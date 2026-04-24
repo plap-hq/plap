@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
 from plap.db import create_database_engine, create_session_maker
 from plap.models import (
-    Base,
     Organization,
     OrganizationMembership,
     SSOProvider,
@@ -29,6 +32,22 @@ def _to_asyncpg_url(url: str) -> str:
     if url.startswith("postgres://"):
         return url.replace("postgres://", "postgresql+asyncpg://", 1)
     return url
+
+
+async def _reset_database_schema(database_url: str) -> None:
+    engine = create_database_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
+    finally:
+        await engine.dispose()
+
+
+def _run_migrations(database_url: str) -> None:
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
 
 
 @dataclass(slots=True)
@@ -56,11 +75,8 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
 
 @pytest_asyncio.fixture(autouse=True)
 async def database_schema(test_settings: Settings) -> None:
-    engine = create_database_engine(test_settings.database_url)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.drop_all)
-        await connection.run_sync(Base.metadata.create_all)
-    await engine.dispose()
+    await _reset_database_schema(test_settings.database_url)
+    await asyncio.to_thread(_run_migrations, test_settings.database_url)
 
 
 @pytest_asyncio.fixture

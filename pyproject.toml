@@ -40,6 +40,12 @@ testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["src"]
 asyncio_mode = "auto"
+filterwarnings = [
+  "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
+  "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
+  "ignore:'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16:DeprecationWarning:litestar\\.concurrency",
+  "ignore:remove second argument of ws_handler:DeprecationWarning",
+]
 markers = [
   "unit: unit tests",
   "integration: integration tests",
@@ -65,6 +71,9 @@ default = ["dev"]
 
 [tool.pixi.tasks]
 dev = "uvicorn plap.app:create_app --factory --reload"
+db-current = "alembic current"
+db-history = "alembic history"
+db-upgrade = "alembic upgrade head"
 format = "ruff format ."
 format-check = "ruff format --check ."
 lint = "ruff check ."
