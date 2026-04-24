@@ -12,8 +12,8 @@ from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
-from plap.db import create_database_engine, create_session_maker
-from plap.models import (
+from plap.persistence import create_database_engine, create_session_maker
+from plap.persistence.models import (
     Organization,
     OrganizationMembership,
     SSOProvider,

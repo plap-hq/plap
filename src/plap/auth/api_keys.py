@@ -10,7 +10,7 @@ import blake3
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from plap.models import APIKey, utcnow
+from plap.persistence.models import APIKey, utcnow
 
 API_KEY_PREFIX = "plap"
 

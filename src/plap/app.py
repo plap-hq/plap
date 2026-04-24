@@ -11,7 +11,7 @@ from litestar.exceptions import (
 )
 
 from plap.auth import APIKeyManager
-from plap.db import create_database_engine, create_session_maker
+from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
 from plap.settings import Settings, get_settings
 
