@@ -119,7 +119,8 @@ create table state_nodes (
   ),
 
   check (left_id is null or left_id <> node_id),
-  check (right_id is null or right_id <> node_id)
+  check (right_id is null or right_id <> node_id),
+  check (kind <> 'concat' or left_id <> right_id)
 );
 
 create table state_leaves (

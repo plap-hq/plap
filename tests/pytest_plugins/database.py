@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import docker
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from docker.errors import ImageNotFound
 from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
@@ -22,6 +25,8 @@ from plap.persistence.models import (
     UserIdentity,
 )
 from plap.settings import Settings
+
+POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
 
 
 def _to_asyncpg_url(url: str) -> str:
@@ -61,8 +66,18 @@ class SeededAuthData:
 
 @pytest.fixture(scope="session")
 def postgres_container() -> PostgresContainer:
-    with PostgresContainer("postgres:16-alpine") as container:
+    _ensure_postgres_image()
+    with PostgresContainer(POSTGRES_IMAGE) as container:
         yield container
+
+
+def _ensure_postgres_image() -> None:
+    client = docker.from_env()
+    try:
+        client.images.get(POSTGRES_IMAGE)
+    except ImageNotFound:
+        dockerfile_dir = Path(__file__).resolve().parents[1] / "postgres"
+        client.images.build(path=str(dockerfile_dir), tag=POSTGRES_IMAGE, rm=True)
 
 
 @pytest.fixture(scope="session")

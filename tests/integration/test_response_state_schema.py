@@ -319,6 +319,39 @@ async def test_response_state_rejects_structural_node_updates(
 
 
 @pytest.mark.asyncio
+async def test_response_state_rejects_concat_with_duplicate_child(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+
+        with pytest.raises(SQLAlchemyError):
+            await session.execute(
+                text(
+                    """
+                    insert into state_nodes (
+                      scope_id,
+                      kind,
+                      left_id,
+                      right_id,
+                      item_count
+                    ) values (
+                      :scope_id,
+                      'concat',
+                      :node_id,
+                      :node_id,
+                      2
+                    )
+                    """
+                ),
+                {"scope_id": scope_id, "node_id": node_id},
+            )
+
+
+@pytest.mark.asyncio
 async def test_response_state_rejects_conversation_identity_updates(
     db_session_maker,
 ) -> None:
