@@ -6,6 +6,7 @@ import json
 from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
+    ConversationReference,
     FunctionTool,
     InputItemsCompactionItem,
     InputItemsFunctionCallItem,
@@ -98,6 +99,16 @@ def _count_tokens(text: str) -> int:
     if not stripped:
         return 0
     return len(stripped.split())
+
+
+def _response_conversation(
+    request: ResponseCreateRequest,
+) -> ConversationReference | None:
+    if request.conversation is None:
+        return None
+    if isinstance(request.conversation, str):
+        return ConversationReference(id=request.conversation)
+    return request.conversation
 
 
 def _build_usage(input_text: str, output_text: str) -> ResponseUsage:
@@ -197,7 +208,7 @@ def build_stub_response(
         completed_at=BASE_CREATED_AT + 1
         if status in {"completed", "cancelled"}
         else None,
-        conversation=request.conversation,
+        conversation=_response_conversation(request),
         created_at=BASE_CREATED_AT,
         id=created_id,
         instructions=request.instructions,

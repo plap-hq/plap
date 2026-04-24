@@ -52,7 +52,7 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert compacted.object == "response.compaction"
     assert input_items.object == "list"
     assert input_items.data[0].type == "message"
-    assert token_count.object == "input_token_count"
+    assert token_count.object == "response.input_tokens"
     assert token_count.input_tokens == 3
     assert deleted is None
 

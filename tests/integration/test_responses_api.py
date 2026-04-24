@@ -91,7 +91,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
     assert compacted.json()["object"] == "response.compaction"
     assert input_items.json()["object"] == "list"
     assert input_items.json()["data"][0]["type"] == "message"
-    assert input_tokens.json()["object"] == "input_token_count"
+    assert input_tokens.json()["object"] == "response.input_tokens"
 
 
 @pytest.mark.asyncio
