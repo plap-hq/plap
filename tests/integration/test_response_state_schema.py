@@ -31,6 +31,50 @@ async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) ->
     assert namespace_names == ["m", "s"]
 
 
+@pytest.mark.asyncio
+async def test_response_state_gc_and_fk_indexes_are_shaped_for_deletes(
+    db_session_maker,
+) -> None:
+    expected_indexes = {
+        "ix_payload_objects_gc": "(created_at, scope_id, payload_id)",
+        "ix_state_nodes_gc": "(created_at, scope_id, node_id)",
+        "ix_state_nodes_left_child": "(scope_id, left_id, node_id)",
+        "ix_state_nodes_right_child": "(scope_id, right_id, node_id)",
+        "ix_state_leaf_entries_payload": "(scope_id, payload_id, node_id, pos)",
+        "ix_responses_gc": "(created_at, scope_id, response_id)",
+        "ix_responses_full_state_root": "(scope_id, full_state_root_id, response_id)",
+        "ix_response_checkpoints_root": (
+            "(scope_id, root_id, response_id, checkpoint_id)"
+        ),
+        "ix_response_leases_expiration": "(expires_at, scope_id, lease_id)",
+        "ix_response_leases_response": "(scope_id, response_id, lease_id)",
+        "ix_conversations_last_used_at": "(last_used_at, scope_id, conversation_id)",
+        "ix_conversations_current_response": (
+            "(scope_id, current_response_id, conversation_id)"
+        ),
+    }
+    async with db_session_maker() as session:
+        index_definitions = dict(
+            (
+                await session.execute(
+                    text(
+                        """
+                        select indexname, indexdef
+                          from pg_indexes
+                         where schemaname = 'public'
+                           and indexname = any(:index_names)
+                        """
+                    ),
+                    {"index_names": list(expected_indexes)},
+                )
+            ).all()
+        )
+
+    assert index_definitions.keys() == expected_indexes.keys()
+    for index_name, column_order in expected_indexes.items():
+        assert column_order in index_definitions[index_name]
+
+
 async def _create_payload(session, scope_id) -> str:
     return (
         await session.execute(

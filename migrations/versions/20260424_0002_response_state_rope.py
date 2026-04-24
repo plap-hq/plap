@@ -284,12 +284,23 @@ create table conversations (
 );
 
 create index ix_payload_objects_gc
-  on payload_objects (scope_id, created_at)
+  on payload_objects (created_at, scope_id, payload_id)
   where refcount = 0;
 
 create index ix_state_nodes_gc
-  on state_nodes (scope_id, created_at)
+  on state_nodes (created_at, scope_id, node_id)
   where refcount = 0;
+
+create index ix_state_nodes_left_child
+  on state_nodes (scope_id, left_id, node_id)
+  where left_id is not null;
+
+create index ix_state_nodes_right_child
+  on state_nodes (scope_id, right_id, node_id)
+  where right_id is not null;
+
+create index ix_state_leaf_entries_payload
+  on state_leaf_entries (scope_id, payload_id, node_id, pos);
 
 create index ix_responses_created_at
   on responses (scope_id, created_at);
@@ -298,16 +309,28 @@ create index ix_responses_prev
   on responses (scope_id, prev_response_id)
   where prev_response_id is not null;
 
+create index ix_responses_full_state_root
+  on responses (scope_id, full_state_root_id, response_id);
+
 create index ix_responses_gc
-  on responses (scope_id, created_at)
+  on responses (created_at, scope_id, response_id)
   where child_refcount = 0 and lease_refcount = 0;
 
+create index ix_response_checkpoints_root
+  on response_checkpoints (scope_id, root_id, response_id, checkpoint_id);
+
 create index ix_response_leases_expiration
-  on response_leases (scope_id, expires_at)
+  on response_leases (expires_at, scope_id, lease_id)
   where status = 'live' and expires_at is not null;
 
+create index ix_response_leases_response
+  on response_leases (scope_id, response_id, lease_id);
+
 create index ix_conversations_last_used_at
-  on conversations (scope_id, last_used_at);
+  on conversations (last_used_at, scope_id, conversation_id);
+
+create index ix_conversations_current_response
+  on conversations (scope_id, current_response_id, conversation_id);
 
 create index ix_state_leaf_entries_namespace_ord
   on state_leaf_entries (scope_id, namespace_id, ord);
