@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.29.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plap"
+version = "0.1.0"
+description = "plap"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "alembic>=1.18.4,<2",
+  "advanced-alchemy>=1.9.3,<2",
+  "asyncpg>=0.31.0,<0.32",
+  "blake3>=1.0.8,<2",
+  "fireworks-ai>=0.19.20,<0.20",
+  "litestar>=2.21.1,<3",
+  "msgspec>=0.21.1,<0.22",
+  "openai>=2.32.0,<3",
+  "pydantic>=2.13.3,<3",
+  "pydantic-settings>=2.14.0,<3",
+  "sqlalchemy>=2.0.49,<3",
+  "structlog>=25.5.0,<26",
+  "uvicorn[standard]>=0.46.0,<0.47",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28.1,<0.29",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1.3.0,<2",
+  "ruff>=0.15.11,<0.16",
+  "testcontainers[postgres]>=4.14.2,<5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+  "unit: unit tests",
+  "integration: integration tests",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+extend-select = ["RUF", "C4", "SIM", "RET", "PIE", "PERF", "TRY", "PTH", "PLW", "PLR1714", "N"]
+ignore = ["E731", "PLW0108", "TRY003"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+[tool.pixi.dependencies]
+python = "3.14.*"
+
+[tool.pixi.pypi-options.dependency-overrides]
+ruff = ">=0.15.11,<0.16"
+
+[tool.pixi.environments]
+default = ["dev"]
+
+[tool.pixi.tasks]
+dev = "uvicorn plap.app:create_app --factory --reload"
+format = "ruff format ."
+format-check = "ruff format --check ."
+lint = "ruff check ."
+lint-fix = "ruff check --fix ."
+test-unit = "pytest -q tests/unit"
+test-integration = "pytest -q tests/integration"
+test = { depends-on = ["test-unit", "test-integration"] }

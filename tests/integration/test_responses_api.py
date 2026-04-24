@@ -1,0 +1,142 @@
+import pytest
+from litestar.testing import AsyncTestClient
+
+
+def _request_payload(stream: bool = False) -> dict[str, object]:
+    return {
+        "context_management": [{"compact_threshold": 128, "type": "compaction"}],
+        "input": [
+            {
+                "content": "hello from the client",
+                "role": "user",
+                "type": "message",
+            }
+        ],
+        "model": "gpt-4.1",
+        "stream": stream,
+        "tool_choice": "auto",
+        "tools": [
+            {
+                "description": "Lookup a record",
+                "name": "lookup_record",
+                "parameters": {"type": "object"},
+                "strict": True,
+                "type": "function",
+            },
+            {"type": "web_search"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_routes_require_bearer_auth(test_app) -> None:
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post("/v1/responses", json={"model": "gpt-4.1"})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["error"]["type"] == "authentication_error"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_routes_return_stubbed_contracts(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses", json=_request_payload(), headers=headers
+        )
+        streamed = await client.post(
+            "/v1/responses",
+            json=_request_payload(stream=True),
+            headers=headers,
+        )
+        retrieved = await client.get("/v1/responses/resp_test", headers=headers)
+        deleted = await client.delete("/v1/responses/resp_test", headers=headers)
+        cancelled = await client.post("/v1/responses/resp_test/cancel", headers=headers)
+        compacted = await client.post(
+            "/v1/responses/compact",
+            json={"input": "compact me", "model": "gpt-4.1"},
+            headers=headers,
+        )
+        input_items = await client.get(
+            "/v1/responses/resp_test/input_items", headers=headers
+        )
+        input_tokens = await client.post(
+            "/v1/responses/input_tokens",
+            json={"input": "count these tokens", "model": "gpt-4.1"},
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["object"] == "response"
+    assert body["status"] == "completed"
+    assert any(item["type"] == "message" for item in body["output"])
+    assert any(item["type"] == "function_call" for item in body["output"])
+    assert any(item["type"] == "web_search_call" for item in body["output"])
+
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    assert "response.created" in streamed.text
+    assert "response.completed" in streamed.text
+
+    assert retrieved.status_code == 200
+    assert retrieved.json()["id"] == "resp_test"
+    assert deleted.json() == {"deleted": True, "id": "resp_test", "object": "response"}
+    assert cancelled.json()["status"] == "cancelled"
+    assert compacted.json()["object"] == "response.compaction"
+    assert input_items.json()["object"] == "list"
+    assert input_items.json()["data"][0]["type"] == "message"
+    assert input_tokens.json()["object"] == "input_token_count"
+
+
+@pytest.mark.asyncio
+async def test_http_validation_rejects_unsupported_context_management(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "context_management": [{"type": "retain_all"}],
+                "model": "gpt-4.1",
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_websocket_streams_response_events_with_auth(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        with await client.websocket_connect("/v1/responses", headers=headers) as socket:
+            socket.send_json(
+                {"type": "response.create", "response": _request_payload()}
+            )
+            event_types: list[str] = []
+
+            while True:
+                event = socket.receive_json()
+                event_types.append(event["type"])
+                if event["type"] == "response.completed":
+                    break
+
+    assert event_types[0] == "response.created"
+    assert "response.output_item.added" in event_types
+    assert "response.function_call_arguments.done" in event_types
+    assert "response.web_search_call.completed" in event_types
+    assert event_types[-1] == "response.completed"
