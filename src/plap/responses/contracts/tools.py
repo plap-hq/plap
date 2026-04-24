@@ -123,7 +123,7 @@ class ResponseTextConfig(StrictModel):
         default=None,
         description="Plain text, JSON object, or JSON Schema output format.",
     )
-    verbosity: Literal["low", "medium", "high"] | None = Field(
-        default=None,
-        description="Verbosity constraint for supported models.",
-    )
+    # verbosity: Literal["low", "medium", "high"] | None = Field(
+    #     default=None,
+    #     description="Verbosity constraint for supported models.",
+    # )

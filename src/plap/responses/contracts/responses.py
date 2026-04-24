@@ -157,10 +157,6 @@ class ResponseObject(StrictModel):
         default=None,
         description="Prompt cache key used for this response.",
     )
-    prompt_cache_retention: Literal["in-memory", "24h"] | None = Field(
-        default=None,
-        description="Prompt cache retention policy used.",
-    )
     reasoning: ReasoningConfig | None = Field(
         default=None,
         description="Reasoning configuration used.",

@@ -14,8 +14,8 @@ type ChatFinishReason = Literal[
     "content_filter",
     "function_call",
 ]
-type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
-type ServiceTier = Literal["auto", "default", "priority"]
+type ReasoningEffort = str | int | bool
+type ServiceTier = str
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,6 @@ class ChatPrediction:
 @dataclass(frozen=True)
 class ChatStreamOptions:
     include_usage: bool | None = None
-    include_obfuscation: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -98,16 +97,12 @@ class ChatCompletionRequest:
     seed: int | None = None
     n: int | None = None
     reasoning_effort: ReasoningEffort | None = None
-    verbosity: Literal["low", "medium", "high"] | None = None
     stream_options: ChatStreamOptions | None = None
     user: str | None = None
-    safety_identifier: str | None = None
     prompt_cache_key: str | None = None
-    prompt_cache_retention: Literal["in-memory", "24h"] | None = None
     metadata: dict[str, str] | None = None
     service_tier: ServiceTier | None = None
     prediction: ChatPrediction | None = None
-    store: bool | None = None
 
 
 @dataclass(frozen=True)

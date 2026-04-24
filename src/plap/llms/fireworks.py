@@ -87,11 +87,15 @@ def to_fireworks_chat_params(request: ChatCompletionRequest) -> dict[str, Any]:
         "n",
         "reasoning_effort",
         "user",
+        "prompt_cache_key",
+        "metadata",
+        "service_tier",
+        "prediction",
     ]
     for field in passthrough_fields:
         _set(params, field, openai_params.get(field))
 
-    _set(params, "max_tokens", request.max_completion_tokens)
+    _set(params, "max_completion_tokens", request.max_completion_tokens)
     return params
 
 

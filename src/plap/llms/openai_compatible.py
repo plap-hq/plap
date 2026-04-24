@@ -96,16 +96,12 @@ def to_openai_chat_params(
     _set(params, "seed", request.seed)
     _set(params, "n", request.n)
     _set(params, "reasoning_effort", request.reasoning_effort)
-    _set(params, "verbosity", request.verbosity)
     _set(params, "stream_options", _stream_options_to_param(request.stream_options))
     _set(params, "user", request.user)
-    _set(params, "safety_identifier", request.safety_identifier)
     _set(params, "prompt_cache_key", request.prompt_cache_key)
-    _set(params, "prompt_cache_retention", request.prompt_cache_retention)
     _set(params, "metadata", request.metadata)
     _set(params, "service_tier", request.service_tier)
     _set(params, "prediction", _prediction_to_param(request.prediction))
-    _set(params, "store", request.store)
     return params
 
 
@@ -170,7 +166,6 @@ def _stream_options_to_param(
         return None
     value: dict[str, Any] = {}
     _set(value, "include_usage", stream_options.include_usage)
-    _set(value, "include_obfuscation", stream_options.include_obfuscation)
     return value or None
 
 

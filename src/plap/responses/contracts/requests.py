@@ -33,8 +33,8 @@ class PromptReference(StrictModel):
 
 
 type ReasoningEffort = Literal[
-    "none",
-    "minimal",
+    # "none",
+    # "minimal",
     "low",
     "medium",
     "high",
@@ -43,8 +43,8 @@ type ReasoningEffort = Literal[
 
 type ReasoningSummary = Literal["auto", "concise", "detailed"]
 
-# OpenAI also defines flex and scale; plap does not expose those tiers.
-type ServiceTier = Literal["auto", "default", "priority"]
+# OpenAI also defines scale; plap does not expose that tier.
+type ServiceTier = Literal["auto", "default", "priority", "flex"]
 
 
 class ReasoningConfig(StrictModel):
@@ -150,10 +150,10 @@ class ResponseCreateRequest(StrictModel):
             "Stable cache key for prompt caching; replaces the legacy user field."
         ),
     )
-    prompt_cache_retention: Literal["in-memory", "24h"] | None = Field(
-        default=None,
-        description="Prompt cache retention policy.",
-    )
+    # prompt_cache_retention: Literal["in-memory", "24h"] | None = Field(
+    #     default=None,
+    #     description="Prompt cache retention policy.",
+    # )
     reasoning: ReasoningConfig | None = Field(
         default=None,
         description="Reasoning configuration for compatible models.",

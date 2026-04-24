@@ -57,27 +57,24 @@ def test_openai_compatible_params_preserve_chat_completion_controls() -> None:
     }
     assert params["max_completion_tokens"] == 128
     assert params["prompt_cache_key"] == "cache-a"
-    assert params["prompt_cache_retention"] == "24h"
-    assert params["safety_identifier"] == "safe-user"
+    assert params["metadata"] == {"k": "v"}
+    assert params["service_tier"] == "flex"
     assert params["prediction"] == {"type": "content", "content": "expected"}
-    assert params["stream_options"] == {
-        "include_usage": True,
-        "include_obfuscation": False,
-    }
-
-
-def test_fireworks_params_map_token_limit_and_eat_unsupported_provider_hints() -> None:
-    params = to_fireworks_chat_params(_request())
-
-    assert params["max_tokens"] == 128
-    assert "max_completion_tokens" not in params
-    assert "prompt_cache_key" not in params
+    assert params["stream_options"] == {"include_usage": True}
     assert "prompt_cache_retention" not in params
     assert "safety_identifier" not in params
-    assert "metadata" not in params
-    assert "service_tier" not in params
-    assert "prediction" not in params
     assert "store" not in params
+    assert "verbosity" not in params
+
+
+def test_fireworks_params_preserve_supported_provider_hints() -> None:
+    params = to_fireworks_chat_params(_request())
+
+    assert params["max_completion_tokens"] == 128
+    assert params["prompt_cache_key"] == "cache-a"
+    assert params["metadata"] == {"k": "v"}
+    assert params["service_tier"] == "flex"
+    assert params["prediction"] == {"type": "content", "content": "expected"}
 
 
 async def test_openai_compatible_client_normalizes_completion_result() -> None:
@@ -231,7 +228,7 @@ async def test_fireworks_client_uses_acreate_and_normalizes_response() -> None:
     assert result.id == "fw_1"
     assert result.message.content == "ok"
     assert fireworks.chat.completions.calls[0]["stream"] is False
-    assert fireworks.chat.completions.calls[0]["max_tokens"] == 128
+    assert fireworks.chat.completions.calls[0]["max_completion_tokens"] == 128
 
 
 def test_lightning_client_is_openai_compatible_wrapper() -> None:
@@ -279,17 +276,13 @@ def _request() -> ChatCompletionRequest:
         stop=["END"],
         seed=7,
         n=1,
-        reasoning_effort="medium",
-        verbosity="low",
-        stream_options=ChatStreamOptions(include_usage=True, include_obfuscation=False),
+        reasoning_effort=True,
+        stream_options=ChatStreamOptions(include_usage=True),
         user="user-a",
-        safety_identifier="safe-user",
         prompt_cache_key="cache-a",
-        prompt_cache_retention="24h",
         metadata={"k": "v"},
-        service_tier="default",
+        service_tier="flex",
         prediction=ChatPrediction(content="expected"),
-        store=False,
     )
 
 

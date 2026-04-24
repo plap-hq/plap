@@ -217,7 +217,6 @@ def build_stub_response(
         previous_response_id=request.previous_response_id,
         prompt=request.prompt,
         prompt_cache_key=request.prompt_cache_key,
-        prompt_cache_retention=request.prompt_cache_retention,
         reasoning=request.reasoning,
         safety_identifier=request.safety_identifier,
         service_tier=request.service_tier,
