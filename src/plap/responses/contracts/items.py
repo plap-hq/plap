@@ -82,6 +82,8 @@ type ResponseContentPart = Annotated[
     Field(discriminator="type"),
 ]
 
+type ItemStatus = Literal["in_progress", "completed", "incomplete"]
+
 
 class RequestMessageItem(StrictModel):
     content: str | list[MessageContentPart] = Field(
@@ -111,34 +113,30 @@ class RequestMessageItem(StrictModel):
         )
 
 
-class RequestFunctionCallItem(StrictModel):
+class _FunctionCallItemBase(StrictModel):
     arguments: str = Field(description="JSON string of arguments emitted by the model.")
     call_id: str = Field(description="Stable call ID paired with function output.")
-    id: str | None = Field(default=None, description="Optional item ID.")
     name: str = Field(description="Function name chosen by the model.")
     namespace: str | None = Field(
         default=None, description="Optional function namespace."
     )
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(
+    status: ItemStatus | None = Field(
         default=None,
         description="Function call item status.",
     )
-    type: Literal["function_call"] = Field(description="Input item discriminator.")
+    type: Literal["function_call"] = Field(description="Item discriminator.")
 
 
-class RequestFunctionCallOutputItem(StrictModel):
+class RequestFunctionCallItem(_FunctionCallItemBase):
+    id: str | None = Field(default=None, description="Optional item ID.")
+
+
+class _FunctionCallOutputItemBase(StrictModel):
     call_id: str = Field(description="Call ID this output satisfies.")
-    id: str | None = Field(default=None, description="Optional output item ID.")
     output: str | list[ToolOutputContentPart] = Field(
         description="Function result as a string or supported content blocks."
     )
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(
-        default=None,
-        description="Function output item status.",
-    )
-    type: Literal["function_call_output"] = Field(
-        description="Input item discriminator."
-    )
+    type: Literal["function_call_output"] = Field(description="Item discriminator.")
 
     @field_validator("output", mode="before")
     @classmethod
@@ -150,7 +148,15 @@ class RequestFunctionCallOutputItem(StrictModel):
         )
 
 
-class RequestReasoningItem(StrictModel):
+class RequestFunctionCallOutputItem(_FunctionCallOutputItemBase):
+    id: str | None = Field(default=None, description="Optional output item ID.")
+    status: ItemStatus | None = Field(
+        default=None,
+        description="Function output item status.",
+    )
+
+
+class ReasoningItem(StrictModel):
     content: list[ReasoningTextContent] | None = Field(
         default=None,
         description="Optional reasoning text content blocks.",
@@ -160,27 +166,30 @@ class RequestReasoningItem(StrictModel):
         description="Encrypted reasoning payload when included by the API.",
     )
     id: str = Field(description="Reasoning item ID.")
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(
+    status: ItemStatus | None = Field(
         default=None,
         description="Reasoning item status.",
     )
     summary: list[SummaryTextContent] = Field(
         description="Summaries of the reasoning content."
     )
-    type: Literal["reasoning"] = Field(description="Input item discriminator.")
+    type: Literal["reasoning"] = Field(description="Item discriminator.")
 
 
-class RequestCompactionItem(StrictModel):
+class _CompactionItemBase(StrictModel):
     encrypted_content: str = Field(description="Encrypted compacted context payload.")
+    type: Literal["compaction"] = Field(description="Item discriminator.")
+
+
+class RequestCompactionItem(_CompactionItemBase):
     id: str | None = Field(default=None, description="Optional compaction item ID.")
-    type: Literal["compaction"] = Field(description="Input item discriminator.")
 
 
 type RequestInputItem = Annotated[
     RequestMessageItem
     | RequestFunctionCallItem
     | RequestFunctionCallOutputItem
-    | RequestReasoningItem
+    | ReasoningItem
     | RequestCompactionItem,
     Field(discriminator="type"),
 ]
@@ -202,63 +211,23 @@ class ResponseMessageItem(StrictModel):
     type: Literal["message"] = Field(description="Output item discriminator.")
 
 
-class ResponseFunctionCallItem(StrictModel):
-    arguments: str = Field(description="JSON string of function call arguments.")
-    call_id: str = Field(description="Stable call ID to match with caller output.")
+class ResponseFunctionCallItem(_FunctionCallItemBase):
     id: str = Field(description="Unique function call item ID.")
-    name: str = Field(description="Function name selected by the model.")
-    namespace: str | None = Field(
-        default=None, description="Optional function namespace."
-    )
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(
-        default=None,
-        description="Function call generation status.",
-    )
-    type: Literal["function_call"] = Field(description="Output item discriminator.")
 
 
-class ResponseFunctionCallOutputItem(StrictModel):
-    call_id: str = Field(description="Function call ID this output belongs to.")
+class ResponseFunctionCallOutputItem(_FunctionCallOutputItemBase):
     created_by: str | None = Field(
         default=None, description="Originator of the output."
     )
     id: str = Field(description="Unique function output item ID.")
-    output: str | list[ToolOutputContentPart] = Field(
-        description="Function result string or supported content blocks."
-    )
-    status: Literal["in_progress", "completed", "incomplete"] = Field(
-        description="Function output item status."
-    )
-    type: Literal["function_call_output"] = Field(
-        description="Output item discriminator."
-    )
+    status: ItemStatus = Field(description="Function output item status.")
 
 
-class ResponseReasoningItem(StrictModel):
-    content: list[ReasoningTextContent] | None = Field(
-        default=None,
-        description="Optional reasoning text content blocks.",
-    )
-    encrypted_content: str | None = Field(
-        default=None,
-        description="Encrypted reasoning content when requested via include.",
-    )
-    id: str = Field(description="Unique reasoning item ID.")
-    status: Literal["in_progress", "completed", "incomplete"] | None = Field(
-        default=None,
-        description="Reasoning item status.",
-    )
-    summary: list[SummaryTextContent] = Field(description="Reasoning summaries.")
-    type: Literal["reasoning"] = Field(description="Output item discriminator.")
-
-
-class ResponseCompactionItem(StrictModel):
+class ResponseCompactionItem(_CompactionItemBase):
     created_by: str | None = Field(
         default=None, description="Originator of compaction."
     )
-    encrypted_content: str = Field(description="Encrypted compacted context payload.")
     id: str = Field(description="Unique compaction item ID.")
-    type: Literal["compaction"] = Field(description="Output item discriminator.")
 
 
 class WebSearchActionSearchSource(StrictModel):
@@ -308,7 +277,7 @@ type ResponseOutputItem = Annotated[
     ResponseMessageItem
     | ResponseFunctionCallItem
     | ResponseFunctionCallOutputItem
-    | ResponseReasoningItem
+    | ReasoningItem
     | ResponseCompactionItem
     | ResponseWebSearchCallItem,
     Field(discriminator="type"),
@@ -334,27 +303,11 @@ class InputItemsMessageItem(StrictModel):
     type: Literal["message"] = Field(description="Input item discriminator.")
 
 
-class InputItemsFunctionCallItem(ResponseFunctionCallItem):
-    pass
-
-
-class InputItemsFunctionCallOutputItem(ResponseFunctionCallOutputItem):
-    pass
-
-
-class InputItemsReasoningItem(ResponseReasoningItem):
-    pass
-
-
-class InputItemsCompactionItem(ResponseCompactionItem):
-    pass
-
-
 type InputItemsPageItem = Annotated[
     InputItemsMessageItem
-    | InputItemsFunctionCallItem
-    | InputItemsFunctionCallOutputItem
-    | InputItemsReasoningItem
-    | InputItemsCompactionItem,
+    | ResponseFunctionCallItem
+    | ResponseFunctionCallOutputItem
+    | ReasoningItem
+    | ResponseCompactionItem,
     Field(discriminator="type"),
 ]

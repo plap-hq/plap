@@ -8,17 +8,14 @@ from plap.responses.contracts import (
     CompactRequest,
     ConversationReference,
     FunctionTool,
-    InputItemsCompactionItem,
-    InputItemsFunctionCallItem,
-    InputItemsFunctionCallOutputItem,
     InputItemsMessageItem,
     InputItemsPage,
     InputItemsPageItem,
-    InputItemsReasoningItem,
     InputTextContent,
     InputTokenCountResponse,
     InputTokensCountRequest,
     OutputTextContent,
+    ReasoningItem,
     ReasoningTextContent,
     RequestInputItem,
     RequestMessageItem,
@@ -41,7 +38,6 @@ from plap.responses.contracts import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputTextAnnotationAddedEvent,
-    ResponseReasoningItem,
     ResponseReasoningSummaryPartAddedEvent,
     ResponseReasoningSummaryPartDoneEvent,
     ResponseReasoningSummaryTextDeltaEvent,
@@ -138,7 +134,7 @@ def build_stub_response(
     )
 
     items: list[ResponseOutputItem] = [
-        ResponseReasoningItem(
+        ReasoningItem(
             content=[
                 ReasoningTextContent(
                     text="Stub reasoning trace.", type="reasoning_text"
@@ -277,7 +273,7 @@ def build_input_items_page(response_id: str) -> InputItemsPage:
             role="user",
             type="message",
         ),
-        InputItemsFunctionCallItem(
+        ResponseFunctionCallItem(
             arguments="{}",
             call_id=_stable_id("call", seed),
             id=_stable_id("ifc", seed),
@@ -285,7 +281,7 @@ def build_input_items_page(response_id: str) -> InputItemsPage:
             status="completed",
             type="function_call",
         ),
-        InputItemsFunctionCallOutputItem(
+        ResponseFunctionCallOutputItem(
             call_id=_stable_id("call", seed),
             created_by="plap",
             id=_stable_id("ifco", seed),
@@ -293,7 +289,7 @@ def build_input_items_page(response_id: str) -> InputItemsPage:
             status="completed",
             type="function_call_output",
         ),
-        InputItemsReasoningItem(
+        ReasoningItem(
             content=[
                 ReasoningTextContent(
                     text="Stub reasoning trace.", type="reasoning_text"
@@ -306,7 +302,7 @@ def build_input_items_page(response_id: str) -> InputItemsPage:
             ],
             type="reasoning",
         ),
-        InputItemsCompactionItem(
+        ResponseCompactionItem(
             created_by="plap",
             encrypted_content="stub-compacted-payload",
             id=_stable_id("icmp", seed),
@@ -357,7 +353,7 @@ def build_stream_events(response: ResponseObject) -> list[ResponseStreamEvent]:
             )
         )
 
-        if isinstance(item, ResponseReasoningItem):
+        if isinstance(item, ReasoningItem):
             for summary_index, summary_part in enumerate(item.summary):
                 push(
                     ResponseReasoningSummaryPartAddedEvent(
