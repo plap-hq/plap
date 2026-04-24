@@ -71,6 +71,10 @@ create table ordinal_namespaces (
   check (namespace_name = lower(namespace_name))
 );
 
+insert into ordinal_namespaces (namespace_name)
+values ('m'), ('s')
+on conflict (namespace_name) do nothing;
+
 create table payload_objects (
   scope_id uuid not null,
   payload_id uuid not null default gen_random_uuid(),

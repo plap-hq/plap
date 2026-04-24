@@ -8,6 +8,29 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 
+@pytest.mark.asyncio
+async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) -> None:
+    async with db_session_maker() as session:
+        namespace_names = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    select namespace_name
+                      from ordinal_namespaces
+                     where namespace_name in ('m', 's')
+                     order by namespace_name
+                    """
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert namespace_names == ["m", "s"]
+
+
 async def _create_payload(session, scope_id) -> str:
     return (
         await session.execute(
