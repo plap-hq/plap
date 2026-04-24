@@ -366,6 +366,14 @@ create trigger trg_state_leaf_entries_immutable
 before update on state_leaf_entries
 for each row execute function forbid_any_update();
 
+create trigger trg_response_namespace_counters_immutable
+before update on response_namespace_counters
+for each row execute function forbid_any_update();
+
+create trigger trg_checkpoint_namespace_counters_immutable
+before update on checkpoint_namespace_counters
+for each row execute function forbid_any_update();
+
 create function forbid_responses_structural_update()
 returns trigger
 language plpgsql
@@ -427,6 +435,24 @@ create trigger trg_response_leases_normalize_update
 before update on response_leases
 for each row execute function normalize_response_lease_update();
 
+create function forbid_conversations_structural_update()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.scope_id is distinct from new.scope_id
+    or old.conversation_id is distinct from new.conversation_id
+    or old.created_at is distinct from new.created_at then
+    raise exception 'conversations rows are structurally immutable';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_conversations_immutable
+before update on conversations
+for each row execute function forbid_conversations_structural_update();
+
 create function apply_payload_refcount_from_leaf_entry()
 returns trigger
 language plpgsql
@@ -445,25 +471,11 @@ begin
        and payload_id = old.payload_id;
     return old;
   end if;
-
-  if old.scope_id is distinct from new.scope_id
-    or old.payload_id is distinct from new.payload_id then
-    update payload_objects
-       set refcount = refcount - 1
-     where scope_id = old.scope_id
-       and payload_id = old.payload_id;
-
-    update payload_objects
-       set refcount = refcount + 1
-     where scope_id = new.scope_id
-       and payload_id = new.payload_id;
-  end if;
-  return new;
 end;
 $$;
 
 create trigger trg_state_leaf_entries_payload_refcount
-after insert or update or delete on state_leaf_entries
+after insert or delete on state_leaf_entries
 for each row execute function apply_payload_refcount_from_leaf_entry();
 
 create function apply_concat_child_refcounts()
@@ -488,13 +500,11 @@ begin
     end if;
     return old;
   end if;
-
-  return new;
 end;
 $$;
 
 create trigger trg_state_nodes_concat_refcount
-after insert or update or delete on state_nodes
+after insert or delete on state_nodes
 for each row execute function apply_concat_child_refcounts();
 
 create function apply_response_refcounts()
@@ -529,13 +539,11 @@ begin
     end if;
     return old;
   end if;
-
-  return new;
 end;
 $$;
 
 create trigger trg_responses_refcounts
-after insert or update or delete on responses
+after insert or delete on responses
 for each row execute function apply_response_refcounts();
 
 create function apply_checkpoint_root_refcounts()
@@ -556,13 +564,11 @@ begin
        and node_id = old.root_id;
     return old;
   end if;
-
-  return new;
 end;
 $$;
 
 create trigger trg_response_checkpoints_refcount
-after insert or update or delete on response_checkpoints
+after insert or delete on response_checkpoints
 for each row execute function apply_checkpoint_root_refcounts();
 
 create function apply_response_lease_refcounts()
@@ -741,7 +747,7 @@ end;
 $$;
 
 create constraint trigger ct_state_nodes_consistency
-after insert or update on state_nodes
+after insert on state_nodes
 deferrable initially deferred
 for each row execute function validate_state_node_consistency();
 
@@ -820,12 +826,12 @@ end;
 $$;
 
 create constraint trigger ct_state_leaves_consistency
-after insert or update or delete on state_leaves
+after insert or delete on state_leaves
 deferrable initially deferred
 for each row execute function validate_state_leaf_consistency();
 
 create constraint trigger ct_state_leaf_entries_consistency
-after insert or update or delete on state_leaf_entries
+after insert or delete on state_leaf_entries
 deferrable initially deferred
 for each row execute function validate_state_leaf_consistency();
 """
@@ -846,11 +852,16 @@ drop trigger if exists trg_state_leaf_entries_payload_refcount
   on state_leaf_entries;
 drop trigger if exists trg_response_leases_normalize_update
   on response_leases;
+drop trigger if exists trg_conversations_immutable on conversations;
 drop trigger if exists trg_response_checkpoints_immutable
   on response_checkpoints;
 drop trigger if exists trg_responses_immutable on responses;
 drop trigger if exists trg_state_leaf_entries_immutable
   on state_leaf_entries;
+drop trigger if exists trg_response_namespace_counters_immutable
+  on response_namespace_counters;
+drop trigger if exists trg_checkpoint_namespace_counters_immutable
+  on checkpoint_namespace_counters;
 drop trigger if exists trg_state_leaves_immutable on state_leaves;
 drop trigger if exists trg_state_nodes_immutable on state_nodes;
 drop trigger if exists trg_payload_objects_immutable on payload_objects;
@@ -864,6 +875,7 @@ drop function if exists apply_response_refcounts();
 drop function if exists apply_concat_child_refcounts();
 drop function if exists apply_payload_refcount_from_leaf_entry();
 drop function if exists normalize_response_lease_update();
+drop function if exists forbid_conversations_structural_update();
 drop function if exists forbid_response_checkpoints_structural_update();
 drop function if exists forbid_responses_structural_update();
 drop function if exists forbid_any_update();

@@ -293,3 +293,133 @@ async def test_response_state_rejects_structural_node_updates(
                 ),
                 {"scope_id": scope_id, "node_id": node_id},
             )
+
+
+@pytest.mark.asyncio
+async def test_response_state_rejects_conversation_identity_updates(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+        await session.execute(
+            text(
+                """
+                insert into responses (
+                  scope_id,
+                  response_id,
+                  full_state_root_id
+                ) values (
+                  :scope_id,
+                  'resp_conversation_identity',
+                  :node_id
+                )
+                """
+            ),
+            {"scope_id": scope_id, "node_id": node_id},
+        )
+        await session.execute(
+            text(
+                """
+                insert into conversations (
+                  scope_id,
+                  conversation_id,
+                  current_response_id
+                ) values (
+                  :scope_id,
+                  'conv_identity',
+                  'resp_conversation_identity'
+                )
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.commit()
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match="structurally immutable"):
+            await session.execute(
+                text(
+                    """
+                    update conversations
+                       set conversation_id = 'conv_renamed'
+                     where scope_id = :scope_id
+                       and conversation_id = 'conv_identity'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+
+
+@pytest.mark.asyncio
+async def test_response_state_rejects_namespace_counter_updates(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+        namespace_id = (
+            await session.execute(
+                text(
+                    """
+                    select namespace_id
+                      from ordinal_namespaces
+                     where namespace_name = 'message'
+                    """
+                )
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                insert into responses (
+                  scope_id,
+                  response_id,
+                  full_state_root_id
+                ) values (
+                  :scope_id,
+                  'resp_counter_immutable',
+                  :node_id
+                )
+                """
+            ),
+            {"scope_id": scope_id, "node_id": node_id},
+        )
+        await session.execute(
+            text(
+                """
+                insert into response_namespace_counters (
+                  scope_id,
+                  response_id,
+                  namespace_id,
+                  next_ord
+                ) values (
+                  :scope_id,
+                  'resp_counter_immutable',
+                  :namespace_id,
+                  1
+                )
+                """
+            ),
+            {"scope_id": scope_id, "namespace_id": namespace_id},
+        )
+        await session.commit()
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match="rows are immutable"):
+            await session.execute(
+                text(
+                    """
+                    update response_namespace_counters
+                       set next_ord = 2
+                     where scope_id = :scope_id
+                       and response_id = 'resp_counter_immutable'
+                       and namespace_id = :namespace_id
+                    """
+                ),
+                {"scope_id": scope_id, "namespace_id": namespace_id},
+            )
