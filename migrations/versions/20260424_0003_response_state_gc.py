@@ -75,56 +75,95 @@ language plpgsql
 set search_path = responses, public
 as $$
 declare
-  v_kind text;
-  v_left_id bigint;
-  v_right_id bigint;
-  v_refcount bigint;
+  v_node record;
+  v_child record;
   v_payload_ids uuid[];
 begin
-  select kind, left_id, right_id, refcount
-    into v_kind, v_left_id, v_right_id, v_refcount
-    from state_nodes
-   where scope_id = p_scope_id
-     and node_id = p_node_id
-   for update;
+  create temporary table if not exists pg_temp.response_gc_node_queue (
+    scope_id uuid not null,
+    node_id bigint not null,
+    primary key (scope_id, node_id)
+  ) on commit drop;
+  truncate pg_temp.response_gc_node_queue;
 
-  if not found then
-    return;
-  end if;
+  insert into pg_temp.response_gc_node_queue (scope_id, node_id)
+  values (p_scope_id, p_node_id)
+  on conflict do nothing;
 
-  if v_refcount > 0 then
-    return;
-  end if;
+  loop
+    select q.scope_id, q.node_id, n.kind, n.refcount
+      into v_node
+      from pg_temp.response_gc_node_queue q
+      join state_nodes n
+        on n.scope_id = q.scope_id
+       and n.node_id = q.node_id
+     order by n.height desc, q.node_id
+     limit 1
+     for update of n skip locked;
 
-  if v_kind = 'leaf' then
-    select coalesce(array_agg(payload_id), '{}'::uuid[])
-      into v_payload_ids
-      from state_leaf_entries
-     where scope_id = p_scope_id
-       and node_id = p_node_id;
+    exit when not found;
 
-    delete from state_leaf_entries
-     where scope_id = p_scope_id
-       and node_id = p_node_id;
+    delete from pg_temp.response_gc_node_queue
+     where scope_id = v_node.scope_id
+       and node_id = v_node.node_id;
 
-    delete from state_leaves
-     where scope_id = p_scope_id
-       and node_id = p_node_id;
-  end if;
+    if v_node.refcount > 0 then
+      continue;
+    end if;
 
-  delete from state_nodes
-   where scope_id = p_scope_id
-     and node_id = p_node_id;
+    if v_node.kind = 'leaf' then
+      select coalesce(array_agg(payload_id), '{}'::uuid[])
+        into v_payload_ids
+        from state_leaf_entries
+       where scope_id = v_node.scope_id
+         and node_id = v_node.node_id;
 
-  if v_kind = 'concat' then
-    call responses.gc_try_delete_state_node(p_scope_id, v_left_id);
-    call responses.gc_try_delete_state_node(p_scope_id, v_right_id);
-  elsif v_kind = 'leaf' then
-    delete from payload_objects
-     where scope_id = p_scope_id
-       and payload_id = any(v_payload_ids)
-       and refcount = 0;
-  end if;
+      delete from state_leaf_entries
+       where scope_id = v_node.scope_id
+         and node_id = v_node.node_id;
+
+      delete from state_leaves
+       where scope_id = v_node.scope_id
+         and node_id = v_node.node_id;
+
+      delete from state_nodes
+       where scope_id = v_node.scope_id
+         and node_id = v_node.node_id;
+
+      delete from payload_objects
+       where scope_id = v_node.scope_id
+         and payload_id = any(v_payload_ids)
+         and refcount = 0;
+    else
+      for v_child in
+        select slot, child_node_id
+          from state_node_children
+         where scope_id = v_node.scope_id
+            and parent_node_id = v_node.node_id
+      loop
+        delete from state_node_children
+         where scope_id = v_node.scope_id
+            and parent_node_id = v_node.node_id
+            and slot = v_child.slot
+            and child_node_id = v_child.child_node_id;
+
+        insert into pg_temp.response_gc_node_queue (scope_id, node_id)
+        select v_node.scope_id, v_child.child_node_id
+         where exists (
+           select 1
+             from state_nodes
+            where scope_id = v_node.scope_id
+              and node_id = v_child.child_node_id
+              and refcount = 0
+         )
+        on conflict do nothing;
+      end loop;
+
+      delete from state_nodes
+       where scope_id = v_node.scope_id
+         and node_id = v_node.node_id;
+    end if;
+  end loop;
 end;
 $$;
 
@@ -292,6 +331,28 @@ begin
 end;
 $$;
 
+create procedure responses.gc_prune_state_nodes(
+  p_batch_size integer default 500
+)
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_node record;
+begin
+  for v_node in
+    select scope_id, node_id
+      from state_nodes
+     where refcount = 0
+     order by created_at
+      for update skip locked
+      limit p_batch_size
+  loop
+    call responses.gc_try_delete_state_node(v_node.scope_id, v_node.node_id);
+  end loop;
+end;
+$$;
+
 create procedure responses.gc_prune_payloads(
   p_batch_size integer default 500
 )
@@ -355,6 +416,16 @@ begin
       'call responses.gc_prune_payloads(500);'
     );
   end if;
+
+  if not exists (
+    select 1 from cron.job where jobname = 'prune-zero-ref-state-nodes'
+  ) then
+    perform cron.schedule(
+      'prune-zero-ref-state-nodes',
+      '12 * * * *',
+      'call responses.gc_prune_state_nodes(500);'
+    );
+  end if;
 end;
 $$;
 """
@@ -371,10 +442,11 @@ begin
         from cron.job
        where jobname in (
          'expire-response-leases',
-         'prune-stale-conversations',
-         'prune-unreferenced-responses',
-         'prune-zero-ref-payloads'
-       )
+          'prune-stale-conversations',
+          'prune-unreferenced-responses',
+          'prune-zero-ref-payloads',
+          'prune-zero-ref-state-nodes'
+        )
     loop
       perform cron.unschedule(v_job.jobid);
     end loop;
@@ -383,6 +455,7 @@ end;
 $$;
 
 drop procedure if exists responses.gc_prune_payloads(integer);
+drop procedure if exists responses.gc_prune_state_nodes(integer);
 drop procedure if exists responses.gc_prune_unreferenced_responses(integer);
 drop procedure if exists responses.gc_prune_conversations(integer, interval);
 drop procedure if exists responses.gc_expire_leases(integer);

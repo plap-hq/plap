@@ -38,9 +38,13 @@ async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
     expected_indexes = {
         "ix_payload_objects_gc": "(created_at, scope_id, payload_id)",
         "ix_state_nodes_gc": "(created_at, scope_id, node_id)",
-        "ix_state_nodes_left_child": "(scope_id, left_id, node_id)",
-        "ix_state_nodes_right_child": "(scope_id, right_id, node_id)",
+        "ix_state_node_children_child": (
+            "(scope_id, child_node_id, parent_node_id, slot)"
+        ),
         "ix_state_leaf_entries_payload": "(scope_id, payload_id, node_id, pos)",
+        "ix_state_leaf_entries_namespace_ord": (
+            "(scope_id, namespace_id, ord, node_id, pos)"
+        ),
         "ix_responses_gc": "(created_at, scope_id, response_id)",
         "ix_responses_full_state_root": "(scope_id, full_state_root_id, response_id)",
         "ix_response_checkpoints_root": (
@@ -120,8 +124,19 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into responses.state_nodes (scope_id, kind, item_count)
-                values (:scope_id, 'leaf', 1)
+                insert into responses.state_nodes (
+                  scope_id,
+                  kind,
+                  height,
+                  item_count,
+                  child_count
+                ) values (
+                  :scope_id,
+                  'leaf',
+                  0,
+                  1,
+                  0
+                )
                 returning node_id
                 """
             ),
@@ -287,8 +302,19 @@ async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None
             await session.execute(
                 text(
                     """
-                    insert into responses.state_nodes (scope_id, kind, item_count)
-                    values (:scope_id, 'leaf', 1)
+                    insert into responses.state_nodes (
+                      scope_id,
+                      kind,
+                      height,
+                      item_count,
+                      child_count
+                    ) values (
+                      :scope_id,
+                      'leaf',
+                      0,
+                      1,
+                      0
+                    )
                     returning node_id
                     """
                 ),
@@ -363,7 +389,7 @@ async def test_responses_rejects_structural_node_updates(
 
 
 @pytest.mark.asyncio
-async def test_responses_rejects_concat_with_duplicate_child(
+async def test_responses_rejects_internal_node_with_missing_child_edge(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -372,26 +398,125 @@ async def test_responses_rejects_concat_with_duplicate_child(
         payload_id = await _create_payload(session, scope_id)
         node_id = await _create_leaf(session, scope_id, payload_id)
 
-        with pytest.raises(SQLAlchemyError):
+        parent_id = (
             await session.execute(
                 text(
                     """
                     insert into responses.state_nodes (
                       scope_id,
                       kind,
-                      left_id,
-                      right_id,
-                      item_count
+                      height,
+                      item_count,
+                      child_count
                     ) values (
                       :scope_id,
-                      'concat',
-                      :node_id,
-                      :node_id,
+                      'internal',
+                      1,
+                      2,
                       2
+                    ) returning node_id
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                insert into responses.state_node_children (
+                  scope_id,
+                  parent_node_id,
+                  slot,
+                  child_node_id,
+                  child_item_count
+                ) values (
+                  :scope_id,
+                  :parent_id,
+                  0,
+                  :node_id,
+                  1
+                )
+                """
+            ),
+            {"scope_id": scope_id, "parent_id": parent_id, "node_id": node_id},
+        )
+
+        with pytest.raises(SQLAlchemyError, match="has 1 children, expected 2"):
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_responses_rejects_duplicate_child_edges_under_one_parent(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+        parent_id = (
+            await session.execute(
+                text(
+                    """
+                    insert into responses.state_nodes (
+                      scope_id,
+                      kind,
+                      height,
+                      item_count,
+                      child_count
+                    ) values (
+                      :scope_id,
+                      'internal',
+                      1,
+                      2,
+                      2
+                    ) returning node_id
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                insert into responses.state_node_children (
+                  scope_id,
+                  parent_node_id,
+                  slot,
+                  child_node_id,
+                  child_item_count
+                ) values (
+                  :scope_id,
+                  :parent_id,
+                  0,
+                  :node_id,
+                  1
+                )
+                """
+            ),
+            {"scope_id": scope_id, "parent_id": parent_id, "node_id": node_id},
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await session.execute(
+                text(
+                    """
+                    insert into responses.state_node_children (
+                      scope_id,
+                      parent_node_id,
+                      slot,
+                      child_node_id,
+                      child_item_count
+                    ) values (
+                      :scope_id,
+                      :parent_id,
+                      1,
+                      :node_id,
+                      1
                     )
                     """
                 ),
-                {"scope_id": scope_id, "node_id": node_id},
+                {"scope_id": scope_id, "parent_id": parent_id, "node_id": node_id},
             )
 
 

@@ -153,10 +153,11 @@ begin
   select value ->> 'namespace'
     into v_namespace_name
     from jsonb_array_elements(p_counters) counter(value)
-   where (value ->> 'next_ord')::bigint < 0
+   where (value ->> 'next_ord')::numeric < 0
+      or (value ->> 'next_ord')::numeric > 9223372036854775807
    limit 1;
   if v_namespace_name is not null then
-    raise exception '% namespace counter for % has negative next_ord',
+    raise exception '% namespace counter for % has out-of-range next_ord',
       p_context,
       v_namespace_name;
   end if;
@@ -198,15 +199,8 @@ begin
     raise exception 'payload_json is required';
   end if;
 
-  insert into payload_objects (
-    scope_id,
-    payload_hash,
-    payload_json
-  ) values (
-    p_scope_id,
-    p_payload_hash,
-    p_payload_json
-  )
+  insert into payload_objects (scope_id, payload_hash, payload_json)
+  values (p_scope_id, p_payload_hash, p_payload_json)
   on conflict (scope_id, payload_hash) do nothing
   returning payload_id into v_payload_id;
 
@@ -245,7 +239,6 @@ declare
   v_entry_count integer;
   v_namespace_name text;
   v_ord bigint;
-  v_payload_hash_hex text;
   v_payload_hash bytea;
   v_node_id bigint;
 begin
@@ -256,6 +249,9 @@ begin
   v_entry_count = jsonb_array_length(p_entries);
   if v_entry_count <= 0 then
     raise exception 'entries must not be empty';
+  end if;
+  if v_entry_count > 128 then
+    raise exception 'leaf entries must not exceed 128';
   end if;
 
   select ordinality - 1
@@ -273,7 +269,63 @@ begin
    where coalesce(value ->> 'namespace', '') = ''
    limit 1;
   if v_bad_position is not null then
-    raise exception 'entry at position % is missing namespace', v_bad_position;
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where not (value ? 'ord')
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where (value ->> 'ord') !~ '^-?\d+$'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where (value ->> 'ord')::numeric < 0
+      or (value ->> 'ord')::numeric > 9223372036854775807
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where value ->> 'payload_hash' is null
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where value ->> 'payload_hash' !~ '^[0-9a-fA-F]{64}$'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where not (value ? 'payload')
+      or jsonb_typeof(value -> 'payload') is distinct from 'object'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is malformed', v_bad_position;
   end if;
 
   select value ->> 'namespace'
@@ -285,61 +337,6 @@ begin
    limit 1;
   if v_namespace_name is not null then
     raise exception 'unknown ordinal namespace %', v_namespace_name;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where not (value ? 'ord')
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % is missing ord', v_bad_position;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where (value ->> 'ord') !~ '^-?\d+$'
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % has invalid ord', v_bad_position;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where (value ->> 'ord')::bigint < 0
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % has negative ord', v_bad_position;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where value ->> 'payload_hash' is null
-      or value ->> 'payload_hash' !~ '^[0-9a-fA-F]{64}$'
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % has invalid payload_hash', v_bad_position;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where not (value ? 'payload')
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % is missing payload', v_bad_position;
-  end if;
-
-  select ordinality - 1
-    into v_bad_position
-    from jsonb_array_elements(p_entries) with ordinality
-   where jsonb_typeof(value -> 'payload') is distinct from 'object'
-   limit 1;
-  if v_bad_position is not null then
-    raise exception 'entry at position % payload must be an object', v_bad_position;
   end if;
 
   create temporary table if not exists pg_temp.response_create_leaf_entries (
@@ -391,15 +388,8 @@ begin
     raise exception 'payload hash collision or non-canonical payload hash';
   end if;
 
-  insert into payload_objects (
-    scope_id,
-    payload_hash,
-    payload_json
-  )
-  select distinct
-    p_scope_id,
-    payload_hash,
-    payload_json
+  insert into payload_objects (scope_id, payload_hash, payload_json)
+  select distinct p_scope_id, payload_hash, payload_json
     from pg_temp.response_create_leaf_entries
   on conflict (scope_id, payload_hash) do nothing;
 
@@ -421,9 +411,19 @@ begin
    where payload.scope_id = p_scope_id
      and payload.payload_hash = entry.payload_hash;
 
-  insert into state_nodes (scope_id, kind, item_count)
-  values (p_scope_id, 'leaf', v_entry_count)
-  returning node_id into v_node_id;
+  insert into state_nodes (
+    scope_id,
+    kind,
+    height,
+    item_count,
+    child_count
+  ) values (
+    p_scope_id,
+    'leaf',
+    0,
+    v_entry_count,
+    0
+  ) returning node_id into v_node_id;
 
   insert into state_leaves (scope_id, node_id, entry_count)
   values (p_scope_id, v_node_id, v_entry_count);
@@ -436,13 +436,7 @@ begin
     ord,
     payload_id
   )
-  select
-    p_scope_id,
-    v_node_id,
-    pos,
-    namespace_id,
-    ord,
-    payload_id
+  select p_scope_id, v_node_id, pos, namespace_id, ord, payload_id
     from pg_temp.response_create_leaf_entries
    order by pos;
 
@@ -450,67 +444,327 @@ begin
 end;
 $$;
 
-create function responses.create_concat(
+create function responses.create_internal_node(
   p_scope_id uuid,
-  p_left_id bigint,
-  p_right_id bigint
+  p_child_ids bigint[]
 )
 returns bigint
 language plpgsql
 set search_path = responses, public
 as $$
 declare
-  v_left_count bigint;
-  v_right_count bigint;
+  v_child_count integer;
+  v_duplicate_child_id bigint;
+  v_existing_count integer;
+  v_child_height smallint;
+  v_height_count integer;
+  v_item_count bigint;
   v_node_id bigint;
 begin
-  if p_left_id = p_right_id then
-    raise exception 'concat children must be distinct';
+  v_child_count = coalesce(array_length(p_child_ids, 1), 0);
+  if v_child_count = 0 then
+    raise exception 'internal nodes require at least one child';
+  end if;
+  if v_child_count = 1 then
+    return p_child_ids[1];
+  end if;
+  if v_child_count > 64 then
+    raise exception 'internal nodes cannot have more than 64 children';
   end if;
 
-  select item_count
-    into v_left_count
-    from state_nodes
-   where scope_id = p_scope_id
-     and node_id = p_left_id;
-
-  if v_left_count is null then
-    raise exception 'left state node %/% does not exist', p_scope_id, p_left_id;
+  select child_node_id
+    into v_duplicate_child_id
+    from unnest(p_child_ids) child(child_node_id)
+   group by child_node_id
+  having count(*) > 1
+   limit 1;
+  if v_duplicate_child_id is not null then
+    raise exception 'internal node cannot reference child % more than once',
+      v_duplicate_child_id;
   end if;
 
-  select item_count
-    into v_right_count
-    from state_nodes
-   where scope_id = p_scope_id
-     and node_id = p_right_id;
+  select count(*), count(distinct node.height), min(node.height), sum(node.item_count)
+    into v_existing_count, v_height_count, v_child_height, v_item_count
+    from unnest(p_child_ids) with ordinality child(child_node_id, ordinality)
+    join state_nodes node
+      on node.scope_id = p_scope_id
+     and node.node_id = child.child_node_id;
 
-  if v_right_count is null then
-    raise exception 'right state node %/% does not exist', p_scope_id, p_right_id;
+  if v_existing_count <> v_child_count then
+    raise exception 'one or more child state nodes do not exist';
+  end if;
+  if v_height_count <> 1 then
+    raise exception 'internal node children must have the same height';
   end if;
 
   insert into state_nodes (
     scope_id,
     kind,
-    left_id,
-    right_id,
-    item_count
+    height,
+    item_count,
+    child_count
   ) values (
     p_scope_id,
-    'concat',
-    p_left_id,
-    p_right_id,
-    v_left_count + v_right_count
+    'internal',
+    v_child_height + 1,
+    v_item_count,
+    v_child_count
+  ) returning node_id into v_node_id;
+
+  insert into state_node_children (
+    scope_id,
+    parent_node_id,
+    slot,
+    child_node_id,
+    child_item_count
   )
-  returning node_id into v_node_id;
+  select
+    p_scope_id,
+    v_node_id,
+    (child.ordinality - 1)::smallint,
+    child.child_node_id,
+    node.item_count
+    from unnest(p_child_ids) with ordinality child(child_node_id, ordinality)
+    join state_nodes node
+      on node.scope_id = p_scope_id
+     and node.node_id = child.child_node_id
+   order by child.ordinality;
 
   return v_node_id;
 end;
 $$;
 
-create function responses.create_balanced_concat(
+create function responses.create_items_tree(
   p_scope_id uuid,
-  p_left_id bigint,
-  p_right_id bigint
+  p_entries jsonb
+)
+returns bigint
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_entry_count integer;
+  v_start integer = 0;
+  v_chunk jsonb;
+  v_leaf_id bigint;
+  v_nodes bigint[];
+  v_namespace_name text;
+  v_ord bigint;
+begin
+  if jsonb_typeof(p_entries) is distinct from 'array' then
+    raise exception 'entries must be a JSON array';
+  end if;
+
+  v_entry_count = jsonb_array_length(p_entries);
+  if v_entry_count <= 0 then
+    raise exception 'entries must not be empty';
+  end if;
+
+  with valid_ord_text as materialized (
+    select entry.value ->> 'namespace' as namespace_name,
+           entry.value ->> 'ord' as ord_text
+      from jsonb_array_elements(p_entries) entry(value)
+     where jsonb_typeof(entry.value) = 'object'
+       and coalesce(entry.value ->> 'namespace', '') <> ''
+       and entry.value ? 'ord'
+       and (entry.value ->> 'ord') ~ '^-?\d+$'
+  ), valid_ord as materialized (
+    select namespace_name, ord_text::bigint as ord
+      from valid_ord_text
+     where ord_text::numeric between 0 and 9223372036854775807
+  )
+  select namespace_name, ord
+    into v_namespace_name, v_ord
+    from valid_ord
+   group by namespace_name, ord
+  having count(*) > 1
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception 'duplicate ordinal %.%', v_namespace_name, v_ord;
+  end if;
+
+  create temporary table if not exists pg_temp.response_tree_level (
+    pos integer not null primary key,
+    node_id bigint not null
+  ) on commit drop;
+  truncate pg_temp.response_tree_level;
+
+  while v_start < v_entry_count loop
+    select jsonb_agg(entry.value order by entry.ordinality)
+      into v_chunk
+      from jsonb_array_elements(p_entries) with ordinality as entry(value, ordinality)
+     where entry.ordinality > v_start
+       and entry.ordinality <= v_start + 128;
+
+    v_leaf_id = responses.create_leaf(p_scope_id, v_chunk);
+    insert into pg_temp.response_tree_level (pos, node_id)
+    values (v_start / 128, v_leaf_id);
+    v_start = v_start + 128;
+  end loop;
+
+  select array_agg(node_id order by pos)
+    into v_nodes
+    from pg_temp.response_tree_level;
+
+  return responses.create_node_tree_from_children(p_scope_id, v_nodes);
+end;
+$$;
+
+create function responses.create_node_tree_from_children(
+  p_scope_id uuid,
+  p_child_ids bigint[]
+)
+returns bigint
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_nodes bigint[];
+  v_child_count integer;
+  v_group_count integer;
+  v_groups_left integer;
+  v_group_size integer;
+  v_group_start integer;
+  v_group_end integer;
+  v_pos integer;
+  v_parent_id bigint;
+begin
+  v_child_count = coalesce(array_length(p_child_ids, 1), 0);
+  if v_child_count = 0 then
+    return null;
+  end if;
+  if v_child_count = 1 then
+    return p_child_ids[1];
+  end if;
+
+  create temporary table if not exists pg_temp.response_child_tree_level (
+    pos integer not null primary key,
+    node_id bigint not null
+  ) on commit drop;
+  truncate pg_temp.response_child_tree_level;
+
+  insert into pg_temp.response_child_tree_level (pos, node_id)
+  select (child.ordinality - 1)::integer, child.node_id
+    from unnest(p_child_ids) with ordinality child(node_id, ordinality);
+
+  loop
+    select array_agg(node_id order by pos)
+      into v_nodes
+      from pg_temp.response_child_tree_level;
+    exit when array_length(v_nodes, 1) = 1;
+
+    truncate pg_temp.response_child_tree_level;
+    v_child_count = array_length(v_nodes, 1);
+    v_group_count = ceiling(v_child_count::numeric / 64)::integer;
+    v_group_start = 1;
+    v_pos = 0;
+
+    while v_group_start <= v_child_count loop
+      v_groups_left = v_group_count - v_pos;
+      v_group_size = ceiling(
+        (v_child_count - v_group_start + 1)::numeric / v_groups_left
+      )::integer;
+      v_group_end = v_group_start + v_group_size - 1;
+      v_parent_id = responses.create_internal_node(
+        p_scope_id,
+        v_nodes[v_group_start:v_group_end]
+      );
+      insert into pg_temp.response_child_tree_level (pos, node_id)
+      values (v_pos, v_parent_id);
+      v_group_start = v_group_end + 1;
+      v_pos = v_pos + 1;
+    end loop;
+  end loop;
+
+  return v_nodes[1];
+end;
+$$;
+
+create function responses.list_state_items(
+  p_scope_id uuid,
+  p_root_id bigint,
+  p_start_index bigint default 0,
+  p_limit bigint default null
+)
+returns table (
+  item_position bigint,
+  namespace text,
+  ord bigint,
+  payload_hash text,
+  payload jsonb
+)
+language sql
+stable
+set search_path = responses, public
+as $$
+  with recursive walk(node_id, offset_items, item_count, kind) as (
+    select node_id, 0::bigint, item_count, kind
+      from state_nodes
+     where scope_id = p_scope_id
+       and node_id = p_root_id
+       and (
+         p_limit is null
+         or p_limit > 0
+       )
+    union all
+    select
+      edge.child_node_id,
+      child_offset.offset_items,
+      child.item_count,
+      child.kind
+      from walk
+      join state_node_children edge
+        on edge.scope_id = p_scope_id
+       and edge.parent_node_id = walk.node_id
+      join state_nodes child
+        on child.scope_id = edge.scope_id
+       and child.node_id = edge.child_node_id
+      left join lateral (
+        select sum(prev.child_item_count)::bigint as item_count
+          from state_node_children prev
+          where prev.scope_id = edge.scope_id
+            and prev.parent_node_id = edge.parent_node_id
+            and prev.slot < edge.slot
+      ) previous_items on true
+      cross join lateral (
+        select walk.offset_items
+          + coalesce(previous_items.item_count, 0)::bigint as offset_items
+      ) child_offset
+     where walk.kind = 'internal'
+       and child_offset.offset_items + child.item_count > p_start_index
+       and (
+         p_limit is null
+         or child_offset.offset_items < p_start_index + p_limit
+       )
+  )
+  select
+    walk.offset_items + entry.pos,
+    namespace.namespace_name,
+    entry.ord,
+    encode(payload.payload_hash, 'hex'),
+    payload.payload_json
+    from walk
+    join state_leaf_entries entry
+      on entry.scope_id = p_scope_id
+     and entry.node_id = walk.node_id
+    join ordinal_namespaces namespace
+      on namespace.namespace_id = entry.namespace_id
+    join payload_objects payload
+      on payload.scope_id = entry.scope_id
+     and payload.payload_id = entry.payload_id
+   where walk.kind = 'leaf'
+     and walk.offset_items + entry.pos >= p_start_index
+     and (
+       p_limit is null
+       or walk.offset_items + entry.pos < p_start_index + p_limit
+     )
+   order by walk.offset_items + entry.pos;
+$$;
+
+create function responses.concat_balanced(
+  p_scope_id uuid,
+  p_left_root_id bigint,
+  p_right_root_id bigint
 )
 returns bigint
 language plpgsql
@@ -518,66 +772,348 @@ set search_path = responses, public
 as $$
 declare
   v_left_kind text;
-  v_left_left_id bigint;
-  v_left_right_id bigint;
-  v_left_count bigint;
+  v_left_height smallint;
+  v_left_child_count smallint;
   v_right_kind text;
-  v_right_left_id bigint;
-  v_right_right_id bigint;
-  v_right_count bigint;
-  v_rebalanced_child_id bigint;
+  v_right_height smallint;
+  v_right_child_count smallint;
+  v_left_children bigint[];
+  v_right_children bigint[];
+  v_child_count integer;
+  v_joined_id bigint;
+  v_joined_height smallint;
+  v_joined_children bigint[];
 begin
-  if p_left_id = p_right_id then
-    raise exception 'concat children must be distinct';
+  if p_left_root_id is null then
+    return p_right_root_id;
+  end if;
+  if p_right_root_id is null then
+    return p_left_root_id;
   end if;
 
-  select kind, left_id, right_id, item_count
-    into v_left_kind, v_left_left_id, v_left_right_id, v_left_count
+  select kind, height, child_count
+    into v_left_kind, v_left_height, v_left_child_count
     from state_nodes
    where scope_id = p_scope_id
-     and node_id = p_left_id;
-
-  if v_left_count is null then
-    raise exception 'left state node %/% does not exist', p_scope_id, p_left_id;
+      and node_id = p_left_root_id;
+  if v_left_height is null then
+    raise exception 'left state root %/% does not exist', p_scope_id, p_left_root_id;
   end if;
 
-  select kind, left_id, right_id, item_count
-    into v_right_kind, v_right_left_id, v_right_right_id, v_right_count
+  select kind, height, child_count
+    into v_right_kind, v_right_height, v_right_child_count
     from state_nodes
    where scope_id = p_scope_id
-     and node_id = p_right_id;
-
-  if v_right_count is null then
-    raise exception 'right state node %/% does not exist', p_scope_id, p_right_id;
+      and node_id = p_right_root_id;
+  if v_right_height is null then
+    raise exception 'right state root %/% does not exist', p_scope_id, p_right_root_id;
   end if;
 
-  if v_left_kind = 'concat' and v_left_count > v_right_count * 2 then
-    v_rebalanced_child_id = responses.create_balanced_concat(
+  if v_left_height = v_right_height then
+    if v_left_kind = 'internal'
+      and v_right_kind = 'internal'
+      and v_left_child_count + v_right_child_count <= 64 then
+      select array_agg(child_node_id order by slot)
+        into v_left_children
+        from state_node_children
+       where scope_id = p_scope_id
+         and parent_node_id = p_left_root_id;
+
+      select array_agg(child_node_id order by slot)
+        into v_right_children
+        from state_node_children
+       where scope_id = p_scope_id
+         and parent_node_id = p_right_root_id;
+
+      return responses.create_internal_node(
+        p_scope_id,
+        v_left_children || v_right_children
+      );
+    end if;
+
+    -- Relaxed B+ join: when equal-height internal roots cannot be merged under
+    -- one 64-child parent, keep both roots as children of a new parent. A more
+    -- tightly packed join could redistribute their child arrays, but that would
+    -- rewrite more edges and reduce structural sharing without changing the
+    -- logical sequence. Add redistribution later only if workload data shows
+    -- underfilled internal nodes are a real read/write bottleneck.
+    return responses.create_node_tree_from_children(
       p_scope_id,
-      v_left_right_id,
-      p_right_id
-    );
-    return responses.create_balanced_concat(
-      p_scope_id,
-      v_left_left_id,
-      v_rebalanced_child_id
+      array[p_left_root_id, p_right_root_id]::bigint[]
     );
   end if;
 
-  if v_right_kind = 'concat' and v_right_count > v_left_count * 2 then
-    v_rebalanced_child_id = responses.create_balanced_concat(
+  if v_left_height > v_right_height then
+    select array_agg(child_node_id order by slot)
+      into v_left_children
+      from state_node_children
+     where scope_id = p_scope_id
+       and parent_node_id = p_left_root_id;
+    v_child_count = array_length(v_left_children, 1);
+    v_joined_id = responses.concat_balanced(
       p_scope_id,
-      p_left_id,
-      v_right_left_id
+      v_left_children[v_child_count],
+      p_right_root_id
     );
-    return responses.create_balanced_concat(
+    select height
+      into v_joined_height
+      from state_nodes
+     where scope_id = p_scope_id
+       and node_id = v_joined_id;
+
+    if v_joined_height = v_left_height - 1 then
+      return responses.create_node_tree_from_children(
+        p_scope_id,
+        coalesce(v_left_children[1:v_child_count - 1], '{}'::bigint[])
+          || v_joined_id
+      );
+    end if;
+
+    select array_agg(child_node_id order by slot)
+      into v_joined_children
+      from state_node_children
+     where scope_id = p_scope_id
+       and parent_node_id = v_joined_id;
+    return responses.create_node_tree_from_children(
       p_scope_id,
-      v_rebalanced_child_id,
-      v_right_right_id
+      coalesce(v_left_children[1:v_child_count - 1], '{}'::bigint[])
+        || v_joined_children
     );
   end if;
 
-  return responses.create_concat(p_scope_id, p_left_id, p_right_id);
+  select array_agg(child_node_id order by slot)
+    into v_right_children
+    from state_node_children
+   where scope_id = p_scope_id
+     and parent_node_id = p_right_root_id;
+  v_child_count = array_length(v_right_children, 1);
+  v_joined_id = responses.concat_balanced(
+    p_scope_id,
+    p_left_root_id,
+    v_right_children[1]
+  );
+  select height
+    into v_joined_height
+    from state_nodes
+   where scope_id = p_scope_id
+     and node_id = v_joined_id;
+
+  if v_joined_height = v_right_height - 1 then
+    return responses.create_node_tree_from_children(
+      p_scope_id,
+      array[v_joined_id]::bigint[]
+        || coalesce(v_right_children[2:v_child_count], '{}'::bigint[])
+    );
+  end if;
+
+  select array_agg(child_node_id order by slot)
+    into v_joined_children
+    from state_node_children
+   where scope_id = p_scope_id
+     and parent_node_id = v_joined_id;
+  return responses.create_node_tree_from_children(
+    p_scope_id,
+    v_joined_children
+      || coalesce(v_right_children[2:v_child_count], '{}'::bigint[])
+  );
+end;
+$$;
+
+create function responses.split_at_index(
+  p_scope_id uuid,
+  p_root_id bigint,
+  p_index bigint
+)
+returns table (
+  left_root_id bigint,
+  right_root_id bigint
+)
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_node_kind text;
+  v_item_count bigint;
+  v_split_slot smallint;
+  v_split_child_id bigint;
+  v_before_count bigint;
+  v_child_left_root_id bigint;
+  v_child_right_root_id bigint;
+  v_prefix_children bigint[];
+  v_suffix_children bigint[];
+  v_prefix_root_id bigint;
+  v_suffix_root_id bigint;
+  v_left_entries jsonb;
+  v_right_entries jsonb;
+begin
+  if p_root_id is null then
+    if p_index <> 0 then
+      raise exception 'split index % is out of range for empty state', p_index;
+    end if;
+    left_root_id = null;
+    right_root_id = null;
+    return next;
+    return;
+  end if;
+
+  select kind, item_count
+    into v_node_kind, v_item_count
+    from state_nodes
+   where scope_id = p_scope_id
+     and node_id = p_root_id;
+
+  if v_item_count is null then
+    raise exception 'state root %/% does not exist', p_scope_id, p_root_id;
+  end if;
+  if p_index < 0 or p_index > v_item_count then
+    raise exception 'split index % is out of range 0..%', p_index, v_item_count;
+  end if;
+
+  if p_index = 0 then
+    left_root_id = null;
+    right_root_id = p_root_id;
+    return next;
+    return;
+  end if;
+  if p_index = v_item_count then
+    left_root_id = p_root_id;
+    right_root_id = null;
+    return next;
+    return;
+  end if;
+
+  if v_node_kind = 'leaf' then
+    select jsonb_agg(
+      jsonb_build_object(
+        'namespace', item.namespace,
+        'ord', item.ord,
+        'payload_hash', item.payload_hash,
+        'payload', item.payload
+      ) order by item.item_position
+    ) into v_left_entries
+      from responses.list_state_items(p_scope_id, p_root_id) item
+     where item.item_position < p_index;
+
+    select jsonb_agg(
+      jsonb_build_object(
+        'namespace', item.namespace,
+        'ord', item.ord,
+        'payload_hash', item.payload_hash,
+        'payload', item.payload
+      ) order by item.item_position
+    ) into v_right_entries
+      from responses.list_state_items(p_scope_id, p_root_id) item
+     where item.item_position >= p_index;
+
+    left_root_id = responses.create_items_tree(p_scope_id, v_left_entries);
+    right_root_id = responses.create_items_tree(p_scope_id, v_right_entries);
+    return next;
+    return;
+  end if;
+
+  select slot, child_node_id, before_count
+    into v_split_slot, v_split_child_id, v_before_count
+    from (
+      select
+        edge.slot,
+        edge.child_node_id,
+        coalesce(
+          sum(edge.child_item_count) over (
+            order by edge.slot rows between unbounded preceding and 1 preceding
+          ),
+          0
+        )::bigint as before_count,
+        edge.child_item_count
+        from state_node_children edge
+       where edge.scope_id = p_scope_id
+         and edge.parent_node_id = p_root_id
+    ) edge
+   where p_index >= before_count
+     and p_index < before_count + child_item_count
+   order by slot
+   limit 1;
+
+  select left_root_id, right_root_id
+    into v_child_left_root_id, v_child_right_root_id
+    from responses.split_at_index(
+      p_scope_id,
+      v_split_child_id,
+      p_index - v_before_count
+    );
+
+  select array_agg(child_node_id order by slot)
+    into v_prefix_children
+    from state_node_children
+   where scope_id = p_scope_id
+     and parent_node_id = p_root_id
+     and slot < v_split_slot;
+
+  select array_agg(child_node_id order by slot)
+    into v_suffix_children
+    from state_node_children
+   where scope_id = p_scope_id
+     and parent_node_id = p_root_id
+     and slot > v_split_slot;
+
+  v_prefix_root_id = responses.create_node_tree_from_children(
+    p_scope_id,
+    v_prefix_children
+  );
+  v_suffix_root_id = responses.create_node_tree_from_children(
+    p_scope_id,
+    v_suffix_children
+  );
+  left_root_id = responses.concat_balanced(
+    p_scope_id,
+    v_prefix_root_id,
+    v_child_left_root_id
+  );
+  right_root_id = responses.concat_balanced(
+    p_scope_id,
+    v_child_right_root_id,
+    v_suffix_root_id
+  );
+  return next;
+end;
+$$;
+
+create function responses.splice(
+  p_scope_id uuid,
+  p_root_id bigint,
+  p_start_index bigint,
+  p_delete_count bigint,
+  p_insert_root_id bigint default null
+)
+returns bigint
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_left_root_id bigint;
+  v_tail_root_id bigint;
+  v_deleted_root_id bigint;
+  v_right_root_id bigint;
+  v_combined_root_id bigint;
+begin
+  if p_delete_count < 0 then
+    raise exception 'delete_count must not be negative';
+  end if;
+
+  select left_root_id, right_root_id
+    into v_left_root_id, v_tail_root_id
+    from responses.split_at_index(p_scope_id, p_root_id, p_start_index);
+
+  select left_root_id, right_root_id
+    into v_deleted_root_id, v_right_root_id
+    from responses.split_at_index(p_scope_id, v_tail_root_id, p_delete_count);
+
+  v_combined_root_id = responses.concat_balanced(
+    p_scope_id,
+    v_left_root_id,
+    p_insert_root_id
+  );
+
+  return responses.concat_balanced(p_scope_id, v_combined_root_id, v_right_root_id);
 end;
 $$;
 
@@ -632,10 +1168,6 @@ begin
       from ordinal_namespaces
      where namespace_name = v_namespace_name;
 
-    if v_namespace_id is null then
-      raise exception 'unknown ordinal namespace %', v_namespace_name;
-    end if;
-
     insert into response_namespace_counters (
       scope_id,
       response_id,
@@ -653,15 +1185,8 @@ begin
     select value
       from jsonb_array_elements(p_checkpoints)
   loop
-    insert into response_checkpoints (
-      scope_id,
-      response_id,
-      root_id
-    ) values (
-      p_scope_id,
-      p_response_id,
-      (v_checkpoint.value ->> 'root_id')::bigint
-    )
+    insert into response_checkpoints (scope_id, response_id, root_id)
+    values (p_scope_id, p_response_id, (v_checkpoint.value ->> 'root_id')::bigint)
     returning checkpoint_id into v_checkpoint_id;
 
     if not (v_checkpoint.value ? 'namespace_counters') then
@@ -719,14 +1244,14 @@ language plpgsql
 set search_path = responses, public
 as $$
 declare
-  v_leaf_id bigint;
+  v_items_root_id bigint;
   v_prev_root_id bigint;
   v_root_id bigint;
 begin
-  v_leaf_id = responses.create_leaf(p_scope_id, p_items);
+  v_items_root_id = responses.create_items_tree(p_scope_id, p_items);
 
   if p_prev_response_id is null then
-    v_root_id = v_leaf_id;
+    v_root_id = v_items_root_id;
   else
     select full_state_root_id
       into v_prev_root_id
@@ -740,10 +1265,10 @@ begin
         p_prev_response_id;
     end if;
 
-    v_root_id = responses.create_balanced_concat(
+    v_root_id = responses.concat_balanced(
       p_scope_id,
       v_prev_root_id,
-      v_leaf_id
+      v_items_root_id
     );
   end if;
 
@@ -805,8 +1330,7 @@ begin
       p_owner_id,
       'live',
       p_expires_at
-    )
-    returning lease_id into v_lease_id;
+    ) returning lease_id into v_lease_id;
   exception when unique_violation then
     update response_leases
        set response_id = p_response_id,
@@ -851,15 +1375,8 @@ language plpgsql
 set search_path = responses, public
 as $$
 begin
-  insert into conversations (
-    scope_id,
-    conversation_id,
-    current_response_id
-  ) values (
-    p_scope_id,
-    p_conversation_id,
-    p_response_id
-  )
+  insert into conversations (scope_id, conversation_id, current_response_id)
+  values (p_scope_id, p_conversation_id, p_response_id)
   on conflict (scope_id, conversation_id) do update
      set current_response_id = excluded.current_response_id,
          last_used_at = now();
@@ -878,14 +1395,7 @@ drop function if exists responses.create_or_refresh_lease(
   text,
   timestamptz
 );
-drop function if exists responses.append_items(
-  uuid,
-  text,
-  text,
-  jsonb,
-  jsonb,
-  jsonb
-);
+drop function if exists responses.append_items(uuid, text, text, jsonb, jsonb, jsonb);
 drop function if exists responses.create_response(
   uuid,
   text,
@@ -894,8 +1404,13 @@ drop function if exists responses.create_response(
   jsonb,
   jsonb
 );
-drop function if exists responses.create_balanced_concat(uuid, bigint, bigint);
-drop function if exists responses.create_concat(uuid, bigint, bigint);
+drop function if exists responses.splice(uuid, bigint, bigint, bigint, bigint);
+drop function if exists responses.split_at_index(uuid, bigint, bigint);
+drop function if exists responses.concat_balanced(uuid, bigint, bigint);
+drop function if exists responses.list_state_items(uuid, bigint, bigint, bigint);
+drop function if exists responses.create_items_tree(uuid, jsonb);
+drop function if exists responses.create_node_tree_from_children(uuid, bigint[]);
+drop function if exists responses.create_internal_node(uuid, bigint[]);
 drop function if exists responses.create_leaf(uuid, jsonb);
 drop function if exists responses.get_or_create_payload(uuid, bytea, jsonb);
 drop function if exists responses.validate_namespace_counters(jsonb, text);

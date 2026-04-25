@@ -50,8 +50,19 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
         await session.execute(
             text(
                 """
-                insert into responses.state_nodes (scope_id, kind, item_count)
-                values (:scope_id, 'leaf', 1)
+                insert into responses.state_nodes (
+                  scope_id,
+                  kind,
+                  height,
+                  item_count,
+                  child_count
+                ) values (
+                  :scope_id,
+                  'leaf',
+                  0,
+                  1,
+                  0
+                )
                 returning node_id
                 """
             ),
@@ -151,12 +162,13 @@ async def test_responses_gc_registers_cron_jobs(db_session_maker) -> None:
                     """
                         select jobname, command
                           from cron.job
-                         where jobname in (
-                           'expire-response-leases',
-                           'prune-stale-conversations',
-                           'prune-unreferenced-responses',
-                           'prune-zero-ref-payloads'
-                         )
+                          where jobname in (
+                            'expire-response-leases',
+                            'prune-stale-conversations',
+                            'prune-unreferenced-responses',
+                            'prune-zero-ref-payloads',
+                            'prune-zero-ref-state-nodes'
+                          )
                          order by jobname
                         """
                 )
@@ -168,6 +180,7 @@ async def test_responses_gc_registers_cron_jobs(db_session_maker) -> None:
         "prune-stale-conversations",
         "prune-unreferenced-responses",
         "prune-zero-ref-payloads",
+        "prune-zero-ref-state-nodes",
     ]
     assert all("responses." in job.command for job in jobs)
 
@@ -290,4 +303,37 @@ async def test_responses_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
         await session.execute(text("call responses.gc_prune_payloads(10)"))
         await session.commit()
 
+        assert await _table_count(session, "payload_objects", scope_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_gc_prunes_unattached_state_nodes(db_session_maker) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        left_id = await _create_leaf(session, scope_id, 1)
+        right_id = await _create_leaf(session, scope_id, 2)
+        internal_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.create_internal_node(
+                      :scope_id,
+                      array[:left_id, :right_id]::bigint[]
+                    )
+                    """
+                ),
+                {"scope_id": scope_id, "left_id": left_id, "right_id": right_id},
+            )
+        ).scalar_one()
+        await session.commit()
+
+        assert await _table_count(session, "state_nodes", scope_id) == 3
+        assert await _table_count(session, "payload_objects", scope_id) == 2
+
+        await session.execute(text("call responses.gc_prune_state_nodes(10)"))
+        await session.commit()
+
+        assert internal_id is not None
+        assert await _table_count(session, "state_nodes", scope_id) == 0
         assert await _table_count(session, "payload_objects", scope_id) == 0
