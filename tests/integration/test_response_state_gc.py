@@ -302,7 +302,7 @@ async def test_responses_gc_prunes_unreferenced_responses(
 
 
 @pytest.mark.asyncio
-async def test_responses_created_via_mechanics_get_response_owned_retention(
+async def test_responses_created_via_tree_functions_get_response_owned_retention(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()

@@ -1,4 +1,4 @@
-"""Add response state mechanics functions.
+"""Add responses tree functions.
 
 Revision ID: 20260424_0004
 Revises: 20260424_0003

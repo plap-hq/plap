@@ -1,4 +1,4 @@
-"""Add response state B+ rope schema.
+"""Add responses B+ rope schema.
 
 Revision ID: 20260424_0002
 Revises: 20260423_0001

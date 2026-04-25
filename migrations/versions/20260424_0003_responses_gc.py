@@ -1,4 +1,4 @@
-"""Add response state GC procedures.
+"""Add responses GC procedures.
 
 Revision ID: 20260424_0003
 Revises: 20260424_0002
