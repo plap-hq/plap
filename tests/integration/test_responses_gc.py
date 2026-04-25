@@ -12,7 +12,7 @@ async def _create_payload(session, scope_id, marker: int):
         await session.execute(
             text(
                 """
-                insert into responses.payload_objects (
+                insert into responses.payloads (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -40,7 +40,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
             text(
                 """
                 select namespace_id
-                  from responses.ordinal_namespaces
+                  from responses.item_namespaces
                  where namespace_name = 'm'
                 """
             )
@@ -84,9 +84,9 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
             insert into responses.state_leaf_entries (
               scope_id,
               node_id,
-              pos,
+              item_index,
               namespace_id,
-              ord,
+              ordinal,
               payload_id
             ) values (
               :scope_id,
@@ -119,11 +119,11 @@ async def _create_response(
     await session.execute(
         text(
             """
-            insert into responses.responses (
+            insert into responses.response_records (
               scope_id,
               response_id,
               prev_response_id,
-              full_state_root_id
+              state_root_id
             ) values (
               :scope_id,
               :response_id,
@@ -141,11 +141,11 @@ async def _create_response(
     )
 
 
-def _namespace_counters(message_next_ord: int, summary_next_ord: int = 0) -> str:
+def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0) -> str:
     return json.dumps(
         [
-            {"namespace": "m", "next_ord": message_next_ord},
-            {"namespace": "s", "next_ord": summary_next_ord},
+            {"namespace": "m", "next_ordinal": message_next_ordinal},
+            {"namespace": "s", "next_ordinal": summary_next_ordinal},
         ]
     )
 
@@ -233,12 +233,12 @@ async def test_responses_gc_expires_lease_and_deletes_suffix(
         )
         await session.commit()
 
-        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.execute(text("call responses.gc_expire_response_leases(10)"))
         await session.commit()
 
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
         assert await _table_count(session, "response_leases", scope_id) == 0
 
 
@@ -276,7 +276,7 @@ async def test_responses_gc_prunes_stale_conversations(db_session_maker) -> None
 
         assert await _table_count(session, "conversations", scope_id) == 0
         assert await _table_count(session, "response_leases", scope_id) == 0
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
 
 
@@ -296,9 +296,9 @@ async def test_responses_gc_prunes_unreferenced_responses(
         )
         await session.commit()
 
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
 
 
 @pytest.mark.asyncio
@@ -312,12 +312,12 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_retained',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
                 """
@@ -325,7 +325,7 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
             {
                 "scope_id": scope_id,
                 "root_id": root_id,
-                "namespace_counters": _namespace_counters(1),
+                "namespace_cursors": _namespace_cursors(1),
             },
         )
         await session.commit()
@@ -354,7 +354,7 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
             text("call responses.gc_prune_unreferenced_responses(10)")
         )
         await session.commit()
-        assert await _table_count(session, "responses", scope_id) == 1
+        assert await _table_count(session, "response_records", scope_id) == 1
 
         await session.execute(
             text(
@@ -370,16 +370,16 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
         await session.commit()
 
         assert await _table_count(session, "response_leases", scope_id) == 1
-        assert await _table_count(session, "responses", scope_id) == 1
+        assert await _table_count(session, "response_records", scope_id) == 1
         assert await _table_count(session, "state_nodes", scope_id) == 1
-        assert await _table_count(session, "payload_objects", scope_id) == 1
+        assert await _table_count(session, "payloads", scope_id) == 1
 
-        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.execute(text("call responses.gc_expire_response_leases(10)"))
         await session.commit()
 
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
 
 
 @pytest.mark.asyncio
@@ -393,12 +393,12 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_active_conversation',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
                 """
@@ -406,13 +406,13 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
             {
                 "scope_id": scope_id,
                 "root_id": root_id,
-                "namespace_counters": _namespace_counters(1),
+                "namespace_cursors": _namespace_cursors(1),
             },
         )
         await session.execute(
             text(
                 """
-                select responses.move_conversation(
+                select responses.move_conversation_head(
                   :scope_id,
                   'conv_active',
                   'resp_active_conversation'
@@ -435,12 +435,12 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
         )
         await session.commit()
 
-        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.execute(text("call responses.gc_expire_response_leases(10)"))
         await session.commit()
 
         assert await _table_count(session, "conversations", scope_id) == 1
         assert await _table_count(session, "response_leases", scope_id) == 1
-        assert await _table_count(session, "responses", scope_id) == 1
+        assert await _table_count(session, "response_records", scope_id) == 1
         assert await _table_count(session, "state_nodes", scope_id) == 1
 
         await session.execute(
@@ -461,9 +461,9 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
 
         assert await _table_count(session, "conversations", scope_id) == 0
         assert await _table_count(session, "response_leases", scope_id) == 0
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
 
 
 @pytest.mark.asyncio
@@ -478,12 +478,12 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_chain_1',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
                 )
@@ -492,18 +492,18 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
             {
                 "scope_id": scope_id,
                 "root_id": first_root,
-                "namespace_counters": _namespace_counters(1),
+                "namespace_cursors": _namespace_cursors(1),
             },
         )
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_chain_2',
                   'resp_chain_1',
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
                 """
@@ -511,7 +511,7 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
             {
                 "scope_id": scope_id,
                 "root_id": second_root,
-                "namespace_counters": _namespace_counters(2),
+                "namespace_cursors": _namespace_cursors(2),
             },
         )
         await session.commit()
@@ -520,7 +520,7 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
             text("call responses.gc_prune_unreferenced_responses(10)")
         )
         await session.commit()
-        assert await _table_count(session, "responses", scope_id) == 2
+        assert await _table_count(session, "response_records", scope_id) == 2
 
         await session.execute(
             text(
@@ -533,12 +533,12 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
             ),
             {"scope_id": scope_id},
         )
-        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.execute(text("call responses.gc_expire_response_leases(10)"))
         await session.commit()
 
-        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
 
 
 @pytest.mark.asyncio
@@ -552,7 +552,7 @@ async def test_responses_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
         await session.execute(text("call responses.gc_prune_payloads(10)"))
         await session.commit()
 
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0
 
 
 @pytest.mark.asyncio
@@ -566,7 +566,7 @@ async def test_responses_gc_prunes_unattached_state_nodes(db_session_maker) -> N
             await session.execute(
                 text(
                     """
-                    select responses.create_internal_node(
+                    select responses.create_state_internal_node(
                       :scope_id,
                       array[:left_id, :right_id]::bigint[]
                     )
@@ -578,11 +578,11 @@ async def test_responses_gc_prunes_unattached_state_nodes(db_session_maker) -> N
         await session.commit()
 
         assert await _table_count(session, "state_nodes", scope_id) == 3
-        assert await _table_count(session, "payload_objects", scope_id) == 2
+        assert await _table_count(session, "payloads", scope_id) == 2
 
         await session.execute(text("call responses.gc_prune_state_nodes(10)"))
         await session.commit()
 
         assert internal_id is not None
         assert await _table_count(session, "state_nodes", scope_id) == 0
-        assert await _table_count(session, "payload_objects", scope_id) == 0
+        assert await _table_count(session, "payloads", scope_id) == 0

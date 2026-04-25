@@ -19,7 +19,7 @@ def _items(*payloads: dict[str, object], start_ord: int = 0) -> str:
         [
             {
                 "namespace": "m",
-                "ord": start_ord + index,
+                "ordinal": start_ord + index,
                 "payload_hash": _canonical_payload_hash(payload),
                 "payload": payload,
             }
@@ -28,11 +28,11 @@ def _items(*payloads: dict[str, object], start_ord: int = 0) -> str:
     )
 
 
-def _namespace_counters(message_next_ord: int, summary_next_ord: int = 0) -> str:
+def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0) -> str:
     return json.dumps(
         [
-            {"namespace": "m", "next_ord": message_next_ord},
-            {"namespace": "s", "next_ord": summary_next_ord},
+            {"namespace": "m", "next_ordinal": message_next_ordinal},
+            {"namespace": "s", "next_ordinal": summary_next_ordinal},
         ]
     )
 
@@ -52,19 +52,19 @@ async def _append_response(
     payload: dict[str, object],
     *,
     prev_response_id: str | None = None,
-    next_ord: int = 1,
+    next_ordinal: int = 1,
 ) -> int:
     row = (
         await session.execute(
             text(
                 """
-                select root_node_id
-                  from responses.append_items(
+                select state_root_id
+                  from responses.append_response(
                     :scope_id,
                     :response_id,
                     :prev_response_id,
                     cast(:items as jsonb),
-                    cast(:namespace_counters as jsonb),
+                    cast(:namespace_cursors as jsonb),
                     '[]'::jsonb
                   )
                 """
@@ -73,12 +73,12 @@ async def _append_response(
                 "scope_id": scope_id,
                 "response_id": response_id,
                 "prev_response_id": prev_response_id,
-                "items": _items(payload, start_ord=next_ord - 1),
-                "namespace_counters": _namespace_counters(next_ord),
+                "items": _items(payload, start_ord=next_ordinal - 1),
+                "namespace_cursors": _namespace_cursors(next_ordinal),
             },
         )
     ).one()
-    return row.root_node_id
+    return row.state_root_id
 
 
 async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int, int]:
@@ -87,7 +87,7 @@ async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int,
             text(
                 """
                 select child_refcount, lease_refcount
-                  from responses.responses
+                  from responses.response_records
                  where scope_id = :scope_id
                    and response_id = :response_id
                 """
@@ -103,7 +103,7 @@ async def _create_numbered_tree(session, scope_id, count: int) -> int:
         await session.execute(
             text(
                 """
-                select responses.create_items_tree(
+                select responses.build_state_tree(
                   :scope_id,
                   cast(:items as jsonb)
                 )
@@ -230,7 +230,7 @@ async def test_responses_create_leaf_rejects_same_batch_payload_hash_collision(
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -239,13 +239,13 @@ async def test_responses_create_leaf_rejects_same_batch_payload_hash_collision(
                         [
                             {
                                 "namespace": "m",
-                                "ord": 0,
+                                "ordinal": 0,
                                 "payload_hash": reused_hash,
                                 "payload": first_payload,
                             },
                             {
                                 "namespace": "m",
-                                "ord": 1,
+                                "ordinal": 1,
                                 "payload_hash": reused_hash,
                                 "payload": second_payload,
                             },
@@ -266,7 +266,7 @@ async def test_responses_create_leaf_rejects_duplicate_ordinals(
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -275,7 +275,7 @@ async def test_responses_create_leaf_rejects_duplicate_ordinals(
                         {"type": "message", "text": "first"},
                         {"type": "message", "text": "second"},
                         start_ord=4,
-                    ).replace('"ord": 5', '"ord": 4'),
+                    ).replace('"ordinal": 5', '"ordinal": 4'),
                 },
             )
 
@@ -285,14 +285,14 @@ async def test_responses_create_leaf_rejects_invalid_ord_cleanly(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
-    payload = {"type": "message", "text": "bad ord"}
+    payload = {"type": "message", "text": "bad ordinal"}
 
     async with db_session_maker() as session:
         with pytest.raises(SQLAlchemyError, match="entry at position 0 is malformed"):
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -301,7 +301,7 @@ async def test_responses_create_leaf_rejects_invalid_ord_cleanly(
                         [
                             {
                                 "namespace": "m",
-                                "ord": "abc",
+                                "ordinal": "abc",
                                 "payload_hash": _canonical_payload_hash(payload),
                                 "payload": payload,
                             }
@@ -312,7 +312,7 @@ async def test_responses_create_leaf_rejects_invalid_ord_cleanly(
 
 
 @pytest.mark.asyncio
-async def test_responses_create_items_tree_rejects_cross_leaf_duplicate_ordinals(
+async def test_responses_build_state_tree_rejects_cross_leaf_duplicate_ordinals(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -320,7 +320,7 @@ async def test_responses_create_items_tree_rejects_cross_leaf_duplicate_ordinals
     items = [
         {
             "namespace": "m",
-            "ord": 0 if index == 128 else index,
+            "ordinal": 0 if index == 128 else index,
             "payload_hash": _canonical_payload_hash(payload),
             "payload": payload,
         }
@@ -332,7 +332,7 @@ async def test_responses_create_items_tree_rejects_cross_leaf_duplicate_ordinals
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -343,7 +343,7 @@ async def test_responses_create_items_tree_rejects_cross_leaf_duplicate_ordinals
 
 
 @pytest.mark.asyncio
-async def test_responses_create_items_tree_rejects_normalized_duplicate_ordinals(
+async def test_responses_build_state_tree_rejects_normalized_duplicate_ordinals(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -351,7 +351,7 @@ async def test_responses_create_items_tree_rejects_normalized_duplicate_ordinals
     items = [
         {
             "namespace": "m",
-            "ord": "01" if index == 128 else str(index),
+            "ordinal": "01" if index == 128 else str(index),
             "payload_hash": _canonical_payload_hash(payload),
             "payload": payload,
         }
@@ -363,7 +363,7 @@ async def test_responses_create_items_tree_rejects_normalized_duplicate_ordinals
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -374,19 +374,19 @@ async def test_responses_create_items_tree_rejects_normalized_duplicate_ordinals
 
 
 @pytest.mark.asyncio
-async def test_responses_create_items_tree_rejects_duplicate_huge_ord_cleanly(
+async def test_responses_build_state_tree_rejects_duplicate_huge_ord_cleanly(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
     huge_ord = "922337203685477580800"
     payloads = [
-        {"type": "message", "text": "first huge ord"},
-        {"type": "message", "text": "second huge ord"},
+        {"type": "message", "text": "first huge ordinal"},
+        {"type": "message", "text": "second huge ordinal"},
     ]
     items = [
         {
             "namespace": "m",
-            "ord": huge_ord,
+            "ordinal": huge_ord,
             "payload_hash": _canonical_payload_hash(payload),
             "payload": payload,
         }
@@ -398,7 +398,7 @@ async def test_responses_create_items_tree_rejects_duplicate_huge_ord_cleanly(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -419,7 +419,7 @@ async def test_responses_create_leaf_and_internal_node_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -432,7 +432,7 @@ async def test_responses_create_leaf_and_internal_node_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -445,7 +445,7 @@ async def test_responses_create_leaf_and_internal_node_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select responses.create_internal_node(
+                    select responses.create_state_internal_node(
                       :scope_id,
                       array[:left_id, :right_id]::bigint[]
                     )
@@ -497,7 +497,7 @@ async def test_responses_create_internal_node_rejects_duplicate_children(
             await session.execute(
                 text(
                     """
-                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_state_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -511,7 +511,7 @@ async def test_responses_create_internal_node_rejects_duplicate_children(
             await session.execute(
                 text(
                     """
-                    select responses.create_internal_node(
+                    select responses.create_state_internal_node(
                       :scope_id,
                       array[:leaf_id, :leaf_id]::bigint[]
                     )
@@ -533,7 +533,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
                 await session.execute(
                     text(
                         """
-                        select responses.create_leaf(
+                        select responses.create_state_leaf(
                           :scope_id,
                           cast(:items as jsonb)
                         )
@@ -554,7 +554,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
             await session.execute(
                 text(
                     """
-                    select responses.create_internal_node(
+                    select responses.create_state_internal_node(
                       :scope_id,
                       array[:first_id, :second_id]::bigint[]
                     )
@@ -571,7 +571,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
             await session.execute(
                 text(
                     """
-                    select responses.create_internal_node(
+                    select responses.create_state_internal_node(
                       :scope_id,
                       array[:third_id, :fourth_id]::bigint[]
                     )
@@ -588,7 +588,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
             await session.execute(
                 text(
                     """
-                    select responses.concat_balanced(
+                    select responses.concat_state_trees(
                       :scope_id,
                       :left_root,
                       :right_root
@@ -626,7 +626,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
                           from responses.state_node_children
                          where scope_id = :scope_id
                            and parent_node_id = :root_id
-                         order by slot
+                         order by child_index
                         """
                     ),
                     {"scope_id": scope_id, "root_id": merged_root},
@@ -641,7 +641,7 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
 
 
 @pytest.mark.asyncio
-async def test_responses_append_items_creates_response_chain(
+async def test_responses_append_response_creates_response_chain(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -659,7 +659,7 @@ async def test_responses_append_items_creates_response_chain(
             "resp_2",
             {"type": "message", "text": "second"},
             prev_response_id="resp_1",
-            next_ord=2,
+            next_ordinal=2,
         )
         await session.commit()
 
@@ -678,13 +678,13 @@ async def test_responses_append_items_creates_response_chain(
                 {"scope_id": scope_id, "node_id": second_root},
             )
         ).one()
-        counters = (
+        cursors = (
             await session.execute(
                 text(
                     """
-                    select c.next_ord
-                      from responses.response_namespace_counters c
-                      join responses.ordinal_namespaces n
+                    select c.next_ordinal
+                      from responses.response_namespace_cursors c
+                      join responses.item_namespaces n
                         on n.namespace_id = c.namespace_id
                      where scope_id = :scope_id
                        and response_id = 'resp_2'
@@ -699,11 +699,11 @@ async def test_responses_append_items_creates_response_chain(
     assert first_counts == (1, 1)
     assert second_counts == (0, 1)
     assert (second_root.kind, second_root.item_count) == ("internal", 2)
-    assert counters == 2
+    assert cursors == 2
 
 
 @pytest.mark.asyncio
-async def test_responses_append_items_balances_repeated_appends(
+async def test_responses_append_response_balances_repeated_appends(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -718,7 +718,7 @@ async def test_responses_append_items_balances_repeated_appends(
                 response_id,
                 {"type": "message", "text": f"message {index + 1}"},
                 prev_response_id=previous_response_id,
-                next_ord=index + 1,
+                next_ordinal=index + 1,
             )
             previous_response_id = response_id
         await session.commit()
@@ -728,10 +728,10 @@ async def test_responses_append_items_balances_repeated_appends(
                 text(
                     """
                     select root.item_count, root.height, root.child_count
-                      from responses.responses response
+                      from responses.response_records response
                       join responses.state_nodes root
                         on root.scope_id = response.scope_id
-                       and root.node_id = response.full_state_root_id
+                       and root.node_id = response.state_root_id
                      where response.scope_id = :scope_id
                        and response.response_id = 'resp_130'
                     """
@@ -758,7 +758,7 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
                 await session.execute(
                     text(
                         """
-                        select responses.create_leaf(
+                        select responses.create_state_leaf(
                           :scope_id,
                           cast(:items as jsonb)
                         )
@@ -779,7 +779,7 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
             await session.execute(
                 text(
                     """
-                    select responses.create_node_tree_from_children(
+                    select responses.build_state_tree_from_roots(
                       :scope_id,
                       cast(:child_ids as bigint[])
                     )
@@ -815,7 +815,7 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
                            and child.node_id = edge.child_node_id
                          where edge.scope_id = :scope_id
                            and edge.parent_node_id = :root_id
-                         order by edge.slot
+                         order by edge.child_index
                         """
                     ),
                     {"scope_id": scope_id, "root_id": root_id},
@@ -830,7 +830,7 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
 
 
 @pytest.mark.asyncio
-async def test_responses_create_items_tree_handles_leaf_boundary_plus_one(
+async def test_responses_build_state_tree_handles_leaf_boundary_plus_one(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -878,7 +878,7 @@ async def test_responses_create_items_tree_handles_leaf_boundary_plus_one(
 
 
 @pytest.mark.asyncio
-async def test_responses_create_items_tree_handles_multilevel_8193_items(
+async def test_responses_build_state_tree_handles_multilevel_8193_items(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -921,7 +921,7 @@ async def test_responses_create_items_tree_handles_multilevel_8193_items(
 
 
 @pytest.mark.asyncio
-async def test_responses_split_at_index_handles_edges_and_boundaries(
+async def test_responses_split_state_tree_handles_edges_and_boundaries(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -943,8 +943,8 @@ async def test_responses_split_at_index_handles_edges_and_boundaries(
                 await session.execute(
                     text(
                         """
-                        select left_root_id, right_root_id
-                          from responses.split_at_index(
+                        select left_state_root_id, right_state_root_id
+                          from responses.split_state_tree(
                             :scope_id,
                             :root_id,
                             :split_index
@@ -959,8 +959,8 @@ async def test_responses_split_at_index_handles_edges_and_boundaries(
                 )
             ).one()
             observed_counts[split_index] = (
-                await _tree_count(session, scope_id, split.left_root_id),
-                await _tree_count(session, scope_id, split.right_root_id),
+                await _tree_count(session, scope_id, split.left_state_root_id),
+                await _tree_count(session, scope_id, split.right_state_root_id),
             )
 
         old_root_sample = (
@@ -996,7 +996,7 @@ async def test_responses_list_state_items_reads_ranges_from_multilevel_tree(
                 await session.execute(
                     text(
                         """
-                        select responses.create_leaf(
+                        select responses.create_state_leaf(
                           :scope_id,
                           cast(:items as jsonb)
                         )
@@ -1017,7 +1017,7 @@ async def test_responses_list_state_items_reads_ranges_from_multilevel_tree(
             await session.execute(
                 text(
                     """
-                    select responses.create_node_tree_from_children(
+                    select responses.build_state_tree_from_roots(
                       :scope_id,
                       cast(:child_ids as bigint[])
                     )
@@ -1059,7 +1059,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -1081,7 +1081,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -1093,7 +1093,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
                         [
                             {
                                 "namespace": "s",
-                                "ord": 0,
+                                "ordinal": 0,
                                 "payload_hash": _canonical_payload_hash(
                                     summary_payload
                                 ),
@@ -1108,7 +1108,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
             await session.execute(
                 text(
                     """
-                    select responses.splice(
+                    select responses.splice_state_tree(
                       :scope_id,
                       :root_id,
                       1,
@@ -1128,7 +1128,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
             await session.execute(
                 text(
                     """
-                    select namespace, ord, payload ->> 'text' as text
+                    select namespace, ordinal, payload ->> 'text' as text
                       from responses.list_state_items(:scope_id, :root_id)
                      order by item_position
                     """
@@ -1140,7 +1140,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
             await session.execute(
                 text(
                     """
-                    select namespace, ord, payload ->> 'text' as text
+                    select namespace, ordinal, payload ->> 'text' as text
                       from responses.list_state_items(:scope_id, :root_id)
                      order by item_position
                     """
@@ -1149,12 +1149,12 @@ async def test_responses_list_and_splice_support_compaction_shape(
             )
         ).all()
 
-    assert [(row.namespace, row.ord, row.text) for row in rows] == [
+    assert [(row.namespace, row.ordinal, row.text) for row in rows] == [
         ("m", 0, "m1"),
         ("s", 0, "s1"),
         ("m", 3, "m4"),
     ]
-    assert [(row.namespace, row.ord, row.text) for row in old_rows] == [
+    assert [(row.namespace, row.ordinal, row.text) for row in old_rows] == [
         ("m", 0, "m1"),
         ("m", 1, "m2"),
         ("m", 2, "m3"),
@@ -1173,7 +1173,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -1193,12 +1193,12 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_b',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
                 """
@@ -1206,11 +1206,13 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             {
                 "scope_id": scope_id,
                 "root_id": base_root_id,
-                "namespace_counters": _namespace_counters(4),
+                "namespace_cursors": _namespace_cursors(4),
             },
         )
         await session.execute(
-            text("select responses.move_conversation(:scope_id, 'conv_1', 'resp_b')"),
+            text(
+                "select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_b')"
+            ),
             {"scope_id": scope_id},
         )
 
@@ -1219,7 +1221,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -1231,7 +1233,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                         [
                             {
                                 "namespace": "s",
-                                "ord": 0,
+                                "ordinal": 0,
                                 "payload_hash": _canonical_payload_hash(
                                     summary_payload
                                 ),
@@ -1246,7 +1248,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             await session.execute(
                 text(
                     """
-                    select responses.splice(
+                    select responses.splice_state_tree(
                       :scope_id,
                       :root_id,
                       1,
@@ -1265,12 +1267,12 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_c',
                   'resp_b',
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
                 """
@@ -1278,11 +1280,13 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             {
                 "scope_id": scope_id,
                 "root_id": compacted_root_id,
-                "namespace_counters": _namespace_counters(4, 1),
+                "namespace_cursors": _namespace_cursors(4, 1),
             },
         )
         await session.execute(
-            text("select responses.move_conversation(:scope_id, 'conv_1', 'resp_c')"),
+            text(
+                "select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_c')"
+            ),
             {"scope_id": scope_id},
         )
         await session.commit()
@@ -1304,7 +1308,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             await session.execute(
                 text(
                     """
-                    select namespace, ord, payload ->> 'text' as text
+                    select namespace, ordinal, payload ->> 'text' as text
                       from responses.list_state_items(:scope_id, :root_id)
                      order by item_position
                     """
@@ -1316,7 +1320,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
         c_counts = await _response_refcounts(session, scope_id, "resp_c")
 
     assert current_response_id == "resp_c"
-    assert [(row.namespace, row.ord, row.text) for row in compacted_items] == [
+    assert [(row.namespace, row.ordinal, row.text) for row in compacted_items] == [
         ("m", 0, "m1"),
         ("s", 0, "s1"),
         ("m", 3, "m4"),
@@ -1343,8 +1347,8 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                           from responses.state_node_children
                          where scope_id = :scope_id
                            and parent_node_id = :root_id
-                           and slot in (0, 2)
-                         order by slot
+                           and child_index in (0, 2)
+                         order by child_index
                         """
                     ),
                     {"scope_id": scope_id, "root_id": old_root_id},
@@ -1357,7 +1361,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
             await session.execute(
                 text(
                     """
-                    select responses.create_items_tree(
+                    select responses.build_state_tree(
                       :scope_id,
                       cast(:items as jsonb)
                     )
@@ -1369,7 +1373,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                         [
                             {
                                 "namespace": "s",
-                                "ord": 0,
+                                "ordinal": 0,
                                 "payload_hash": _canonical_payload_hash(
                                     summary_payload
                                 ),
@@ -1384,7 +1388,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
             await session.execute(
                 text(
                     """
-                    select responses.splice(
+                    select responses.splice_state_tree(
                       :scope_id,
                       :root_id,
                       129,
@@ -1403,12 +1407,12 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_old_root',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
                 )
@@ -1417,18 +1421,18 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
             {
                 "scope_id": scope_id,
                 "root_id": old_root_id,
-                "namespace_counters": _namespace_counters(257),
+                "namespace_cursors": _namespace_cursors(257),
             },
         )
         await session.execute(
             text(
                 """
-                select responses.create_response(
+                select responses.create_response_record(
                   :scope_id,
                   'resp_new_root',
                   null,
                   :root_id,
-                  cast(:namespace_counters as jsonb),
+                  cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
                 )
@@ -1437,7 +1441,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
             {
                 "scope_id": scope_id,
                 "root_id": new_root_id,
-                "namespace_counters": _namespace_counters(257, 1),
+                "namespace_cursors": _namespace_cursors(257, 1),
             },
         )
         await session.commit()
@@ -1521,7 +1525,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
 
 
 @pytest.mark.asyncio
-async def test_responses_append_items_requires_complete_namespace_counters(
+async def test_responses_append_response_requires_complete_namespace_cursors(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -1531,13 +1535,13 @@ async def test_responses_append_items_requires_complete_namespace_counters(
             await session.execute(
                 text(
                     """
-                    select root_node_id
-                      from responses.append_items(
+                    select state_root_id
+                      from responses.append_response(
                         :scope_id,
-                        'resp_partial_counters',
+                        'resp_partial_cursors',
                         null,
                         cast(:items as jsonb),
-                        cast(:namespace_counters as jsonb),
+                        cast(:namespace_cursors as jsonb),
                         '[]'::jsonb
                       )
                     """
@@ -1545,8 +1549,8 @@ async def test_responses_append_items_requires_complete_namespace_counters(
                 {
                     "scope_id": scope_id,
                     "items": _items({"type": "message", "text": "partial"}),
-                    "namespace_counters": json.dumps(
-                        [{"namespace": "m", "next_ord": 1}]
+                    "namespace_cursors": json.dumps(
+                        [{"namespace": "m", "next_ordinal": 1}]
                     ),
                 },
             )
@@ -1571,14 +1575,14 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
             "resp_2",
             {"type": "message", "text": "second"},
             prev_response_id="resp_1",
-            next_ord=2,
+            next_ordinal=2,
         )
 
         lease_id = (
             await session.execute(
                 text(
                     """
-                    select responses.create_or_refresh_lease(
+                    select responses.create_or_refresh_response_lease(
                       :scope_id,
                       'resp_1',
                       'manual',
@@ -1594,7 +1598,7 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
             await session.execute(
                 text(
                     """
-                    select responses.create_or_refresh_lease(
+                    select responses.create_or_refresh_response_lease(
                       :scope_id,
                       'resp_2',
                       'manual',
@@ -1609,7 +1613,7 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select responses.move_conversation(
+                select responses.move_conversation_head(
                   :scope_id,
                   'conv_1',
                   'resp_1'
@@ -1621,7 +1625,7 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select responses.move_conversation(
+                select responses.move_conversation_head(
                   :scope_id,
                   'conv_1',
                   'resp_2'
@@ -1633,7 +1637,7 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select responses.release_lease(
+                select responses.release_response_lease(
                   :scope_id,
                   'manual',
                   'owner_1'

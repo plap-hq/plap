@@ -67,7 +67,7 @@ create extension if not exists pg_cron;
 
 set search_path = responses, public;
 
-create procedure responses.gc_try_delete_state_node(
+create procedure responses.gc_delete_state_node_if_unreferenced(
   p_scope_id uuid,
   p_node_id bigint
 )
@@ -130,13 +130,13 @@ begin
        where scope_id = v_node.scope_id
          and node_id = v_node.node_id;
 
-      delete from payload_objects
+      delete from payloads
        where scope_id = v_node.scope_id
          and payload_id = any(v_payload_ids)
          and refcount = 0;
     else
       for v_child in
-        select slot, child_node_id
+        select child_index, child_node_id
           from state_node_children
          where scope_id = v_node.scope_id
             and parent_node_id = v_node.node_id
@@ -144,7 +144,7 @@ begin
         delete from state_node_children
          where scope_id = v_node.scope_id
             and parent_node_id = v_node.node_id
-            and slot = v_child.slot
+            and child_index = v_child.child_index
             and child_node_id = v_child.child_node_id;
 
         insert into pg_temp.response_gc_node_queue (scope_id, node_id)
@@ -167,7 +167,7 @@ begin
 end;
 $$;
 
-create procedure responses.gc_try_delete_response(
+create procedure responses.gc_delete_response_if_unreferenced(
   p_scope_id uuid,
   p_response_id text
 )
@@ -176,7 +176,7 @@ set search_path = responses, public
 as $$
 declare
   v_prev_response_id text;
-  v_full_state_root_id bigint;
+  v_state_root_id bigint;
   v_child_refcount bigint;
   v_lease_refcount bigint;
   v_checkpoint_root_ids bigint[];
@@ -184,15 +184,15 @@ declare
 begin
   select
     prev_response_id,
-    full_state_root_id,
+    state_root_id,
     child_refcount,
     lease_refcount
   into
     v_prev_response_id,
-    v_full_state_root_id,
+    v_state_root_id,
     v_child_refcount,
     v_lease_refcount
-    from responses
+    from response_records
    where scope_id = p_scope_id
      and response_id = p_response_id
    for update;
@@ -205,7 +205,7 @@ begin
     return;
   end if;
 
-  select coalesce(array_agg(root_id), '{}'::bigint[])
+  select coalesce(array_agg(state_root_id), '{}'::bigint[])
     into v_checkpoint_root_ids
     from response_checkpoints
    where scope_id = p_scope_id
@@ -216,24 +216,24 @@ begin
      and response_id = p_response_id
      and status <> 'live';
 
-  delete from responses
+  delete from response_records
    where scope_id = p_scope_id
      and response_id = p_response_id;
 
-  call responses.gc_try_delete_state_node(p_scope_id, v_full_state_root_id);
+  call responses.gc_delete_state_node_if_unreferenced(p_scope_id, v_state_root_id);
 
   foreach v_root_id in array v_checkpoint_root_ids
   loop
-    call responses.gc_try_delete_state_node(p_scope_id, v_root_id);
+    call responses.gc_delete_state_node_if_unreferenced(p_scope_id, v_root_id);
   end loop;
 
   if v_prev_response_id is not null then
-    call responses.gc_try_delete_response(p_scope_id, v_prev_response_id);
+    call responses.gc_delete_response_if_unreferenced(p_scope_id, v_prev_response_id);
   end if;
 end;
 $$;
 
-create procedure responses.gc_expire_leases(
+create procedure responses.gc_expire_response_leases(
   p_batch_size integer default 200
 )
 language plpgsql
@@ -264,7 +264,7 @@ begin
      where scope_id = v_lease.scope_id
        and lease_id = v_lease.lease_id;
 
-    call responses.gc_try_delete_response(
+    call responses.gc_delete_response_if_unreferenced(
       v_lease.scope_id,
       v_lease.response_id
     );
@@ -297,7 +297,7 @@ begin
        and c.conversation_id = d.conversation_id
      returning c.scope_id, c.current_response_id
   loop
-    call responses.gc_try_delete_response(
+    call responses.gc_delete_response_if_unreferenced(
       v_conversation.scope_id,
       v_conversation.current_response_id
     );
@@ -316,14 +316,14 @@ declare
 begin
   for v_response in
     select scope_id, response_id
-      from responses
+      from response_records
      where child_refcount = 0
        and lease_refcount = 0
      order by created_at
       for update skip locked
       limit p_batch_size
   loop
-    call responses.gc_try_delete_response(
+    call responses.gc_delete_response_if_unreferenced(
       v_response.scope_id,
       v_response.response_id
     );
@@ -348,7 +348,10 @@ begin
       for update skip locked
       limit p_batch_size
   loop
-    call responses.gc_try_delete_state_node(v_node.scope_id, v_node.node_id);
+    call responses.gc_delete_state_node_if_unreferenced(
+      v_node.scope_id,
+      v_node.node_id
+    );
   end loop;
 end;
 $$;
@@ -362,13 +365,13 @@ as $$
 begin
   with claimed as (
     select scope_id, payload_id
-      from payload_objects
+      from payloads
      where refcount = 0
      order by created_at
      for update skip locked
      limit p_batch_size
   )
-  delete from payload_objects p
+  delete from payloads p
     using claimed c
    where p.scope_id = c.scope_id
      and p.payload_id = c.payload_id;
@@ -383,7 +386,7 @@ begin
     perform cron.schedule(
       'expire-response-leases',
       '* * * * *',
-      'call responses.gc_expire_leases(200);'
+      'call responses.gc_expire_response_leases(200);'
     );
   end if;
 
@@ -458,7 +461,7 @@ drop procedure if exists responses.gc_prune_payloads(integer);
 drop procedure if exists responses.gc_prune_state_nodes(integer);
 drop procedure if exists responses.gc_prune_unreferenced_responses(integer);
 drop procedure if exists responses.gc_prune_conversations(integer, interval);
-drop procedure if exists responses.gc_expire_leases(integer);
-drop procedure if exists responses.gc_try_delete_response(uuid, text);
-drop procedure if exists responses.gc_try_delete_state_node(uuid, bigint);
+drop procedure if exists responses.gc_expire_response_leases(integer);
+drop procedure if exists responses.gc_delete_response_if_unreferenced(uuid, text);
+drop procedure if exists responses.gc_delete_state_node_if_unreferenced(uuid, bigint);
 """

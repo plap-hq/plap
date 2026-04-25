@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 @pytest.mark.asyncio
-async def test_responses_seeds_core_ordinal_namespaces(db_session_maker) -> None:
+async def test_responses_seeds_core_item_namespaces(db_session_maker) -> None:
     async with db_session_maker() as session:
         namespace_names = (
             (
@@ -17,7 +17,7 @@ async def test_responses_seeds_core_ordinal_namespaces(db_session_maker) -> None
                     text(
                         """
                     select namespace_name
-                      from responses.ordinal_namespaces
+                      from responses.item_namespaces
                      where namespace_name in ('m', 's')
                      order by namespace_name
                     """
@@ -36,19 +36,21 @@ async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
     db_session_maker,
 ) -> None:
     expected_indexes = {
-        "ix_payload_objects_gc": "(created_at, scope_id, payload_id)",
+        "ix_payloads_gc": "(created_at, scope_id, payload_id)",
         "ix_state_nodes_gc": "(created_at, scope_id, node_id)",
-        "ix_state_node_children_child": (
-            "(scope_id, child_node_id, parent_node_id, slot)"
+        "ix_state_node_children_child_lookup": (
+            "(scope_id, child_node_id, parent_node_id, child_index)"
         ),
-        "ix_state_leaf_entries_payload": "(scope_id, payload_id, node_id, pos)",
-        "ix_state_leaf_entries_namespace_ord": (
-            "(scope_id, namespace_id, ord, node_id, pos)"
+        "ix_state_leaf_entries_payload_lookup": (
+            "(scope_id, payload_id, node_id, item_index)"
         ),
-        "ix_responses_gc": "(created_at, scope_id, response_id)",
-        "ix_responses_full_state_root": "(scope_id, full_state_root_id, response_id)",
-        "ix_response_checkpoints_root": (
-            "(scope_id, root_id, response_id, checkpoint_id)"
+        "ix_state_leaf_entries_namespace_ordinal": (
+            "(scope_id, namespace_id, ordinal, node_id, item_index)"
+        ),
+        "ix_response_records_gc": "(created_at, scope_id, response_id)",
+        "ix_response_records_state_root": "(scope_id, state_root_id, response_id)",
+        "ix_response_checkpoints_state_root": (
+            "(scope_id, state_root_id, response_id, checkpoint_id)"
         ),
         "ix_response_leases_expiration": "(expires_at, scope_id, lease_id)",
         "ix_response_leases_response": "(scope_id, response_id, lease_id)",
@@ -84,7 +86,7 @@ async def _create_payload(session, scope_id) -> str:
         await session.execute(
             text(
                 """
-                insert into responses.payload_objects (
+                insert into responses.payloads (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -110,7 +112,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into responses.ordinal_namespaces (namespace_name)
+                insert into responses.item_namespaces (namespace_name)
                 values ('message')
                 on conflict (namespace_name) do update
                   set namespace_name = excluded.namespace_name
@@ -159,9 +161,9 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
             insert into responses.state_leaf_entries (
               scope_id,
               node_id,
-              pos,
+              item_index,
               namespace_id,
-              ord,
+              ordinal,
               payload_id
             ) values (
               :scope_id,
@@ -197,10 +199,10 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
         await session.execute(
             text(
                 """
-                insert into responses.responses (
+                insert into responses.response_records (
                   scope_id,
                   response_id,
-                  full_state_root_id
+                  state_root_id
                 ) values (
                   :scope_id,
                   :response_id,
@@ -241,7 +243,7 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select refcount
-                       from responses.payload_objects
+                       from responses.payloads
                      where scope_id = :scope_id
                        and payload_id = :payload_id
                     """
@@ -267,7 +269,7 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select lease_refcount
-                       from responses.responses
+                       from responses.response_records
                      where scope_id = :scope_id
                        and response_id = :response_id
                     """
@@ -291,7 +293,7 @@ async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None
             await session.execute(
                 text(
                     """
-                    insert into responses.ordinal_namespaces (namespace_name)
+                    insert into responses.item_namespaces (namespace_name)
                     values ('message')
                     returning namespace_id
                     """
@@ -336,9 +338,9 @@ async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None
                 insert into responses.state_leaf_entries (
                   scope_id,
                   node_id,
-                  pos,
+                  item_index,
                   namespace_id,
-                  ord,
+                  ordinal,
                   payload_id
                 ) values (
                   :scope_id,
@@ -426,7 +428,7 @@ async def test_responses_rejects_internal_node_with_missing_child_edge(
                 insert into responses.state_node_children (
                   scope_id,
                   parent_node_id,
-                  slot,
+                  child_index,
                   child_node_id,
                   child_item_count
                 ) values (
@@ -482,7 +484,7 @@ async def test_responses_rejects_duplicate_child_edges_under_one_parent(
                 insert into responses.state_node_children (
                   scope_id,
                   parent_node_id,
-                  slot,
+                  child_index,
                   child_node_id,
                   child_item_count
                 ) values (
@@ -504,7 +506,7 @@ async def test_responses_rejects_duplicate_child_edges_under_one_parent(
                     insert into responses.state_node_children (
                       scope_id,
                       parent_node_id,
-                      slot,
+                      child_index,
                       child_node_id,
                       child_item_count
                     ) values (
@@ -532,10 +534,10 @@ async def test_responses_rejects_conversation_identity_updates(
         await session.execute(
             text(
                 """
-                insert into responses.responses (
+                insert into responses.response_records (
                   scope_id,
                   response_id,
-                  full_state_root_id
+                  state_root_id
                 ) values (
                   :scope_id,
                   'resp_conversation_identity',
@@ -592,7 +594,7 @@ async def test_responses_rejects_namespace_counter_updates(
                 text(
                     """
                     select namespace_id
-                       from responses.ordinal_namespaces
+                       from responses.item_namespaces
                      where namespace_name = 'message'
                     """
                 )
@@ -601,10 +603,10 @@ async def test_responses_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into responses.responses (
+                insert into responses.response_records (
                   scope_id,
                   response_id,
-                  full_state_root_id
+                  state_root_id
                 ) values (
                   :scope_id,
                   'resp_counter_immutable',
@@ -617,11 +619,11 @@ async def test_responses_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into responses.response_namespace_counters (
+                insert into responses.response_namespace_cursors (
                   scope_id,
                   response_id,
                   namespace_id,
-                  next_ord
+                  next_ordinal
                 ) values (
                   :scope_id,
                   'resp_counter_immutable',
@@ -639,8 +641,8 @@ async def test_responses_rejects_namespace_counter_updates(
             await session.execute(
                 text(
                     """
-                    update responses.response_namespace_counters
-                       set next_ord = 2
+                    update responses.response_namespace_cursors
+                       set next_ordinal = 2
                      where scope_id = :scope_id
                        and response_id = 'resp_counter_immutable'
                        and namespace_id = :namespace_id
