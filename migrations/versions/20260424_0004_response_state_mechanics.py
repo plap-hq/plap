@@ -74,78 +74,106 @@ language plpgsql
 set search_path = responses, public
 as $$
 declare
-  v_counter record;
-  v_required record;
+  v_bad_position bigint;
   v_namespace_name text;
-  v_namespace_id smallint;
-  v_is_required boolean;
-  v_next_ord bigint;
-  v_seen_namespace_ids smallint[] = '{}'::smallint[];
 begin
   if jsonb_typeof(p_counters) is distinct from 'array' then
     raise exception '% namespace counters must be a JSON array', p_context;
   end if;
 
-  for v_counter in
-    select value, ordinality
-      from jsonb_array_elements(p_counters) with ordinality
-  loop
-    if jsonb_typeof(v_counter.value) is distinct from 'object' then
-      raise exception '% namespace counter at position % must be an object',
-        p_context,
-        v_counter.ordinality - 1;
-    end if;
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_counters) with ordinality
+   where jsonb_typeof(value) is distinct from 'object'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception '% namespace counter at position % must be an object',
+      p_context,
+      v_bad_position;
+  end if;
 
-    v_namespace_name = v_counter.value ->> 'namespace';
-    if v_namespace_name is null or v_namespace_name = '' then
-      raise exception '% namespace counter at position % is missing namespace',
-        p_context,
-        v_counter.ordinality - 1;
-    end if;
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_counters) with ordinality
+   where coalesce(value ->> 'namespace', '') = ''
+   limit 1;
+  if v_bad_position is not null then
+    raise exception '% namespace counter at position % is missing namespace',
+      p_context,
+      v_bad_position;
+  end if;
 
-    select namespace_id, is_required
-      into v_namespace_id, v_is_required
-      from ordinal_namespaces
-     where namespace_name = v_namespace_name;
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_counters) counter(value)
+    left join ordinal_namespaces namespace
+      on namespace.namespace_name = counter.value ->> 'namespace'
+   where namespace.namespace_id is null
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counter references unknown namespace %',
+      p_context,
+      v_namespace_name;
+  end if;
 
-    if v_namespace_id is null then
-      raise exception '% namespace counter references unknown namespace %',
-        p_context,
-        v_namespace_name;
-    end if;
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_counters) counter(value)
+   group by value ->> 'namespace'
+  having count(*) > 1
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counter duplicates namespace %',
+      p_context,
+      v_namespace_name;
+  end if;
 
-    if v_namespace_id = any(v_seen_namespace_ids) then
-      raise exception '% namespace counter duplicates namespace %',
-        p_context,
-        v_namespace_name;
-    end if;
-    v_seen_namespace_ids = array_append(v_seen_namespace_ids, v_namespace_id);
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_counters) counter(value)
+   where not (value ? 'next_ord')
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counter for % is missing next_ord',
+      p_context,
+      v_namespace_name;
+  end if;
 
-    if not (v_counter.value ? 'next_ord') then
-      raise exception '% namespace counter for % is missing next_ord',
-        p_context,
-        v_namespace_name;
-    end if;
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_counters) counter(value)
+   where (value ->> 'next_ord') !~ '^-?\d+$'
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counter for % has invalid next_ord',
+      p_context,
+      v_namespace_name;
+  end if;
 
-    v_next_ord = (v_counter.value ->> 'next_ord')::bigint;
-    if v_next_ord < 0 then
-      raise exception '% namespace counter for % has negative next_ord',
-        p_context,
-        v_namespace_name;
-    end if;
-  end loop;
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_counters) counter(value)
+   where (value ->> 'next_ord')::bigint < 0
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counter for % has negative next_ord',
+      p_context,
+      v_namespace_name;
+  end if;
 
-  for v_required in
-    select namespace_id, namespace_name
-      from ordinal_namespaces
-     where is_required
-  loop
-    if not (v_required.namespace_id = any(v_seen_namespace_ids)) then
-      raise exception '% namespace counters missing required namespace %',
-        p_context,
-        v_required.namespace_name;
-    end if;
-  end loop;
+  select namespace.namespace_name
+    into v_namespace_name
+    from ordinal_namespaces namespace
+    left join jsonb_array_elements(p_counters) counter(value)
+      on counter.value ->> 'namespace' = namespace.namespace_name
+   where namespace.is_required
+     and counter.value is null
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception '% namespace counters missing required namespace %',
+      p_context,
+      v_namespace_name;
+  end if;
 end;
 $$;
 
@@ -213,16 +241,13 @@ language plpgsql
 set search_path = responses, public
 as $$
 declare
-  v_entry record;
+  v_bad_position bigint;
   v_entry_count integer;
   v_namespace_name text;
-  v_namespace_id smallint;
+  v_ord bigint;
   v_payload_hash_hex text;
   v_payload_hash bytea;
-  v_payload_json jsonb;
-  v_payload_id uuid;
   v_node_id bigint;
-  v_ord bigint;
 begin
   if jsonb_typeof(p_entries) is distinct from 'array' then
     raise exception 'entries must be a JSON array';
@@ -233,6 +258,169 @@ begin
     raise exception 'entries must not be empty';
   end if;
 
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where jsonb_typeof(value) is distinct from 'object'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % must be an object', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where coalesce(value ->> 'namespace', '') = ''
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is missing namespace', v_bad_position;
+  end if;
+
+  select value ->> 'namespace'
+    into v_namespace_name
+    from jsonb_array_elements(p_entries) entry(value)
+    left join ordinal_namespaces namespace
+      on namespace.namespace_name = entry.value ->> 'namespace'
+   where namespace.namespace_id is null
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception 'unknown ordinal namespace %', v_namespace_name;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where not (value ? 'ord')
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is missing ord', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where (value ->> 'ord') !~ '^-?\d+$'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % has invalid ord', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where (value ->> 'ord')::bigint < 0
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % has negative ord', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where value ->> 'payload_hash' is null
+      or value ->> 'payload_hash' !~ '^[0-9a-fA-F]{64}$'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % has invalid payload_hash', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where not (value ? 'payload')
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % is missing payload', v_bad_position;
+  end if;
+
+  select ordinality - 1
+    into v_bad_position
+    from jsonb_array_elements(p_entries) with ordinality
+   where jsonb_typeof(value -> 'payload') is distinct from 'object'
+   limit 1;
+  if v_bad_position is not null then
+    raise exception 'entry at position % payload must be an object', v_bad_position;
+  end if;
+
+  create temporary table if not exists pg_temp.response_create_leaf_entries (
+    pos integer not null,
+    namespace_id smallint not null,
+    ord bigint not null,
+    payload_hash bytea not null,
+    payload_json jsonb not null,
+    payload_id uuid
+  ) on commit drop;
+  truncate pg_temp.response_create_leaf_entries;
+
+  insert into pg_temp.response_create_leaf_entries (
+    pos,
+    namespace_id,
+    ord,
+    payload_hash,
+    payload_json
+  )
+  select
+    (entry.ordinality - 1)::integer,
+    namespace.namespace_id,
+    (entry.value ->> 'ord')::bigint,
+    decode(entry.value ->> 'payload_hash', 'hex'),
+    entry.value -> 'payload'
+    from jsonb_array_elements(p_entries) with ordinality as entry(value, ordinality)
+    join ordinal_namespaces namespace
+      on namespace.namespace_name = entry.value ->> 'namespace';
+
+  select namespace.namespace_name, entry.ord
+    into v_namespace_name, v_ord
+    from pg_temp.response_create_leaf_entries entry
+    join ordinal_namespaces namespace
+      on namespace.namespace_id = entry.namespace_id
+   group by namespace.namespace_name, entry.ord
+  having count(*) > 1
+   limit 1;
+  if v_namespace_name is not null then
+    raise exception 'duplicate ordinal %.%', v_namespace_name, v_ord;
+  end if;
+
+  select payload_hash
+    into v_payload_hash
+    from pg_temp.response_create_leaf_entries
+   group by payload_hash
+  having count(distinct payload_json) > 1
+   limit 1;
+  if v_payload_hash is not null then
+    raise exception 'payload hash collision or non-canonical payload hash';
+  end if;
+
+  insert into payload_objects (
+    scope_id,
+    payload_hash,
+    payload_json
+  )
+  select distinct
+    p_scope_id,
+    payload_hash,
+    payload_json
+    from pg_temp.response_create_leaf_entries
+  on conflict (scope_id, payload_hash) do nothing;
+
+  select entry.payload_hash
+    into v_payload_hash
+    from pg_temp.response_create_leaf_entries entry
+    join payload_objects payload
+      on payload.scope_id = p_scope_id
+     and payload.payload_hash = entry.payload_hash
+   where payload.payload_json <> entry.payload_json
+   limit 1;
+  if v_payload_hash is not null then
+    raise exception 'payload hash collision or non-canonical payload hash';
+  end if;
+
+  update pg_temp.response_create_leaf_entries entry
+     set payload_id = payload.payload_id
+    from payload_objects payload
+   where payload.scope_id = p_scope_id
+     and payload.payload_hash = entry.payload_hash;
+
   insert into state_nodes (scope_id, kind, item_count)
   values (p_scope_id, 'leaf', v_entry_count)
   returning node_id into v_node_id;
@@ -240,73 +428,23 @@ begin
   insert into state_leaves (scope_id, node_id, entry_count)
   values (p_scope_id, v_node_id, v_entry_count);
 
-  for v_entry in
-    select value, ordinality
-      from jsonb_array_elements(p_entries) with ordinality
-  loop
-    if jsonb_typeof(v_entry.value) is distinct from 'object' then
-      raise exception 'entry at position % must be an object', v_entry.ordinality - 1;
-    end if;
-
-    v_namespace_name = v_entry.value ->> 'namespace';
-    if v_namespace_name is null or v_namespace_name = '' then
-      raise exception 'entry at position % is missing namespace',
-        v_entry.ordinality - 1;
-    end if;
-
-    select namespace_id
-      into v_namespace_id
-      from ordinal_namespaces
-     where namespace_name = v_namespace_name;
-
-    if v_namespace_id is null then
-      raise exception 'unknown ordinal namespace %', v_namespace_name;
-    end if;
-
-    if not (v_entry.value ? 'ord') then
-      raise exception 'entry at position % is missing ord', v_entry.ordinality - 1;
-    end if;
-    v_ord = (v_entry.value ->> 'ord')::bigint;
-
-    v_payload_hash_hex = v_entry.value ->> 'payload_hash';
-    if v_payload_hash_hex is null
-      or v_payload_hash_hex !~ '^[0-9a-fA-F]{64}$' then
-      raise exception 'entry at position % has invalid payload_hash',
-        v_entry.ordinality - 1;
-    end if;
-    v_payload_hash = decode(v_payload_hash_hex, 'hex');
-
-    if not (v_entry.value ? 'payload') then
-      raise exception 'entry at position % is missing payload', v_entry.ordinality - 1;
-    end if;
-    v_payload_json = v_entry.value -> 'payload';
-    if jsonb_typeof(v_payload_json) is distinct from 'object' then
-      raise exception 'entry at position % payload must be an object',
-        v_entry.ordinality - 1;
-    end if;
-
-    v_payload_id = responses.get_or_create_payload(
-      p_scope_id,
-      v_payload_hash,
-      v_payload_json
-    );
-
-    insert into state_leaf_entries (
-      scope_id,
-      node_id,
-      pos,
-      namespace_id,
-      ord,
-      payload_id
-    ) values (
-      p_scope_id,
-      v_node_id,
-      (v_entry.ordinality - 1)::integer,
-      v_namespace_id,
-      v_ord,
-      v_payload_id
-    );
-  end loop;
+  insert into state_leaf_entries (
+    scope_id,
+    node_id,
+    pos,
+    namespace_id,
+    ord,
+    payload_id
+  )
+  select
+    p_scope_id,
+    v_node_id,
+    pos,
+    namespace_id,
+    ord,
+    payload_id
+    from pg_temp.response_create_leaf_entries
+   order by pos;
 
   return v_node_id;
 end;

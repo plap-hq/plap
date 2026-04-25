@@ -158,6 +158,70 @@ async def test_responses_payload_dedupe_and_collision_guard(
 
 
 @pytest.mark.asyncio
+async def test_responses_create_leaf_rejects_same_batch_payload_hash_collision(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+    first_payload = {"type": "message", "text": "first"}
+    second_payload = {"type": "message", "text": "second"}
+    reused_hash = _canonical_payload_hash(first_payload)
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match="non-canonical payload hash"):
+            await session.execute(
+                text(
+                    """
+                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": json.dumps(
+                        [
+                            {
+                                "namespace": "m",
+                                "ord": 0,
+                                "payload_hash": reused_hash,
+                                "payload": first_payload,
+                            },
+                            {
+                                "namespace": "m",
+                                "ord": 1,
+                                "payload_hash": reused_hash,
+                                "payload": second_payload,
+                            },
+                        ]
+                    ),
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_responses_create_leaf_rejects_duplicate_ordinals(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match=r"duplicate ordinal m\.4"):
+            await session.execute(
+                text(
+                    """
+                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": _items(
+                        {"type": "message", "text": "first"},
+                        {"type": "message", "text": "second"},
+                        start_ord=4,
+                    ).replace('"ord": 5', '"ord": 4'),
+                },
+            )
+
+
+@pytest.mark.asyncio
 async def test_responses_create_leaf_and_concat_update_refcounts(
     db_session_maker,
 ) -> None:
