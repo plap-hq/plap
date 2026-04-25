@@ -1199,7 +1199,6 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                   'resp_b',
                   null,
                   :root_id,
-                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
@@ -1274,7 +1273,6 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                   'resp_c',
                   'resp_b',
                   :root_id,
-                  :output_root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
@@ -1283,7 +1281,6 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             {
                 "scope_id": scope_id,
                 "root_id": compacted_root_id,
-                "output_root_id": summary_root_id,
                 "namespace_cursors": _namespace_cursors(4, 1),
             },
         )
@@ -1416,7 +1413,6 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                   'resp_old_root',
                   null,
                   :root_id,
-                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
@@ -1436,7 +1432,6 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                   :scope_id,
                   'resp_new_root',
                   null,
-                  :root_id,
                   :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,

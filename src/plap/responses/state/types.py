@@ -33,7 +33,6 @@ class ResponseRecord:
     response_id: str
     previous_response_id: str | None
     state_root_id: int
-    output_state_root_id: int
     status: str
     created_at: datetime
     completed_at: datetime | None
@@ -41,7 +40,26 @@ class ResponseRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseOutputEntry:
+    output_index: int
+    type: str
+    namespace: str | None
+    ordinal: int | None
+    payload: JSONPayload | None
+    payload_hash: str | None
+    descriptor: JSONPayload
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseOutputManifestItem:
+    type: str
+    namespace: str | None = None
+    ordinal: int | None = None
+    payload_hash: str | None = None
+    descriptor: JSONPayload | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AppendResponseResult:
     response_id: str
     state_root_id: int
-    output_state_root_id: int

@@ -187,7 +187,6 @@ create table response_records (
   response_id text not null,
   prev_response_id text,
   state_root_id bigint not null,
-  output_state_root_id bigint not null,
   child_refcount bigint not null default 0,
   lease_refcount bigint not null default 0,
   status text not null default 'completed',
@@ -203,9 +202,6 @@ create table response_records (
   foreign key (scope_id, state_root_id)
     references state_nodes (scope_id, node_id),
 
-  foreign key (scope_id, output_state_root_id)
-    references state_nodes (scope_id, node_id),
-
   check (response_id <> ''),
   check (child_refcount >= 0),
   check (lease_refcount >= 0),
@@ -218,6 +214,47 @@ create table response_records (
     'incomplete'
   )),
   check (jsonb_typeof(fields) = 'object')
+);
+
+create table response_output_items (
+  scope_id uuid not null,
+  response_id text not null,
+  output_index integer not null,
+  type text not null,
+  namespace_id smallint,
+  ordinal bigint,
+  payload_id uuid,
+  descriptor jsonb not null default '{}'::jsonb,
+
+  primary key (scope_id, response_id, output_index),
+
+  foreign key (scope_id, response_id)
+    references response_records (scope_id, response_id)
+    on delete cascade,
+
+  foreign key (namespace_id)
+    references item_namespaces (namespace_id),
+
+  foreign key (scope_id, payload_id)
+    references payloads (scope_id, payload_id),
+
+  check (response_id <> ''),
+  check (output_index >= 0),
+  check (type in (
+    'message',
+    'function_call',
+    'function_call_output',
+    'reasoning',
+    'compaction',
+    'web_search_call'
+  )),
+  check (ordinal is null or ordinal >= 0),
+  check (jsonb_typeof(descriptor) = 'object'),
+  check (
+    (namespace_id is null and ordinal is null and payload_id is null)
+    or
+    (namespace_id is not null and ordinal is not null and payload_id is not null)
+  )
 );
 
 create table response_namespace_cursors (
@@ -348,8 +385,9 @@ create index ix_response_records_prev
 create index ix_response_records_state_root
   on response_records (scope_id, state_root_id, response_id);
 
-create index ix_response_records_output_state_root
-  on response_records (scope_id, output_state_root_id, response_id);
+create index ix_response_output_items_payload_lookup
+  on response_output_items (scope_id, payload_id, response_id, output_index)
+  where payload_id is not null;
 
 create index ix_response_records_gc
   on response_records (created_at, scope_id, response_id)
@@ -449,6 +487,10 @@ create trigger trg_checkpoint_namespace_cursors_immutable
 before update on checkpoint_namespace_cursors
 for each row execute function forbid_any_update();
 
+create trigger trg_response_output_items_immutable
+before update on response_output_items
+for each row execute function forbid_any_update();
+
 create function forbid_response_records_structural_update()
 returns trigger
 language plpgsql
@@ -459,7 +501,6 @@ begin
     or old.response_id is distinct from new.response_id
     or old.prev_response_id is distinct from new.prev_response_id
     or old.state_root_id is distinct from new.state_root_id
-    or old.output_state_root_id is distinct from new.output_state_root_id
     or old.fields is distinct from new.fields
     or old.created_at is distinct from new.created_at then
     raise exception 'response_records rows are structurally immutable';
@@ -560,6 +601,10 @@ create trigger trg_state_leaf_entries_payload_refcount
 after insert or delete on state_leaf_entries
 for each row execute function apply_payload_refcount_from_leaf_entry();
 
+create trigger trg_response_output_items_payload_refcount
+after insert or delete on response_output_items
+for each row execute function apply_payload_refcount_from_leaf_entry();
+
 create function apply_child_refcounts()
 returns trigger
 language plpgsql
@@ -598,11 +643,6 @@ begin
      where scope_id = new.scope_id
        and node_id = new.state_root_id;
 
-    update state_nodes
-       set refcount = refcount + 1
-     where scope_id = new.scope_id
-       and node_id = new.output_state_root_id;
-
     if new.prev_response_id is not null then
       update response_records
          set child_refcount = child_refcount + 1
@@ -615,11 +655,6 @@ begin
        set refcount = refcount - 1
      where scope_id = old.scope_id
        and node_id = old.state_root_id;
-
-    update state_nodes
-       set refcount = refcount - 1
-     where scope_id = old.scope_id
-       and node_id = old.output_state_root_id;
 
     if old.prev_response_id is not null then
       update response_records
@@ -1074,6 +1109,8 @@ drop trigger if exists trg_response_leases_refcounts on response_leases;
 drop trigger if exists trg_response_checkpoints_refcount
   on response_checkpoints;
 drop trigger if exists trg_response_records_refcounts on response_records;
+drop trigger if exists trg_response_output_items_payload_refcount
+  on response_output_items;
 drop trigger if exists trg_state_node_children_refcounts
   on state_node_children;
 drop trigger if exists trg_state_leaf_entries_payload_refcount
@@ -1084,6 +1121,8 @@ drop trigger if exists trg_conversations_immutable on conversations;
 drop trigger if exists trg_response_checkpoints_immutable
   on response_checkpoints;
 drop trigger if exists trg_response_records_immutable on response_records;
+drop trigger if exists trg_response_output_items_immutable
+  on response_output_items;
 drop trigger if exists trg_state_leaf_entries_immutable
   on state_leaf_entries;
 drop trigger if exists trg_state_leaves_immutable on state_leaves;
@@ -1118,6 +1157,7 @@ drop table if exists response_leases;
 drop table if exists checkpoint_namespace_cursors;
 drop table if exists response_checkpoints;
 drop table if exists response_namespace_cursors;
+drop table if exists response_output_items;
 drop table if exists response_records;
 drop table if exists state_leaf_entries;
 drop table if exists state_leaves;

@@ -14,6 +14,8 @@ from plap.responses.state.types import (
     AppendResponseResult,
     JSONPayload,
     NamespaceCursor,
+    ResponseOutputEntry,
+    ResponseOutputManifestItem,
     ResponseRecord,
     StateCheckpoint,
     StateItem,
@@ -119,6 +121,49 @@ class ResponseRepository:
             for row in rows
         )
 
+    async def list_response_outputs(
+        self,
+        scope_id: UUID,
+        response_id: str,
+    ) -> list[ResponseOutputEntry]:
+        rows = (
+            await self._session.execute(
+                text(
+                    """
+                    select output.output_index,
+                           output.type,
+                           namespace.namespace_name,
+                           output.ordinal,
+                           encode(payload.payload_hash, 'hex') as payload_hash,
+                           payload.payload_json as payload,
+                           output.descriptor
+                      from responses.response_output_items output
+                      left join responses.item_namespaces namespace
+                        on namespace.namespace_id = output.namespace_id
+                      left join responses.payloads payload
+                        on payload.scope_id = output.scope_id
+                       and payload.payload_id = output.payload_id
+                     where output.scope_id = :scope_id
+                       and output.response_id = :response_id
+                     order by output.output_index
+                    """
+                ),
+                {"scope_id": scope_id, "response_id": response_id},
+            )
+        ).all()
+        return [
+            ResponseOutputEntry(
+                output_index=row.output_index,
+                type=row.type,
+                namespace=row.namespace_name,
+                ordinal=row.ordinal,
+                payload=row.payload,
+                payload_hash=row.payload_hash,
+                descriptor=row.descriptor,
+            )
+            for row in rows
+        ]
+
     async def splice_tree(
         self,
         scope_id: UUID,
@@ -159,7 +204,7 @@ class ResponseRepository:
         state_root_id: int,
         namespace_cursors: Sequence[NamespaceCursor],
         *,
-        output_state_root_id: int | None = None,
+        output_items: Sequence[ResponseOutputManifestItem] = (),
         checkpoints: Sequence[StateCheckpoint] = (),
         retention: timedelta | None = timedelta(days=30),
         status: str = "completed",
@@ -175,13 +220,13 @@ class ResponseRepository:
                       :response_id,
                       :previous_response_id,
                       :state_root_id,
-                      :output_state_root_id,
                       cast(:namespace_cursors as jsonb),
                       cast(:checkpoints as jsonb),
                       :retention,
                       :status,
                       :completed_at,
-                      cast(:fields as jsonb)
+                      cast(:fields as jsonb),
+                      cast(:output_items as jsonb)
                     )
                     """
                 ),
@@ -190,12 +235,10 @@ class ResponseRepository:
                     "response_id": response_id,
                     "previous_response_id": previous_response_id,
                     "state_root_id": state_root_id,
-                    "output_state_root_id": output_state_root_id
-                    if output_state_root_id is not None
-                    else state_root_id,
                     "namespace_cursors": self._namespace_cursors_json(
                         namespace_cursors
                     ),
+                    "output_items": self._output_manifest_json(output_items),
                     "checkpoints": self._checkpoints_json(checkpoints),
                     "retention": retention,
                     "status": status,
@@ -213,6 +256,7 @@ class ResponseRepository:
         items: Sequence[StateItem],
         namespace_cursors: Sequence[NamespaceCursor],
         *,
+        output_items: Sequence[ResponseOutputManifestItem] = (),
         checkpoints: Sequence[StateCheckpoint] = (),
         retention: timedelta | None = timedelta(days=30),
         status: str = "completed",
@@ -223,7 +267,7 @@ class ResponseRepository:
             await self._session.execute(
                 text(
                     """
-                    select response_id, state_root_id, output_state_root_id
+                    select response_id, state_root_id
                       from responses.append_response(
                         :scope_id,
                         :response_id,
@@ -234,7 +278,8 @@ class ResponseRepository:
                         :retention,
                         :status,
                         :completed_at,
-                        cast(:fields as jsonb)
+                        cast(:fields as jsonb),
+                        cast(:output_items as jsonb)
                       )
                     """
                 ),
@@ -251,13 +296,13 @@ class ResponseRepository:
                     "status": status,
                     "completed_at": completed_at,
                     "fields": self._fields_json(fields),
+                    "output_items": self._output_manifest_json(output_items),
                 },
             )
         ).one()
         return AppendResponseResult(
             response_id=row.response_id,
             state_root_id=row.state_root_id,
-            output_state_root_id=row.output_state_root_id,
         )
 
     async def get_response_record(
@@ -272,7 +317,6 @@ class ResponseRepository:
                     select response_id,
                             prev_response_id,
                             state_root_id,
-                            output_state_root_id,
                             status,
                            created_at,
                            completed_at,
@@ -299,7 +343,6 @@ class ResponseRepository:
                     select record.response_id,
                             record.prev_response_id,
                             record.state_root_id,
-                            record.output_state_root_id,
                             record.status,
                            record.created_at,
                            record.completed_at,
@@ -426,6 +469,29 @@ class ResponseRepository:
     def _fields_json(fields: JSONPayload | None) -> str:
         return msgspec.json.encode({} if fields is None else fields).decode()
 
+    @staticmethod
+    def _output_manifest_json(
+        output_items: Sequence[ResponseOutputManifestItem],
+    ) -> str:
+        return msgspec.json.encode(
+            [
+                {
+                    key: value
+                    for key, value in {
+                        "type": item.type,
+                        "namespace": item.namespace,
+                        "ordinal": item.ordinal,
+                        "payload_hash": item.payload_hash,
+                        "descriptor": {}
+                        if item.descriptor is None
+                        else item.descriptor,
+                    }.items()
+                    if value is not None
+                }
+                for item in output_items
+            ]
+        ).decode()
+
     @classmethod
     def _item_to_db(cls, item: StateItem) -> dict[str, object]:
         payload_hash = cls.payload_hash(item.payload)
@@ -446,7 +512,6 @@ class ResponseRepository:
             response_id=row.response_id,
             previous_response_id=row.prev_response_id,
             state_root_id=row.state_root_id,
-            output_state_root_id=row.output_state_root_id,
             status=row.status,
             created_at=row.created_at,
             completed_at=row.completed_at,

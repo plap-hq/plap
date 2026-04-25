@@ -1129,18 +1129,136 @@ begin
 end;
 $$;
 
+create function responses.insert_response_output_items(
+  p_scope_id uuid,
+  p_response_id text,
+  p_output_items jsonb
+)
+returns void
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_output record;
+  v_namespace_id smallint;
+  v_payload_hash bytea;
+  v_payload_id uuid;
+  v_type text;
+  v_descriptor jsonb;
+begin
+  if jsonb_typeof(p_output_items) is distinct from 'array' then
+    raise exception 'response output items must be a JSON array';
+  end if;
+
+  for v_output in
+    select value, ordinality - 1 as output_index
+      from jsonb_array_elements(p_output_items) with ordinality
+  loop
+    if jsonb_typeof(v_output.value) is distinct from 'object' then
+      raise exception 'response output item at index % is malformed',
+        v_output.output_index;
+    end if;
+
+    v_type = coalesce(
+      v_output.value ->> 'type',
+      v_output.value #>> '{payload,type}'
+    );
+    if v_type is null or v_type = '' then
+      raise exception 'response output item at index % is missing type',
+        v_output.output_index;
+    end if;
+
+    v_descriptor = coalesce(v_output.value -> 'descriptor', '{}'::jsonb);
+    if jsonb_typeof(v_descriptor) is distinct from 'object' then
+      raise exception 'response output item descriptor at index % must be an object',
+        v_output.output_index;
+    end if;
+
+    v_namespace_id = null;
+    v_payload_hash = null;
+    v_payload_id = null;
+
+    if v_output.value ? 'namespace'
+      or v_output.value ? 'ordinal'
+      or v_output.value ? 'payload_hash' then
+      if not (v_output.value ? 'namespace')
+        or not (v_output.value ? 'ordinal')
+        or not (v_output.value ? 'payload_hash') then
+        raise exception 'response output item at index % has an incomplete state ref',
+          v_output.output_index;
+      end if;
+
+      select namespace_id
+        into v_namespace_id
+        from item_namespaces
+       where namespace_name = v_output.value ->> 'namespace';
+      if v_namespace_id is null then
+        raise exception 'unknown response output namespace %',
+          v_output.value ->> 'namespace';
+      end if;
+
+      if (v_output.value ->> 'ordinal') !~ '^-?[0-9]+$'
+        or (v_output.value ->> 'ordinal')::numeric < 0
+        or (v_output.value ->> 'ordinal')::numeric > 9223372036854775807 then
+        raise exception 'response output item at index % has invalid ordinal',
+          v_output.output_index;
+      end if;
+
+      if (v_output.value ->> 'payload_hash') !~ '^[0-9a-fA-F]{64}$' then
+        raise exception 'response output item at index % has invalid payload_hash',
+          v_output.output_index;
+      end if;
+
+      v_payload_hash = decode(v_output.value ->> 'payload_hash', 'hex');
+      select payload_id
+        into v_payload_id
+        from payloads
+       where scope_id = p_scope_id
+         and payload_hash = v_payload_hash;
+      if v_payload_id is null then
+        raise exception 'response output payload at index % does not exist',
+          v_output.output_index;
+      end if;
+    end if;
+
+    insert into response_output_items (
+      scope_id,
+      response_id,
+      output_index,
+      type,
+      namespace_id,
+      ordinal,
+      payload_id,
+      descriptor
+    ) values (
+      p_scope_id,
+      p_response_id,
+      v_output.output_index,
+      v_type,
+      v_namespace_id,
+      case
+        when v_namespace_id is null then null
+        else (v_output.value ->> 'ordinal')::bigint
+      end,
+      v_payload_id,
+      v_descriptor
+    );
+  end loop;
+end;
+$$;
+
 create function responses.create_response_record(
   p_scope_id uuid,
   p_response_id text,
   p_prev_response_id text,
   p_state_root_id bigint,
-  p_output_state_root_id bigint,
   p_namespace_cursors jsonb,
   p_checkpoints jsonb default '[]'::jsonb,
   p_retention interval default interval '30 days',
   p_status text default 'completed',
   p_completed_at timestamptz default null,
-  p_fields jsonb default '{}'::jsonb
+  p_fields jsonb default '{}'::jsonb,
+  p_output_items jsonb default '[]'::jsonb
 )
 returns text
 language plpgsql
@@ -1183,7 +1301,6 @@ begin
     response_id,
     prev_response_id,
     state_root_id,
-    output_state_root_id,
     status,
     completed_at,
     fields
@@ -1192,7 +1309,6 @@ begin
     p_response_id,
     p_prev_response_id,
     p_state_root_id,
-    p_output_state_root_id,
     p_status,
     coalesce(p_completed_at, case when p_status = 'completed' then now() end),
     p_fields
@@ -1215,6 +1331,12 @@ begin
       now() + p_retention
     );
   end if;
+
+  perform responses.insert_response_output_items(
+    p_scope_id,
+    p_response_id,
+    p_output_items
+  );
 
   for v_counter in
     select value
@@ -1300,12 +1422,12 @@ create function responses.append_response(
   p_retention interval default interval '30 days',
   p_status text default 'completed',
   p_completed_at timestamptz default null,
-  p_fields jsonb default '{}'::jsonb
+  p_fields jsonb default '{}'::jsonb,
+  p_output_items jsonb default '[]'::jsonb
 )
 returns table (
   response_id text,
-  state_root_id bigint,
-  output_state_root_id bigint
+  state_root_id bigint
 )
 language plpgsql
 set search_path = responses, public
@@ -1344,18 +1466,17 @@ begin
     p_response_id,
     p_prev_response_id,
     v_root_id,
-    v_items_root_id,
     p_namespace_cursors,
     p_checkpoints,
     p_retention,
     p_status,
     p_completed_at,
-    p_fields
+    p_fields,
+    p_output_items
   );
 
   response_id = p_response_id;
   state_root_id = v_root_id;
-  output_state_root_id = v_items_root_id;
   return next;
 end;
 $$;
@@ -1494,6 +1615,7 @@ drop function if exists responses.append_response(
   interval,
   text,
   timestamptz,
+  jsonb,
   jsonb
 );
 drop function if exists responses.create_response_record(
@@ -1501,14 +1623,15 @@ drop function if exists responses.create_response_record(
   text,
   text,
   bigint,
-  bigint,
   jsonb,
   jsonb,
   interval,
   text,
   timestamptz,
+  jsonb,
   jsonb
 );
+drop function if exists responses.insert_response_output_items(uuid, text, jsonb);
 drop function if exists responses.splice_state_tree(
   uuid,
   bigint,

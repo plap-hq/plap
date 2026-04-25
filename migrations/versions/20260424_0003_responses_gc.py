@@ -177,7 +177,6 @@ as $$
 declare
   v_prev_response_id text;
   v_state_root_id bigint;
-  v_output_state_root_id bigint;
   v_child_refcount bigint;
   v_lease_refcount bigint;
   v_checkpoint_root_ids bigint[];
@@ -186,13 +185,11 @@ begin
   select
     prev_response_id,
     state_root_id,
-    output_state_root_id,
     child_refcount,
     lease_refcount
   into
     v_prev_response_id,
     v_state_root_id,
-    v_output_state_root_id,
     v_child_refcount,
     v_lease_refcount
     from response_records
@@ -224,10 +221,6 @@ begin
      and response_id = p_response_id;
 
   call responses.gc_delete_state_node_if_unreferenced(p_scope_id, v_state_root_id);
-  call responses.gc_delete_state_node_if_unreferenced(
-    p_scope_id,
-    v_output_state_root_id
-  );
 
   foreach v_root_id in array v_checkpoint_root_ids
   loop
