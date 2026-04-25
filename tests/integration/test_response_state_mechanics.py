@@ -360,6 +360,66 @@ async def test_responses_append_items_creates_response_chain(
 
 
 @pytest.mark.asyncio
+async def test_responses_append_items_balances_repeated_appends(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+    previous_response_id: str | None = None
+
+    async with db_session_maker() as session:
+        for index in range(16):
+            response_id = f"resp_{index + 1}"
+            await _append_response(
+                session,
+                scope_id,
+                response_id,
+                {"type": "message", "text": f"message {index + 1}"},
+                prev_response_id=previous_response_id,
+                next_ord=index + 1,
+            )
+            previous_response_id = response_id
+        await session.commit()
+
+        row = (
+            await session.execute(
+                text(
+                    """
+                    with recursive walk(node_id, depth) as (
+                      select full_state_root_id, 1
+                        from responses.responses
+                       where scope_id = :scope_id
+                         and response_id = 'resp_16'
+                      union all
+                      select child.node_id, walk.depth + 1
+                        from walk
+                        join responses.state_nodes node
+                          on node.scope_id = :scope_id
+                         and node.node_id = walk.node_id
+                       cross join lateral (
+                         values (node.left_id), (node.right_id)
+                       ) as child(node_id)
+                       where node.kind = 'concat'
+                    )
+                    select root.item_count, max(walk.depth) as max_depth
+                      from responses.responses response
+                      join responses.state_nodes root
+                        on root.scope_id = response.scope_id
+                       and root.node_id = response.full_state_root_id
+                      join walk on true
+                     where response.scope_id = :scope_id
+                       and response.response_id = 'resp_16'
+                     group by root.item_count
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).one()
+
+    assert row.item_count == 16
+    assert row.max_depth <= 8
+
+
+@pytest.mark.asyncio
 async def test_responses_append_items_requires_complete_namespace_counters(
     db_session_maker,
 ) -> None:

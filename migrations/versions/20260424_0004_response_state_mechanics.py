@@ -507,6 +507,80 @@ begin
 end;
 $$;
 
+create function responses.create_balanced_concat(
+  p_scope_id uuid,
+  p_left_id bigint,
+  p_right_id bigint
+)
+returns bigint
+language plpgsql
+set search_path = responses, public
+as $$
+declare
+  v_left_kind text;
+  v_left_left_id bigint;
+  v_left_right_id bigint;
+  v_left_count bigint;
+  v_right_kind text;
+  v_right_left_id bigint;
+  v_right_right_id bigint;
+  v_right_count bigint;
+  v_rebalanced_child_id bigint;
+begin
+  if p_left_id = p_right_id then
+    raise exception 'concat children must be distinct';
+  end if;
+
+  select kind, left_id, right_id, item_count
+    into v_left_kind, v_left_left_id, v_left_right_id, v_left_count
+    from state_nodes
+   where scope_id = p_scope_id
+     and node_id = p_left_id;
+
+  if v_left_count is null then
+    raise exception 'left state node %/% does not exist', p_scope_id, p_left_id;
+  end if;
+
+  select kind, left_id, right_id, item_count
+    into v_right_kind, v_right_left_id, v_right_right_id, v_right_count
+    from state_nodes
+   where scope_id = p_scope_id
+     and node_id = p_right_id;
+
+  if v_right_count is null then
+    raise exception 'right state node %/% does not exist', p_scope_id, p_right_id;
+  end if;
+
+  if v_left_kind = 'concat' and v_left_count > v_right_count * 2 then
+    v_rebalanced_child_id = responses.create_balanced_concat(
+      p_scope_id,
+      v_left_right_id,
+      p_right_id
+    );
+    return responses.create_balanced_concat(
+      p_scope_id,
+      v_left_left_id,
+      v_rebalanced_child_id
+    );
+  end if;
+
+  if v_right_kind = 'concat' and v_right_count > v_left_count * 2 then
+    v_rebalanced_child_id = responses.create_balanced_concat(
+      p_scope_id,
+      p_left_id,
+      v_right_left_id
+    );
+    return responses.create_balanced_concat(
+      p_scope_id,
+      v_rebalanced_child_id,
+      v_right_right_id
+    );
+  end if;
+
+  return responses.create_concat(p_scope_id, p_left_id, p_right_id);
+end;
+$$;
+
 create function responses.create_response(
   p_scope_id uuid,
   p_response_id text,
@@ -666,7 +740,7 @@ begin
         p_prev_response_id;
     end if;
 
-    v_root_id = responses.create_concat(
+    v_root_id = responses.create_balanced_concat(
       p_scope_id,
       v_prev_root_id,
       v_leaf_id
@@ -820,6 +894,7 @@ drop function if exists responses.create_response(
   jsonb,
   jsonb
 );
+drop function if exists responses.create_balanced_concat(uuid, bigint, bigint);
 drop function if exists responses.create_concat(uuid, bigint, bigint);
 drop function if exists responses.create_leaf(uuid, jsonb);
 drop function if exists responses.get_or_create_payload(uuid, bytea, jsonb);
