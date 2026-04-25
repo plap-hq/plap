@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import blake3
+import msgspec
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,8 +26,8 @@ class ResponseStateRepository:
 
     @staticmethod
     def payload_hash(payload: JSONPayload) -> str:
-        canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        return blake3.blake3(canonical.encode()).hexdigest()
+        canonical = msgspec.json.encode(payload, order="deterministic")
+        return blake3.blake3(canonical).hexdigest()
 
     async def build_tree(
         self,
@@ -355,34 +355,34 @@ class ResponseStateRepository:
 
     @classmethod
     def _items_json(cls, items: Sequence[StateItem]) -> str:
-        return json.dumps([cls._item_to_db(item) for item in items])
+        return msgspec.json.encode([cls._item_to_db(item) for item in items]).decode()
 
     @staticmethod
     def _namespace_cursors_json(cursors: Sequence[NamespaceCursor]) -> str:
-        return json.dumps(
+        return msgspec.json.encode(
             [
                 {"namespace": cursor.namespace, "next_ordinal": cursor.next_ordinal}
                 for cursor in cursors
             ]
-        )
+        ).decode()
 
     @classmethod
     def _checkpoints_json(cls, checkpoints: Sequence[StateCheckpoint]) -> str:
-        return json.dumps(
+        return msgspec.json.encode(
             [
                 {
                     "state_root_id": checkpoint.state_root_id,
-                    "namespace_cursors": json.loads(
+                    "namespace_cursors": msgspec.json.decode(
                         cls._namespace_cursors_json(checkpoint.namespace_cursors)
                     ),
                 }
                 for checkpoint in checkpoints
             ]
-        )
+        ).decode()
 
     @staticmethod
     def _fields_json(fields: JSONPayload | None) -> str:
-        return json.dumps({} if fields is None else fields)
+        return msgspec.json.encode({} if fields is None else fields).decode()
 
     @classmethod
     def _item_to_db(cls, item: StateItem) -> dict[str, object]:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
+
+import msgspec
 
 from plap.responses.contracts import (
     CompactedResponseObject,
@@ -69,9 +70,9 @@ def _stable_id(prefix: str, seed: str) -> str:
 def _request_seed(
     request: ResponseCreateRequest | CompactRequest | InputTokensCountRequest,
 ) -> str:
-    return json.dumps(
-        request.model_dump(mode="json", exclude_none=True), sort_keys=True
-    )
+    return msgspec.json.encode(
+        request.model_dump(mode="json", exclude_none=True), order="deterministic"
+    ).decode()
 
 
 def _extract_input_text(input_value: str | list[RequestInputItem] | None) -> str:

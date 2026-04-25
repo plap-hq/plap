@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import msgspec
 from openai import (
     APIStatusError,
     AsyncOpenAI,
@@ -299,4 +299,4 @@ def _finish_reason(value: Any) -> ChatFinishReason | None:
 def _stringify_arguments(value: Any) -> str | None:
     if value is None or isinstance(value, str):
         return value
-    return json.dumps(value, separators=(",", ":"))
+    return msgspec.json.encode(value).decode()
