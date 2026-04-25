@@ -200,7 +200,6 @@ def build_stub_response(
 
     created_id = response_id or _stable_id("resp", seed)
     return ResponseObject(
-        background=request.background,
         completed_at=BASE_CREATED_AT + 1
         if status in {"completed", "cancelled"}
         else None,

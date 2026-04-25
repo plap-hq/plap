@@ -78,10 +78,10 @@ class ContextManagementCompaction(StrictModel):
 
 
 class ResponseCreateRequest(StrictModel):
-    background: bool | None = Field(
-        default=None,
-        description="Whether to run response generation in the background.",
-    )
+    # background: bool | None = Field(
+    #     default=None,
+    #     description="Whether to run response generation in the background.",
+    # )
     context_management: list[ContextManagementCompaction] | None = Field(
         default=None,
         description=(

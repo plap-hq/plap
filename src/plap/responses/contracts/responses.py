@@ -94,9 +94,9 @@ class ResponseIncompleteDetails(StrictModel):
 
 
 class ResponseObject(StrictModel):
-    background: bool | None = Field(
-        default=None, description="Whether it ran in background mode."
-    )
+    # background: bool | None = Field(
+    #     default=None, description="Whether it ran in background mode."
+    # )
     completed_at: float | None = Field(
         default=None,
         description="Unix timestamp in seconds when generation completed.",
