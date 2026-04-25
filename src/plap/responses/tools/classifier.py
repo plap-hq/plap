@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+import asyncio
+from typing import Any
 
 import blake3
 import msgspec
@@ -11,29 +12,34 @@ from plap.llms.chat import (
     ChatMessage,
     ChatResponseFormat,
 )
-from plap.responses.tools.repository import ToolClassificationRepository
-from plap.responses.tools.types import (
+from plap.responses.tools.policy import (
     EffectClass,
     ToolClassification,
     ToolSignature,
+    signature_hash_hex,
 )
 
-TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify a client-provided tool by side effects.
+TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
 Return only JSON matching this schema:
-{"effect_class":"safe|mutation|unknown","confidence":0.0,"rationale":"short"}
+{"effect_class":"safe|mutation|contextual|unknown","confidence":0.0,"rationale":"short"}
 
 Definitions:
 - safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
 - mutation: writes files, runs mutating commands, changes external state, or has
   irreversible side effects.
+- contextual: can be safe or mutating depending on call arguments, such as shell,
+  SQL, HTTP, or command execution tools.
 - unknown: ambiguous or insufficient information.
 """
 
 TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "effect_class": {"type": "string", "enum": ["safe", "mutation", "unknown"]},
+        "effect_class": {
+            "type": "string",
+            "enum": ["safe", "mutation", "contextual", "unknown"],
+        },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string"},
     },
@@ -48,15 +54,7 @@ TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
     strict=True,
     description="Effect classification for a client-provided function tool.",
 )
-TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 128
-
-
-class ToolClassifier(Protocol):
-    classifier: str
-    classifier_model: str
-    prompt_hash: bytes
-
-    async def classify(self, signature: ToolSignature) -> ToolClassification: ...
+TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 
 
 class LLMToolClassifier:
@@ -67,14 +65,47 @@ class LLMToolClassifier:
         classifier: str,
         classifier_model: str,
         prompt: str = TOOL_EFFECT_CLASSIFIER_PROMPT,
+        max_concurrency: int = 4,
     ) -> None:
         self._client = client
         self.classifier = classifier
         self.classifier_model = classifier_model
         self.prompt_hash = _prompt_hash(prompt)
         self._prompt = prompt
+        self._max_concurrency = max_concurrency
 
     async def classify(self, signature: ToolSignature) -> ToolClassification:
+        return (await self.classify_many([signature]))[signature.signature_hash]
+
+    async def classify_many(
+        self, signatures: list[ToolSignature]
+    ) -> dict[bytes, ToolClassification]:
+        signatures_by_hash = {
+            signature.signature_hash: signature for signature in signatures
+        }
+        if not signatures_by_hash:
+            return {}
+
+        semaphore = asyncio.Semaphore(self._max_concurrency)
+
+        async def classify_with_limit(
+            signature: ToolSignature,
+        ) -> ToolClassification:
+            async with semaphore:
+                return await self._classify_one(signature)
+
+        classifications = await asyncio.gather(
+            *(
+                classify_with_limit(signature)
+                for signature in signatures_by_hash.values()
+            )
+        )
+        return {
+            classification.signature_hash: classification
+            for classification in classifications
+        }
+
+    async def _classify_one(self, signature: ToolSignature) -> ToolClassification:
         try:
             result = await self._client.complete(
                 ChatCompletionRequest(
@@ -84,7 +115,13 @@ class LLMToolClassifier:
                         ChatMessage(
                             role="user",
                             content=msgspec.json.encode(
-                                signature.signature, order="deterministic"
+                                {
+                                    "signature_hash": signature_hash_hex(
+                                        signature.signature_hash
+                                    ),
+                                    "signature": signature.signature,
+                                },
+                                order="deterministic",
                             ).decode(),
                         ),
                     ],
@@ -110,47 +147,6 @@ class LLMToolClassifier:
                 rationale=f"classifier failed: {type(exc).__name__}",
                 raw_output={},
             )
-
-
-class CachedToolClassifier:
-    def __init__(
-        self,
-        repository: ToolClassificationRepository,
-        classifier: ToolClassifier,
-    ) -> None:
-        self._repository = repository
-        self._classifier = classifier
-
-    async def classify(self, signature: ToolSignature) -> ToolClassification:
-        return (await self.classify_many([signature]))[signature.signature_hash]
-
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
-        signatures_by_hash = {
-            signature.signature_hash: signature for signature in signatures
-        }
-        if not signatures_by_hash:
-            return {}
-
-        unique_signatures = list(signatures_by_hash.values())
-        await self._repository.get_or_create_signatures(unique_signatures)
-        cached = await self._repository.get_classifications(
-            list(signatures_by_hash),
-            classifier=self._classifier.classifier,
-            classifier_model=self._classifier.classifier_model,
-            prompt_hash=self._classifier.prompt_hash,
-        )
-        missing = [
-            signature
-            for signature_hash, signature in signatures_by_hash.items()
-            if signature_hash not in cached
-        ]
-        new_classifications = [
-            await self._classifier.classify(signature) for signature in missing
-        ]
-        stored = await self._repository.store_classifications(new_classifications)
-        return {**cached, **stored}
 
 
 def _parse_raw_output(content: str | None) -> dict[str, Any]:
@@ -225,7 +221,7 @@ def _unknown_classification(
 
 
 def _effect_class(value: object) -> EffectClass:
-    if value in {"safe", "mutation", "unknown"}:
+    if value in {"safe", "mutation", "contextual", "unknown"}:
         return value
     raise ValueError("classifier effect_class is invalid")
 

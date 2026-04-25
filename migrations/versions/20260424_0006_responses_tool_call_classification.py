@@ -1,8 +1,8 @@
-"""Add responses tool classification cache.
+"""Add responses tool call classification cache.
 
-Revision ID: 20260424_0005
-Revises: 20260424_0004
-Create Date: 2026-04-24 00:05:00.000000
+Revision ID: 20260424_0006
+Revises: 20260424_0005
+Create Date: 2026-04-24 00:06:00.000000
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "20260424_0005"
-down_revision: str | None = "20260424_0004"
+revision: str = "20260424_0006"
+down_revision: str | None = "20260424_0005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -63,19 +63,12 @@ def _split_sql_statements(script: str) -> list[str]:
 UPGRADE_SQL = r"""
 set search_path = responses, public;
 
-create table tool_signatures (
-  signature_hash bytea primary key,
-  signature_json jsonb not null,
-  created_at timestamptz not null default now(),
-
-  check (octet_length(signature_hash) = 32),
-  check (jsonb_typeof(signature_json) = 'object')
-);
-
-create table tool_classifications (
+create table tool_call_classifications (
+  scope_id uuid not null,
   signature_hash bytea not null
     references tool_signatures (signature_hash)
     on delete cascade,
+  arguments_hash bytea not null,
   classifier text not null,
   classifier_model text not null,
   prompt_hash bytea not null,
@@ -86,27 +79,27 @@ create table tool_classifications (
   created_at timestamptz not null default now(),
 
   primary key (
+    scope_id,
     signature_hash,
+    arguments_hash,
     classifier,
     classifier_model,
     prompt_hash
   ),
 
+  check (octet_length(signature_hash) = 32),
+  check (octet_length(arguments_hash) = 32),
   check (octet_length(prompt_hash) = 32),
   check (classifier <> ''),
   check (classifier_model <> ''),
-  check (effect_class in ('safe', 'mutation', 'contextual', 'unknown')),
+  check (effect_class in ('safe', 'mutation', 'unknown')),
   check (confidence >= 0 and confidence <= 1),
   check (rationale <> ''),
   check (jsonb_typeof(raw_output) = 'object')
 );
 
-create trigger trg_tool_signatures_immutable
-before update on tool_signatures
-for each row execute function forbid_any_update();
-
-create trigger trg_tool_classifications_immutable
-before update on tool_classifications
+create trigger trg_tool_call_classifications_immutable
+before update on tool_call_classifications
 for each row execute function forbid_any_update();
 """
 
@@ -114,9 +107,8 @@ for each row execute function forbid_any_update();
 DOWNGRADE_SQL = r"""
 set search_path = responses, public;
 
-drop trigger if exists trg_tool_classifications_immutable on tool_classifications;
-drop trigger if exists trg_tool_signatures_immutable on tool_signatures;
+drop trigger if exists trg_tool_call_classifications_immutable
+on tool_call_classifications;
 
-drop table if exists tool_classifications;
-drop table if exists tool_signatures;
+drop table if exists tool_call_classifications;
 """

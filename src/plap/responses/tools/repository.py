@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import msgspec
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from plap.responses.tools.types import (
+from plap.responses.tools.policy import (
     EffectClass,
+    ToolCallClassification,
+    ToolCallEffectClass,
     ToolClassification,
     ToolSignature,
 )
@@ -109,8 +112,10 @@ class ToolClassificationRepository:
             text(
                 """
                 with requested(signature_hash) as (
-                  select decode(value #>> '{}', 'hex')
-                  from jsonb_array_elements(cast(:signature_hashes as jsonb)) value
+                  select decode(value, 'hex')
+                  from jsonb_array_elements_text(
+                    cast(:signature_hashes as jsonb)
+                  ) value
                 )
                 select
                   classifications.signature_hash,
@@ -219,6 +224,117 @@ class ToolClassificationRepository:
             raise RuntimeError("tool classification insert did not produce a row")
         return stored
 
+    async def get_tool_call_classification(
+        self,
+        *,
+        scope_id: UUID,
+        signature_hash: bytes,
+        arguments_hash: bytes,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> ToolCallClassification | None:
+        result = await self._session.execute(
+            text(
+                """
+                select
+                  scope_id,
+                  signature_hash,
+                  arguments_hash,
+                  classifier,
+                  classifier_model,
+                  prompt_hash,
+                  effect_class,
+                  confidence,
+                  rationale,
+                  raw_output
+                from responses.tool_call_classifications
+                where scope_id = :scope_id
+                  and signature_hash = :signature_hash
+                  and arguments_hash = :arguments_hash
+                  and classifier = :classifier
+                  and classifier_model = :classifier_model
+                  and prompt_hash = :prompt_hash
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "signature_hash": signature_hash,
+                "arguments_hash": arguments_hash,
+                "classifier": classifier,
+                "classifier_model": classifier_model,
+                "prompt_hash": prompt_hash,
+            },
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return _tool_call_classification_from_row(row)
+
+    async def store_tool_call_classification(
+        self, classification: ToolCallClassification
+    ) -> ToolCallClassification:
+        await self._session.execute(
+            text(
+                """
+                insert into responses.tool_call_classifications (
+                  scope_id,
+                  signature_hash,
+                  arguments_hash,
+                  classifier,
+                  classifier_model,
+                  prompt_hash,
+                  effect_class,
+                  confidence,
+                  rationale,
+                  raw_output
+                ) values (
+                  :scope_id,
+                  :signature_hash,
+                  :arguments_hash,
+                  :classifier,
+                  :classifier_model,
+                  :prompt_hash,
+                  :effect_class,
+                  :confidence,
+                  :rationale,
+                  cast(:raw_output as jsonb)
+                )
+                on conflict (
+                  scope_id,
+                  signature_hash,
+                  arguments_hash,
+                  classifier,
+                  classifier_model,
+                  prompt_hash
+                ) do nothing
+                """
+            ),
+            {
+                "scope_id": classification.scope_id,
+                "signature_hash": classification.signature_hash,
+                "arguments_hash": classification.arguments_hash,
+                "classifier": classification.classifier,
+                "classifier_model": classification.classifier_model,
+                "prompt_hash": classification.prompt_hash,
+                "effect_class": classification.effect_class,
+                "confidence": classification.confidence,
+                "rationale": classification.rationale,
+                "raw_output": _json_string(classification.raw_output),
+            },
+        )
+        stored = await self.get_tool_call_classification(
+            scope_id=classification.scope_id,
+            signature_hash=classification.signature_hash,
+            arguments_hash=classification.arguments_hash,
+            classifier=classification.classifier,
+            classifier_model=classification.classifier_model,
+            prompt_hash=classification.prompt_hash,
+        )
+        if stored is None:
+            raise RuntimeError("tool call classification insert did not produce a row")
+        return stored
+
 
 def _classification_from_row(row: Any) -> ToolClassification:
     return ToolClassification(
@@ -233,10 +349,31 @@ def _classification_from_row(row: Any) -> ToolClassification:
     )
 
 
+def _tool_call_classification_from_row(row: Any) -> ToolCallClassification:
+    return ToolCallClassification(
+        scope_id=row.scope_id,
+        signature_hash=bytes(row.signature_hash),
+        arguments_hash=bytes(row.arguments_hash),
+        classifier=row.classifier,
+        classifier_model=row.classifier_model,
+        prompt_hash=bytes(row.prompt_hash),
+        effect_class=_tool_call_effect_class(row.effect_class),
+        confidence=float(row.confidence),
+        rationale=row.rationale,
+        raw_output=row.raw_output,
+    )
+
+
 def _effect_class(value: str) -> EffectClass:
-    if value in {"safe", "mutation", "unknown"}:
+    if value in {"safe", "mutation", "contextual", "unknown"}:
         return value
     raise ValueError(f"unsupported effect class: {value}")
+
+
+def _tool_call_effect_class(value: str) -> ToolCallEffectClass:
+    if value in {"safe", "mutation", "unknown"}:
+        return value
+    raise ValueError(f"unsupported tool call effect class: {value}")
 
 
 def _json_string(value: object) -> str:
