@@ -61,9 +61,11 @@ def _split_sql_statements(script: str) -> list[str]:
 
 
 UPGRADE_SQL = r"""
+create schema if not exists response_state;
+
 create extension if not exists pg_cron;
 
-create procedure gc_try_delete_state_node(
+create procedure response_state.gc_try_delete_state_node(
   p_scope_id uuid,
   p_node_id bigint
 )
@@ -112,8 +114,8 @@ begin
      and node_id = p_node_id;
 
   if v_kind = 'concat' then
-    call gc_try_delete_state_node(p_scope_id, v_left_id);
-    call gc_try_delete_state_node(p_scope_id, v_right_id);
+    call response_state.gc_try_delete_state_node(p_scope_id, v_left_id);
+    call response_state.gc_try_delete_state_node(p_scope_id, v_right_id);
   elsif v_kind = 'leaf' then
     delete from payload_objects
      where scope_id = p_scope_id
@@ -123,7 +125,7 @@ begin
 end;
 $$;
 
-create procedure gc_try_delete_response(
+create procedure response_state.gc_try_delete_response(
   p_scope_id uuid,
   p_response_id text
 )
@@ -175,20 +177,20 @@ begin
    where scope_id = p_scope_id
      and response_id = p_response_id;
 
-  call gc_try_delete_state_node(p_scope_id, v_full_state_root_id);
+  call response_state.gc_try_delete_state_node(p_scope_id, v_full_state_root_id);
 
   foreach v_root_id in array v_checkpoint_root_ids
   loop
-    call gc_try_delete_state_node(p_scope_id, v_root_id);
+    call response_state.gc_try_delete_state_node(p_scope_id, v_root_id);
   end loop;
 
   if v_prev_response_id is not null then
-    call gc_try_delete_response(p_scope_id, v_prev_response_id);
+    call response_state.gc_try_delete_response(p_scope_id, v_prev_response_id);
   end if;
 end;
 $$;
 
-create procedure gc_expire_response_leases(
+create procedure response_state.gc_expire_leases(
   p_batch_size integer default 200
 )
 language plpgsql
@@ -218,12 +220,15 @@ begin
      where scope_id = v_lease.scope_id
        and lease_id = v_lease.lease_id;
 
-    call gc_try_delete_response(v_lease.scope_id, v_lease.response_id);
+    call response_state.gc_try_delete_response(
+      v_lease.scope_id,
+      v_lease.response_id
+    );
   end loop;
 end;
 $$;
 
-create procedure gc_prune_conversations(
+create procedure response_state.gc_prune_conversations(
   p_batch_size integer default 200,
   p_max_idle interval default interval '30 days'
 )
@@ -247,7 +252,7 @@ begin
        and c.conversation_id = d.conversation_id
      returning c.scope_id, c.current_response_id
   loop
-    call gc_try_delete_response(
+    call response_state.gc_try_delete_response(
       v_conversation.scope_id,
       v_conversation.current_response_id
     );
@@ -255,7 +260,7 @@ begin
 end;
 $$;
 
-create procedure gc_prune_unreferenced_responses(
+create procedure response_state.gc_prune_unreferenced_responses(
   p_batch_size integer default 200
 )
 language plpgsql
@@ -269,15 +274,18 @@ begin
      where child_refcount = 0
        and lease_refcount = 0
      order by created_at
-     for update skip locked
-     limit p_batch_size
+      for update skip locked
+      limit p_batch_size
   loop
-    call gc_try_delete_response(v_response.scope_id, v_response.response_id);
+    call response_state.gc_try_delete_response(
+      v_response.scope_id,
+      v_response.response_id
+    );
   end loop;
 end;
 $$;
 
-create procedure gc_prune_payload_objects(
+create procedure response_state.gc_prune_payloads(
   p_batch_size integer default 500
 )
 language plpgsql
@@ -306,7 +314,7 @@ begin
     perform cron.schedule(
       'expire-response-leases',
       '* * * * *',
-      'call gc_expire_response_leases(200);'
+      'call response_state.gc_expire_leases(200);'
     );
   end if;
 
@@ -316,7 +324,7 @@ begin
     perform cron.schedule(
       'prune-stale-conversations',
       '5 * * * *',
-      'call gc_prune_conversations(200, interval ''30 days'');'
+      'call response_state.gc_prune_conversations(200, interval ''30 days'');'
     );
   end if;
 
@@ -326,7 +334,7 @@ begin
     perform cron.schedule(
       'prune-unreferenced-responses',
       '10 * * * *',
-      'call gc_prune_unreferenced_responses(200);'
+      'call response_state.gc_prune_unreferenced_responses(200);'
     );
   end if;
 
@@ -336,7 +344,7 @@ begin
     perform cron.schedule(
       'prune-zero-ref-payloads',
       '15 * * * *',
-      'call gc_prune_payload_objects(500);'
+      'call response_state.gc_prune_payloads(500);'
     );
   end if;
 end;
@@ -366,10 +374,11 @@ begin
 end;
 $$;
 
-drop procedure if exists gc_prune_payload_objects(integer);
-drop procedure if exists gc_prune_unreferenced_responses(integer);
-drop procedure if exists gc_prune_conversations(integer, interval);
-drop procedure if exists gc_expire_response_leases(integer);
-drop procedure if exists gc_try_delete_response(uuid, text);
-drop procedure if exists gc_try_delete_state_node(uuid, bigint);
+drop procedure if exists response_state.gc_prune_payloads(integer);
+drop procedure if exists response_state.gc_prune_unreferenced_responses(integer);
+drop procedure if exists response_state.gc_prune_conversations(integer, interval);
+drop procedure if exists response_state.gc_expire_leases(integer);
+drop procedure if exists response_state.gc_try_delete_response(uuid, text);
+drop procedure if exists response_state.gc_try_delete_state_node(uuid, bigint);
+drop schema if exists response_state;
 """

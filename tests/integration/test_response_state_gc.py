@@ -142,12 +142,11 @@ async def _table_count(session, table_name: str, scope_id) -> int:
 @pytest.mark.asyncio
 async def test_response_state_gc_registers_cron_jobs(db_session_maker) -> None:
     async with db_session_maker() as session:
-        job_names = (
-            (
-                await session.execute(
-                    text(
-                        """
-                        select jobname
+        jobs = (
+            await session.execute(
+                text(
+                    """
+                        select jobname, command
                           from cron.job
                          where jobname in (
                            'expire-response-leases',
@@ -157,19 +156,17 @@ async def test_response_state_gc_registers_cron_jobs(db_session_maker) -> None:
                          )
                          order by jobname
                         """
-                    )
                 )
             )
-            .scalars()
-            .all()
-        )
+        ).all()
 
-    assert job_names == [
+    assert [job.jobname for job in jobs] == [
         "expire-response-leases",
         "prune-stale-conversations",
         "prune-unreferenced-responses",
         "prune-zero-ref-payloads",
     ]
+    assert all("response_state." in job.command for job in jobs)
 
 
 @pytest.mark.asyncio
@@ -211,7 +208,7 @@ async def test_response_state_gc_expires_lease_and_deletes_suffix(
         )
         await session.commit()
 
-        await session.execute(text("call gc_expire_response_leases(10)"))
+        await session.execute(text("call response_state.gc_expire_leases(10)"))
         await session.commit()
 
         assert await _table_count(session, "responses", scope_id) == 0
@@ -248,7 +245,7 @@ async def test_response_state_gc_prunes_stale_conversations(db_session_maker) ->
         await session.commit()
 
         await session.execute(
-            text("call gc_prune_conversations(10, interval '30 days')")
+            text("call response_state.gc_prune_conversations(10, interval '30 days')")
         )
         await session.commit()
 
@@ -269,7 +266,9 @@ async def test_response_state_gc_prunes_unreferenced_responses(
         await _create_response(session, scope_id, "resp_unreferenced", root_id)
         await session.commit()
 
-        await session.execute(text("call gc_prune_unreferenced_responses(10)"))
+        await session.execute(
+            text("call response_state.gc_prune_unreferenced_responses(10)")
+        )
         await session.commit()
 
         assert await _table_count(session, "responses", scope_id) == 0
@@ -285,7 +284,7 @@ async def test_response_state_gc_prunes_zero_ref_payloads(db_session_maker) -> N
         await _create_payload(session, scope_id, 1)
         await session.commit()
 
-        await session.execute(text("call gc_prune_payload_objects(10)"))
+        await session.execute(text("call response_state.gc_prune_payloads(10)"))
         await session.commit()
 
         assert await _table_count(session, "payload_objects", scope_id) == 0
