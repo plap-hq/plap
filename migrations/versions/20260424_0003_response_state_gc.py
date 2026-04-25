@@ -65,11 +65,14 @@ create schema if not exists response_state;
 
 create extension if not exists pg_cron;
 
+set search_path = response_state, public;
+
 create procedure response_state.gc_try_delete_state_node(
   p_scope_id uuid,
   p_node_id bigint
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_kind text;
@@ -130,6 +133,7 @@ create procedure response_state.gc_try_delete_response(
   p_response_id text
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_prev_response_id text;
@@ -194,6 +198,7 @@ create procedure response_state.gc_expire_leases(
   p_batch_size integer default 200
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_lease record;
@@ -233,6 +238,7 @@ create procedure response_state.gc_prune_conversations(
   p_max_idle interval default interval '30 days'
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_conversation record;
@@ -264,6 +270,7 @@ create procedure response_state.gc_prune_unreferenced_responses(
   p_batch_size integer default 200
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_response record;
@@ -289,6 +296,7 @@ create procedure response_state.gc_prune_payloads(
   p_batch_size integer default 500
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   with claimed as (
@@ -380,5 +388,4 @@ drop procedure if exists response_state.gc_prune_conversations(integer, interval
 drop procedure if exists response_state.gc_expire_leases(integer);
 drop procedure if exists response_state.gc_try_delete_response(uuid, text);
 drop procedure if exists response_state.gc_try_delete_state_node(uuid, bigint);
-drop schema if exists response_state;
 """

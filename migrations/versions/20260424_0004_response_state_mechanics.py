@@ -63,6 +63,92 @@ def _split_sql_statements(script: str) -> list[str]:
 UPGRADE_SQL = r"""
 create schema if not exists response_state;
 
+set search_path = response_state, public;
+
+create function response_state.validate_namespace_counters(
+  p_counters jsonb,
+  p_context text
+)
+returns void
+language plpgsql
+set search_path = response_state, public
+as $$
+declare
+  v_counter record;
+  v_required record;
+  v_namespace_name text;
+  v_namespace_id smallint;
+  v_is_required boolean;
+  v_next_ord bigint;
+  v_seen_namespace_ids smallint[] = '{}'::smallint[];
+begin
+  if jsonb_typeof(p_counters) is distinct from 'array' then
+    raise exception '% namespace counters must be a JSON array', p_context;
+  end if;
+
+  for v_counter in
+    select value, ordinality
+      from jsonb_array_elements(p_counters) with ordinality
+  loop
+    if jsonb_typeof(v_counter.value) is distinct from 'object' then
+      raise exception '% namespace counter at position % must be an object',
+        p_context,
+        v_counter.ordinality - 1;
+    end if;
+
+    v_namespace_name = v_counter.value ->> 'namespace';
+    if v_namespace_name is null or v_namespace_name = '' then
+      raise exception '% namespace counter at position % is missing namespace',
+        p_context,
+        v_counter.ordinality - 1;
+    end if;
+
+    select namespace_id, is_required
+      into v_namespace_id, v_is_required
+      from ordinal_namespaces
+     where namespace_name = v_namespace_name;
+
+    if v_namespace_id is null then
+      raise exception '% namespace counter references unknown namespace %',
+        p_context,
+        v_namespace_name;
+    end if;
+
+    if v_namespace_id = any(v_seen_namespace_ids) then
+      raise exception '% namespace counter duplicates namespace %',
+        p_context,
+        v_namespace_name;
+    end if;
+    v_seen_namespace_ids = array_append(v_seen_namespace_ids, v_namespace_id);
+
+    if not (v_counter.value ? 'next_ord') then
+      raise exception '% namespace counter for % is missing next_ord',
+        p_context,
+        v_namespace_name;
+    end if;
+
+    v_next_ord = (v_counter.value ->> 'next_ord')::bigint;
+    if v_next_ord < 0 then
+      raise exception '% namespace counter for % has negative next_ord',
+        p_context,
+        v_namespace_name;
+    end if;
+  end loop;
+
+  for v_required in
+    select namespace_id, namespace_name
+      from ordinal_namespaces
+     where is_required
+  loop
+    if not (v_required.namespace_id = any(v_seen_namespace_ids)) then
+      raise exception '% namespace counters missing required namespace %',
+        p_context,
+        v_required.namespace_name;
+    end if;
+  end loop;
+end;
+$$;
+
 create function response_state.get_or_create_payload(
   p_scope_id uuid,
   p_payload_hash bytea,
@@ -70,6 +156,7 @@ create function response_state.get_or_create_payload(
 )
 returns uuid
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_payload_id uuid;
@@ -123,6 +210,7 @@ create function response_state.create_leaf(
 )
 returns bigint
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_entry record;
@@ -231,6 +319,7 @@ create function response_state.create_concat(
 )
 returns bigint
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_left_count bigint;
@@ -285,11 +374,12 @@ create function response_state.create_response(
   p_response_id text,
   p_prev_response_id text,
   p_full_state_root_id bigint,
-  p_namespace_counters jsonb default '[]'::jsonb,
+  p_namespace_counters jsonb,
   p_checkpoints jsonb default '[]'::jsonb
 )
 returns text
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_counter record;
@@ -299,9 +389,10 @@ declare
   v_namespace_id smallint;
   v_checkpoint_id bigint;
 begin
-  if jsonb_typeof(p_namespace_counters) is distinct from 'array' then
-    raise exception 'namespace_counters must be a JSON array';
-  end if;
+  perform response_state.validate_namespace_counters(
+    p_namespace_counters,
+    'response'
+  );
 
   if jsonb_typeof(p_checkpoints) is distinct from 'array' then
     raise exception 'checkpoints must be a JSON array';
@@ -361,41 +452,39 @@ begin
     )
     returning checkpoint_id into v_checkpoint_id;
 
-    if v_checkpoint.value ? 'namespace_counters' then
-      if jsonb_typeof(v_checkpoint.value -> 'namespace_counters')
-        is distinct from 'array' then
-        raise exception 'checkpoint namespace_counters must be a JSON array';
-      end if;
-
-      for v_checkpoint_counter in
-        select value
-          from jsonb_array_elements(v_checkpoint.value -> 'namespace_counters')
-      loop
-        v_namespace_name = v_checkpoint_counter.value ->> 'namespace';
-        select namespace_id
-          into v_namespace_id
-          from ordinal_namespaces
-         where namespace_name = v_namespace_name;
-
-        if v_namespace_id is null then
-          raise exception 'unknown ordinal namespace %', v_namespace_name;
-        end if;
-
-        insert into checkpoint_namespace_counters (
-          scope_id,
-          response_id,
-          checkpoint_id,
-          namespace_id,
-          next_ord
-        ) values (
-          p_scope_id,
-          p_response_id,
-          v_checkpoint_id,
-          v_namespace_id,
-          (v_checkpoint_counter.value ->> 'next_ord')::bigint
-        );
-      end loop;
+    if not (v_checkpoint.value ? 'namespace_counters') then
+      raise exception 'checkpoint namespace_counters are required';
     end if;
+
+    perform response_state.validate_namespace_counters(
+      v_checkpoint.value -> 'namespace_counters',
+      'checkpoint'
+    );
+
+    for v_checkpoint_counter in
+      select value
+        from jsonb_array_elements(v_checkpoint.value -> 'namespace_counters')
+    loop
+      v_namespace_name = v_checkpoint_counter.value ->> 'namespace';
+      select namespace_id
+        into v_namespace_id
+        from ordinal_namespaces
+       where namespace_name = v_namespace_name;
+
+      insert into checkpoint_namespace_counters (
+        scope_id,
+        response_id,
+        checkpoint_id,
+        namespace_id,
+        next_ord
+      ) values (
+        p_scope_id,
+        p_response_id,
+        v_checkpoint_id,
+        v_namespace_id,
+        (v_checkpoint_counter.value ->> 'next_ord')::bigint
+      );
+    end loop;
   end loop;
 
   return p_response_id;
@@ -407,7 +496,7 @@ create function response_state.append_items(
   p_response_id text,
   p_prev_response_id text,
   p_items jsonb,
-  p_namespace_counters jsonb default '[]'::jsonb,
+  p_namespace_counters jsonb,
   p_checkpoints jsonb default '[]'::jsonb
 )
 returns table (
@@ -415,6 +504,7 @@ returns table (
   root_node_id bigint
 )
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_leaf_id bigint;
@@ -469,6 +559,7 @@ create function response_state.create_or_refresh_lease(
 )
 returns uuid
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   v_lease_id uuid;
@@ -527,6 +618,7 @@ create function response_state.release_lease(
 )
 returns void
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   delete from response_leases
@@ -544,6 +636,7 @@ create function response_state.move_conversation(
 )
 returns void
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   insert into conversations (
@@ -592,4 +685,5 @@ drop function if exists response_state.create_response(
 drop function if exists response_state.create_concat(uuid, bigint, bigint);
 drop function if exists response_state.create_leaf(uuid, jsonb);
 drop function if exists response_state.get_or_create_payload(uuid, bytea, jsonb);
+drop function if exists response_state.validate_namespace_counters(jsonb, text);
 """

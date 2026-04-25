@@ -28,6 +28,15 @@ def _items(*payloads: dict[str, object], start_ord: int = 0) -> str:
     )
 
 
+def _namespace_counters(message_next_ord: int, summary_next_ord: int = 0) -> str:
+    return json.dumps(
+        [
+            {"namespace": "m", "next_ord": message_next_ord},
+            {"namespace": "s", "next_ord": summary_next_ord},
+        ]
+    )
+
+
 async def _append_response(
     session,
     scope_id,
@@ -57,9 +66,7 @@ async def _append_response(
                 "response_id": response_id,
                 "prev_response_id": prev_response_id,
                 "items": _items(payload),
-                "namespace_counters": json.dumps(
-                    [{"namespace": "m", "next_ord": next_ord}]
-                ),
+                "namespace_counters": _namespace_counters(next_ord),
             },
         )
     ).one()
@@ -72,7 +79,7 @@ async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int,
             text(
                 """
                 select child_refcount, lease_refcount
-                  from responses
+                  from response_state.responses
                  where scope_id = :scope_id
                    and response_id = :response_id
                 """
@@ -204,7 +211,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
                 text(
                     """
                     select node_id, kind, item_count, refcount
-                      from state_nodes
+                      from response_state.state_nodes
                      where scope_id = :scope_id
                        and node_id in (:left_id, :right_id, :concat_id)
                      order by node_id
@@ -256,7 +263,7 @@ async def test_response_state_append_items_creates_response_chain(
                 text(
                     """
                     select kind
-                      from state_nodes
+                      from response_state.state_nodes
                      where scope_id = :scope_id
                        and node_id = :node_id
                     """
@@ -268,10 +275,13 @@ async def test_response_state_append_items_creates_response_chain(
             await session.execute(
                 text(
                     """
-                    select next_ord
-                      from response_namespace_counters
+                    select c.next_ord
+                      from response_state.response_namespace_counters c
+                      join response_state.ordinal_namespaces n
+                        on n.namespace_id = c.namespace_id
                      where scope_id = :scope_id
                        and response_id = 'resp_2'
+                       and n.namespace_name = 'm'
                     """
                 ),
                 {"scope_id": scope_id},
@@ -283,6 +293,38 @@ async def test_response_state_append_items_creates_response_chain(
     assert second_counts == (0, 0)
     assert second_root_kind == "concat"
     assert counters == 2
+
+
+@pytest.mark.asyncio
+async def test_response_state_append_items_requires_complete_namespace_counters(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match="missing required namespace s"):
+            await session.execute(
+                text(
+                    """
+                    select root_node_id
+                      from response_state.append_items(
+                        :scope_id,
+                        'resp_partial_counters',
+                        null,
+                        cast(:items as jsonb),
+                        cast(:namespace_counters as jsonb),
+                        '[]'::jsonb
+                      )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": _items({"type": "message", "text": "partial"}),
+                    "namespace_counters": json.dumps(
+                        [{"namespace": "m", "next_ord": 1}]
+                    ),
+                },
+            )
 
 
 @pytest.mark.asyncio
@@ -384,7 +426,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
                 text(
                     """
                     select owner_type, owner_id, response_id
-                      from response_leases
+                      from response_state.response_leases
                      where scope_id = :scope_id
                        and status = 'live'
                      order by owner_type, owner_id

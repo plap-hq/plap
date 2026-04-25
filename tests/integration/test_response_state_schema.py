@@ -17,7 +17,7 @@ async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) ->
                     text(
                         """
                     select namespace_name
-                      from ordinal_namespaces
+                      from response_state.ordinal_namespaces
                      where namespace_name in ('m', 's')
                      order by namespace_name
                     """
@@ -61,7 +61,7 @@ async def test_response_state_gc_and_fk_indexes_are_shaped_for_deletes(
                         """
                         select indexname, indexdef
                           from pg_indexes
-                         where schemaname = 'public'
+                         where schemaname = 'response_state'
                            and indexname = any(:index_names)
                         """
                     ),
@@ -80,7 +80,7 @@ async def _create_payload(session, scope_id) -> str:
         await session.execute(
             text(
                 """
-                insert into payload_objects (
+                insert into response_state.payload_objects (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -106,7 +106,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into ordinal_namespaces (namespace_name)
+                insert into response_state.ordinal_namespaces (namespace_name)
                 values ('message')
                 on conflict (namespace_name) do update
                   set namespace_name = excluded.namespace_name
@@ -120,7 +120,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into state_nodes (scope_id, kind, item_count)
+                insert into response_state.state_nodes (scope_id, kind, item_count)
                 values (:scope_id, 'leaf', 1)
                 returning node_id
                 """
@@ -132,7 +132,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
     await session.execute(
         text(
             """
-            insert into state_leaves (scope_id, node_id, entry_count)
+            insert into response_state.state_leaves (scope_id, node_id, entry_count)
             values (:scope_id, :node_id, 1)
             """
         ),
@@ -141,7 +141,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
     await session.execute(
         text(
             """
-            insert into state_leaf_entries (
+            insert into response_state.state_leaf_entries (
               scope_id,
               node_id,
               pos,
@@ -182,7 +182,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
         await session.execute(
             text(
                 """
-                insert into responses (
+                insert into response_state.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -202,7 +202,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
         await session.execute(
             text(
                 """
-                insert into conversations (
+                insert into response_state.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id
@@ -226,7 +226,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select refcount
-                      from payload_objects
+                       from response_state.payload_objects
                      where scope_id = :scope_id
                        and payload_id = :payload_id
                     """
@@ -239,7 +239,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select refcount
-                      from state_nodes
+                       from response_state.state_nodes
                      where scope_id = :scope_id
                        and node_id = :node_id
                     """
@@ -252,7 +252,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select lease_refcount
-                      from responses
+                       from response_state.responses
                      where scope_id = :scope_id
                        and response_id = :response_id
                     """
@@ -276,7 +276,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
             await session.execute(
                 text(
                     """
-                    insert into ordinal_namespaces (namespace_name)
+                    insert into response_state.ordinal_namespaces (namespace_name)
                     values ('message')
                     returning namespace_id
                     """
@@ -287,7 +287,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
             await session.execute(
                 text(
                     """
-                    insert into state_nodes (scope_id, kind, item_count)
+                    insert into response_state.state_nodes (scope_id, kind, item_count)
                     values (:scope_id, 'leaf', 1)
                     returning node_id
                     """
@@ -298,7 +298,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into state_leaves (scope_id, node_id, entry_count)
+                insert into response_state.state_leaves (scope_id, node_id, entry_count)
                 values (:scope_id, :node_id, 1)
                 """
             ),
@@ -307,7 +307,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into state_leaf_entries (
+                insert into response_state.state_leaf_entries (
                   scope_id,
                   node_id,
                   pos,
@@ -352,7 +352,7 @@ async def test_response_state_rejects_structural_node_updates(
             await session.execute(
                 text(
                     """
-                    update state_nodes
+                    update response_state.state_nodes
                        set item_count = 2
                      where scope_id = :scope_id
                        and node_id = :node_id
@@ -376,7 +376,7 @@ async def test_response_state_rejects_concat_with_duplicate_child(
             await session.execute(
                 text(
                     """
-                    insert into state_nodes (
+                    insert into response_state.state_nodes (
                       scope_id,
                       kind,
                       left_id,
@@ -407,7 +407,7 @@ async def test_response_state_rejects_conversation_identity_updates(
         await session.execute(
             text(
                 """
-                insert into responses (
+                insert into response_state.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -423,7 +423,7 @@ async def test_response_state_rejects_conversation_identity_updates(
         await session.execute(
             text(
                 """
-                insert into conversations (
+                insert into response_state.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id
@@ -443,7 +443,7 @@ async def test_response_state_rejects_conversation_identity_updates(
             await session.execute(
                 text(
                     """
-                    update conversations
+                    update response_state.conversations
                        set conversation_id = 'conv_renamed'
                      where scope_id = :scope_id
                        and conversation_id = 'conv_identity'
@@ -467,7 +467,7 @@ async def test_response_state_rejects_namespace_counter_updates(
                 text(
                     """
                     select namespace_id
-                      from ordinal_namespaces
+                       from response_state.ordinal_namespaces
                      where namespace_name = 'message'
                     """
                 )
@@ -476,7 +476,7 @@ async def test_response_state_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into responses (
+                insert into response_state.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -492,7 +492,7 @@ async def test_response_state_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into response_namespace_counters (
+                insert into response_state.response_namespace_counters (
                   scope_id,
                   response_id,
                   namespace_id,
@@ -514,7 +514,7 @@ async def test_response_state_rejects_namespace_counter_updates(
             await session.execute(
                 text(
                     """
-                    update response_namespace_counters
+                    update response_state.response_namespace_counters
                        set next_ord = 2
                      where scope_id = :scope_id
                        and response_id = 'resp_counter_immutable'

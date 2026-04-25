@@ -61,18 +61,23 @@ def _split_sql_statements(script: str) -> list[str]:
 
 
 UPGRADE_SQL = r"""
-create extension if not exists pgcrypto;
+create schema if not exists response_state;
+
+create extension if not exists pgcrypto with schema public;
+
+set search_path = response_state, public;
 
 create table ordinal_namespaces (
   namespace_id smallint generated always as identity primary key,
   namespace_name text not null unique,
+  is_required boolean not null default false,
 
   check (namespace_name <> ''),
   check (namespace_name = lower(namespace_name))
 );
 
-insert into ordinal_namespaces (namespace_name)
-values ('m'), ('s')
+insert into ordinal_namespaces (namespace_name, is_required)
+values ('m', true), ('s', true)
 on conflict (namespace_name) do nothing;
 
 create table payload_objects (
@@ -338,6 +343,7 @@ create index ix_state_leaf_entries_namespace_ord
 create function forbid_payload_objects_structural_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -358,6 +364,7 @@ for each row execute function forbid_payload_objects_structural_update();
 create function forbid_state_nodes_structural_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -380,6 +387,7 @@ for each row execute function forbid_state_nodes_structural_update();
 create function forbid_any_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   raise exception '% rows are immutable', tg_table_name;
@@ -405,6 +413,7 @@ for each row execute function forbid_any_update();
 create function forbid_responses_structural_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -425,6 +434,7 @@ for each row execute function forbid_responses_structural_update();
 create function forbid_response_checkpoints_structural_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -445,6 +455,7 @@ for each row execute function forbid_response_checkpoints_structural_update();
 create function normalize_response_lease_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -466,6 +477,7 @@ for each row execute function normalize_response_lease_update();
 create function forbid_conversations_structural_update()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if old.scope_id is distinct from new.scope_id
@@ -484,6 +496,7 @@ for each row execute function forbid_conversations_structural_update();
 create function apply_payload_refcount_from_leaf_entry()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -509,6 +522,7 @@ for each row execute function apply_payload_refcount_from_leaf_entry();
 create function apply_concat_child_refcounts()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -538,6 +552,7 @@ for each row execute function apply_concat_child_refcounts();
 create function apply_response_refcounts()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -577,6 +592,7 @@ for each row execute function apply_response_refcounts();
 create function apply_checkpoint_root_refcounts()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -602,6 +618,7 @@ for each row execute function apply_checkpoint_root_refcounts();
 create function apply_response_lease_refcounts()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -655,6 +672,7 @@ for each row execute function apply_response_lease_refcounts();
 create function maintain_conversation_response_lease()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 begin
   if tg_op = 'INSERT' then
@@ -721,6 +739,7 @@ for each row execute function maintain_conversation_response_lease();
 create function validate_state_node_consistency()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   left_count bigint;
@@ -782,6 +801,7 @@ for each row execute function validate_state_node_consistency();
 create function validate_state_leaf_consistency()
 returns trigger
 language plpgsql
+set search_path = response_state, public
 as $$
 declare
   check_scope uuid;
@@ -866,6 +886,8 @@ for each row execute function validate_state_leaf_consistency();
 
 
 DOWNGRADE_SQL = r"""
+set search_path = response_state, public;
+
 drop trigger if exists ct_state_leaf_entries_consistency
   on state_leaf_entries;
 drop trigger if exists ct_state_leaves_consistency on state_leaves;
@@ -921,4 +943,5 @@ drop table if exists state_leaves;
 drop table if exists state_nodes;
 drop table if exists payload_objects;
 drop table if exists ordinal_namespaces;
+drop schema if exists response_state;
 """

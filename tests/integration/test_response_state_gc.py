@@ -12,7 +12,7 @@ async def _create_payload(session, scope_id, marker: int):
         await session.execute(
             text(
                 """
-                insert into payload_objects (
+                insert into response_state.payload_objects (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -40,7 +40,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
             text(
                 """
                 select namespace_id
-                  from ordinal_namespaces
+                  from response_state.ordinal_namespaces
                  where namespace_name = 'm'
                 """
             )
@@ -50,7 +50,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
         await session.execute(
             text(
                 """
-                insert into state_nodes (scope_id, kind, item_count)
+                insert into response_state.state_nodes (scope_id, kind, item_count)
                 values (:scope_id, 'leaf', 1)
                 returning node_id
                 """
@@ -61,7 +61,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
     await session.execute(
         text(
             """
-            insert into state_leaves (scope_id, node_id, entry_count)
+            insert into response_state.state_leaves (scope_id, node_id, entry_count)
             values (:scope_id, :node_id, 1)
             """
         ),
@@ -70,7 +70,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
     await session.execute(
         text(
             """
-            insert into state_leaf_entries (
+            insert into response_state.state_leaf_entries (
               scope_id,
               node_id,
               pos,
@@ -108,7 +108,7 @@ async def _create_response(
     await session.execute(
         text(
             """
-            insert into responses (
+            insert into response_state.responses (
               scope_id,
               response_id,
               prev_response_id,
@@ -133,7 +133,10 @@ async def _create_response(
 async def _table_count(session, table_name: str, scope_id) -> int:
     return (
         await session.execute(
-            text(f"select count(*) from {table_name} where scope_id = :scope_id"),
+            text(
+                f"select count(*) from response_state.{table_name} "
+                "where scope_id = :scope_id"
+            ),
             {"scope_id": scope_id},
         )
     ).scalar_one()
@@ -189,7 +192,7 @@ async def test_response_state_gc_expires_lease_and_deletes_suffix(
         await session.execute(
             text(
                 """
-                insert into response_leases (
+                insert into response_state.response_leases (
                   scope_id,
                   response_id,
                   owner_type,
@@ -227,7 +230,7 @@ async def test_response_state_gc_prunes_stale_conversations(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into conversations (
+                insert into response_state.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id,
