@@ -1033,13 +1033,13 @@ begin
    order by slot
    limit 1;
 
-  select left_root_id, right_root_id
+  select split_result.left_root_id, split_result.right_root_id
     into v_child_left_root_id, v_child_right_root_id
     from responses.split_at_index(
       p_scope_id,
       v_split_child_id,
       p_index - v_before_count
-    );
+    ) split_result;
 
   select array_agg(child_node_id order by slot)
     into v_prefix_children
@@ -1099,13 +1099,17 @@ begin
     raise exception 'delete_count must not be negative';
   end if;
 
-  select left_root_id, right_root_id
+  select split_result.left_root_id, split_result.right_root_id
     into v_left_root_id, v_tail_root_id
-    from responses.split_at_index(p_scope_id, p_root_id, p_start_index);
+    from responses.split_at_index(p_scope_id, p_root_id, p_start_index) split_result;
 
-  select left_root_id, right_root_id
+  select split_result.left_root_id, split_result.right_root_id
     into v_deleted_root_id, v_right_root_id
-    from responses.split_at_index(p_scope_id, v_tail_root_id, p_delete_count);
+    from responses.split_at_index(
+      p_scope_id,
+      v_tail_root_id,
+      p_delete_count
+    ) split_result;
 
   v_combined_root_id = responses.concat_balanced(
     p_scope_id,
@@ -1123,7 +1127,8 @@ create function responses.create_response(
   p_prev_response_id text,
   p_full_state_root_id bigint,
   p_namespace_counters jsonb,
-  p_checkpoints jsonb default '[]'::jsonb
+  p_checkpoints jsonb default '[]'::jsonb,
+  p_retention interval default interval '30 days'
 )
 returns text
 language plpgsql
@@ -1157,6 +1162,24 @@ begin
     p_prev_response_id,
     p_full_state_root_id
   );
+
+  if p_retention is not null then
+    insert into response_leases (
+      scope_id,
+      response_id,
+      owner_type,
+      owner_id,
+      status,
+      expires_at
+    ) values (
+      p_scope_id,
+      p_response_id,
+      'response',
+      p_response_id,
+      'live',
+      now() + p_retention
+    );
+  end if;
 
   for v_counter in
     select value
@@ -1402,7 +1425,8 @@ drop function if exists responses.create_response(
   text,
   bigint,
   jsonb,
-  jsonb
+  jsonb,
+  interval
 );
 drop function if exists responses.splice(uuid, bigint, bigint, bigint, bigint);
 drop function if exists responses.split_at_index(uuid, bigint, bigint);

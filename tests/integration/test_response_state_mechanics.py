@@ -37,6 +37,14 @@ def _namespace_counters(message_next_ord: int, summary_next_ord: int = 0) -> str
     )
 
 
+def _numbered_items(count: int, *, start_ord: int = 0) -> str:
+    payloads = [
+        {"type": "message", "text": f"message {start_ord + index}"}
+        for index in range(count)
+    ]
+    return _items(*payloads, start_ord=start_ord)
+
+
 async def _append_response(
     session,
     scope_id,
@@ -88,6 +96,57 @@ async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int,
         )
     ).one()
     return row.child_refcount, row.lease_refcount
+
+
+async def _create_numbered_tree(session, scope_id, count: int) -> int:
+    return (
+        await session.execute(
+            text(
+                """
+                select responses.create_items_tree(
+                  :scope_id,
+                  cast(:items as jsonb)
+                )
+                """
+            ),
+            {"scope_id": scope_id, "items": _numbered_items(count)},
+        )
+    ).scalar_one()
+
+
+async def _tree_texts(session, scope_id, root_id: int) -> list[str]:
+    return (
+        (
+            await session.execute(
+                text(
+                    """
+                    select payload ->> 'text'
+                      from responses.list_state_items(:scope_id, :root_id)
+                     order by item_position
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _tree_count(session, scope_id, root_id: int | None) -> int:
+    if root_id is None:
+        return 0
+    return (
+        await session.execute(
+            text(
+                """
+                select count(*)
+                  from responses.list_state_items(:scope_id, :root_id)
+                """
+            ),
+            {"scope_id": scope_id, "root_id": root_id},
+        )
+    ).scalar_one()
 
 
 @pytest.mark.asyncio
@@ -637,8 +696,8 @@ async def test_responses_append_items_creates_response_chain(
         ).scalar_one()
 
     assert first_root != second_root
-    assert first_counts == (1, 0)
-    assert second_counts == (0, 0)
+    assert first_counts == (1, 1)
+    assert second_counts == (0, 1)
     assert (second_root.kind, second_root.item_count) == ("internal", 2)
     assert counters == 2
 
@@ -768,6 +827,161 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
 
     assert (root.height, root.child_count, root.item_count) == (2, 2, 65)
     assert child_counts == [33, 32]
+
+
+@pytest.mark.asyncio
+async def test_responses_create_items_tree_handles_leaf_boundary_plus_one(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_numbered_tree(session, scope_id, 129)
+        await session.commit()
+
+        root = (
+            await session.execute(
+                text(
+                    """
+                    select kind, height, item_count, child_count
+                      from responses.state_nodes
+                     where scope_id = :scope_id
+                       and node_id = :root_id
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        ).one()
+        boundary_rows = (
+            await session.execute(
+                text(
+                    """
+                    select item_position, payload ->> 'text' as text
+                      from responses.list_state_items(:scope_id, :root_id, 127, 2)
+                     order by item_position
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        ).all()
+
+    assert (root.kind, root.height, root.item_count, root.child_count) == (
+        "internal",
+        1,
+        129,
+        2,
+    )
+    assert [(row.item_position, row.text) for row in boundary_rows] == [
+        (127, "message 127"),
+        (128, "message 128"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_create_items_tree_handles_multilevel_8193_items(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_numbered_tree(session, scope_id, 8193)
+        await session.commit()
+
+        root = (
+            await session.execute(
+                text(
+                    """
+                    select height, item_count, child_count
+                      from responses.state_nodes
+                     where scope_id = :scope_id
+                       and node_id = :root_id
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        ).one()
+        edge_rows = (
+            await session.execute(
+                text(
+                    """
+                    select item_position, payload ->> 'text' as text
+                      from responses.list_state_items(:scope_id, :root_id, 8191, 2)
+                     order by item_position
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        ).all()
+
+    assert (root.height, root.item_count, root.child_count) == (2, 8193, 2)
+    assert [(row.item_position, row.text) for row in edge_rows] == [
+        (8191, "message 8191"),
+        (8192, "message 8192"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_split_at_index_handles_edges_and_boundaries(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_numbered_tree(session, scope_id, 8193)
+        await session.commit()
+
+        expected_counts = {
+            0: (0, 8193),
+            37: (37, 8156),
+            128: (128, 8065),
+            4224: (4224, 3969),
+            8193: (8193, 0),
+        }
+        observed_counts = {}
+        for split_index in expected_counts:
+            split = (
+                await session.execute(
+                    text(
+                        """
+                        select left_root_id, right_root_id
+                          from responses.split_at_index(
+                            :scope_id,
+                            :root_id,
+                            :split_index
+                          )
+                        """
+                    ),
+                    {
+                        "scope_id": scope_id,
+                        "root_id": root_id,
+                        "split_index": split_index,
+                    },
+                )
+            ).one()
+            observed_counts[split_index] = (
+                await _tree_count(session, scope_id, split.left_root_id),
+                await _tree_count(session, scope_id, split.right_root_id),
+            )
+
+        old_root_sample = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    select payload ->> 'text'
+                      from responses.list_state_items(:scope_id, :root_id, 4223, 2)
+                     order by item_position
+                    """
+                    ),
+                    {"scope_id": scope_id, "root_id": root_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert observed_counts == expected_counts
+    assert old_root_sample == ["message 4223", "message 4224"]
 
 
 @pytest.mark.asyncio
@@ -922,12 +1136,225 @@ async def test_responses_list_and_splice_support_compaction_shape(
                 {"scope_id": scope_id, "root_id": spliced_root_id},
             )
         ).all()
+        old_rows = (
+            await session.execute(
+                text(
+                    """
+                    select namespace, ord, payload ->> 'text' as text
+                      from responses.list_state_items(:scope_id, :root_id)
+                     order by item_position
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": root_id},
+            )
+        ).all()
 
     assert [(row.namespace, row.ord, row.text) for row in rows] == [
         ("m", 0, "m1"),
         ("s", 0, "s1"),
         ("m", 3, "m4"),
     ]
+    assert [(row.namespace, row.ord, row.text) for row in old_rows] == [
+        ("m", 0, "m1"),
+        ("m", 1, "m2"),
+        ("m", 2, "m3"),
+        ("m", 3, "m4"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_gc_preserves_shared_nodes_after_splice(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+    summary_payload = {"type": "summary", "text": "summary 0"}
+
+    async with db_session_maker() as session:
+        old_root_id = await _create_numbered_tree(session, scope_id, 257)
+        shared_leaf_ids = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        select child_node_id
+                          from responses.state_node_children
+                         where scope_id = :scope_id
+                           and parent_node_id = :root_id
+                           and slot in (0, 2)
+                         order by slot
+                        """
+                    ),
+                    {"scope_id": scope_id, "root_id": old_root_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        summary_root_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.create_items_tree(
+                      :scope_id,
+                      cast(:items as jsonb)
+                    )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": json.dumps(
+                        [
+                            {
+                                "namespace": "s",
+                                "ord": 0,
+                                "payload_hash": _canonical_payload_hash(
+                                    summary_payload
+                                ),
+                                "payload": summary_payload,
+                            }
+                        ]
+                    ),
+                },
+            )
+        ).scalar_one()
+        new_root_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.splice(
+                      :scope_id,
+                      :root_id,
+                      129,
+                      1,
+                      :summary_root_id
+                    )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "root_id": old_root_id,
+                    "summary_root_id": summary_root_id,
+                },
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_old_root',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb,
+                  null
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": old_root_id,
+                "namespace_counters": _namespace_counters(257),
+            },
+        )
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_new_root',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb,
+                  null
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": new_root_id,
+                "namespace_counters": _namespace_counters(257, 1),
+            },
+        )
+        await session.commit()
+
+        before_count = (
+            await session.execute(
+                text(
+                    """
+                    select count(*)
+                      from responses.state_nodes
+                     where scope_id = :scope_id
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+        await session.execute(text("call responses.gc_prune_state_nodes(1000)"))
+        await session.commit()
+        after_count = (
+            await session.execute(
+                text(
+                    """
+                    select count(*)
+                      from responses.state_nodes
+                     where scope_id = :scope_id
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+        shared_nodes_exist = (
+            await session.execute(
+                text(
+                    """
+                    select count(*)
+                      from responses.state_nodes
+                     where scope_id = :scope_id
+                       and node_id = any(:node_ids)
+                    """
+                ),
+                {"scope_id": scope_id, "node_ids": shared_leaf_ids},
+            )
+        ).scalar_one()
+        old_sample = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    select payload ->> 'text'
+                      from responses.list_state_items(:scope_id, :root_id, 128, 3)
+                     order by item_position
+                    """
+                    ),
+                    {"scope_id": scope_id, "root_id": old_root_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        new_sample = (
+            (
+                await session.execute(
+                    text(
+                        """
+                    select payload ->> 'text'
+                      from responses.list_state_items(:scope_id, :root_id, 128, 3)
+                     order by item_position
+                    """
+                    ),
+                    {"scope_id": scope_id, "root_id": new_root_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert after_count < before_count
+    assert shared_nodes_exist == len(shared_leaf_ids)
+    assert old_sample == ["message 128", "message 129", "message 130"]
+    assert new_sample == ["message 128", "summary 0", "message 130"]
 
 
 @pytest.mark.asyncio
@@ -1072,8 +1499,10 @@ async def test_responses_lease_and_conversation_helpers_move_roots(
         ).all()
 
     assert refreshed_lease_id == lease_id
-    assert resp_1_counts == (1, 0)
-    assert resp_2_counts == (0, 1)
+    assert resp_1_counts == (1, 1)
+    assert resp_2_counts == (0, 2)
     assert [(row.owner_type, row.owner_id, row.response_id) for row in live_leases] == [
-        ("conversation", "conv_1", "resp_2")
+        ("conversation", "conv_1", "resp_2"),
+        ("response", "resp_1", "resp_1"),
+        ("response", "resp_2", "resp_2"),
     ]

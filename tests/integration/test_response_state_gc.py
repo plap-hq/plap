@@ -141,6 +141,15 @@ async def _create_response(
     )
 
 
+def _namespace_counters(message_next_ord: int, summary_next_ord: int = 0) -> str:
+    return json.dumps(
+        [
+            {"namespace": "m", "next_ord": message_next_ord},
+            {"namespace": "s", "next_ord": summary_next_ord},
+        ]
+    )
+
+
 async def _table_count(session, table_name: str, scope_id) -> int:
     return (
         await session.execute(
@@ -285,6 +294,155 @@ async def test_responses_gc_prunes_unreferenced_responses(
         await session.execute(
             text("call responses.gc_prune_unreferenced_responses(10)")
         )
+        await session.commit()
+
+        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "state_nodes", scope_id) == 0
+        assert await _table_count(session, "payload_objects", scope_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_created_via_mechanics_get_response_owned_retention(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_leaf(session, scope_id, 1)
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_retained',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": root_id,
+                "namespace_counters": _namespace_counters(1),
+            },
+        )
+        await session.commit()
+
+        lease = (
+            await session.execute(
+                text(
+                    """
+                    select owner_type, owner_id, status, expires_at > now() as future
+                      from responses.response_leases
+                     where scope_id = :scope_id
+                       and response_id = 'resp_retained'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).one()
+        assert (lease.owner_type, lease.owner_id, lease.status, lease.future) == (
+            "response",
+            "resp_retained",
+            "live",
+            True,
+        )
+
+        await session.execute(
+            text("call responses.gc_prune_unreferenced_responses(10)")
+        )
+        await session.commit()
+        assert await _table_count(session, "responses", scope_id) == 1
+
+        await session.execute(
+            text(
+                """
+                update responses.response_leases
+                   set expires_at = now() - interval '1 hour'
+                 where scope_id = :scope_id
+                   and response_id = 'resp_retained'
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.commit()
+
+        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "state_nodes", scope_id) == 0
+        assert await _table_count(session, "payload_objects", scope_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_response_owned_head_lease_retains_previous_chain(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        first_root = await _create_leaf(session, scope_id, 1)
+        second_root = await _create_leaf(session, scope_id, 2)
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_chain_1',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb,
+                  null
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": first_root,
+                "namespace_counters": _namespace_counters(1),
+            },
+        )
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_chain_2',
+                  'resp_chain_1',
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": second_root,
+                "namespace_counters": _namespace_counters(2),
+            },
+        )
+        await session.commit()
+
+        await session.execute(
+            text("call responses.gc_prune_unreferenced_responses(10)")
+        )
+        await session.commit()
+        assert await _table_count(session, "responses", scope_id) == 2
+
+        await session.execute(
+            text(
+                """
+                update responses.response_leases
+                   set expires_at = now() - interval '1 hour'
+                 where scope_id = :scope_id
+                   and response_id = 'resp_chain_2'
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.execute(text("call responses.gc_expire_leases(10)"))
         await session.commit()
 
         assert await _table_count(session, "responses", scope_id) == 0
