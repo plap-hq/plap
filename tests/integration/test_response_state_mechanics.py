@@ -1163,6 +1163,169 @@ async def test_responses_list_and_splice_support_compaction_shape(
 
 
 @pytest.mark.asyncio
+async def test_responses_summary_compaction_workflow_persists_new_head(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        base_root_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.create_items_tree(
+                      :scope_id,
+                      cast(:items as jsonb)
+                    )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": _items(
+                        {"type": "message", "text": "m1"},
+                        {"type": "message", "text": "m2"},
+                        {"type": "message", "text": "m3"},
+                        {"type": "message", "text": "m4"},
+                    ),
+                },
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_b',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": base_root_id,
+                "namespace_counters": _namespace_counters(4),
+            },
+        )
+        await session.execute(
+            text("select responses.move_conversation(:scope_id, 'conv_1', 'resp_b')"),
+            {"scope_id": scope_id},
+        )
+
+        summary_payload = {"type": "summary", "text": "s1"}
+        summary_root_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.create_items_tree(
+                      :scope_id,
+                      cast(:items as jsonb)
+                    )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "items": json.dumps(
+                        [
+                            {
+                                "namespace": "s",
+                                "ord": 0,
+                                "payload_hash": _canonical_payload_hash(
+                                    summary_payload
+                                ),
+                                "payload": summary_payload,
+                            }
+                        ]
+                    ),
+                },
+            )
+        ).scalar_one()
+        compacted_root_id = (
+            await session.execute(
+                text(
+                    """
+                    select responses.splice(
+                      :scope_id,
+                      :root_id,
+                      1,
+                      2,
+                      :summary_root_id
+                    )
+                    """
+                ),
+                {
+                    "scope_id": scope_id,
+                    "root_id": base_root_id,
+                    "summary_root_id": summary_root_id,
+                },
+            )
+        ).scalar_one()
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_c',
+                  'resp_b',
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": compacted_root_id,
+                "namespace_counters": _namespace_counters(4, 1),
+            },
+        )
+        await session.execute(
+            text("select responses.move_conversation(:scope_id, 'conv_1', 'resp_c')"),
+            {"scope_id": scope_id},
+        )
+        await session.commit()
+
+        current_response_id = (
+            await session.execute(
+                text(
+                    """
+                    select current_response_id
+                      from responses.conversations
+                     where scope_id = :scope_id
+                       and conversation_id = 'conv_1'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+        compacted_items = (
+            await session.execute(
+                text(
+                    """
+                    select namespace, ord, payload ->> 'text' as text
+                      from responses.list_state_items(:scope_id, :root_id)
+                     order by item_position
+                    """
+                ),
+                {"scope_id": scope_id, "root_id": compacted_root_id},
+            )
+        ).all()
+        b_counts = await _response_refcounts(session, scope_id, "resp_b")
+        c_counts = await _response_refcounts(session, scope_id, "resp_c")
+
+    assert current_response_id == "resp_c"
+    assert [(row.namespace, row.ord, row.text) for row in compacted_items] == [
+        ("m", 0, "m1"),
+        ("s", 0, "s1"),
+        ("m", 3, "m4"),
+    ]
+    assert b_counts == (1, 1)
+    assert c_counts == (0, 2)
+
+
+@pytest.mark.asyncio
 async def test_responses_gc_preserves_shared_nodes_after_splice(
     db_session_maker,
 ) -> None:

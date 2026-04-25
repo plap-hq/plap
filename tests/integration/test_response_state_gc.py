@@ -367,9 +367,100 @@ async def test_responses_created_via_mechanics_get_response_owned_retention(
             ),
             {"scope_id": scope_id},
         )
+        await session.commit()
+
+        assert await _table_count(session, "response_leases", scope_id) == 1
+        assert await _table_count(session, "responses", scope_id) == 1
+        assert await _table_count(session, "state_nodes", scope_id) == 1
+        assert await _table_count(session, "payload_objects", scope_id) == 1
+
         await session.execute(text("call responses.gc_expire_leases(10)"))
         await session.commit()
 
+        assert await _table_count(session, "responses", scope_id) == 0
+        assert await _table_count(session, "state_nodes", scope_id) == 0
+        assert await _table_count(session, "payload_objects", scope_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_conversation_lease_survives_response_retention_expiry(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_leaf(session, scope_id, 1)
+        await session.execute(
+            text(
+                """
+                select responses.create_response(
+                  :scope_id,
+                  'resp_active_conversation',
+                  null,
+                  :root_id,
+                  cast(:namespace_counters as jsonb),
+                  '[]'::jsonb
+                )
+                """
+            ),
+            {
+                "scope_id": scope_id,
+                "root_id": root_id,
+                "namespace_counters": _namespace_counters(1),
+            },
+        )
+        await session.execute(
+            text(
+                """
+                select responses.move_conversation(
+                  :scope_id,
+                  'conv_active',
+                  'resp_active_conversation'
+                )
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.execute(
+            text(
+                """
+                update responses.response_leases
+                   set expires_at = now() - interval '1 hour'
+                 where scope_id = :scope_id
+                   and response_id = 'resp_active_conversation'
+                   and owner_type = 'response'
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.commit()
+
+        await session.execute(text("call responses.gc_expire_leases(10)"))
+        await session.commit()
+
+        assert await _table_count(session, "conversations", scope_id) == 1
+        assert await _table_count(session, "response_leases", scope_id) == 1
+        assert await _table_count(session, "responses", scope_id) == 1
+        assert await _table_count(session, "state_nodes", scope_id) == 1
+
+        await session.execute(
+            text(
+                """
+                update responses.conversations
+                   set last_used_at = now() - interval '31 days'
+                 where scope_id = :scope_id
+                   and conversation_id = 'conv_active'
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.execute(
+            text("call responses.gc_prune_conversations(10, interval '30 days')")
+        )
+        await session.commit()
+
+        assert await _table_count(session, "conversations", scope_id) == 0
+        assert await _table_count(session, "response_leases", scope_id) == 0
         assert await _table_count(session, "responses", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
         assert await _table_count(session, "payload_objects", scope_id) == 0
