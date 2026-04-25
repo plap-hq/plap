@@ -6,12 +6,17 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
-from plap.responses.state import NamespaceCursor, ResponseStateRepository, StateItem
+from plap.responses.state import NamespaceCursor, ResponseRepository, StateItem
 
 
-def _cursors(message_next_ordinal: int, summary_next_ordinal: int = 0):
+def _cursors(
+    message_next_ordinal: int,
+    summary_next_ordinal: int = 0,
+    reasoning_next_ordinal: int = 0,
+):
     return (
         NamespaceCursor(namespace="m", next_ordinal=message_next_ordinal),
+        NamespaceCursor(namespace="r", next_ordinal=reasoning_next_ordinal),
         NamespaceCursor(namespace="s", next_ordinal=summary_next_ordinal),
     )
 
@@ -40,7 +45,7 @@ async def test_response_state_repository_builds_and_lists_tree(
     items = [_message(0, "one"), _message(1, "two")]
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         state_root_id = await repository.build_tree(scope_id, items)
         await session.commit()
 
@@ -68,7 +73,7 @@ async def test_response_state_repository_rejects_mismatched_payload_hash(
     )
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         with pytest.raises(ValueError, match="payload_hash does not match"):
             await repository.build_tree(scope_id, [item])
 
@@ -80,7 +85,7 @@ async def test_response_state_repository_appends_and_reads_records(
     scope_id = uuid4()
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         first = await repository.append_response(
             scope_id,
             "resp_1",
@@ -124,7 +129,7 @@ async def test_response_state_repository_splices_summary_state(
     scope_id = uuid4()
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         base_root = await repository.build_tree(
             scope_id,
             [
@@ -182,7 +187,7 @@ async def test_response_state_repository_scopes_response_ids(
     second_scope_id = uuid4()
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         first = await repository.append_response(
             first_scope_id,
             "resp_same",
@@ -224,7 +229,7 @@ async def test_response_state_repository_preserves_explicit_completed_at(
     completed_at = datetime(2026, 4, 24, 12, 30, tzinfo=UTC)
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         await repository.append_response(
             scope_id,
             "resp_completed_at",
@@ -250,7 +255,7 @@ async def test_response_state_repository_sets_conversation_retention(
     scope_id = uuid4()
 
     async with db_session_maker() as session:
-        repository = ResponseStateRepository(session)
+        repository = ResponseRepository(session)
         await repository.append_response(
             scope_id,
             "resp_retention",

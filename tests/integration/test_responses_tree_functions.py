@@ -32,6 +32,7 @@ def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0)
     return json.dumps(
         [
             {"namespace": "m", "next_ordinal": message_next_ordinal},
+            {"namespace": "r", "next_ordinal": 0},
             {"namespace": "s", "next_ordinal": summary_next_ordinal},
         ]
     )
@@ -1198,6 +1199,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                   'resp_b',
                   null,
                   :root_id,
+                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
@@ -1272,6 +1274,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                   'resp_c',
                   'resp_b',
                   :root_id,
+                  :output_root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
@@ -1280,6 +1283,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             {
                 "scope_id": scope_id,
                 "root_id": compacted_root_id,
+                "output_root_id": summary_root_id,
                 "namespace_cursors": _namespace_cursors(4, 1),
             },
         )
@@ -1412,6 +1416,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                   'resp_old_root',
                   null,
                   :root_id,
+                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
@@ -1431,6 +1436,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                   :scope_id,
                   'resp_new_root',
                   null,
+                  :root_id,
                   :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
@@ -1531,7 +1537,7 @@ async def test_responses_append_response_requires_complete_namespace_cursors(
     scope_id = uuid4()
 
     async with db_session_maker() as session:
-        with pytest.raises(SQLAlchemyError, match="missing required namespace s"):
+        with pytest.raises(SQLAlchemyError, match="missing required namespace"):
             await session.execute(
                 text(
                     """

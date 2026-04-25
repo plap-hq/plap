@@ -18,7 +18,7 @@ async def test_responses_seeds_core_item_namespaces(db_session_maker) -> None:
                         """
                     select namespace_name
                       from responses.item_namespaces
-                     where namespace_name in ('m', 's')
+                     where namespace_name in ('m', 'r', 's')
                      order by namespace_name
                     """
                     )
@@ -28,7 +28,7 @@ async def test_responses_seeds_core_item_namespaces(db_session_maker) -> None:
             .all()
         )
 
-    assert namespace_names == ["m", "s"]
+    assert namespace_names == ["m", "r", "s"]
 
 
 @pytest.mark.asyncio
@@ -49,6 +49,9 @@ async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
         ),
         "ix_response_records_gc": "(created_at, scope_id, response_id)",
         "ix_response_records_state_root": "(scope_id, state_root_id, response_id)",
+        "ix_response_records_output_state_root": (
+            "(scope_id, output_state_root_id, response_id)"
+        ),
         "ix_response_checkpoints_state_root": (
             "(scope_id, state_root_id, response_id, checkpoint_id)"
         ),
@@ -202,10 +205,12 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
                 insert into responses.response_records (
                   scope_id,
                   response_id,
-                  state_root_id
+                  state_root_id,
+                  output_state_root_id
                 ) values (
                   :scope_id,
                   :response_id,
+                  :node_id,
                   :node_id
                 )
                 """
@@ -279,7 +284,7 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
         ).scalar_one()
 
     assert payload_refcount == 1
-    assert root_refcount == 1
+    assert root_refcount == 2
     assert lease_refcount == 1
 
 
@@ -537,10 +542,12 @@ async def test_responses_rejects_conversation_identity_updates(
                 insert into responses.response_records (
                   scope_id,
                   response_id,
-                  state_root_id
+                  state_root_id,
+                  output_state_root_id
                 ) values (
                   :scope_id,
                   'resp_conversation_identity',
+                  :node_id,
                   :node_id
                 )
                 """
@@ -606,10 +613,12 @@ async def test_responses_rejects_namespace_counter_updates(
                 insert into responses.response_records (
                   scope_id,
                   response_id,
-                  state_root_id
+                  state_root_id,
+                  output_state_root_id
                 ) values (
                   :scope_id,
                   'resp_counter_immutable',
+                  :node_id,
                   :node_id
                 )
                 """
@@ -669,10 +678,12 @@ async def test_responses_rejects_non_object_response_fields(
                       scope_id,
                       response_id,
                       state_root_id,
+                      output_state_root_id,
                       fields
                     ) values (
                       :scope_id,
                       'resp_bad_fields',
+                      :node_id,
                       :node_id,
                       '[]'::jsonb
                     )
@@ -698,11 +709,13 @@ async def test_responses_allows_lifecycle_updates_but_rejects_fields_updates(
                   scope_id,
                   response_id,
                   state_root_id,
+                  output_state_root_id,
                   status,
                   fields
                 ) values (
                   :scope_id,
                   'resp_lifecycle',
+                  :node_id,
                   :node_id,
                   'in_progress',
                   '{"model":"test/model"}'::jsonb

@@ -77,7 +77,7 @@ create table item_namespaces (
 );
 
 insert into item_namespaces (namespace_name, is_required)
-values ('m', true), ('s', true)
+values ('m', true), ('r', true), ('s', true)
 on conflict (namespace_name) do nothing;
 
 create table payloads (
@@ -187,6 +187,7 @@ create table response_records (
   response_id text not null,
   prev_response_id text,
   state_root_id bigint not null,
+  output_state_root_id bigint not null,
   child_refcount bigint not null default 0,
   lease_refcount bigint not null default 0,
   status text not null default 'completed',
@@ -200,6 +201,9 @@ create table response_records (
     references response_records (scope_id, response_id),
 
   foreign key (scope_id, state_root_id)
+    references state_nodes (scope_id, node_id),
+
+  foreign key (scope_id, output_state_root_id)
     references state_nodes (scope_id, node_id),
 
   check (response_id <> ''),
@@ -344,6 +348,9 @@ create index ix_response_records_prev
 create index ix_response_records_state_root
   on response_records (scope_id, state_root_id, response_id);
 
+create index ix_response_records_output_state_root
+  on response_records (scope_id, output_state_root_id, response_id);
+
 create index ix_response_records_gc
   on response_records (created_at, scope_id, response_id)
   where child_refcount = 0 and lease_refcount = 0;
@@ -452,6 +459,7 @@ begin
     or old.response_id is distinct from new.response_id
     or old.prev_response_id is distinct from new.prev_response_id
     or old.state_root_id is distinct from new.state_root_id
+    or old.output_state_root_id is distinct from new.output_state_root_id
     or old.fields is distinct from new.fields
     or old.created_at is distinct from new.created_at then
     raise exception 'response_records rows are structurally immutable';
@@ -590,6 +598,11 @@ begin
      where scope_id = new.scope_id
        and node_id = new.state_root_id;
 
+    update state_nodes
+       set refcount = refcount + 1
+     where scope_id = new.scope_id
+       and node_id = new.output_state_root_id;
+
     if new.prev_response_id is not null then
       update response_records
          set child_refcount = child_refcount + 1
@@ -602,6 +615,11 @@ begin
        set refcount = refcount - 1
      where scope_id = old.scope_id
        and node_id = old.state_root_id;
+
+    update state_nodes
+       set refcount = refcount - 1
+     where scope_id = old.scope_id
+       and node_id = old.output_state_root_id;
 
     if old.prev_response_id is not null then
       update response_records

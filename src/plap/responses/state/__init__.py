@@ -1,4 +1,5 @@
-from plap.responses.state.repository import ResponseStateRepository
+from plap.responses.state.repository import ResponseRepository
+from plap.responses.state.store import ResponseStore, StoredResponse, StoredResponseItem
 from plap.responses.state.types import (
     AppendResponseResult,
     NamespaceCursor,
@@ -11,7 +12,10 @@ __all__ = [
     "AppendResponseResult",
     "NamespaceCursor",
     "ResponseRecord",
-    "ResponseStateRepository",
+    "ResponseRepository",
+    "ResponseStore",
     "StateCheckpoint",
     "StateItem",
+    "StoredResponse",
+    "StoredResponseItem",
 ]

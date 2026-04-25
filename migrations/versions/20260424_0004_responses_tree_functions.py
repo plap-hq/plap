@@ -1134,6 +1134,7 @@ create function responses.create_response_record(
   p_response_id text,
   p_prev_response_id text,
   p_state_root_id bigint,
+  p_output_state_root_id bigint,
   p_namespace_cursors jsonb,
   p_checkpoints jsonb default '[]'::jsonb,
   p_retention interval default interval '30 days',
@@ -1182,6 +1183,7 @@ begin
     response_id,
     prev_response_id,
     state_root_id,
+    output_state_root_id,
     status,
     completed_at,
     fields
@@ -1190,6 +1192,7 @@ begin
     p_response_id,
     p_prev_response_id,
     p_state_root_id,
+    p_output_state_root_id,
     p_status,
     coalesce(p_completed_at, case when p_status = 'completed' then now() end),
     p_fields
@@ -1301,7 +1304,8 @@ create function responses.append_response(
 )
 returns table (
   response_id text,
-  state_root_id bigint
+  state_root_id bigint,
+  output_state_root_id bigint
 )
 language plpgsql
 set search_path = responses, public
@@ -1340,6 +1344,7 @@ begin
     p_response_id,
     p_prev_response_id,
     v_root_id,
+    v_items_root_id,
     p_namespace_cursors,
     p_checkpoints,
     p_retention,
@@ -1350,6 +1355,7 @@ begin
 
   response_id = p_response_id;
   state_root_id = v_root_id;
+  output_state_root_id = v_items_root_id;
   return next;
 end;
 $$;
@@ -1494,6 +1500,7 @@ drop function if exists responses.create_response_record(
   uuid,
   text,
   text,
+  bigint,
   bigint,
   jsonb,
   jsonb,

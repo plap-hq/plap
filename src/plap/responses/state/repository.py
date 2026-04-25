@@ -20,7 +20,7 @@ from plap.responses.state.types import (
 )
 
 
-class ResponseStateRepository:
+class ResponseRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -60,7 +60,7 @@ class ResponseStateRepository:
             await self._session.execute(
                 text(
                     """
-                    select namespace, ordinal, payload_hash, payload
+                    select item_position, namespace, ordinal, payload_hash, payload
                       from responses.list_state_items(
                         :scope_id,
                         :state_root_id,
@@ -85,9 +85,39 @@ class ResponseStateRepository:
                 ordinal=row.ordinal,
                 payload=row.payload,
                 payload_hash=row.payload_hash,
+                position=row.item_position,
             )
             for row in rows
         ]
+
+    async def get_namespace_cursors(
+        self,
+        scope_id: UUID,
+        response_id: str,
+    ) -> tuple[NamespaceCursor, ...]:
+        rows = (
+            await self._session.execute(
+                text(
+                    """
+                    select namespace.namespace_name, cursor.next_ordinal
+                      from responses.response_namespace_cursors cursor
+                      join responses.item_namespaces namespace
+                        on namespace.namespace_id = cursor.namespace_id
+                     where cursor.scope_id = :scope_id
+                       and cursor.response_id = :response_id
+                     order by namespace.namespace_name
+                    """
+                ),
+                {"scope_id": scope_id, "response_id": response_id},
+            )
+        ).all()
+        return tuple(
+            NamespaceCursor(
+                namespace=row.namespace_name,
+                next_ordinal=row.next_ordinal,
+            )
+            for row in rows
+        )
 
     async def splice_tree(
         self,
@@ -129,6 +159,7 @@ class ResponseStateRepository:
         state_root_id: int,
         namespace_cursors: Sequence[NamespaceCursor],
         *,
+        output_state_root_id: int | None = None,
         checkpoints: Sequence[StateCheckpoint] = (),
         retention: timedelta | None = timedelta(days=30),
         status: str = "completed",
@@ -144,6 +175,7 @@ class ResponseStateRepository:
                       :response_id,
                       :previous_response_id,
                       :state_root_id,
+                      :output_state_root_id,
                       cast(:namespace_cursors as jsonb),
                       cast(:checkpoints as jsonb),
                       :retention,
@@ -158,6 +190,9 @@ class ResponseStateRepository:
                     "response_id": response_id,
                     "previous_response_id": previous_response_id,
                     "state_root_id": state_root_id,
+                    "output_state_root_id": output_state_root_id
+                    if output_state_root_id is not None
+                    else state_root_id,
                     "namespace_cursors": self._namespace_cursors_json(
                         namespace_cursors
                     ),
@@ -188,7 +223,7 @@ class ResponseStateRepository:
             await self._session.execute(
                 text(
                     """
-                    select response_id, state_root_id
+                    select response_id, state_root_id, output_state_root_id
                       from responses.append_response(
                         :scope_id,
                         :response_id,
@@ -222,6 +257,7 @@ class ResponseStateRepository:
         return AppendResponseResult(
             response_id=row.response_id,
             state_root_id=row.state_root_id,
+            output_state_root_id=row.output_state_root_id,
         )
 
     async def get_response_record(
@@ -234,9 +270,10 @@ class ResponseStateRepository:
                 text(
                     """
                     select response_id,
-                           prev_response_id,
-                           state_root_id,
-                           status,
+                            prev_response_id,
+                            state_root_id,
+                            output_state_root_id,
+                            status,
                            created_at,
                            completed_at,
                            fields
@@ -260,9 +297,10 @@ class ResponseStateRepository:
                 text(
                     """
                     select record.response_id,
-                           record.prev_response_id,
-                           record.state_root_id,
-                           record.status,
+                            record.prev_response_id,
+                            record.state_root_id,
+                            record.output_state_root_id,
+                            record.status,
                            record.created_at,
                            record.completed_at,
                            record.fields
@@ -408,6 +446,7 @@ class ResponseStateRepository:
             response_id=row.response_id,
             previous_response_id=row.prev_response_id,
             state_root_id=row.state_root_id,
+            output_state_root_id=row.output_state_root_id,
             status=row.status,
             created_at=row.created_at,
             completed_at=row.completed_at,

@@ -13,6 +13,7 @@ class StateItem:
     ordinal: int
     payload: JSONPayload
     payload_hash: str | None = None
+    position: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,7 @@ class ResponseRecord:
     response_id: str
     previous_response_id: str | None
     state_root_id: int
+    output_state_root_id: int
     status: str
     created_at: datetime
     completed_at: datetime | None
@@ -42,3 +44,4 @@ class ResponseRecord:
 class AppendResponseResult:
     response_id: str
     state_root_id: int
+    output_state_root_id: int

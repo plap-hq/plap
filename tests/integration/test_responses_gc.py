@@ -123,11 +123,13 @@ async def _create_response(
               scope_id,
               response_id,
               prev_response_id,
-              state_root_id
+              state_root_id,
+              output_state_root_id
             ) values (
               :scope_id,
               :response_id,
               :prev_response_id,
+              :root_id,
               :root_id
             )
             """
@@ -145,6 +147,7 @@ def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0)
     return json.dumps(
         [
             {"namespace": "m", "next_ordinal": message_next_ordinal},
+            {"namespace": "r", "next_ordinal": 0},
             {"namespace": "s", "next_ordinal": summary_next_ordinal},
         ]
     )
@@ -315,6 +318,7 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
                   'resp_retained',
                   null,
                   :root_id,
+                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
                 )
@@ -395,6 +399,7 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
                   :scope_id,
                   'resp_active_conversation',
                   null,
+                  :root_id,
                   :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
@@ -526,6 +531,7 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
                   'resp_chain_1',
                   null,
                   :root_id,
+                  :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb,
                   null
@@ -545,6 +551,7 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
                   :scope_id,
                   'resp_chain_2',
                   'resp_chain_1',
+                  :root_id,
                   :root_id,
                   cast(:namespace_cursors as jsonb),
                   '[]'::jsonb
