@@ -13,6 +13,7 @@ from litestar.exceptions import (
 from plap.auth import APIKeyManager
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
+from plap.responses.tools import StaticToolPolicyResolver
 from plap.settings import Settings, get_settings
 
 
@@ -109,6 +110,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "owns_engine": True,
             "session_maker": session_maker,
             "settings": resolved_settings,
+            "tool_policy_resolver": StaticToolPolicyResolver(),
         }
     )
 

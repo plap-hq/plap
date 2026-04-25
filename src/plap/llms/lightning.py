@@ -13,4 +13,9 @@ class LightningChatCompletionClient(OpenAICompatibleChatCompletionClient):
         base_url: str | None = None,
         client: Any | None = None,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url, client=client)
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            client=client,
+            developer_role="system",
+        )

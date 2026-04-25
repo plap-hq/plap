@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
-from litestar import delete, get, post, websocket
+from litestar import Request, delete, get, post, websocket
 from litestar.connection import WebSocket
+from litestar.exceptions import ValidationException
 from litestar.response import ServerSentEvent
 from pydantic import ValidationError
 
@@ -32,6 +34,7 @@ from plap.responses.stubs import (
     build_stream_events,
     build_stub_response,
 )
+from plap.responses.tools import ToolPolicyError, ToolPolicyResolver
 
 
 async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
@@ -44,8 +47,14 @@ async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
 async def create_response(
     data: ResponseCreateRequest,
     auth_context: AuthContext,
+    request: Request[Any, Any, Any],
 ) -> object:
     _ = auth_context
+    try:
+        resolver: ToolPolicyResolver = request.app.state.tool_policy_resolver
+        await resolver.resolve(data.tools or [])
+    except ToolPolicyError as exc:
+        raise ValidationException(str(exc)) from exc
     response = build_stub_response(data)
     if data.stream:
         return ServerSentEvent(

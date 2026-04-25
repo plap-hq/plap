@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 from openai import (
@@ -43,13 +43,19 @@ class OpenAICompatibleChatCompletionClient:
         api_key: str | None = None,
         base_url: str | None = None,
         client: Any | None = None,
+        developer_role: Literal["developer", "system"] = "developer",
     ) -> None:
         self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._developer_role = developer_role
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         try:
             response = await self._client.chat.completions.create(
-                **to_openai_chat_params(request, stream=False)
+                **to_openai_chat_params(
+                    request,
+                    stream=False,
+                    developer_role=self._developer_role,
+                )
             )
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
@@ -60,7 +66,11 @@ class OpenAICompatibleChatCompletionClient:
     ) -> AsyncIterator[ChatCompletionDelta]:
         try:
             stream = await self._client.chat.completions.create(
-                **to_openai_chat_params(request, stream=True)
+                **to_openai_chat_params(
+                    request,
+                    stream=True,
+                    developer_role=self._developer_role,
+                )
             )
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
@@ -69,11 +79,17 @@ class OpenAICompatibleChatCompletionClient:
 
 
 def to_openai_chat_params(
-    request: ChatCompletionRequest, *, stream: bool
+    request: ChatCompletionRequest,
+    *,
+    stream: bool,
+    developer_role: Literal["developer", "system"] = "developer",
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "model": request.model,
-        "messages": [_message_to_param(message) for message in request.messages],
+        "messages": [
+            _message_to_param(message, developer_role=developer_role)
+            for message in request.messages
+        ],
         "stream": stream,
     }
     _set(
@@ -105,8 +121,13 @@ def to_openai_chat_params(
     return params
 
 
-def _message_to_param(message: ChatMessage) -> dict[str, Any]:
-    value: dict[str, Any] = {"role": message.role}
+def _message_to_param(
+    message: ChatMessage,
+    *,
+    developer_role: Literal["developer", "system"],
+) -> dict[str, Any]:
+    role = developer_role if message.role == "developer" else message.role
+    value: dict[str, Any] = {"role": role}
     _set(value, "content", message.content)
     _set(value, "name", message.name)
     _set(value, "tool_call_id", message.tool_call_id)

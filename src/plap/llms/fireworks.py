@@ -64,7 +64,11 @@ class FireworksChatCompletionClient:
 
 
 def to_fireworks_chat_params(request: ChatCompletionRequest) -> dict[str, Any]:
-    openai_params = to_openai_chat_params(request, stream=False)
+    openai_params = to_openai_chat_params(
+        request,
+        stream=False,
+        developer_role="system",
+    )
     params: dict[str, Any] = {
         "model": openai_params["model"],
         "messages": openai_params["messages"],

@@ -67,9 +67,25 @@ def test_openai_compatible_params_preserve_chat_completion_controls() -> None:
     assert "verbosity" not in params
 
 
+def test_openai_compatible_params_can_downgrade_developer_role() -> None:
+    params = to_openai_chat_params(_request(), stream=False, developer_role="system")
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+
+
 def test_fireworks_params_preserve_supported_provider_hints() -> None:
     params = to_fireworks_chat_params(_request())
 
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object"},
+            "strict": True,
+            "description": "answer schema",
+        },
+    }
     assert params["max_completion_tokens"] == 128
     assert params["prompt_cache_key"] == "cache-a"
     assert params["metadata"] == {"k": "v"}
@@ -231,12 +247,35 @@ async def test_fireworks_client_uses_acreate_and_normalizes_response() -> None:
     assert fireworks.chat.completions.calls[0]["max_completion_tokens"] == 128
 
 
-def test_lightning_client_is_openai_compatible_wrapper() -> None:
-    client = LightningChatCompletionClient(
-        client=_FakeOpenAIClient(_FakeOpenAICompletion(None))
+async def test_lightning_client_maps_developer_role_to_system() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        SimpleNamespace(
+            id="chatcmpl_1",
+            model="model-a",
+            created=10,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content="ok",
+                        refusal=None,
+                        reasoning_content=None,
+                        tool_calls=None,
+                    ),
+                )
+            ],
+            usage=None,
+        )
     )
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = LightningChatCompletionClient(client=fake_client)
 
-    assert isinstance(client, OpenAICompatibleChatCompletionClient)
+    await client.complete(_request())
+
+    assert fake_completion.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "be precise",
+    }
 
 
 def _request() -> ChatCompletionRequest:
