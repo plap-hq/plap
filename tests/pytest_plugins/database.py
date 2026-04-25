@@ -87,6 +87,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
     return Settings(
         api_key_pepper="test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
+        sealing_keys=["a" * 43],
     )
 
 

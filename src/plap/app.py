@@ -14,6 +14,7 @@ from plap.auth import APIKeyManager
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tools import StaticToolPolicyResolver
+from plap.sealing import SealingKeyring
 from plap.settings import Settings, get_settings
 
 
@@ -109,6 +110,9 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "db_engine": db_engine,
             "owns_engine": True,
             "session_maker": session_maker,
+            "sealing_keyring": SealingKeyring.from_encoded(
+                resolved_settings.sealing_keys
+            ),
             "settings": resolved_settings,
             "tool_policy_resolver": StaticToolPolicyResolver(),
         }

@@ -1,3 +1,13 @@
+from plap.responses.tools.call_ids import (
+    InvalidToolCallIDError,
+    ModelSide,
+    ToolCallID,
+    ToolCallIDContext,
+    open_tool_call_id,
+    open_tool_call_id_with_keyring,
+    seal_tool_call_id,
+    seal_tool_call_id_with_keyring,
+)
 from plap.responses.tools.classifier import (
     TOOL_EFFECT_CLASSIFIER_PROMPT,
     LLMToolClassifier,
@@ -25,10 +35,14 @@ __all__ = [
     "TOOL_EFFECT_CLASSIFIER_PROMPT",
     "CachedToolPolicyResolver",
     "EffectClass",
+    "InvalidToolCallIDError",
     "LLMToolClassifier",
+    "ModelSide",
     "StaticToolPolicyResolver",
     "ToolCallClassification",
     "ToolCallEffectClass",
+    "ToolCallID",
+    "ToolCallIDContext",
     "ToolClassification",
     "ToolClassificationRepository",
     "ToolClassifier",
@@ -39,5 +53,9 @@ __all__ = [
     "ToolSource",
     "function_tool_signature",
     "normalize_function_tool",
+    "open_tool_call_id",
+    "open_tool_call_id_with_keyring",
+    "seal_tool_call_id",
+    "seal_tool_call_id_with_keyring",
     "signature_hash_hex",
 ]
