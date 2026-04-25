@@ -51,7 +51,7 @@ async def _append_response(
             text(
                 """
                 select root_node_id
-                  from response_state.append_items(
+                  from responses.append_items(
                     :scope_id,
                     :response_id,
                     :prev_response_id,
@@ -79,7 +79,7 @@ async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int,
             text(
                 """
                 select child_refcount, lease_refcount
-                  from response_state.responses
+                  from responses.responses
                  where scope_id = :scope_id
                    and response_id = :response_id
                 """
@@ -91,7 +91,7 @@ async def _response_refcounts(session, scope_id, response_id: str) -> tuple[int,
 
 
 @pytest.mark.asyncio
-async def test_response_state_payload_dedupe_and_collision_guard(
+async def test_responses_payload_dedupe_and_collision_guard(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -103,7 +103,7 @@ async def test_response_state_payload_dedupe_and_collision_guard(
             await session.execute(
                 text(
                     """
-                    select response_state.get_or_create_payload(
+                    select responses.get_or_create_payload(
                       :scope_id,
                       :payload_hash,
                       cast(:payload_json as jsonb)
@@ -121,7 +121,7 @@ async def test_response_state_payload_dedupe_and_collision_guard(
             await session.execute(
                 text(
                     """
-                    select response_state.get_or_create_payload(
+                    select responses.get_or_create_payload(
                       :scope_id,
                       :payload_hash,
                       cast(:payload_json as jsonb)
@@ -142,7 +142,7 @@ async def test_response_state_payload_dedupe_and_collision_guard(
             await session.execute(
                 text(
                     """
-                    select response_state.get_or_create_payload(
+                    select responses.get_or_create_payload(
                       :scope_id,
                       :payload_hash,
                       cast(:payload_json as jsonb)
@@ -158,7 +158,7 @@ async def test_response_state_payload_dedupe_and_collision_guard(
 
 
 @pytest.mark.asyncio
-async def test_response_state_create_leaf_and_concat_update_refcounts(
+async def test_responses_create_leaf_and_concat_update_refcounts(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -168,7 +168,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select response_state.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -181,7 +181,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select response_state.create_leaf(:scope_id, cast(:items as jsonb))
+                    select responses.create_leaf(:scope_id, cast(:items as jsonb))
                     """
                 ),
                 {
@@ -194,7 +194,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
             await session.execute(
                 text(
                     """
-                    select response_state.create_concat(
+                    select responses.create_concat(
                       :scope_id,
                       :left_id,
                       :right_id
@@ -211,7 +211,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
                 text(
                     """
                     select node_id, kind, item_count, refcount
-                      from response_state.state_nodes
+                      from responses.state_nodes
                      where scope_id = :scope_id
                        and node_id in (:left_id, :right_id, :concat_id)
                      order by node_id
@@ -234,7 +234,7 @@ async def test_response_state_create_leaf_and_concat_update_refcounts(
 
 
 @pytest.mark.asyncio
-async def test_response_state_append_items_creates_response_chain(
+async def test_responses_append_items_creates_response_chain(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -263,7 +263,7 @@ async def test_response_state_append_items_creates_response_chain(
                 text(
                     """
                     select kind
-                      from response_state.state_nodes
+                      from responses.state_nodes
                      where scope_id = :scope_id
                        and node_id = :node_id
                     """
@@ -276,8 +276,8 @@ async def test_response_state_append_items_creates_response_chain(
                 text(
                     """
                     select c.next_ord
-                      from response_state.response_namespace_counters c
-                      join response_state.ordinal_namespaces n
+                      from responses.response_namespace_counters c
+                      join responses.ordinal_namespaces n
                         on n.namespace_id = c.namespace_id
                      where scope_id = :scope_id
                        and response_id = 'resp_2'
@@ -296,7 +296,7 @@ async def test_response_state_append_items_creates_response_chain(
 
 
 @pytest.mark.asyncio
-async def test_response_state_append_items_requires_complete_namespace_counters(
+async def test_responses_append_items_requires_complete_namespace_counters(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -307,7 +307,7 @@ async def test_response_state_append_items_requires_complete_namespace_counters(
                 text(
                     """
                     select root_node_id
-                      from response_state.append_items(
+                      from responses.append_items(
                         :scope_id,
                         'resp_partial_counters',
                         null,
@@ -328,7 +328,7 @@ async def test_response_state_append_items_requires_complete_namespace_counters(
 
 
 @pytest.mark.asyncio
-async def test_response_state_lease_and_conversation_helpers_move_roots(
+async def test_responses_lease_and_conversation_helpers_move_roots(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -353,7 +353,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
             await session.execute(
                 text(
                     """
-                    select response_state.create_or_refresh_lease(
+                    select responses.create_or_refresh_lease(
                       :scope_id,
                       'resp_1',
                       'manual',
@@ -369,7 +369,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
             await session.execute(
                 text(
                     """
-                    select response_state.create_or_refresh_lease(
+                    select responses.create_or_refresh_lease(
                       :scope_id,
                       'resp_2',
                       'manual',
@@ -384,7 +384,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select response_state.move_conversation(
+                select responses.move_conversation(
                   :scope_id,
                   'conv_1',
                   'resp_1'
@@ -396,7 +396,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select response_state.move_conversation(
+                select responses.move_conversation(
                   :scope_id,
                   'conv_1',
                   'resp_2'
@@ -408,7 +408,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
         await session.execute(
             text(
                 """
-                select response_state.release_lease(
+                select responses.release_lease(
                   :scope_id,
                   'manual',
                   'owner_1'
@@ -426,7 +426,7 @@ async def test_response_state_lease_and_conversation_helpers_move_roots(
                 text(
                     """
                     select owner_type, owner_id, response_id
-                      from response_state.response_leases
+                      from responses.response_leases
                      where scope_id = :scope_id
                        and status = 'live'
                      order by owner_type, owner_id

@@ -61,18 +61,18 @@ def _split_sql_statements(script: str) -> list[str]:
 
 
 UPGRADE_SQL = r"""
-create schema if not exists response_state;
+create schema if not exists responses;
 
 create extension if not exists pg_cron;
 
-set search_path = response_state, public;
+set search_path = responses, public;
 
-create procedure response_state.gc_try_delete_state_node(
+create procedure responses.gc_try_delete_state_node(
   p_scope_id uuid,
   p_node_id bigint
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_kind text;
@@ -117,8 +117,8 @@ begin
      and node_id = p_node_id;
 
   if v_kind = 'concat' then
-    call response_state.gc_try_delete_state_node(p_scope_id, v_left_id);
-    call response_state.gc_try_delete_state_node(p_scope_id, v_right_id);
+    call responses.gc_try_delete_state_node(p_scope_id, v_left_id);
+    call responses.gc_try_delete_state_node(p_scope_id, v_right_id);
   elsif v_kind = 'leaf' then
     delete from payload_objects
      where scope_id = p_scope_id
@@ -128,12 +128,12 @@ begin
 end;
 $$;
 
-create procedure response_state.gc_try_delete_response(
+create procedure responses.gc_try_delete_response(
   p_scope_id uuid,
   p_response_id text
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_prev_response_id text;
@@ -181,24 +181,24 @@ begin
    where scope_id = p_scope_id
      and response_id = p_response_id;
 
-  call response_state.gc_try_delete_state_node(p_scope_id, v_full_state_root_id);
+  call responses.gc_try_delete_state_node(p_scope_id, v_full_state_root_id);
 
   foreach v_root_id in array v_checkpoint_root_ids
   loop
-    call response_state.gc_try_delete_state_node(p_scope_id, v_root_id);
+    call responses.gc_try_delete_state_node(p_scope_id, v_root_id);
   end loop;
 
   if v_prev_response_id is not null then
-    call response_state.gc_try_delete_response(p_scope_id, v_prev_response_id);
+    call responses.gc_try_delete_response(p_scope_id, v_prev_response_id);
   end if;
 end;
 $$;
 
-create procedure response_state.gc_expire_leases(
+create procedure responses.gc_expire_leases(
   p_batch_size integer default 200
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_lease record;
@@ -225,7 +225,7 @@ begin
      where scope_id = v_lease.scope_id
        and lease_id = v_lease.lease_id;
 
-    call response_state.gc_try_delete_response(
+    call responses.gc_try_delete_response(
       v_lease.scope_id,
       v_lease.response_id
     );
@@ -233,12 +233,12 @@ begin
 end;
 $$;
 
-create procedure response_state.gc_prune_conversations(
+create procedure responses.gc_prune_conversations(
   p_batch_size integer default 200,
   p_max_idle interval default interval '30 days'
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_conversation record;
@@ -258,7 +258,7 @@ begin
        and c.conversation_id = d.conversation_id
      returning c.scope_id, c.current_response_id
   loop
-    call response_state.gc_try_delete_response(
+    call responses.gc_try_delete_response(
       v_conversation.scope_id,
       v_conversation.current_response_id
     );
@@ -266,11 +266,11 @@ begin
 end;
 $$;
 
-create procedure response_state.gc_prune_unreferenced_responses(
+create procedure responses.gc_prune_unreferenced_responses(
   p_batch_size integer default 200
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_response record;
@@ -284,7 +284,7 @@ begin
       for update skip locked
       limit p_batch_size
   loop
-    call response_state.gc_try_delete_response(
+    call responses.gc_try_delete_response(
       v_response.scope_id,
       v_response.response_id
     );
@@ -292,11 +292,11 @@ begin
 end;
 $$;
 
-create procedure response_state.gc_prune_payloads(
+create procedure responses.gc_prune_payloads(
   p_batch_size integer default 500
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 begin
   with claimed as (
@@ -322,7 +322,7 @@ begin
     perform cron.schedule(
       'expire-response-leases',
       '* * * * *',
-      'call response_state.gc_expire_leases(200);'
+      'call responses.gc_expire_leases(200);'
     );
   end if;
 
@@ -332,7 +332,7 @@ begin
     perform cron.schedule(
       'prune-stale-conversations',
       '5 * * * *',
-      'call response_state.gc_prune_conversations(200, interval ''30 days'');'
+      'call responses.gc_prune_conversations(200, interval ''30 days'');'
     );
   end if;
 
@@ -342,7 +342,7 @@ begin
     perform cron.schedule(
       'prune-unreferenced-responses',
       '10 * * * *',
-      'call response_state.gc_prune_unreferenced_responses(200);'
+      'call responses.gc_prune_unreferenced_responses(200);'
     );
   end if;
 
@@ -352,7 +352,7 @@ begin
     perform cron.schedule(
       'prune-zero-ref-payloads',
       '15 * * * *',
-      'call response_state.gc_prune_payloads(500);'
+      'call responses.gc_prune_payloads(500);'
     );
   end if;
 end;
@@ -382,10 +382,10 @@ begin
 end;
 $$;
 
-drop procedure if exists response_state.gc_prune_payloads(integer);
-drop procedure if exists response_state.gc_prune_unreferenced_responses(integer);
-drop procedure if exists response_state.gc_prune_conversations(integer, interval);
-drop procedure if exists response_state.gc_expire_leases(integer);
-drop procedure if exists response_state.gc_try_delete_response(uuid, text);
-drop procedure if exists response_state.gc_try_delete_state_node(uuid, bigint);
+drop procedure if exists responses.gc_prune_payloads(integer);
+drop procedure if exists responses.gc_prune_unreferenced_responses(integer);
+drop procedure if exists responses.gc_prune_conversations(integer, interval);
+drop procedure if exists responses.gc_expire_leases(integer);
+drop procedure if exists responses.gc_try_delete_response(uuid, text);
+drop procedure if exists responses.gc_try_delete_state_node(uuid, bigint);
 """

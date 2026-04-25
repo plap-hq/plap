@@ -12,7 +12,7 @@ async def _create_payload(session, scope_id, marker: int):
         await session.execute(
             text(
                 """
-                insert into response_state.payload_objects (
+                insert into responses.payload_objects (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -40,7 +40,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
             text(
                 """
                 select namespace_id
-                  from response_state.ordinal_namespaces
+                  from responses.ordinal_namespaces
                  where namespace_name = 'm'
                 """
             )
@@ -50,7 +50,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
         await session.execute(
             text(
                 """
-                insert into response_state.state_nodes (scope_id, kind, item_count)
+                insert into responses.state_nodes (scope_id, kind, item_count)
                 values (:scope_id, 'leaf', 1)
                 returning node_id
                 """
@@ -61,7 +61,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
     await session.execute(
         text(
             """
-            insert into response_state.state_leaves (scope_id, node_id, entry_count)
+            insert into responses.state_leaves (scope_id, node_id, entry_count)
             values (:scope_id, :node_id, 1)
             """
         ),
@@ -70,7 +70,7 @@ async def _create_leaf(session, scope_id, marker: int) -> int:
     await session.execute(
         text(
             """
-            insert into response_state.state_leaf_entries (
+            insert into responses.state_leaf_entries (
               scope_id,
               node_id,
               pos,
@@ -108,7 +108,7 @@ async def _create_response(
     await session.execute(
         text(
             """
-            insert into response_state.responses (
+            insert into responses.responses (
               scope_id,
               response_id,
               prev_response_id,
@@ -134,7 +134,7 @@ async def _table_count(session, table_name: str, scope_id) -> int:
     return (
         await session.execute(
             text(
-                f"select count(*) from response_state.{table_name} "
+                f"select count(*) from responses.{table_name} "
                 "where scope_id = :scope_id"
             ),
             {"scope_id": scope_id},
@@ -143,7 +143,7 @@ async def _table_count(session, table_name: str, scope_id) -> int:
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_registers_cron_jobs(db_session_maker) -> None:
+async def test_responses_gc_registers_cron_jobs(db_session_maker) -> None:
     async with db_session_maker() as session:
         jobs = (
             await session.execute(
@@ -169,11 +169,11 @@ async def test_response_state_gc_registers_cron_jobs(db_session_maker) -> None:
         "prune-unreferenced-responses",
         "prune-zero-ref-payloads",
     ]
-    assert all("response_state." in job.command for job in jobs)
+    assert all("responses." in job.command for job in jobs)
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_expires_lease_and_deletes_suffix(
+async def test_responses_gc_expires_lease_and_deletes_suffix(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -192,7 +192,7 @@ async def test_response_state_gc_expires_lease_and_deletes_suffix(
         await session.execute(
             text(
                 """
-                insert into response_state.response_leases (
+                insert into responses.response_leases (
                   scope_id,
                   response_id,
                   owner_type,
@@ -211,7 +211,7 @@ async def test_response_state_gc_expires_lease_and_deletes_suffix(
         )
         await session.commit()
 
-        await session.execute(text("call response_state.gc_expire_leases(10)"))
+        await session.execute(text("call responses.gc_expire_leases(10)"))
         await session.commit()
 
         assert await _table_count(session, "responses", scope_id) == 0
@@ -221,7 +221,7 @@ async def test_response_state_gc_expires_lease_and_deletes_suffix(
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_prunes_stale_conversations(db_session_maker) -> None:
+async def test_responses_gc_prunes_stale_conversations(db_session_maker) -> None:
     scope_id = uuid4()
 
     async with db_session_maker() as session:
@@ -230,7 +230,7 @@ async def test_response_state_gc_prunes_stale_conversations(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into response_state.conversations (
+                insert into responses.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id,
@@ -248,7 +248,7 @@ async def test_response_state_gc_prunes_stale_conversations(db_session_maker) ->
         await session.commit()
 
         await session.execute(
-            text("call response_state.gc_prune_conversations(10, interval '30 days')")
+            text("call responses.gc_prune_conversations(10, interval '30 days')")
         )
         await session.commit()
 
@@ -259,7 +259,7 @@ async def test_response_state_gc_prunes_stale_conversations(db_session_maker) ->
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_prunes_unreferenced_responses(
+async def test_responses_gc_prunes_unreferenced_responses(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -270,7 +270,7 @@ async def test_response_state_gc_prunes_unreferenced_responses(
         await session.commit()
 
         await session.execute(
-            text("call response_state.gc_prune_unreferenced_responses(10)")
+            text("call responses.gc_prune_unreferenced_responses(10)")
         )
         await session.commit()
 
@@ -280,14 +280,14 @@ async def test_response_state_gc_prunes_unreferenced_responses(
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
+async def test_responses_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
     scope_id = uuid4()
 
     async with db_session_maker() as session:
         await _create_payload(session, scope_id, 1)
         await session.commit()
 
-        await session.execute(text("call response_state.gc_prune_payloads(10)"))
+        await session.execute(text("call responses.gc_prune_payloads(10)"))
         await session.commit()
 
         assert await _table_count(session, "payload_objects", scope_id) == 0

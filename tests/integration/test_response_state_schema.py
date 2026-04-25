@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 @pytest.mark.asyncio
-async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) -> None:
+async def test_responses_seeds_core_ordinal_namespaces(db_session_maker) -> None:
     async with db_session_maker() as session:
         namespace_names = (
             (
@@ -17,7 +17,7 @@ async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) ->
                     text(
                         """
                     select namespace_name
-                      from response_state.ordinal_namespaces
+                      from responses.ordinal_namespaces
                      where namespace_name in ('m', 's')
                      order by namespace_name
                     """
@@ -32,7 +32,7 @@ async def test_response_state_seeds_core_ordinal_namespaces(db_session_maker) ->
 
 
 @pytest.mark.asyncio
-async def test_response_state_gc_and_fk_indexes_are_shaped_for_deletes(
+async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
     db_session_maker,
 ) -> None:
     expected_indexes = {
@@ -61,7 +61,7 @@ async def test_response_state_gc_and_fk_indexes_are_shaped_for_deletes(
                         """
                         select indexname, indexdef
                           from pg_indexes
-                         where schemaname = 'response_state'
+                         where schemaname = 'responses'
                            and indexname = any(:index_names)
                         """
                     ),
@@ -80,7 +80,7 @@ async def _create_payload(session, scope_id) -> str:
         await session.execute(
             text(
                 """
-                insert into response_state.payload_objects (
+                insert into responses.payload_objects (
                   scope_id,
                   payload_hash,
                   payload_json
@@ -106,7 +106,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into response_state.ordinal_namespaces (namespace_name)
+                insert into responses.ordinal_namespaces (namespace_name)
                 values ('message')
                 on conflict (namespace_name) do update
                   set namespace_name = excluded.namespace_name
@@ -120,7 +120,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
         await session.execute(
             text(
                 """
-                insert into response_state.state_nodes (scope_id, kind, item_count)
+                insert into responses.state_nodes (scope_id, kind, item_count)
                 values (:scope_id, 'leaf', 1)
                 returning node_id
                 """
@@ -132,7 +132,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
     await session.execute(
         text(
             """
-            insert into response_state.state_leaves (scope_id, node_id, entry_count)
+            insert into responses.state_leaves (scope_id, node_id, entry_count)
             values (:scope_id, :node_id, 1)
             """
         ),
@@ -141,7 +141,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
     await session.execute(
         text(
             """
-            insert into response_state.state_leaf_entries (
+            insert into responses.state_leaf_entries (
               scope_id,
               node_id,
               pos,
@@ -169,7 +169,7 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
 
 
 @pytest.mark.asyncio
-async def test_response_state_triggers_update_refcounts_and_conversation_lease(
+async def test_responses_triggers_update_refcounts_and_conversation_lease(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -182,7 +182,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
         await session.execute(
             text(
                 """
-                insert into response_state.responses (
+                insert into responses.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -202,7 +202,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
         await session.execute(
             text(
                 """
-                insert into response_state.conversations (
+                insert into responses.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id
@@ -226,7 +226,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select refcount
-                       from response_state.payload_objects
+                       from responses.payload_objects
                      where scope_id = :scope_id
                        and payload_id = :payload_id
                     """
@@ -239,7 +239,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select refcount
-                       from response_state.state_nodes
+                       from responses.state_nodes
                      where scope_id = :scope_id
                        and node_id = :node_id
                     """
@@ -252,7 +252,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
                 text(
                     """
                     select lease_refcount
-                       from response_state.responses
+                       from responses.responses
                      where scope_id = :scope_id
                        and response_id = :response_id
                     """
@@ -267,7 +267,7 @@ async def test_response_state_triggers_update_refcounts_and_conversation_lease(
 
 
 @pytest.mark.asyncio
-async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) -> None:
+async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None:
     scope_id = uuid4()
 
     async with db_session_maker() as session:
@@ -276,7 +276,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
             await session.execute(
                 text(
                     """
-                    insert into response_state.ordinal_namespaces (namespace_name)
+                    insert into responses.ordinal_namespaces (namespace_name)
                     values ('message')
                     returning namespace_id
                     """
@@ -287,7 +287,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
             await session.execute(
                 text(
                     """
-                    insert into response_state.state_nodes (scope_id, kind, item_count)
+                    insert into responses.state_nodes (scope_id, kind, item_count)
                     values (:scope_id, 'leaf', 1)
                     returning node_id
                     """
@@ -298,7 +298,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into response_state.state_leaves (scope_id, node_id, entry_count)
+                insert into responses.state_leaves (scope_id, node_id, entry_count)
                 values (:scope_id, :node_id, 1)
                 """
             ),
@@ -307,7 +307,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
         await session.execute(
             text(
                 """
-                insert into response_state.state_leaf_entries (
+                insert into responses.state_leaf_entries (
                   scope_id,
                   node_id,
                   pos,
@@ -337,7 +337,7 @@ async def test_response_state_rejects_sparse_leaf_positions(db_session_maker) ->
 
 
 @pytest.mark.asyncio
-async def test_response_state_rejects_structural_node_updates(
+async def test_responses_rejects_structural_node_updates(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -352,7 +352,7 @@ async def test_response_state_rejects_structural_node_updates(
             await session.execute(
                 text(
                     """
-                    update response_state.state_nodes
+                    update responses.state_nodes
                        set item_count = 2
                      where scope_id = :scope_id
                        and node_id = :node_id
@@ -363,7 +363,7 @@ async def test_response_state_rejects_structural_node_updates(
 
 
 @pytest.mark.asyncio
-async def test_response_state_rejects_concat_with_duplicate_child(
+async def test_responses_rejects_concat_with_duplicate_child(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -376,7 +376,7 @@ async def test_response_state_rejects_concat_with_duplicate_child(
             await session.execute(
                 text(
                     """
-                    insert into response_state.state_nodes (
+                    insert into responses.state_nodes (
                       scope_id,
                       kind,
                       left_id,
@@ -396,7 +396,7 @@ async def test_response_state_rejects_concat_with_duplicate_child(
 
 
 @pytest.mark.asyncio
-async def test_response_state_rejects_conversation_identity_updates(
+async def test_responses_rejects_conversation_identity_updates(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -407,7 +407,7 @@ async def test_response_state_rejects_conversation_identity_updates(
         await session.execute(
             text(
                 """
-                insert into response_state.responses (
+                insert into responses.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -423,7 +423,7 @@ async def test_response_state_rejects_conversation_identity_updates(
         await session.execute(
             text(
                 """
-                insert into response_state.conversations (
+                insert into responses.conversations (
                   scope_id,
                   conversation_id,
                   current_response_id
@@ -443,7 +443,7 @@ async def test_response_state_rejects_conversation_identity_updates(
             await session.execute(
                 text(
                     """
-                    update response_state.conversations
+                    update responses.conversations
                        set conversation_id = 'conv_renamed'
                      where scope_id = :scope_id
                        and conversation_id = 'conv_identity'
@@ -454,7 +454,7 @@ async def test_response_state_rejects_conversation_identity_updates(
 
 
 @pytest.mark.asyncio
-async def test_response_state_rejects_namespace_counter_updates(
+async def test_responses_rejects_namespace_counter_updates(
     db_session_maker,
 ) -> None:
     scope_id = uuid4()
@@ -467,7 +467,7 @@ async def test_response_state_rejects_namespace_counter_updates(
                 text(
                     """
                     select namespace_id
-                       from response_state.ordinal_namespaces
+                       from responses.ordinal_namespaces
                      where namespace_name = 'message'
                     """
                 )
@@ -476,7 +476,7 @@ async def test_response_state_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into response_state.responses (
+                insert into responses.responses (
                   scope_id,
                   response_id,
                   full_state_root_id
@@ -492,7 +492,7 @@ async def test_response_state_rejects_namespace_counter_updates(
         await session.execute(
             text(
                 """
-                insert into response_state.response_namespace_counters (
+                insert into responses.response_namespace_counters (
                   scope_id,
                   response_id,
                   namespace_id,
@@ -514,7 +514,7 @@ async def test_response_state_rejects_namespace_counter_updates(
             await session.execute(
                 text(
                     """
-                    update response_state.response_namespace_counters
+                    update responses.response_namespace_counters
                        set next_ord = 2
                      where scope_id = :scope_id
                        and response_id = 'resp_counter_immutable'

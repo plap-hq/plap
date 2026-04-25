@@ -20,6 +20,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute("CREATE SCHEMA IF NOT EXISTS identity")
     op.create_table(
         "organizations",
         sa.Column("id", sa.UUID(), nullable=False),
@@ -29,6 +30,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_organizations")),
         sa.UniqueConstraint("slug", name=op.f("uq_organizations_slug")),
+        schema="identity",
     )
     op.create_table(
         "users",
@@ -37,6 +39,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
+        schema="identity",
     )
     op.create_table(
         "api_keys",
@@ -54,18 +57,19 @@ def upgrade() -> None:
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(
             ["organization_id"],
-            ["organizations.id"],
+            ["identity.organizations.id"],
             name=op.f("fk_api_keys_organization_id_organizations"),
             ondelete="SET NULL",
         ),
         sa.ForeignKeyConstraint(
             ["user_id"],
-            ["users.id"],
+            ["identity.users.id"],
             name=op.f("fk_api_keys_user_id_users"),
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_api_keys")),
         sa.UniqueConstraint("key_id", name=op.f("uq_api_keys_key_id")),
+        schema="identity",
     )
     op.create_table(
         "organization_memberships",
@@ -78,13 +82,13 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["organization_id"],
-            ["organizations.id"],
+            ["identity.organizations.id"],
             name=op.f("fk_organization_memberships_organization_id_organizations"),
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["user_id"],
-            ["users.id"],
+            ["identity.users.id"],
             name=op.f("fk_organization_memberships_user_id_users"),
             ondelete="CASCADE",
         ),
@@ -94,6 +98,7 @@ def upgrade() -> None:
             "user_id",
             name=op.f("uq_organization_memberships_organization_id"),
         ),
+        schema="identity",
     )
     op.create_table(
         "sso_providers",
@@ -116,7 +121,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["organization_id"],
-            ["organizations.id"],
+            ["identity.organizations.id"],
             name=op.f("fk_sso_providers_organization_id_organizations"),
             ondelete="CASCADE",
         ),
@@ -126,6 +131,7 @@ def upgrade() -> None:
             "slug",
             name=op.f("uq_sso_providers_organization_id"),
         ),
+        schema="identity",
     )
     op.create_table(
         "user_emails",
@@ -139,7 +145,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["user_id"],
-            ["users.id"],
+            ["identity.users.id"],
             name=op.f("fk_user_emails_user_id_users"),
             ondelete="CASCADE",
         ),
@@ -147,6 +153,7 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "normalized_email", name=op.f("uq_user_emails_normalized_email")
         ),
+        schema="identity",
     )
     op.create_table(
         "user_identities",
@@ -163,19 +170,19 @@ def upgrade() -> None:
         sa.Column("last_authenticated_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(
             ["organization_id"],
-            ["organizations.id"],
+            ["identity.organizations.id"],
             name=op.f("fk_user_identities_organization_id_organizations"),
             ondelete="SET NULL",
         ),
         sa.ForeignKeyConstraint(
             ["sso_provider_id"],
-            ["sso_providers.id"],
+            ["identity.sso_providers.id"],
             name=op.f("fk_user_identities_sso_provider_id_sso_providers"),
             ondelete="SET NULL",
         ),
         sa.ForeignKeyConstraint(
             ["user_id"],
-            ["users.id"],
+            ["identity.users.id"],
             name=op.f("fk_user_identities_user_id_users"),
             ondelete="CASCADE",
         ),
@@ -186,14 +193,16 @@ def upgrade() -> None:
             "provider_subject",
             name=op.f("uq_user_identities_provider_type"),
         ),
+        schema="identity",
     )
 
 
 def downgrade() -> None:
-    op.drop_table("user_identities")
-    op.drop_table("user_emails")
-    op.drop_table("sso_providers")
-    op.drop_table("organization_memberships")
-    op.drop_table("api_keys")
-    op.drop_table("users")
-    op.drop_table("organizations")
+    op.drop_table("user_identities", schema="identity")
+    op.drop_table("user_emails", schema="identity")
+    op.drop_table("sso_providers", schema="identity")
+    op.drop_table("organization_memberships", schema="identity")
+    op.drop_table("api_keys", schema="identity")
+    op.drop_table("users", schema="identity")
+    op.drop_table("organizations", schema="identity")
+    op.execute("DROP SCHEMA IF EXISTS identity")

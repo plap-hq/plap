@@ -22,13 +22,14 @@ def utcnow() -> datetime:
 
 class Base(DeclarativeBase):
     metadata = MetaData(
+        schema="identity",
         naming_convention={
             "ix": "ix_%(column_0_label)s",
             "uq": "uq_%(table_name)s_%(column_0_name)s",
             "ck": "ck_%(table_name)s_%(constraint_name)s",
             "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
             "pk": "pk_%(table_name)s",
-        }
+        },
     )
 
 
@@ -50,7 +51,9 @@ class UserEmail(Base):
     __table_args__ = (UniqueConstraint("normalized_email"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("identity.users.id", ondelete="CASCADE")
+    )
     email: Mapped[str] = mapped_column(String(320))
     normalized_email: Mapped[str] = mapped_column(String(320))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -84,9 +87,11 @@ class OrganizationMembership(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE")
+        ForeignKey("identity.organizations.id", ondelete="CASCADE")
     )
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("identity.users.id", ondelete="CASCADE")
+    )
     role: Mapped[str] = mapped_column(String(64), default="member")
     status: Mapped[str] = mapped_column(String(64), default="active")
     created_at: Mapped[datetime] = mapped_column(
@@ -103,7 +108,7 @@ class SSOProvider(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE")
+        ForeignKey("identity.organizations.id", ondelete="CASCADE")
     )
     slug: Mapped[str] = mapped_column(String(120))
     display_name: Mapped[str] = mapped_column(String(255))
@@ -131,12 +136,14 @@ class UserIdentity(Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("identity.users.id", ondelete="CASCADE")
+    )
     organization_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("identity.organizations.id", ondelete="SET NULL"), nullable=True
     )
     sso_provider_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("sso_providers.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("identity.sso_providers.id", ondelete="SET NULL"), nullable=True
     )
     provider_type: Mapped[str] = mapped_column(String(64))
     provider_name: Mapped[str] = mapped_column(String(120))
@@ -156,9 +163,11 @@ class APIKey(Base):
     __table_args__ = (UniqueConstraint("key_id"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("identity.users.id", ondelete="CASCADE")
+    )
     organization_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("identity.organizations.id", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(255))
     key_id: Mapped[str] = mapped_column(String(64))

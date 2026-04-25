@@ -61,17 +61,17 @@ def _split_sql_statements(script: str) -> list[str]:
 
 
 UPGRADE_SQL = r"""
-create schema if not exists response_state;
+create schema if not exists responses;
 
-set search_path = response_state, public;
+set search_path = responses, public;
 
-create function response_state.validate_namespace_counters(
+create function responses.validate_namespace_counters(
   p_counters jsonb,
   p_context text
 )
 returns void
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_counter record;
@@ -149,14 +149,14 @@ begin
 end;
 $$;
 
-create function response_state.get_or_create_payload(
+create function responses.get_or_create_payload(
   p_scope_id uuid,
   p_payload_hash bytea,
   p_payload_json jsonb
 )
 returns uuid
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_payload_id uuid;
@@ -204,13 +204,13 @@ begin
 end;
 $$;
 
-create function response_state.create_leaf(
+create function responses.create_leaf(
   p_scope_id uuid,
   p_entries jsonb
 )
 returns bigint
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_entry record;
@@ -285,7 +285,7 @@ begin
         v_entry.ordinality - 1;
     end if;
 
-    v_payload_id = response_state.get_or_create_payload(
+    v_payload_id = responses.get_or_create_payload(
       p_scope_id,
       v_payload_hash,
       v_payload_json
@@ -312,14 +312,14 @@ begin
 end;
 $$;
 
-create function response_state.create_concat(
+create function responses.create_concat(
   p_scope_id uuid,
   p_left_id bigint,
   p_right_id bigint
 )
 returns bigint
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_left_count bigint;
@@ -369,7 +369,7 @@ begin
 end;
 $$;
 
-create function response_state.create_response(
+create function responses.create_response(
   p_scope_id uuid,
   p_response_id text,
   p_prev_response_id text,
@@ -379,7 +379,7 @@ create function response_state.create_response(
 )
 returns text
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_counter record;
@@ -389,7 +389,7 @@ declare
   v_namespace_id smallint;
   v_checkpoint_id bigint;
 begin
-  perform response_state.validate_namespace_counters(
+  perform responses.validate_namespace_counters(
     p_namespace_counters,
     'response'
   );
@@ -456,7 +456,7 @@ begin
       raise exception 'checkpoint namespace_counters are required';
     end if;
 
-    perform response_state.validate_namespace_counters(
+    perform responses.validate_namespace_counters(
       v_checkpoint.value -> 'namespace_counters',
       'checkpoint'
     );
@@ -491,7 +491,7 @@ begin
 end;
 $$;
 
-create function response_state.append_items(
+create function responses.append_items(
   p_scope_id uuid,
   p_response_id text,
   p_prev_response_id text,
@@ -504,14 +504,14 @@ returns table (
   root_node_id bigint
 )
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_leaf_id bigint;
   v_prev_root_id bigint;
   v_root_id bigint;
 begin
-  v_leaf_id = response_state.create_leaf(p_scope_id, p_items);
+  v_leaf_id = responses.create_leaf(p_scope_id, p_items);
 
   if p_prev_response_id is null then
     v_root_id = v_leaf_id;
@@ -528,14 +528,14 @@ begin
         p_prev_response_id;
     end if;
 
-    v_root_id = response_state.create_concat(
+    v_root_id = responses.create_concat(
       p_scope_id,
       v_prev_root_id,
       v_leaf_id
     );
   end if;
 
-  perform response_state.create_response(
+  perform responses.create_response(
     p_scope_id,
     p_response_id,
     p_prev_response_id,
@@ -550,7 +550,7 @@ begin
 end;
 $$;
 
-create function response_state.create_or_refresh_lease(
+create function responses.create_or_refresh_lease(
   p_scope_id uuid,
   p_response_id text,
   p_owner_type text,
@@ -559,7 +559,7 @@ create function response_state.create_or_refresh_lease(
 )
 returns uuid
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 declare
   v_lease_id uuid;
@@ -611,14 +611,14 @@ begin
 end;
 $$;
 
-create function response_state.release_lease(
+create function responses.release_lease(
   p_scope_id uuid,
   p_owner_type text,
   p_owner_id text
 )
 returns void
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 begin
   delete from response_leases
@@ -629,14 +629,14 @@ begin
 end;
 $$;
 
-create function response_state.move_conversation(
+create function responses.move_conversation(
   p_scope_id uuid,
   p_conversation_id text,
   p_response_id text
 )
 returns void
 language plpgsql
-set search_path = response_state, public
+set search_path = responses, public
 as $$
 begin
   insert into conversations (
@@ -657,16 +657,16 @@ $$;
 
 
 DOWNGRADE_SQL = r"""
-drop function if exists response_state.move_conversation(uuid, text, text);
-drop function if exists response_state.release_lease(uuid, text, text);
-drop function if exists response_state.create_or_refresh_lease(
+drop function if exists responses.move_conversation(uuid, text, text);
+drop function if exists responses.release_lease(uuid, text, text);
+drop function if exists responses.create_or_refresh_lease(
   uuid,
   text,
   text,
   text,
   timestamptz
 );
-drop function if exists response_state.append_items(
+drop function if exists responses.append_items(
   uuid,
   text,
   text,
@@ -674,7 +674,7 @@ drop function if exists response_state.append_items(
   jsonb,
   jsonb
 );
-drop function if exists response_state.create_response(
+drop function if exists responses.create_response(
   uuid,
   text,
   text,
@@ -682,8 +682,8 @@ drop function if exists response_state.create_response(
   jsonb,
   jsonb
 );
-drop function if exists response_state.create_concat(uuid, bigint, bigint);
-drop function if exists response_state.create_leaf(uuid, jsonb);
-drop function if exists response_state.get_or_create_payload(uuid, bytea, jsonb);
-drop function if exists response_state.validate_namespace_counters(jsonb, text);
+drop function if exists responses.create_concat(uuid, bigint, bigint);
+drop function if exists responses.create_leaf(uuid, jsonb);
+drop function if exists responses.get_or_create_payload(uuid, bytea, jsonb);
+drop function if exists responses.validate_namespace_counters(jsonb, text);
 """
