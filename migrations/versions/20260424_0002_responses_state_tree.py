@@ -189,6 +189,9 @@ create table response_records (
   state_root_id bigint not null,
   child_refcount bigint not null default 0,
   lease_refcount bigint not null default 0,
+  status text not null default 'completed',
+  completed_at timestamptz,
+  fields jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
 
   primary key (scope_id, response_id),
@@ -201,7 +204,16 @@ create table response_records (
 
   check (response_id <> ''),
   check (child_refcount >= 0),
-  check (lease_refcount >= 0)
+  check (lease_refcount >= 0),
+  check (status in (
+    'queued',
+    'in_progress',
+    'completed',
+    'failed',
+    'cancelled',
+    'incomplete'
+  )),
+  check (jsonb_typeof(fields) = 'object')
 );
 
 create table response_namespace_cursors (
@@ -435,6 +447,7 @@ begin
     or old.response_id is distinct from new.response_id
     or old.prev_response_id is distinct from new.prev_response_id
     or old.state_root_id is distinct from new.state_root_id
+    or old.fields is distinct from new.fields
     or old.created_at is distinct from new.created_at then
     raise exception 'response_records rows are structurally immutable';
   end if;

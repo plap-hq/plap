@@ -1136,7 +1136,10 @@ create function responses.create_response_record(
   p_state_root_id bigint,
   p_namespace_cursors jsonb,
   p_checkpoints jsonb default '[]'::jsonb,
-  p_retention interval default interval '30 days'
+  p_retention interval default interval '30 days',
+  p_status text default 'completed',
+  p_completed_at timestamptz default null,
+  p_fields jsonb default '{}'::jsonb
 )
 returns text
 language plpgsql
@@ -1159,16 +1162,37 @@ begin
     raise exception 'checkpoints must be a JSON array';
   end if;
 
+  if p_status not in (
+    'queued',
+    'in_progress',
+    'completed',
+    'failed',
+    'cancelled',
+    'incomplete'
+  ) then
+    raise exception 'invalid response status %', p_status;
+  end if;
+
+  if jsonb_typeof(p_fields) is distinct from 'object' then
+    raise exception 'response fields must be a JSON object';
+  end if;
+
   insert into response_records (
     scope_id,
     response_id,
     prev_response_id,
-    state_root_id
+    state_root_id,
+    status,
+    completed_at,
+    fields
   ) values (
     p_scope_id,
     p_response_id,
     p_prev_response_id,
-    p_state_root_id
+    p_state_root_id,
+    p_status,
+    coalesce(p_completed_at, case when p_status = 'completed' then now() end),
+    p_fields
   );
 
   if p_retention is not null then
@@ -1269,7 +1293,11 @@ create function responses.append_response(
   p_prev_response_id text,
   p_items jsonb,
   p_namespace_cursors jsonb,
-  p_checkpoints jsonb default '[]'::jsonb
+  p_checkpoints jsonb default '[]'::jsonb,
+  p_retention interval default interval '30 days',
+  p_status text default 'completed',
+  p_completed_at timestamptz default null,
+  p_fields jsonb default '{}'::jsonb
 )
 returns table (
   response_id text,
@@ -1313,7 +1341,11 @@ begin
     p_prev_response_id,
     v_root_id,
     p_namespace_cursors,
-    p_checkpoints
+    p_checkpoints,
+    p_retention,
+    p_status,
+    p_completed_at,
+    p_fields
   );
 
   response_id = p_response_id;
@@ -1436,6 +1468,10 @@ drop function if exists responses.append_response(
   text,
   jsonb,
   jsonb,
+  jsonb,
+  interval,
+  text,
+  timestamptz,
   jsonb
 );
 drop function if exists responses.create_response_record(
@@ -1445,7 +1481,10 @@ drop function if exists responses.create_response_record(
   bigint,
   jsonb,
   jsonb,
-  interval
+  interval,
+  text,
+  timestamptz,
+  jsonb
 );
 drop function if exists responses.splice_state_tree(
   uuid,

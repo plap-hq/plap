@@ -650,3 +650,94 @@ async def test_responses_rejects_namespace_counter_updates(
                 ),
                 {"scope_id": scope_id, "namespace_id": namespace_id},
             )
+
+
+@pytest.mark.asyncio
+async def test_responses_rejects_non_object_response_fields(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+        with pytest.raises(SQLAlchemyError):
+            await session.execute(
+                text(
+                    """
+                    insert into responses.response_records (
+                      scope_id,
+                      response_id,
+                      state_root_id,
+                      fields
+                    ) values (
+                      :scope_id,
+                      'resp_bad_fields',
+                      :node_id,
+                      '[]'::jsonb
+                    )
+                    """
+                ),
+                {"scope_id": scope_id, "node_id": node_id},
+            )
+
+
+@pytest.mark.asyncio
+async def test_responses_allows_lifecycle_updates_but_rejects_fields_updates(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        payload_id = await _create_payload(session, scope_id)
+        node_id = await _create_leaf(session, scope_id, payload_id)
+        await session.execute(
+            text(
+                """
+                insert into responses.response_records (
+                  scope_id,
+                  response_id,
+                  state_root_id,
+                  status,
+                  fields
+                ) values (
+                  :scope_id,
+                  'resp_lifecycle',
+                  :node_id,
+                  'in_progress',
+                  '{"model":"test/model"}'::jsonb
+                )
+                """
+            ),
+            {"scope_id": scope_id, "node_id": node_id},
+        )
+        await session.commit()
+
+    async with db_session_maker() as session:
+        await session.execute(
+            text(
+                """
+                update responses.response_records
+                   set status = 'completed',
+                       completed_at = now()
+                 where scope_id = :scope_id
+                   and response_id = 'resp_lifecycle'
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.commit()
+
+    async with db_session_maker() as session:
+        with pytest.raises(SQLAlchemyError, match="structurally immutable"):
+            await session.execute(
+                text(
+                    """
+                    update responses.response_records
+                       set fields = '{"model":"other"}'::jsonb
+                     where scope_id = :scope_id
+                       and response_id = 'resp_lifecycle'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
