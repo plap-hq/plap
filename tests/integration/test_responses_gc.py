@@ -243,7 +243,7 @@ async def test_responses_gc_expires_lease_and_deletes_suffix(
 
 
 @pytest.mark.asyncio
-async def test_responses_gc_prunes_stale_conversations(db_session_maker) -> None:
+async def test_responses_gc_prunes_expired_conversations(db_session_maker) -> None:
     scope_id = uuid4()
 
     async with db_session_maker() as session:
@@ -256,12 +256,12 @@ async def test_responses_gc_prunes_stale_conversations(db_session_maker) -> None
                   scope_id,
                   conversation_id,
                   current_response_id,
-                  last_used_at
+                  retention_expires_at
                 ) values (
                   :scope_id,
                   'conv_stale',
                   'resp_stale',
-                  now() - interval '31 days'
+                  now() - interval '1 hour'
                 )
                 """
             ),
@@ -269,9 +269,7 @@ async def test_responses_gc_prunes_stale_conversations(db_session_maker) -> None
         )
         await session.commit()
 
-        await session.execute(
-            text("call responses.gc_prune_conversations(10, interval '30 days')")
-        )
+        await session.execute(text("call responses.gc_prune_conversations(10)"))
         await session.commit()
 
         assert await _table_count(session, "conversations", scope_id) == 0
@@ -447,16 +445,14 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
             text(
                 """
                 update responses.conversations
-                   set last_used_at = now() - interval '31 days'
-                 where scope_id = :scope_id
-                   and conversation_id = 'conv_active'
+                   set retention_expires_at = now() - interval '1 hour'
+                  where scope_id = :scope_id
+                    and conversation_id = 'conv_active'
                 """
             ),
             {"scope_id": scope_id},
         )
-        await session.execute(
-            text("call responses.gc_prune_conversations(10, interval '30 days')")
-        )
+        await session.execute(text("call responses.gc_prune_conversations(10)"))
         await session.commit()
 
         assert await _table_count(session, "conversations", scope_id) == 0
@@ -464,6 +460,53 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
         assert await _table_count(session, "response_records", scope_id) == 0
         assert await _table_count(session, "state_nodes", scope_id) == 0
         assert await _table_count(session, "payloads", scope_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_gc_ignores_indefinitely_retained_conversations(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        root_id = await _create_leaf(session, scope_id, 1)
+        await _create_response(session, scope_id, "resp_indefinite", root_id)
+        await session.execute(
+            text(
+                """
+                select responses.move_conversation_head(
+                  :scope_id,
+                  'conv_indefinite',
+                  'resp_indefinite',
+                  null
+                )
+                """
+            ),
+            {"scope_id": scope_id},
+        )
+        await session.commit()
+
+        retention_expires_at = (
+            await session.execute(
+                text(
+                    """
+                    select retention_expires_at
+                      from responses.conversations
+                     where scope_id = :scope_id
+                       and conversation_id = 'conv_indefinite'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+
+        await session.execute(text("call responses.gc_prune_conversations(10)"))
+        await session.commit()
+
+        assert retention_expires_at is None
+        assert await _table_count(session, "conversations", scope_id) == 1
+        assert await _table_count(session, "response_leases", scope_id) == 1
+        assert await _table_count(session, "response_records", scope_id) == 1
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from plap.responses.state import NamespaceCursor, ResponseStateRepository, StateItem
 
@@ -240,3 +241,43 @@ async def test_response_state_repository_preserves_explicit_completed_at(
     assert record is not None
     assert record.completed_at == completed_at
     assert record.fields == {"service_tier": "default"}
+
+
+@pytest.mark.asyncio
+async def test_response_state_repository_sets_conversation_retention(
+    db_session_maker,
+) -> None:
+    scope_id = uuid4()
+
+    async with db_session_maker() as session:
+        repository = ResponseStateRepository(session)
+        await repository.append_response(
+            scope_id,
+            "resp_retention",
+            None,
+            [_message(0, "retained")],
+            _cursors(1),
+        )
+        await repository.move_conversation_head(
+            scope_id,
+            "conv_retention",
+            "resp_retention",
+            retention=timedelta(hours=2),
+        )
+        await session.commit()
+
+        retention_seconds = (
+            await session.execute(
+                text(
+                    """
+                    select extract(epoch from (retention_expires_at - now()))
+                      from responses.conversations
+                     where scope_id = :scope_id
+                       and conversation_id = 'conv_retention'
+                    """
+                ),
+                {"scope_id": scope_id},
+            )
+        ).scalar_one()
+
+    assert 60 * 60 < retention_seconds <= 2 * 60 * 60

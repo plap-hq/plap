@@ -1435,25 +1435,41 @@ $$;
 create function responses.move_conversation_head(
   p_scope_id uuid,
   p_conversation_id text,
-  p_response_id text
+  p_response_id text,
+  p_retention interval default interval '30 days'
 )
 returns void
 language plpgsql
 set search_path = responses, public
 as $$
 begin
-  insert into conversations (scope_id, conversation_id, current_response_id)
-  values (p_scope_id, p_conversation_id, p_response_id)
+  insert into conversations (
+    scope_id,
+    conversation_id,
+    current_response_id,
+    retention_expires_at
+  ) values (
+    p_scope_id,
+    p_conversation_id,
+    p_response_id,
+    case when p_retention is null then null else now() + p_retention end
+  )
   on conflict (scope_id, conversation_id) do update
      set current_response_id = excluded.current_response_id,
-         last_used_at = now();
+         last_used_at = now(),
+         retention_expires_at = excluded.retention_expires_at;
 end;
 $$;
 """
 
 
 DOWNGRADE_SQL = r"""
-drop function if exists responses.move_conversation_head(uuid, text, text);
+drop function if exists responses.move_conversation_head(
+  uuid,
+  text,
+  text,
+  interval
+);
 drop function if exists responses.release_response_lease(uuid, text, text);
 drop function if exists responses.create_or_refresh_response_lease(
   uuid,

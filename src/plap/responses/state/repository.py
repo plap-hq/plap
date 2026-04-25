@@ -284,6 +284,8 @@ class ResponseStateRepository:
         scope_id: UUID,
         conversation_id: str,
         response_id: str,
+        *,
+        retention: timedelta | None = timedelta(days=30),
     ) -> None:
         await self._session.execute(
             text(
@@ -291,7 +293,8 @@ class ResponseStateRepository:
                 select responses.move_conversation_head(
                   :scope_id,
                   :conversation_id,
-                  :response_id
+                  :response_id,
+                  :retention
                 )
                 """
             ),
@@ -299,6 +302,7 @@ class ResponseStateRepository:
                 "scope_id": scope_id,
                 "conversation_id": conversation_id,
                 "response_id": response_id,
+                "retention": retention,
             },
         )
 

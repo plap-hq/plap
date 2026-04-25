@@ -306,6 +306,7 @@ create table conversations (
   current_response_id text not null,
   created_at timestamptz not null default now(),
   last_used_at timestamptz not null default now(),
+  retention_expires_at timestamptz,
 
   primary key (scope_id, conversation_id),
 
@@ -359,6 +360,10 @@ create index ix_response_leases_response
 
 create index ix_conversations_last_used_at
   on conversations (last_used_at, scope_id, conversation_id);
+
+create index ix_conversations_retention_expiration
+  on conversations (retention_expires_at, scope_id, conversation_id)
+  where retention_expires_at is not null;
 
 create index ix_conversations_current_response
   on conversations (scope_id, current_response_id, conversation_id);

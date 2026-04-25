@@ -273,8 +273,7 @@ end;
 $$;
 
 create procedure responses.gc_prune_conversations(
-  p_batch_size integer default 200,
-  p_max_idle interval default interval '30 days'
+  p_batch_size integer default 200
 )
 language plpgsql
 set search_path = responses, public
@@ -286,8 +285,9 @@ begin
     with doomed as (
       select scope_id, conversation_id
         from conversations
-       where last_used_at <= now() - p_max_idle
-       order by last_used_at
+       where retention_expires_at is not null
+         and retention_expires_at <= now()
+       order by retention_expires_at
        for update skip locked
        limit p_batch_size
     )
@@ -396,7 +396,7 @@ begin
     perform cron.schedule(
       'prune-stale-conversations',
       '5 * * * *',
-      'call responses.gc_prune_conversations(200, interval ''30 days'');'
+      'call responses.gc_prune_conversations(200);'
     );
   end if;
 
@@ -460,7 +460,7 @@ $$;
 drop procedure if exists responses.gc_prune_payloads(integer);
 drop procedure if exists responses.gc_prune_state_nodes(integer);
 drop procedure if exists responses.gc_prune_unreferenced_responses(integer);
-drop procedure if exists responses.gc_prune_conversations(integer, interval);
+drop procedure if exists responses.gc_prune_conversations(integer);
 drop procedure if exists responses.gc_expire_response_leases(integer);
 drop procedure if exists responses.gc_delete_response_if_unreferenced(uuid, text);
 drop procedure if exists responses.gc_delete_state_node_if_unreferenced(uuid, bigint);
