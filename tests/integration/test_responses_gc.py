@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-import pytest
 from sqlalchemy import text
 
 
@@ -163,7 +162,6 @@ async def _table_count(session, table_name: str, scope_id) -> int:
     ).scalar_one()
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_registers_cron_jobs(db_session_maker) -> None:
     async with db_session_maker() as session:
         jobs = (
@@ -195,7 +193,6 @@ async def test_responses_gc_registers_cron_jobs(db_session_maker) -> None:
     assert all("responses." in job.command for job in jobs)
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_expires_lease_and_deletes_suffix(
     db_session_maker,
 ) -> None:
@@ -243,7 +240,6 @@ async def test_responses_gc_expires_lease_and_deletes_suffix(
         assert await _table_count(session, "response_leases", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_prunes_expired_conversations(db_session_maker) -> None:
     scope_id = uuid4()
 
@@ -279,7 +275,6 @@ async def test_responses_gc_prunes_expired_conversations(db_session_maker) -> No
         assert await _table_count(session, "state_nodes", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_prunes_unreferenced_responses(
     db_session_maker,
 ) -> None:
@@ -300,7 +295,6 @@ async def test_responses_gc_prunes_unreferenced_responses(
         assert await _table_count(session, "payloads", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_created_via_tree_functions_get_response_owned_retention(
     db_session_maker,
 ) -> None:
@@ -381,7 +375,6 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
         assert await _table_count(session, "payloads", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_conversation_lease_survives_response_retention_expiry(
     db_session_maker,
 ) -> None:
@@ -463,7 +456,6 @@ async def test_responses_conversation_lease_survives_response_retention_expiry(
         assert await _table_count(session, "payloads", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_ignores_indefinitely_retained_conversations(
     db_session_maker,
 ) -> None:
@@ -510,7 +502,6 @@ async def test_responses_gc_ignores_indefinitely_retained_conversations(
         assert await _table_count(session, "response_records", scope_id) == 1
 
 
-@pytest.mark.asyncio
 async def test_responses_response_owned_head_lease_retains_previous_chain(
     db_session_maker,
 ) -> None:
@@ -585,7 +576,6 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
         assert await _table_count(session, "payloads", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
     scope_id = uuid4()
 
@@ -599,7 +589,6 @@ async def test_responses_gc_prunes_zero_ref_payloads(db_session_maker) -> None:
         assert await _table_count(session, "payloads", scope_id) == 0
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_prunes_unattached_state_nodes(db_session_maker) -> None:
     scope_id = uuid4()
 

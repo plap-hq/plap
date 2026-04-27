@@ -150,7 +150,6 @@ async def _tree_count(session, scope_id, root_id: int | None) -> int:
     ).scalar_one()
 
 
-@pytest.mark.asyncio
 async def test_responses_payload_dedupe_and_collision_guard(
     db_session_maker,
 ) -> None:
@@ -217,7 +216,6 @@ async def test_responses_payload_dedupe_and_collision_guard(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_create_leaf_rejects_same_batch_payload_hash_collision(
     db_session_maker,
 ) -> None:
@@ -256,7 +254,6 @@ async def test_responses_create_leaf_rejects_same_batch_payload_hash_collision(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_create_leaf_rejects_duplicate_ordinals(
     db_session_maker,
 ) -> None:
@@ -281,7 +278,6 @@ async def test_responses_create_leaf_rejects_duplicate_ordinals(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_create_leaf_rejects_invalid_ord_cleanly(
     db_session_maker,
 ) -> None:
@@ -312,7 +308,6 @@ async def test_responses_create_leaf_rejects_invalid_ord_cleanly(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_build_state_tree_rejects_cross_leaf_duplicate_ordinals(
     db_session_maker,
 ) -> None:
@@ -343,7 +338,6 @@ async def test_responses_build_state_tree_rejects_cross_leaf_duplicate_ordinals(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_build_state_tree_rejects_normalized_duplicate_ordinals(
     db_session_maker,
 ) -> None:
@@ -374,7 +368,6 @@ async def test_responses_build_state_tree_rejects_normalized_duplicate_ordinals(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_build_state_tree_rejects_duplicate_huge_ord_cleanly(
     db_session_maker,
 ) -> None:
@@ -409,7 +402,6 @@ async def test_responses_build_state_tree_rejects_duplicate_huge_ord_cleanly(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_create_leaf_and_internal_node_update_refcounts(
     db_session_maker,
 ) -> None:
@@ -487,7 +479,6 @@ async def test_responses_create_leaf_and_internal_node_update_refcounts(
     ]
 
 
-@pytest.mark.asyncio
 async def test_responses_create_internal_node_rejects_duplicate_children(
     db_session_maker,
 ) -> None:
@@ -522,7 +513,6 @@ async def test_responses_create_internal_node_rejects_duplicate_children(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_concat_merges_same_height_internal_children_when_possible(
     db_session_maker,
 ) -> None:
@@ -641,7 +631,6 @@ async def test_responses_concat_merges_same_height_internal_children_when_possib
     assert child_ids == leaf_ids
 
 
-@pytest.mark.asyncio
 async def test_responses_append_response_creates_response_chain(
     db_session_maker,
 ) -> None:
@@ -703,7 +692,6 @@ async def test_responses_append_response_creates_response_chain(
     assert cursors == 2
 
 
-@pytest.mark.asyncio
 async def test_responses_append_response_balances_repeated_appends(
     db_session_maker,
 ) -> None:
@@ -746,7 +734,6 @@ async def test_responses_append_response_balances_repeated_appends(
     assert row.child_count >= 2
 
 
-@pytest.mark.asyncio
 async def test_responses_create_node_tree_avoids_single_child_carry_groups(
     db_session_maker,
 ) -> None:
@@ -830,7 +817,6 @@ async def test_responses_create_node_tree_avoids_single_child_carry_groups(
     assert child_counts == [33, 32]
 
 
-@pytest.mark.asyncio
 async def test_responses_build_state_tree_handles_leaf_boundary_plus_one(
     db_session_maker,
 ) -> None:
@@ -878,7 +864,6 @@ async def test_responses_build_state_tree_handles_leaf_boundary_plus_one(
     ]
 
 
-@pytest.mark.asyncio
 async def test_responses_build_state_tree_handles_multilevel_8193_items(
     db_session_maker,
 ) -> None:
@@ -921,7 +906,6 @@ async def test_responses_build_state_tree_handles_multilevel_8193_items(
     ]
 
 
-@pytest.mark.asyncio
 async def test_responses_split_state_tree_handles_edges_and_boundaries(
     db_session_maker,
 ) -> None:
@@ -985,7 +969,6 @@ async def test_responses_split_state_tree_handles_edges_and_boundaries(
     assert old_root_sample == ["message 4223", "message 4224"]
 
 
-@pytest.mark.asyncio
 async def test_responses_list_state_items_reads_ranges_from_multilevel_tree(
     db_session_maker,
 ) -> None:
@@ -1049,7 +1032,6 @@ async def test_responses_list_state_items_reads_ranges_from_multilevel_tree(
     ]
 
 
-@pytest.mark.asyncio
 async def test_responses_list_and_splice_support_compaction_shape(
     db_session_maker,
 ) -> None:
@@ -1163,7 +1145,6 @@ async def test_responses_list_and_splice_support_compaction_shape(
     ]
 
 
-@pytest.mark.asyncio
 async def test_responses_summary_compaction_workflow_persists_new_head(
     db_session_maker,
 ) -> None:
@@ -1330,7 +1311,6 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
     assert c_counts == (0, 2)
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_preserves_shared_nodes_after_splice(
     db_session_maker,
 ) -> None:
@@ -1525,7 +1505,6 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
     assert new_sample == ["message 128", "summary 0", "message 130"]
 
 
-@pytest.mark.asyncio
 async def test_responses_append_response_requires_complete_namespace_cursors(
     db_session_maker,
 ) -> None:
@@ -1557,7 +1536,6 @@ async def test_responses_append_response_requires_complete_namespace_cursors(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_lease_and_conversation_helpers_move_roots(
     db_session_maker,
 ) -> None:

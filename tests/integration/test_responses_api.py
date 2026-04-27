@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 
-import pytest
 from litestar.testing import AsyncTestClient
 
 from plap.responses.contracts import SupportedTool
@@ -33,7 +32,6 @@ def _request_payload(stream: bool = False) -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
 async def test_http_routes_require_bearer_auth(test_app) -> None:
     async with AsyncTestClient(app=test_app) as client:
         response = await client.post("/v1/responses", json={"model": "gpt-4.1"})
@@ -43,7 +41,6 @@ async def test_http_routes_require_bearer_auth(test_app) -> None:
     assert response.json()["error"]["type"] == "authentication_error"
 
 
-@pytest.mark.asyncio
 async def test_authenticated_routes_return_stubbed_contracts(
     test_app,
     seeded_auth_data,
@@ -99,7 +96,6 @@ async def test_authenticated_routes_return_stubbed_contracts(
     assert input_tokens.json()["object"] == "response.input_tokens"
 
 
-@pytest.mark.asyncio
 async def test_create_response_resolves_tool_policies_without_changing_behavior(
     test_app,
     seeded_auth_data,
@@ -118,7 +114,6 @@ async def test_create_response_resolves_tool_policies_without_changing_behavior(
     assert resolver.tool_names == [["lookup_record", "web_search"]]
 
 
-@pytest.mark.asyncio
 async def test_http_validation_rejects_unsupported_context_management(
     test_app,
     seeded_auth_data,
@@ -139,7 +134,6 @@ async def test_http_validation_rejects_unsupported_context_management(
     assert response.json()["error"]["type"] == "invalid_request_error"
 
 
-@pytest.mark.asyncio
 async def test_websocket_streams_response_events_with_auth(
     test_app,
     seeded_auth_data,

@@ -1,7 +1,5 @@
 from uuid import uuid4
 
-import pytest
-
 from plap.responses.contracts import FunctionTool
 from plap.responses.tools import (
     CachedToolPolicyResolver,
@@ -13,7 +11,6 @@ from plap.responses.tools import (
 from plap.responses.tools.repository import ToolClassificationRepository
 
 
-@pytest.mark.asyncio
 async def test_tool_classification_repository_roundtrips_signature_and_classification(
     db_session_maker,
 ) -> None:
@@ -47,7 +44,6 @@ async def test_tool_classification_repository_roundtrips_signature_and_classific
     assert stored == classification
 
 
-@pytest.mark.asyncio
 async def test_tool_classification_repository_roundtrips_contextual_classification(
     db_session_maker,
 ) -> None:
@@ -81,7 +77,6 @@ async def test_tool_classification_repository_roundtrips_contextual_classificati
     assert stored == classification
 
 
-@pytest.mark.asyncio
 async def test_tool_classification_repository_cache_key_uses_prompt_hash(
     db_session_maker,
 ) -> None:
@@ -116,7 +111,6 @@ async def test_tool_classification_repository_cache_key_uses_prompt_hash(
     assert missing is None
 
 
-@pytest.mark.asyncio
 async def test_cached_policy_resolver_uses_stored_classification(
     db_session_maker,
 ) -> None:
@@ -137,7 +131,6 @@ async def test_cached_policy_resolver_uses_stored_classification(
     assert classifier.calls == 1
 
 
-@pytest.mark.asyncio
 async def test_cached_policy_resolver_batches_cache_lookup(
     db_session_maker,
 ) -> None:
@@ -170,7 +163,6 @@ async def test_cached_policy_resolver_batches_cache_lookup(
     assert classifier.calls == 1
 
 
-@pytest.mark.asyncio
 async def test_tool_call_classification_repository_is_scoped(
     db_session_maker,
 ) -> None:

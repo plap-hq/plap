@@ -58,7 +58,6 @@ async def ingest_response_request(
     )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
     result = await ingest_response_request(
         _request(
@@ -89,7 +88,6 @@ async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
     assert result.continuation_side == "main"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_compaction_only_continues_main() -> None:
     result = await ingest_response_request(
         _request(input=[_compaction_item("only", 1)]),
@@ -106,7 +104,6 @@ async def test_ingestion_compaction_only_continues_main() -> None:
     assert result.continuation_side == "main"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
     result = await ingest_response_request(
         _request(input=[_message("user", "u0"), _message("assistant", "a0")]),
@@ -125,7 +122,6 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
     assert result.continuation_side == "main"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
     result = await ingest_response_request(
         _request(
@@ -147,7 +143,6 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
     assert result.continuation_side == "reviewer"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
     result = await ingest_response_request(
         _request(
@@ -164,7 +159,6 @@ async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
     assert result.continuation_side == "arbitrator"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     temp_message = {"role": "assistant", "content": "temp reviewer"}
     call_id = _call_id(
@@ -198,7 +192,6 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     assert result.in_temp_debate is False
 
 
-@pytest.mark.asyncio
 async def test_ingestion_exposes_active_temp_debate_state() -> None:
     result = await ingest_response_request(
         _request(
@@ -221,7 +214,6 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
     assert result.in_temp_debate is True
 
 
-@pytest.mark.asyncio
 async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
     assistant = {
         "role": "assistant",
@@ -254,7 +246,6 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
     assert result.continuation_side == "reviewer"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> None:
     assistant = {"role": "assistant", "content": "public assistant"}
     call_id = _call_id(
@@ -297,7 +288,6 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
     assert result.continuation_side == "main"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
     result = await ingest_response_request(
         _request(
@@ -352,7 +342,6 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
     assert result.continuation_side == "main"
 
 
-@pytest.mark.asyncio
 async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> None:
     with pytest.raises(IngestionError, match="pending tool outputs"):
         await ingest_response_request(
@@ -373,7 +362,6 @@ async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> N
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
     first_call = RequestFunctionCallItem(
         arguments='{"path":"a"}',
@@ -395,7 +383,6 @@ async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> None:
     assistant = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
@@ -422,7 +409,6 @@ async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> Non
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_allows_stripped_tool_call_association() -> None:
     stripped = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
@@ -452,7 +438,6 @@ async def test_ingestion_allows_stripped_tool_call_association() -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_ingestion_rejects_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 
@@ -477,7 +462,6 @@ async def test_ingestion_rejects_reasoning_forward_refs() -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None:
     anchor = {"role": "assistant", "content": "anchor"}
 
@@ -527,7 +511,6 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
     assert result.main_context == result.main_transcript
 
 
-@pytest.mark.asyncio
 async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
     call_id = _call_id(
         side="reviewer",
@@ -542,7 +525,6 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_uses_nearest_backward_hash_prefix_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -590,7 +572,6 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
     ]
 
 
-@pytest.mark.asyncio
 async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
     with pytest.raises(IngestionError):
         await ingest_response_request(
@@ -608,7 +589,6 @@ async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_ingestion_classifies_declared_tools_first() -> None:
     result = await ingest_response_request(
         _request(tools=[_read_file_tool(), WebSearchTool(type="web_search")]),

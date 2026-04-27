@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from logging.config import fileConfig
 
+import anyio
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -70,7 +70,7 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    anyio.run(run_async_migrations)
 
 
 if context.is_offline_mode():

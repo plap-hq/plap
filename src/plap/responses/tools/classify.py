@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
+import anyio
 import blake3
 import msgspec
 
@@ -87,24 +87,21 @@ class LLMToolClassifier(IToolClassifier):
         if not signatures_by_hash:
             return {}
 
-        semaphore = asyncio.Semaphore(self._max_concurrency)
+        limiter = anyio.CapacityLimiter(self._max_concurrency)
+        classifications: dict[bytes, ToolClassification] = {}
 
         async def classify_with_limit(
             signature: ToolSignature,
-        ) -> ToolClassification:
-            async with semaphore:
-                return await self._classify_one(signature)
+        ) -> None:
+            async with limiter:
+                classification = await self._classify_one(signature)
+            classifications[classification.signature_hash] = classification
 
-        classifications = await asyncio.gather(
-            *(
-                classify_with_limit(signature)
-                for signature in signatures_by_hash.values()
-            )
-        )
-        return {
-            classification.signature_hash: classification
-            for classification in classifications
-        }
+        async with anyio.create_task_group() as task_group:
+            for signature in signatures_by_hash.values():
+                task_group.start_soon(classify_with_limit, signature)
+
+        return classifications
 
     async def _classify_one(self, signature: ToolSignature) -> ToolClassification:
         try:

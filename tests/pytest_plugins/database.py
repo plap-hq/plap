@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import anyio
 import docker
 import pytest
-import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from docker.errors import ImageNotFound
@@ -91,13 +90,16 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
     )
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def database_schema(test_settings: Settings) -> None:
-    await _reset_database_schema(test_settings.database_url)
-    await asyncio.to_thread(_run_migrations, test_settings.database_url)
+@pytest.fixture(autouse=True)
+def database_schema(test_settings: Settings) -> None:
+    async def reset_and_migrate() -> None:
+        await _reset_database_schema(test_settings.database_url)
+        await anyio.to_thread.run_sync(_run_migrations, test_settings.database_url)
+
+    anyio.run(reset_and_migrate)
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 async def db_session_maker(test_settings: Settings):
     engine = create_database_engine(test_settings.database_url)
     try:
@@ -106,7 +108,7 @@ async def db_session_maker(test_settings: Settings):
         await engine.dispose()
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 async def seeded_auth_data(
     db_session_maker,
     test_settings: Settings,

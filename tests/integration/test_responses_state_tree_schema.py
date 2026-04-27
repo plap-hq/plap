@@ -8,7 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 
-@pytest.mark.asyncio
 async def test_responses_seeds_core_item_namespaces(db_session_maker) -> None:
     async with db_session_maker() as session:
         namespace_names = (
@@ -31,7 +30,6 @@ async def test_responses_seeds_core_item_namespaces(db_session_maker) -> None:
     assert namespace_names == ["m", "r", "s"]
 
 
-@pytest.mark.asyncio
 async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
     db_session_maker,
 ) -> None:
@@ -188,7 +186,6 @@ async def _create_leaf(session, scope_id, payload_id) -> int:
     return node_id
 
 
-@pytest.mark.asyncio
 async def test_responses_triggers_update_refcounts_and_conversation_lease(
     db_session_maker,
 ) -> None:
@@ -286,7 +283,6 @@ async def test_responses_triggers_update_refcounts_and_conversation_lease(
     assert lease_refcount == 1
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None:
     scope_id = uuid4()
 
@@ -367,7 +363,6 @@ async def test_responses_rejects_sparse_leaf_positions(db_session_maker) -> None
             await session.commit()
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_structural_node_updates(
     db_session_maker,
 ) -> None:
@@ -393,7 +388,6 @@ async def test_responses_rejects_structural_node_updates(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_internal_node_with_missing_child_edge(
     db_session_maker,
 ) -> None:
@@ -450,7 +444,6 @@ async def test_responses_rejects_internal_node_with_missing_child_edge(
             await session.commit()
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_duplicate_child_edges_under_one_parent(
     db_session_maker,
 ) -> None:
@@ -525,7 +518,6 @@ async def test_responses_rejects_duplicate_child_edges_under_one_parent(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_conversation_identity_updates(
     db_session_maker,
 ) -> None:
@@ -583,7 +575,6 @@ async def test_responses_rejects_conversation_identity_updates(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_namespace_counter_updates(
     db_session_maker,
 ) -> None:
@@ -655,7 +646,6 @@ async def test_responses_rejects_namespace_counter_updates(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_rejects_non_object_response_fields(
     db_session_maker,
 ) -> None:
@@ -685,7 +675,6 @@ async def test_responses_rejects_non_object_response_fields(
             )
 
 
-@pytest.mark.asyncio
 async def test_responses_allows_lifecycle_updates_but_rejects_fields_updates(
     db_session_maker,
 ) -> None:

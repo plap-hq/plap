@@ -14,7 +14,6 @@ async def openai_client(live_server, seeded_auth_data):
     await client.close()
 
 
-@pytest.mark.asyncio
 async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> None:
     created = await openai_client.responses.create(
         model="gpt-4.1",
@@ -58,7 +57,6 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert deleted is None
 
 
-@pytest.mark.asyncio
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:
     stream = await openai_client.responses.create(
         model="gpt-4.1",
@@ -73,7 +71,6 @@ async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> Non
     assert event_types[-1] == "response.completed"
 
 
-@pytest.mark.asyncio
 async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None:
     manager = openai_client.responses.connect()
     connection = await manager.enter()
@@ -103,7 +100,6 @@ async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None
     assert event_types[-1] == "response.completed"
 
 
-@pytest.mark.asyncio
 async def test_async_openai_client_rejects_invalid_api_key(live_server) -> None:
     client = AsyncOpenAI(
         api_key="plap_deadbeef_notavalidsecret",
