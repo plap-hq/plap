@@ -237,37 +237,11 @@ class ResponseReasoningTextDoneEvent(StrictModel):
     )
 
 
-class ResponseWebSearchCallInProgressEvent(StrictModel):
-    item_id: str = Field(description="Web search call item ID.")
-    output_index: int = Field(
-        description="Index of the web search item in response.output."
-    )
-    sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.web_search_call.in_progress"] = Field(
-        description="Stream event discriminator."
-    )
-
-
-class ResponseWebSearchCallSearchingEvent(StrictModel):
-    item_id: str = Field(description="Web search call item ID.")
-    output_index: int = Field(
-        description="Index of the web search item in response.output."
-    )
-    sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.web_search_call.searching"] = Field(
-        description="Stream event discriminator."
-    )
-
-
-class ResponseWebSearchCallCompletedEvent(StrictModel):
-    item_id: str = Field(description="Web search call item ID.")
-    output_index: int = Field(
-        description="Index of the web search item in response.output."
-    )
-    sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.web_search_call.completed"] = Field(
-        description="Stream event discriminator."
-    )
+# OpenAI exposes response.web_search_call.* stream events. plap emits web search
+# as ordinary function_call/function_call_output events instead.
+# class ResponseWebSearchCallInProgressEvent(StrictModel): ...
+# class ResponseWebSearchCallSearchingEvent(StrictModel): ...
+# class ResponseWebSearchCallCompletedEvent(StrictModel): ...
 
 
 class ResponseErrorEvent(StrictModel):
@@ -297,9 +271,9 @@ type ResponseStreamEvent = Annotated[
     | ResponseReasoningSummaryTextDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
-    | ResponseWebSearchCallInProgressEvent
-    | ResponseWebSearchCallSearchingEvent
-    | ResponseWebSearchCallCompletedEvent
+    # | ResponseWebSearchCallInProgressEvent
+    # | ResponseWebSearchCallSearchingEvent
+    # | ResponseWebSearchCallCompletedEvent
     | ResponseErrorEvent,
     Field(discriminator="type"),
 ]

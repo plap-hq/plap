@@ -81,7 +81,7 @@ class ToolChoiceFunction(StrictModel):
 type ToolChoice = Literal["none", "auto", "required"] | ToolChoiceFunction
 
 type ResponseIncludable = Literal[
-    "web_search_call.action.sources",
+    # "web_search_call.action.sources",
     "message.output_text.logprobs",
     "reasoning.encrypted_content",
 ]

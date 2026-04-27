@@ -77,7 +77,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
     assert body["status"] == "completed"
     assert any(item["type"] == "message" for item in body["output"])
     assert any(item["type"] == "function_call" for item in body["output"])
-    assert any(item["type"] == "web_search_call" for item in body["output"])
+    assert not any(item["type"] == "web_search_call" for item in body["output"])
 
     assert streamed.status_code == 200
     assert streamed.headers["content-type"].startswith("text/event-stream")
@@ -157,7 +157,6 @@ async def test_websocket_streams_response_events_with_auth(
     assert event_types[0] == "response.created"
     assert "response.output_item.added" in event_types
     assert "response.function_call_arguments.done" in event_types
-    assert "response.web_search_call.completed" in event_types
     assert event_types[-1] == "response.completed"
 
 

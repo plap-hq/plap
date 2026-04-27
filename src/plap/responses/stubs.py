@@ -50,12 +50,7 @@ from plap.responses.contracts import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     ResponseUsage,
-    ResponseWebSearchCallCompletedEvent,
-    ResponseWebSearchCallInProgressEvent,
-    ResponseWebSearchCallItem,
-    ResponseWebSearchCallSearchingEvent,
     SummaryTextContent,
-    WebSearchActionSearch,
     WebSearchTool,
 )
 
@@ -152,41 +147,41 @@ def build_stub_response(
 
     if request.tools:
         for index, tool in enumerate(request.tools):
-            if isinstance(tool, WebSearchTool):
-                items.append(
-                    ResponseWebSearchCallItem(
-                        action=WebSearchActionSearch(
-                            query="stub search",
-                            queries=["stub search"],
-                            type="search",
-                        ),
-                        id=_stable_id("ws", f"{seed}:{index}"),
-                        status="completed",
-                        type="web_search_call",
-                    )
+            if isinstance(tool, FunctionTool):
+                tool_name = tool.name
+                call_seed = f"{seed}:{tool_name}:{index}"
+                call_id = _stable_id("call", call_seed)
+                arguments = "{}"
+                output = '{"ok":true}'
+            elif isinstance(tool, WebSearchTool):
+                tool_name = "web_search"
+                call_seed = f"{seed}:{tool_name}:{index}"
+                call_id = _stable_id("call", call_seed)
+                arguments = '{"query":"stub search"}'
+                output = '{"query":"stub search","results":[]}'
+            else:
+                continue
+
+            items.append(
+                ResponseFunctionCallItem(
+                    arguments=arguments,
+                    call_id=call_id,
+                    id=_stable_id("fc", call_seed),
+                    name=tool_name,
+                    status="completed" if status != "cancelled" else "incomplete",
+                    type="function_call",
                 )
-            elif isinstance(tool, FunctionTool):
-                call_id = _stable_id("call", f"{seed}:{tool.name}:{index}")
-                items.append(
-                    ResponseFunctionCallItem(
-                        arguments="{}",
-                        call_id=call_id,
-                        id=_stable_id("fc", f"{seed}:{tool.name}:{index}"),
-                        name=tool.name,
-                        status="completed" if status != "cancelled" else "incomplete",
-                        type="function_call",
-                    )
+            )
+            items.append(
+                ResponseFunctionCallOutputItem(
+                    call_id=call_id,
+                    created_by="plap",
+                    id=_stable_id("fco", call_seed),
+                    output=output,
+                    status="completed" if status != "cancelled" else "incomplete",
+                    type="function_call_output",
                 )
-                items.append(
-                    ResponseFunctionCallOutputItem(
-                        call_id=call_id,
-                        created_by="plap",
-                        id=_stable_id("fco", f"{seed}:{tool.name}:{index}"),
-                        output='{"ok":true}',
-                        status="completed" if status != "cancelled" else "incomplete",
-                        type="function_call_output",
-                    )
-                )
+            )
 
     items.append(
         ResponseMessageItem(
@@ -436,32 +431,6 @@ def build_stream_events(response: ResponseObject) -> list[ResponseStreamEvent]:
                         type="response.content_part.done",
                     )
                 )
-
-        if isinstance(item, ResponseWebSearchCallItem):
-            push(
-                ResponseWebSearchCallInProgressEvent(
-                    item_id=item.id,
-                    output_index=output_index,
-                    sequence_number=0,
-                    type="response.web_search_call.in_progress",
-                )
-            )
-            push(
-                ResponseWebSearchCallSearchingEvent(
-                    item_id=item.id,
-                    output_index=output_index,
-                    sequence_number=0,
-                    type="response.web_search_call.searching",
-                )
-            )
-            push(
-                ResponseWebSearchCallCompletedEvent(
-                    item_id=item.id,
-                    output_index=output_index,
-                    sequence_number=0,
-                    type="response.web_search_call.completed",
-                )
-            )
 
         if isinstance(item, ResponseFunctionCallItem):
             push(

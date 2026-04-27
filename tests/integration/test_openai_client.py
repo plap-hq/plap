@@ -46,7 +46,8 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert created.object == "response"
     assert created.id.startswith("resp_")
     assert any(item.type == "message" for item in created.output)
-    assert any(item.type == "web_search_call" for item in created.output)
+    assert any(item.type == "function_call" for item in created.output)
+    assert not any(item.type == "web_search_call" for item in created.output)
     assert retrieved.id == created.id
     assert cancelled.status == "cancelled"
     assert compacted.object == "response.compaction"

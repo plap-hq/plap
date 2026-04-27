@@ -99,7 +99,6 @@ class ResponseCreateRequest(StrictModel):
         default=None,
         description=(
             "Additional output data to include, such as "
-            "web_search_call.action.sources, "
             "message.output_text.logprobs, or reasoning.encrypted_content."
         ),
     )
@@ -198,7 +197,7 @@ class ResponseCreateRequest(StrictModel):
     )
     tools: list[SupportedTool] | None = Field(
         default=None,
-        description="Supported tools the model may call: function and web_search only.",
+        description="Supported tools: function tools and hardcoded web_search.",
     )
     top_logprobs: int | None = Field(
         default=None,

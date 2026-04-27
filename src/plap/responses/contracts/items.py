@@ -230,47 +230,14 @@ class ResponseCompactionItem(_CompactionItemBase):
     id: str = Field(description="Unique compaction item ID.")
 
 
-class WebSearchActionSearchSource(StrictModel):
-    type: Literal["url"] = Field(description="Web-search source discriminator.")
-    url: str = Field(description="Source URL used by the web search call.")
-
-
-class WebSearchActionSearch(StrictModel):
-    queries: list[str] | None = Field(default=None, description="Queries used.")
-    query: str = Field(description="Primary query used for the search.")
-    sources: list[WebSearchActionSearchSource] | None = Field(
-        default=None,
-        description="Search result sources when included in the response.",
-    )
-    type: Literal["search"] = Field(description="Web-search action discriminator.")
-
-
-class WebSearchActionOpenPage(StrictModel):
-    type: Literal["open_page"] = Field(description="Web-search action discriminator.")
-    url: str | None = Field(default=None, description="URL opened by web search.")
-
-
-class WebSearchActionFindInPage(StrictModel):
-    pattern: str = Field(description="Search pattern used within the page.")
-    type: Literal["find_in_page"] = Field(
-        description="Web-search action discriminator."
-    )
-    url: str = Field(description="URL searched within.")
-
-
-type WebSearchAction = Annotated[
-    WebSearchActionSearch | WebSearchActionOpenPage | WebSearchActionFindInPage,
-    Field(discriminator="type"),
-]
-
-
-class ResponseWebSearchCallItem(StrictModel):
-    action: WebSearchAction = Field(description="Specific web-search action details.")
-    id: str = Field(description="Unique web search call item ID.")
-    status: Literal["in_progress", "searching", "completed", "failed"] = Field(
-        description="Web search call lifecycle status."
-    )
-    type: Literal["web_search_call"] = Field(description="Output item discriminator.")
+# OpenAI exposes web_search_call output items. plap emits web search as a
+# server-owned function_call/function_call_output pair instead.
+# class WebSearchActionSearchSource(StrictModel): ...
+# class WebSearchActionSearch(StrictModel): ...
+# class WebSearchActionOpenPage(StrictModel): ...
+# class WebSearchActionFindInPage(StrictModel): ...
+# type WebSearchAction = ...
+# class ResponseWebSearchCallItem(StrictModel): ...
 
 
 type ResponseOutputItem = Annotated[
@@ -278,8 +245,8 @@ type ResponseOutputItem = Annotated[
     | ResponseFunctionCallItem
     | ResponseFunctionCallOutputItem
     | ReasoningItem
-    | ResponseCompactionItem
-    | ResponseWebSearchCallItem,
+    | ResponseCompactionItem,
+    # | ResponseWebSearchCallItem,
     Field(discriminator="type"),
 ]
 
