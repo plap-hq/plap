@@ -479,7 +479,7 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingestion_ambiguous_content_hash_prefix_fails_closed(
+async def test_ingestion_uses_nearest_backward_hash_prefix_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_hash(message: dict[str, object]) -> str:
@@ -493,23 +493,37 @@ async def test_ingestion_ambiguous_content_hash_prefix_fails_closed(
         upstream_tool_call_id="up_ambiguous_0",
     )
 
-    with pytest.raises(IngestionError, match="ambiguous"):
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [
-                            {"role": "assistant", "content": "a"},
-                            {"role": "assistant", "content": "b"},
-                        ],
-                    ),
-                    _function_call(call_id),
-                ]
-            ),
-            keyring=_keyring(),
-        )
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "reviewer",
+                    False,
+                    [
+                        {"role": "assistant", "content": "a"},
+                        {"role": "assistant", "content": "b"},
+                    ],
+                ),
+                _function_call(call_id),
+                _function_output(call_id, "nearest output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message for row in result.reviewer] == [
+        {"role": "assistant", "content": "a"},
+        {
+            "role": "assistant",
+            "content": "b",
+            "tool_calls": [_tool_call("up_ambiguous_0")],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "up_ambiguous_0",
+            "content": "nearest output",
+        },
+    ]
 
 
 @pytest.mark.asyncio

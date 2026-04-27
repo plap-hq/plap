@@ -189,19 +189,14 @@ class _QueueBase:
         return None
 
     def _message_for_call(self, call_id: SealedCallID) -> ChatMessage:
-        matches = [
-            entry
-            for entry in reversed(self._entries)
-            if entry.content_hash.startswith(call_id.content_hash_prefix.hex())
-            and entry.message.get("role") == "assistant"
-        ]
-        if not matches:
-            raise IngestionError("sealed function call content_hash target is missing")
-        if len(matches) > 1:
-            raise IngestionError(
-                "sealed function call content_hash target is ambiguous"
-            )
-        return matches[0].message
+        prefix = call_id.content_hash_prefix.hex()
+        for entry in reversed(self._entries):
+            if (
+                entry.content_hash.startswith(prefix)
+                and entry.message.get("role") == "assistant"
+            ):
+                return entry.message
+        raise IngestionError("sealed function call content_hash target is missing")
 
     def _require_tool_call(self, call_id: SealedCallID) -> None:
         target = self._message_for_call(call_id)
