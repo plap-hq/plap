@@ -58,13 +58,17 @@ async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message["content"]) for row in result.main
+        (row.namespace, row.ordinal, row.message["content"])
+        for row in result.main_context
     ] == [
         ("m", 0, "kept active"),
         ("s", 0, "kept summary"),
         ("m", 1, "after"),
     ]
-    assert [row.message["content"] for row in result.source] == ["kept source"]
+    assert [row.message["content"] for row in result.main_transcript] == [
+        "kept source",
+        "after",
+    ]
     assert result.cursors == {"m": 2, "s": 1}
     assert result.continuation_side == "main"
 
@@ -76,7 +80,11 @@ async def test_ingestion_compaction_only_continues_main() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal) for row in result.main] == [("m", 0), ("s", 0)]
+    assert [(row.namespace, row.ordinal) for row in result.main_context] == [
+        ("m", 0),
+        ("s", 0),
+    ]
+    assert [(row.namespace, row.ordinal) for row in result.main_transcript] == [("m", 0)]
     assert result.continuation_side == "main"
 
 
@@ -88,12 +96,14 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message["content"]) for row in result.main
+        (row.namespace, row.ordinal, row.message["content"])
+        for row in result.main_context
     ] == [
         ("m", 0, "u0"),
         ("m", 1, "a0"),
     ]
     assert result.cursors == {"m": 2, "s": 0}
+    assert result.main_context == result.main_transcript
     assert result.continuation_side == "main"
 
 
@@ -110,7 +120,8 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
         keyring=_keyring(),
     )
 
-    assert result.main == ()
+    assert result.main_context == ()
+    assert result.main_transcript == ()
     assert [(row.message["content"], row.content_hash) for row in result.reviewer] == [
         ("review", content_hash({"role": "assistant", "content": "review"}))
     ]
@@ -160,7 +171,10 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main] == ["final debate result"]
+    assert [row.message["content"] for row in result.main_context] == [
+        "final debate result"
+    ]
+    assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.continuation_side == "main"
 
@@ -189,7 +203,8 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
         keyring=_keyring(),
     )
 
-    assert result.main == ()
+    assert result.main_context == ()
+    assert result.main_transcript == ()
     assert [row.message for row in result.reviewer] == [
         assistant,
         {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "review file"},
@@ -217,7 +232,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal, row.message) for row in result.main] == [
+    assert [(row.namespace, row.ordinal, row.message) for row in result.main_context] == [
         (
             "m",
             0,
@@ -234,6 +249,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         ),
     ]
     assert result.cursors == {"m": 2, "s": 0}
+    assert result.main_context == result.main_transcript
     assert result.continuation_side == "main"
 
 
@@ -255,7 +271,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal, row.message) for row in result.main] == [
+    assert [(row.namespace, row.ordinal, row.message) for row in result.main_context] == [
         (
             "m",
             0,
@@ -284,6 +300,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
             },
         ),
     ]
+    assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.arbitrator == ()
     assert result.continuation_side == "main"
@@ -442,7 +459,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         keyring=_keyring(),
     )
 
-    assert [(row.ordinal, row.message) for row in result.main] == [
+    assert [(row.ordinal, row.message) for row in result.main_context] == [
         (
             0,
             {
@@ -461,6 +478,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         ),
     ]
     assert result.cursors == {"m": 2, "s": 0}
+    assert result.main_context == result.main_transcript
 
 
 @pytest.mark.asyncio

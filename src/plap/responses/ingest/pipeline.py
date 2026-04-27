@@ -59,12 +59,12 @@ async def ingest_response_request(
     routed = _route_items_by_side(pruned)
     queues = _associate_side_queues(compaction, routed)
     return IngestedQueues(
-        main=tuple(queues.main.rows),
+        main_context=tuple(queues.main.context_rows),
+        main_transcript=_main_transcript(compaction, queues.main),
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
         continuation_side=routed.continuation_side,
         compaction=compaction,
-        source=() if compaction is None else compaction.source,
         cursors=queues.cursors,
         tool_policies=tool_policies,
     )
@@ -128,7 +128,7 @@ class _QueueBase:
         for message in payload.messages:
             content_hash_value = message.get("content_hash")
             if content_hash_value is None:
-                self._append_message(dict(message))
+                self._append_message(dict(message), temp=payload.temp)
                 continue
             if not isinstance(content_hash_value, str):
                 raise IngestionError("reasoning content_hash must be a string")
@@ -176,7 +176,9 @@ class _QueueBase:
             }
         )
 
-    def _append_message(self, message: ChatMessage) -> ChatMessage:
+    def _append_message(
+        self, message: ChatMessage, *, temp: bool = False
+    ) -> ChatMessage:
         raise NotImplementedError
 
     def _append_tool_output(self, message: ChatMessage) -> None:
@@ -236,16 +238,28 @@ class _MainQueue(_QueueBase):
     def __init__(self, cursors: dict[str, int]) -> None:
         super().__init__("main")
         self._cursors = cursors
+        self._seed_rows: list[ChatMessageWithOrdinal] = []
+        self._stable_rows: list[ChatMessageWithOrdinal] = []
+        self._temp_rows: list[ChatMessageWithOrdinal] = []
 
     @property
-    def rows(self) -> list[ChatMessageWithOrdinal]:
+    def context_rows(self) -> list[ChatMessageWithOrdinal]:
         return [
             entry
             for entry in self._entries
             if isinstance(entry, ChatMessageWithOrdinal)
         ]
 
+    @property
+    def stable_rows(self) -> list[ChatMessageWithOrdinal]:
+        return self._stable_rows
+
+    @property
+    def temp_rows(self) -> list[ChatMessageWithOrdinal]:
+        return self._temp_rows
+
     def add_existing_row(self, row: ChatMessageWithOrdinal) -> None:
+        self._seed_rows.append(row)
         self._entries.append(row)
 
     def add_message(self, message: ChatMessage) -> ChatMessageWithOrdinal:
@@ -275,20 +289,30 @@ class _MainQueue(_QueueBase):
             }
         )
 
-    def _append_message(self, message: ChatMessage) -> ChatMessage:
-        return self.add_message(message).message
+    def _append_message(
+        self, message: ChatMessage, *, temp: bool = False
+    ) -> ChatMessage:
+        return self._append_main_row(message, temp=temp).message
 
     def _append_tool_output(self, message: ChatMessage) -> None:
         self._append_main_row(message, allow_pending=True)
 
     def _append_main_row(
-        self, message: ChatMessage, *, allow_pending: bool = False
+        self,
+        message: ChatMessage,
+        *,
+        allow_pending: bool = False,
+        temp: bool = False,
     ) -> ChatMessageWithOrdinal:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
         ordinal = self._cursors.get("m", 0)
         row = ChatMessageWithOrdinal(namespace="m", ordinal=ordinal, message=message)
         self._cursors["m"] = ordinal + 1
+        if temp:
+            self._temp_rows.append(row)
+        else:
+            self._stable_rows.append(row)
         self._entries.append(row)
         return row
 
@@ -311,7 +335,9 @@ class _PrivateSideQueue(_QueueBase):
     def rows(self) -> list[SideMessage]:
         return [entry for entry in self._entries if isinstance(entry, SideMessage)]
 
-    def _append_message(self, message: ChatMessage) -> ChatMessage:
+    def _append_message(
+        self, message: ChatMessage, *, temp: bool = False
+    ) -> ChatMessage:
         self._ensure_no_pending_tool_calls()
         row = SideMessage(message=message)
         self._entries.append(row)
@@ -483,6 +509,13 @@ def _associate_side_queues(
     _apply_side_events(queues.arbitrator, routed.arbitrator)
     _assert_no_pending_tool_calls(queues)
     return queues
+
+
+def _main_transcript(
+    compaction: CompactionPayload | None, main: _MainQueue
+) -> tuple[ChatMessageWithOrdinal, ...]:
+    root_rows = () if compaction is None else compaction.source
+    return (*root_rows, *main.stable_rows)
 
 
 def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:

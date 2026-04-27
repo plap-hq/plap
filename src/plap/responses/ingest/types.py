@@ -70,12 +70,12 @@ class SealedCallID:
 
 @dataclass(frozen=True, slots=True)
 class IngestedQueues:
-    main: tuple[ChatMessageWithOrdinal, ...]
+    main_context: tuple[ChatMessageWithOrdinal, ...]
+    main_transcript: tuple[ChatMessageWithOrdinal, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
     continuation_side: Side
     compaction: CompactionPayload | None
-    source: tuple[ChatMessageWithOrdinal, ...]
     cursors: dict[str, int]
     tool_policies: dict[str, ToolPolicy]
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
