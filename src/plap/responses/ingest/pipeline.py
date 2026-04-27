@@ -54,7 +54,7 @@ async def ingest_response_request(
     tool_policies = await _classify_tools(request, tool_policy_resolver)
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
-    decoded = _decode_sealed_items(remaining, keyring=keyring)
+    decoded, in_temp_debate = _decode_sealed_items(remaining, keyring=keyring)
     pruned = _prune_temp_debate_globally(decoded)
     routed = _route_items_by_side(pruned)
     queues = _associate_side_queues(compaction, routed)
@@ -64,6 +64,7 @@ async def ingest_response_request(
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
         continuation_side=routed.continuation_side,
+        in_temp_debate=in_temp_debate,
         compaction=compaction,
         cursors=queues.cursors,
         tool_policies=tool_policies,
@@ -383,7 +384,7 @@ def _last_compaction_index(input_items: list[object]) -> int | None:
 
 def _decode_sealed_items(
     input_items: list[object], *, keyring: SealingKeyring
-) -> list[_DecodedItem]:
+) -> tuple[list[_DecodedItem], bool]:
     decoded: list[_DecodedItem] = []
     in_temp_debate = False
     for item in input_items:
@@ -410,7 +411,7 @@ def _decode_sealed_items(
                     temp_related=in_temp_debate and call_id is not None,
                 )
             )
-    return decoded
+    return decoded, in_temp_debate
 
 
 def _open_reasoning_item(

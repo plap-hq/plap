@@ -75,6 +75,7 @@ class IngestedQueues:
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
     continuation_side: Side
+    in_temp_debate: bool
     compaction: CompactionPayload | None
     cursors: dict[str, int]
     tool_policies: dict[str, ToolPolicy]

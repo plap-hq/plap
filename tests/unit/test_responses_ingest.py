@@ -177,6 +177,30 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.continuation_side == "main"
+    assert result.in_temp_debate is False
+
+
+@pytest.mark.asyncio
+async def test_ingestion_exposes_active_temp_debate_state() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    True,
+                    [{"role": "assistant", "content": "temp debate tail"}],
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message["content"] for row in result.main_context] == [
+        "temp debate tail"
+    ]
+    assert result.main_transcript == ()
+    assert result.continuation_side == "main"
+    assert result.in_temp_debate is True
 
 
 @pytest.mark.asyncio
