@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from plap.sealing import SealingKeyError, SealingKeyring, associated_data, derive_key
+from plap.keyring import SealingKeyError, SealingKeyring, associated_data, derive_key
 from plap.settings import Settings
 
 

@@ -11,10 +11,10 @@ from litestar.exceptions import (
 )
 
 from plap.auth import APIKeyManager
+from plap.keyring import SealingKeyring
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tools import StaticToolPolicyResolver
-from plap.sealing import SealingKeyring
 from plap.settings import Settings, get_settings
 
 
