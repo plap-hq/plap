@@ -62,6 +62,7 @@ async def ingest_response_request(
         main=tuple(queues.main.rows),
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
+        continuation_side=routed.continuation_side,
         compaction=compaction,
         source=() if compaction is None else compaction.source,
         cursors=queues.cursors,
@@ -99,6 +100,7 @@ class _RoutedItems:
     main: list[_SideEvent] = field(default_factory=list)
     reviewer: list[_SideEvent] = field(default_factory=list)
     arbitrator: list[_SideEvent] = field(default_factory=list)
+    continuation_side: Side = "main"
 
     def side(self, side: Side) -> list[_SideEvent]:
         if side == "main":
@@ -414,9 +416,11 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
     pending_unsealed: dict[str, RequestFunctionCallItem] = {}
     for item in items:
         if isinstance(item.item, RequestMessageItem):
+            routed.continuation_side = "main"
             routed.main.append(_SideEvent(kind="message", item=item.item))
             continue
         if item.reasoning is not None:
+            routed.continuation_side = item.reasoning.side
             routed.side(item.reasoning.side).append(
                 _SideEvent(kind="reasoning", reasoning=item.reasoning)
             )
@@ -426,10 +430,12 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
                 if item.item.call_id in pending_unsealed:
                     raise IngestionError("duplicate pending unsealed function_call")
                 pending_unsealed[item.item.call_id] = item.item
+                routed.continuation_side = "main"
                 routed.main.append(
                     _SideEvent(kind="fabricated_function_call", call=item.item)
                 )
             else:
+                routed.continuation_side = item.call_id.side
                 routed.side(item.call_id.side).append(
                     _SideEvent(
                         kind="function_call",
@@ -445,10 +451,12 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
                     raise IngestionError(
                         "unsealed function_call_output has no matching function_call"
                     )
+                routed.continuation_side = "main"
                 routed.main.append(
                     _SideEvent(kind="fabricated_function_call_output", output=item.item)
                 )
             else:
+                routed.continuation_side = item.call_id.side
                 routed.side(item.call_id.side).append(
                     _SideEvent(
                         kind="function_call_output",

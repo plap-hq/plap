@@ -73,6 +73,7 @@ class IngestedQueues:
     main: tuple[ChatMessageWithOrdinal, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
+    continuation_side: Side
     compaction: CompactionPayload | None
     source: tuple[ChatMessageWithOrdinal, ...]
     cursors: dict[str, int]

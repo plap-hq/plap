@@ -66,6 +66,18 @@ async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
     ]
     assert [row.message["content"] for row in result.source] == ["kept source"]
     assert result.cursors == {"m": 2, "s": 1}
+    assert result.continuation_side == "main"
+
+
+@pytest.mark.asyncio
+async def test_ingestion_compaction_only_continues_main() -> None:
+    result = await ingest_response_request(
+        _request(input=[_compaction_item("only", 1)]),
+        keyring=_keyring(),
+    )
+
+    assert [(row.namespace, row.ordinal) for row in result.main] == [("m", 0), ("s", 0)]
+    assert result.continuation_side == "main"
 
 
 @pytest.mark.asyncio
@@ -82,6 +94,7 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
         ("m", 1, "a0"),
     ]
     assert result.cursors == {"m": 2, "s": 0}
+    assert result.continuation_side == "main"
 
 
 @pytest.mark.asyncio
@@ -102,6 +115,24 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
         ("review", content_hash({"role": "assistant", "content": "review"}))
     ]
     assert result.arbitrator == ()
+    assert result.continuation_side == "reviewer"
+
+
+@pytest.mark.asyncio
+async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "arbitrator", False, [{"role": "assistant", "content": "decide"}]
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.arbitrator[0].message["content"] == "decide"
+    assert result.continuation_side == "arbitrator"
 
 
 @pytest.mark.asyncio
@@ -131,6 +162,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
 
     assert [row.message["content"] for row in result.main] == ["final debate result"]
     assert result.reviewer == ()
+    assert result.continuation_side == "main"
 
 
 @pytest.mark.asyncio
@@ -162,6 +194,7 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
         assistant,
         {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "review file"},
     ]
+    assert result.continuation_side == "reviewer"
 
 
 @pytest.mark.asyncio
@@ -201,6 +234,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         ),
     ]
     assert result.cursors == {"m": 2, "s": 0}
+    assert result.continuation_side == "main"
 
 
 @pytest.mark.asyncio
@@ -252,6 +286,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
     ]
     assert result.reviewer == ()
     assert result.arbitrator == ()
+    assert result.continuation_side == "main"
 
 
 @pytest.mark.asyncio
