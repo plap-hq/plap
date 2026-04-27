@@ -484,12 +484,12 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
 ) -> None:
     def fake_hash(message: dict[str, object]) -> str:
         content = str(message.get("content", ""))
-        return "01020304" + ("a" if content.endswith("a") else "b") * 56
+        return "0102030405060708" + ("a" if content.endswith("a") else "b") * 48
 
     monkeypatch.setattr("plap.responses.ingest.types.chat_message_hash", fake_hash)
     call_id = _call_id(
         side="reviewer",
-        content_hash_prefix_value=bytes.fromhex("01020304"),
+        content_hash_prefix_value=bytes.fromhex("0102030405060708"),
         upstream_tool_call_id="up_ambiguous_0",
     )
 
@@ -626,7 +626,7 @@ def test_sealed_compaction_rejects_duplicate_active_ordinals() -> None:
 def test_call_id_binary_encoding_is_compact_and_roundtrips() -> None:
     value = SealedCallID(
         side="arbitrator",
-        content_hash_prefix=bytes.fromhex("01020304"),
+        content_hash_prefix=bytes.fromhex("0102030405060708"),
         tool_call_index=300,
         upstream_tool_call_id="provider_123",
     )
