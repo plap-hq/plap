@@ -24,22 +24,38 @@ from plap.responses.ingest import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
     ChatMessageWithOrdinal,
     CompactionPayload,
+    IngestedQueues,
     IngestionError,
     ReasoningPayload,
     SealedCallID,
     content_hash,
     content_hash_prefix,
-    ingest_response_request,
     open_call_id,
     open_compaction_payload,
     seal_call_id,
     seal_compaction_payload,
     seal_reasoning_payload,
 )
+from plap.responses.ingest import (
+    ingest_response_request as _ingest_response_request,
+)
 from plap.responses.ingest.sealing import (
     COMPACTION_PURPOSE,
     PAYLOAD_FORMAT_VERSION,
 )
+from plap.responses.tools import StaticToolPolicyResolver
+
+
+async def ingest_response_request(
+    request: ResponseCreateRequest,
+    *,
+    keyring: SealingKeyring,
+) -> IngestedQueues:
+    return await _ingest_response_request(
+        request,
+        keyring=keyring,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+    )
 
 
 @pytest.mark.asyncio
@@ -84,7 +100,9 @@ async def test_ingestion_compaction_only_continues_main() -> None:
         ("m", 0),
         ("s", 0),
     ]
-    assert [(row.namespace, row.ordinal) for row in result.main_transcript] == [("m", 0)]
+    assert [(row.namespace, row.ordinal) for row in result.main_transcript] == [
+        ("m", 0)
+    ]
     assert result.continuation_side == "main"
 
 
@@ -256,7 +274,9 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal, row.message) for row in result.main_context] == [
+    assert [
+        (row.namespace, row.ordinal, row.message) for row in result.main_context
+    ] == [
         (
             "m",
             0,
@@ -295,7 +315,9 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal, row.message) for row in result.main_context] == [
+    assert [
+        (row.namespace, row.ordinal, row.message) for row in result.main_context
+    ] == [
         (
             "m",
             0,

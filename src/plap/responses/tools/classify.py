@@ -7,13 +7,14 @@ import blake3
 import msgspec
 
 from plap.llms.chat import (
-    ChatCompletionClient,
     ChatCompletionRequest,
     ChatMessage,
     ChatResponseFormat,
+    IChatCompletionClient,
 )
 from plap.responses.tools.policy import (
     EffectClass,
+    IToolClassifier,
     ToolClassification,
     ToolSignature,
     signature_hash_hex,
@@ -57,10 +58,10 @@ TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
 TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 
 
-class LLMToolClassifier:
+class LLMToolClassifier(IToolClassifier):
     def __init__(
         self,
-        client: ChatCompletionClient,
+        client: IChatCompletionClient,
         *,
         classifier: str,
         classifier_model: str,

@@ -1,6 +1,5 @@
 from plap.llms.chat import (
     ChatAssistantMessage,
-    ChatCompletionClient,
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -19,6 +18,7 @@ from plap.llms.chat import (
     ChatToolChoiceFunction,
     ChatToolChoiceMode,
     ChatUsage,
+    IChatCompletionClient,
     ReasoningEffort,
     ServiceTier,
 )
@@ -34,7 +34,6 @@ from plap.llms.errors import (
 __all__ = [
     "ChatAssistantMessage",
     "ChatCompletionAuthenticationError",
-    "ChatCompletionClient",
     "ChatCompletionDelta",
     "ChatCompletionError",
     "ChatCompletionInvalidRequestError",
@@ -58,6 +57,7 @@ __all__ = [
     "ChatToolChoiceFunction",
     "ChatToolChoiceMode",
     "ChatUsage",
+    "IChatCompletionClient",
     "ReasoningEffort",
     "ServiceTier",
 ]

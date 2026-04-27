@@ -30,9 +30,7 @@ from plap.responses.ingest.types import (
     SideMessage,
 )
 from plap.responses.tools import (
-    StaticToolPolicyResolver,
-    ToolPolicy,
-    ToolPolicyResolver,
+    IToolPolicyResolver,
 )
 
 type _EventKind = Literal[
@@ -49,9 +47,9 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
-    tool_policy_resolver: ToolPolicyResolver | None = None,
+    tool_policy_resolver: IToolPolicyResolver,
 ) -> IngestedQueues:
-    tool_policies = await _classify_tools(request, tool_policy_resolver)
+    tool_policies = await tool_policy_resolver.resolve(request.tools or [])
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
     decoded, in_temp_debate = _decode_sealed_items(remaining, keyring=keyring)
@@ -69,13 +67,6 @@ async def ingest_response_request(
         cursors=queues.cursors,
         tool_policies=tool_policies,
     )
-
-
-async def _classify_tools(
-    request: ResponseCreateRequest,
-    resolver: ToolPolicyResolver | None,
-) -> dict[str, ToolPolicy]:
-    return await (resolver or StaticToolPolicyResolver()).resolve(request.tools or [])
 
 
 @dataclass(slots=True)

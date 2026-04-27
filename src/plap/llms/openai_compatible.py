@@ -27,6 +27,7 @@ from plap.llms.chat import (
     ChatToolCallDelta,
     ChatToolChoice,
     ChatUsage,
+    IChatCompletionClient,
 )
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
@@ -36,7 +37,7 @@ from plap.llms.errors import (
 )
 
 
-class OpenAICompatibleChatCompletionClient:
+class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
     def __init__(
         self,
         *,

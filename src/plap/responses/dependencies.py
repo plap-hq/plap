@@ -15,11 +15,18 @@ from plap.persistence.dependencies import (
     provide_request_db_session,
     provide_socket_db_session,
 )
+from plap.responses.tools import IToolPolicyResolver
 from plap.settings import Settings
 
 
 def provide_settings(request: Request[Any, Any, Any]) -> Settings:
     return request.app.state.settings
+
+
+def provide_tool_policy_resolver(
+    request: Request[Any, Any, Any],
+) -> IToolPolicyResolver:
+    return request.app.state.tool_policy_resolver
 
 
 HTTP_ROUTE_DEPENDENCIES = {
@@ -31,6 +38,10 @@ HTTP_ROUTE_DEPENDENCIES = {
     "auth_context": Provide(provide_request_auth_context),
     "db_session": Provide(provide_request_db_session),
     "settings": Provide(provide_settings, use_cache=True, sync_to_thread=False),
+    "tool_policy_resolver": Provide(
+        provide_tool_policy_resolver,
+        sync_to_thread=False,
+    ),
 }
 
 

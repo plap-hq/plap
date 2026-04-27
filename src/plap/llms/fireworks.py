@@ -16,6 +16,7 @@ from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    IChatCompletionClient,
 )
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
@@ -31,7 +32,7 @@ from plap.llms.openai_compatible import (
 )
 
 
-class FireworksChatCompletionClient:
+class FireworksChatCompletionClient(IChatCompletionClient):
     def __init__(
         self,
         *,

@@ -1,5 +1,10 @@
+from collections.abc import Sequence
+
 import pytest
 from litestar.testing import AsyncTestClient
+
+from plap.responses.contracts import SupportedTool
+from plap.responses.tools import IToolPolicyResolver, ToolPolicy
 
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
@@ -160,11 +165,11 @@ async def test_websocket_streams_response_events_with_auth(
     assert event_types[-1] == "response.completed"
 
 
-class _RecordingToolPolicyResolver:
+class _RecordingToolPolicyResolver(IToolPolicyResolver):
     def __init__(self) -> None:
         self.tool_names: list[list[str]] = []
 
-    async def resolve(self, tools) -> dict[str, object]:
+    async def resolve(self, tools: Sequence[SupportedTool]) -> dict[str, ToolPolicy]:
         self.tool_names.append(
             [tool.name if tool.type == "function" else tool.type for tool in tools]
         )

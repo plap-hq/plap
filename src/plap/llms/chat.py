@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 type ChatRole = Literal["system", "developer", "user", "assistant", "tool"]
 type ChatToolChoiceMode = Literal["none", "auto", "required"]
@@ -158,7 +158,8 @@ class ChatCompletionDelta:
     service_tier: str | None = None
 
 
-class ChatCompletionClient(Protocol):
+@runtime_checkable
+class IChatCompletionClient(Protocol):
     async def complete(
         self, request: ChatCompletionRequest
     ) -> ChatCompletionResult: ...

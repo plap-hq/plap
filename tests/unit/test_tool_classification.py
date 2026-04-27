@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import pytest
 
 from plap.llms.chat import (
     ChatAssistantMessage,
+    ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool, WebSearchTool
 from plap.responses.tools import (
     CachedToolPolicyResolver,
+    IToolClassifier,
     LLMToolClassifier,
     StaticToolPolicyResolver,
     ToolClassification,
@@ -19,7 +23,7 @@ from plap.responses.tools import (
     ToolSignature,
     function_tool_signature,
 )
-from plap.responses.tools.classifier import (
+from plap.responses.tools.classify import (
     TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
 )
 
@@ -229,6 +233,21 @@ async def test_cached_policy_resolver_classifies_client_tools() -> None:
     assert classifier.calls == 1
 
 
+async def test_cached_policy_resolver_uses_l1_before_repository() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _RecordingClassifier()
+    resolver = CachedToolPolicyResolver(repository, classifier)
+
+    first = await resolver.resolve([_read_file_tool()])
+    second = await resolver.resolve([_read_file_tool()])
+
+    assert second["read_file"].classification == first["read_file"].classification
+    assert classifier.calls == 1
+    assert repository.get_or_create_signatures_calls == 1
+    assert repository.get_classifications_calls == 1
+    assert repository.store_classifications_calls == 1
+
+
 async def test_cached_policy_resolver_preserves_contextual_classification() -> None:
     resolver = CachedToolPolicyResolver(
         _MemoryClassificationRepository(),
@@ -271,7 +290,7 @@ def _bash_tool() -> FunctionTool:
     )
 
 
-class _FakeChatClient:
+class _FakeChatClient(IChatCompletionClient):
     def __init__(self, content: str) -> None:
         self.content = content
         self.requests: list[ChatCompletionRequest] = []
@@ -286,8 +305,13 @@ class _FakeChatClient:
             finish_reason="stop",
         )
 
+    def stream(
+        self, _request: ChatCompletionRequest
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        raise NotImplementedError
 
-class _SequenceChatClient:
+
+class _SequenceChatClient(IChatCompletionClient):
     def __init__(self, contents: list[str]) -> None:
         self.contents = contents
         self.requests: list[ChatCompletionRequest] = []
@@ -302,9 +326,14 @@ class _SequenceChatClient:
             finish_reason="stop",
         )
 
+    def stream(
+        self, _request: ChatCompletionRequest
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        raise NotImplementedError
+
 
 @dataclass(slots=True)
-class _RecordingClassifier:
+class _RecordingClassifier(IToolClassifier):
     calls: int = 0
     classifier: str = "fake"
     classifier_model: str = "fake/model"
@@ -352,10 +381,14 @@ class _ContextualClassifier(_RecordingClassifier):
 class _MemoryClassificationRepository:
     def __init__(self) -> None:
         self._cache: dict[bytes, ToolClassification] = {}
+        self.get_or_create_signatures_calls = 0
+        self.get_classifications_calls = 0
+        self.store_classifications_calls = 0
 
     async def get_or_create_signatures(
         self, signatures: list[ToolSignature]
     ) -> list[ToolSignature]:
+        self.get_or_create_signatures_calls += 1
         return signatures
 
     async def get_classifications(
@@ -366,6 +399,7 @@ class _MemoryClassificationRepository:
         classifier_model: str,
         prompt_hash: bytes,
     ) -> dict[bytes, ToolClassification]:
+        self.get_classifications_calls += 1
         return {
             signature_hash: cached
             for signature_hash in signature_hashes
@@ -378,6 +412,7 @@ class _MemoryClassificationRepository:
     async def store_classifications(
         self, classifications: list[ToolClassification]
     ) -> dict[bytes, ToolClassification]:
+        self.store_classifications_calls += 1
         for classification in classifications:
             self._cache[classification.signature_hash] = classification
         return {
