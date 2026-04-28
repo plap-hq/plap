@@ -1,9 +1,6 @@
-from collections.abc import Sequence
-
 from litestar.testing import AsyncTestClient
 
-from plap.responses.contracts import SupportedTool
-from plap.responses.tools import IToolPolicyResolver, ToolPolicy
+from plap.responses.tools import IToolClassifier, ToolClassification, ToolSignature
 
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
@@ -74,7 +71,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
         )
 
     body = response.json()
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert body["object"] == "response"
     assert body["status"] == "completed"
     assert any(item["type"] == "message" for item in body["output"])
@@ -100,8 +97,9 @@ async def test_create_response_resolves_tool_policies_without_changing_behavior(
     test_app,
     seeded_auth_data,
 ) -> None:
-    resolver = _RecordingToolPolicyResolver()
-    test_app.state.tool_policy_resolver = resolver
+    classifier = _RecordingToolClassifier()
+    test_app.state.tool_classifier = classifier
+    test_app.state.tool_policy_l1_cache.clear()
     headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
 
     async with AsyncTestClient(app=test_app) as client:
@@ -109,9 +107,9 @@ async def test_create_response_resolves_tool_policies_without_changing_behavior(
             "/v1/responses", json=_request_payload(), headers=headers
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["object"] == "response"
-    assert resolver.tool_names == [["lookup_record", "web_search"]]
+    assert classifier.tool_names == [["lookup_record"]]
 
 
 async def test_http_validation_rejects_unsupported_context_management(
@@ -159,12 +157,30 @@ async def test_websocket_streams_response_events_with_auth(
     assert event_types[-1] == "response.completed"
 
 
-class _RecordingToolPolicyResolver(IToolPolicyResolver):
+class _RecordingToolClassifier(IToolClassifier):
+    classifier = "fake"
+    classifier_model = "fake/model"
+    prompt_hash = b"p" * 32
+
     def __init__(self) -> None:
         self.tool_names: list[list[str]] = []
 
-    async def resolve(self, tools: Sequence[SupportedTool]) -> dict[str, ToolPolicy]:
+    async def classify_many(
+        self, signatures: list[ToolSignature]
+    ) -> dict[bytes, ToolClassification]:
         self.tool_names.append(
-            [tool.name if tool.type == "function" else tool.type for tool in tools]
+            [str(signature.signature["name"]) for signature in signatures]
         )
-        return {}
+        return {
+            signature.signature_hash: ToolClassification(
+                signature_hash=signature.signature_hash,
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                prompt_hash=self.prompt_hash,
+                effect_class="safe",
+                confidence=1.0,
+                rationale="test classifier",
+                raw_output={"effect_class": "safe"},
+            )
+            for signature in signatures
+        }

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
+from cachetools import LRUCache
 from litestar import Litestar, Request, Response
 from litestar.datastructures import State
 from litestar.exceptions import (
@@ -12,9 +14,18 @@ from litestar.exceptions import (
 
 from plap.auth import APIKeyManager
 from plap.keyring import SealingKeyring
+from plap.llms.chat import IChatCompletionClient
+from plap.llms.fireworks import FireworksChatCompletionClient
+from plap.llms.lightning import LightningChatCompletionClient
+from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.router import (
+    ModelRoute,
+    RoutingChatCompletionClient,
+    UnavailableChatCompletionClient,
+)
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
-from plap.responses.tools import StaticToolPolicyResolver
+from plap.responses.tools import IToolClassifier, LLMToolClassifier
 from plap.settings import Settings, get_settings
 
 
@@ -100,13 +111,80 @@ async def _shutdown_database(app: Litestar) -> None:
         await app.state.db_engine.dispose()
 
 
+def _create_chat_completion_client(settings: Settings) -> IChatCompletionClient:
+    routes = list(_chat_completion_routes(settings))
+    if not routes:
+        return UnavailableChatCompletionClient()
+    return RoutingChatCompletionClient(routes)
+
+
+def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
+    if settings.llm_lightning_api_key:
+        client = LightningChatCompletionClient(api_key=settings.llm_lightning_api_key)
+        for prefix in settings.llm_lightning_model_prefixes:
+            yield ModelRoute(prefix=prefix, client=client)
+
+    if settings.llm_novita_api_key:
+        client = NovitaChatCompletionClient(api_key=settings.llm_novita_api_key)
+        for prefix in settings.llm_novita_model_prefixes:
+            yield ModelRoute(prefix=prefix, client=client)
+
+    if settings.llm_fireworks_api_key:
+        client = FireworksChatCompletionClient(api_key=settings.llm_fireworks_api_key)
+        for prefix in settings.llm_fireworks_model_prefixes:
+            yield ModelRoute(prefix=prefix, client=client)
+
+
+def _create_tool_classifier(
+    settings: Settings,
+    chat_completion_client: IChatCompletionClient,
+) -> IToolClassifier | None:
+    if settings.tool_classifier_model is None:
+        return None
+    if not _has_configured_chat_completion_route(
+        settings, settings.tool_classifier_model
+    ):
+        raise ValueError(
+            "tool_classifier_model does not match any configured LLM route: "
+            f"{settings.tool_classifier_model!r}"
+        )
+    return LLMToolClassifier(
+        client=chat_completion_client,
+        classifier=settings.tool_classifier_name,
+        classifier_model=settings.tool_classifier_model,
+        max_concurrency=settings.tool_classifier_max_concurrency,
+    )
+
+
+def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
+    return any(
+        model.startswith(prefix)
+        for prefix in _configured_chat_completion_prefixes(settings)
+    )
+
+
+def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
+    if settings.llm_lightning_api_key:
+        yield from settings.llm_lightning_model_prefixes
+    if settings.llm_novita_api_key:
+        yield from settings.llm_novita_model_prefixes
+    if settings.llm_fireworks_api_key:
+        yield from settings.llm_fireworks_model_prefixes
+
+
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
     db_engine = create_database_engine(resolved_settings.database_url)
     session_maker = create_session_maker(db_engine)
+    chat_completion_client = _create_chat_completion_client(resolved_settings)
+    tool_classifier = _create_tool_classifier(
+        resolved_settings,
+        chat_completion_client,
+    )
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
+            "chat_completion_client": chat_completion_client,
             "db_engine": db_engine,
             "owns_engine": True,
             "session_maker": session_maker,
@@ -114,7 +192,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
                 resolved_settings.sealing_keys
             ),
             "settings": resolved_settings,
-            "tool_policy_resolver": StaticToolPolicyResolver(),
+            "tool_classifier": tool_classifier,
+            "tool_policy_l1_cache": LRUCache(
+                maxsize=resolved_settings.tool_policy_l1_maxsize
+            ),
         }
     )
 

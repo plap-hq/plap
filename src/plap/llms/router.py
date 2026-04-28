@@ -51,3 +51,24 @@ class RoutingChatCompletionClient(IChatCompletionClient):
         raise ChatCompletionUnsupportedRequestError(
             f"No chat completion route configured for model {model!r}"
         )
+
+
+class UnavailableChatCompletionClient(IChatCompletionClient):
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        raise _unsupported_model(request.model)
+
+    def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        async def raise_unsupported() -> AsyncIterator[ChatCompletionDelta]:
+            raise _unsupported_model(request.model)
+            yield  # pragma: no cover
+
+        return raise_unsupported()
+
+
+def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
+    return ChatCompletionUnsupportedRequestError(
+        f"No chat completion provider configured for model {model!r}"
+    )

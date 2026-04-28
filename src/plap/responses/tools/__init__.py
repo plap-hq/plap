@@ -4,6 +4,7 @@ from plap.responses.tools.classify import (
 )
 from plap.responses.tools.policy import (
     CachedToolPolicyResolver,
+    ClassificationL1Cache,
     EffectClass,
     IToolClassifier,
     IToolPolicyResolver,
@@ -24,6 +25,7 @@ from plap.responses.tools.repository import ToolClassificationRepository
 __all__ = [
     "TOOL_EFFECT_CLASSIFIER_PROMPT",
     "CachedToolPolicyResolver",
+    "ClassificationL1Cache",
     "EffectClass",
     "IToolClassifier",
     "IToolPolicyResolver",

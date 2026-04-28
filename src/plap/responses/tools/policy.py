@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
@@ -33,6 +33,9 @@ class ToolClassification:
     confidence: float
     rationale: str
     raw_output: dict[str, Any]
+
+
+type ClassificationL1Cache = MutableMapping[_ClassificationL1Key, ToolClassification]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +126,11 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
         classifier: IToolClassifier,
         *,
         l1_maxsize: int = 4096,
+        classification_l1: ClassificationL1Cache | None = None,
     ) -> None:
         self._repository = repository
         self._classifier = classifier
-        self._classifications_l1: LRUCache[
-            _ClassificationL1Key, ToolClassification
-        ] = LRUCache(maxsize=l1_maxsize)
+        self._classifications_l1 = classification_l1 or LRUCache(maxsize=l1_maxsize)
 
     async def resolve(self, tools: Sequence[SupportedTool]) -> dict[str, ToolPolicy]:
         policies: dict[str, ToolPolicy] = {}

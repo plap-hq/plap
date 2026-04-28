@@ -33,7 +33,11 @@ from plap.llms.openai import (
     OpenAICompatibleChatCompletionClient,
     to_openai_chat_params,
 )
-from plap.llms.router import ModelRoute, RoutingChatCompletionClient
+from plap.llms.router import (
+    ModelRoute,
+    RoutingChatCompletionClient,
+    UnavailableChatCompletionClient,
+)
 
 
 def test_openai_params_preserve_chat_completion_controls() -> None:
@@ -191,6 +195,31 @@ async def test_routing_client_rejects_unmatched_model() -> None:
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
+
+
+async def test_unavailable_client_rejects_completion() -> None:
+    client = UnavailableChatCompletionClient()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
+        await client.complete(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-20b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+
+async def test_unavailable_client_rejects_stream() -> None:
+    client = UnavailableChatCompletionClient()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
+        async for _delta in client.stream(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-20b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        ):
+            pass
 
 
 def test_lightning_params_preserve_conformance_backed_fields() -> None:
