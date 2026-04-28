@@ -17,6 +17,7 @@ dependencies = [
   "cashews>=7.5.0,<8",
   "cryptography>=47.0.0,<48",
   "fireworks-ai>=0.19.20,<0.20",
+  "jsonschema>=4.26.0,<5",
   "litestar>=2.21.1,<3",
   "msgspec>=0.21.1,<0.22",
   "openai>=2.32.0,<3",
@@ -55,6 +56,8 @@ filterwarnings = [
 markers = [
   "unit: unit tests",
   "integration: integration tests",
+  "money: live provider tests that spend API credits",
+  "expensive: live provider tests with unusually high token or API cost",
 ]
 
 [tool.ruff.lint]

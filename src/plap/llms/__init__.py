@@ -1,5 +1,4 @@
 from plap.llms.chat import (
-    ChatAssistantMessage,
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -30,9 +29,10 @@ from plap.llms.errors import (
     ChatCompletionRateLimitError,
     ChatCompletionUnsupportedRequestError,
 )
+from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.router import ModelRoute, RoutingChatCompletionClient
 
 __all__ = [
-    "ChatAssistantMessage",
     "ChatCompletionAuthenticationError",
     "ChatCompletionDelta",
     "ChatCompletionError",
@@ -58,6 +58,9 @@ __all__ = [
     "ChatToolChoiceMode",
     "ChatUsage",
     "IChatCompletionClient",
+    "ModelRoute",
+    "NovitaChatCompletionClient",
     "ReasoningEffort",
+    "RoutingChatCompletionClient",
     "ServiceTier",
 ]

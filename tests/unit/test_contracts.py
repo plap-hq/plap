@@ -70,6 +70,16 @@ def test_rejects_invalid_reasoning_effort() -> None:
         raise AssertionError("expected validation error")
 
 
+def test_accepts_full_reasoning_effort_vocabulary() -> None:
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+        request = ResponseCreateRequest.model_validate(
+            {"model": "gpt-4.1", "reasoning": {"effort": effort}}
+        )
+
+        assert request.reasoning is not None
+        assert request.reasoning.effort == effort
+
+
 def test_rejects_metadata_limits() -> None:
     cases = [
         {str(index): "value" for index in range(17)},

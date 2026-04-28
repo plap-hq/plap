@@ -25,3 +25,5 @@ dist/
 build/
 
 archive/
+
+.env*

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from plap.llms.chat import (
+    ChatCompletionDelta,
     ChatCompletionRequest,
+    ChatCompletionResult,
     ChatFunctionTool,
     ChatMessage,
     ChatPrediction,
@@ -13,15 +18,25 @@ from plap.llms.chat import (
     ChatToolCall,
     ChatToolChoiceFunction,
 )
+from plap.llms.errors import (
+    ChatCompletionProviderError,
+    ChatCompletionUnsupportedRequestError,
+)
 from plap.llms.fireworks import FireworksChatCompletionClient, to_fireworks_chat_params
-from plap.llms.lightning import LightningChatCompletionClient
-from plap.llms.openai_compatible import (
+from plap.llms.lightning import (
+    LIGHTNING_OPENAI_BASE_URL,
+    LightningChatCompletionClient,
+    to_lightning_chat_params,
+)
+from plap.llms.novita import NovitaChatCompletionClient, to_novita_chat_params
+from plap.llms.openai import (
     OpenAICompatibleChatCompletionClient,
     to_openai_chat_params,
 )
+from plap.llms.router import ModelRoute, RoutingChatCompletionClient
 
 
-def test_openai_compatible_params_preserve_chat_completion_controls() -> None:
+def test_openai_params_preserve_chat_completion_controls() -> None:
     request = _request()
 
     params = to_openai_chat_params(request, stream=True)
@@ -56,6 +71,7 @@ def test_openai_compatible_params_preserve_chat_completion_controls() -> None:
         },
     }
     assert params["max_completion_tokens"] == 128
+    assert params["reasoning_effort"] == "low"
     assert params["prompt_cache_key"] == "cache-a"
     assert params["metadata"] == {"k": "v"}
     assert params["service_tier"] == "flex"
@@ -67,16 +83,137 @@ def test_openai_compatible_params_preserve_chat_completion_controls() -> None:
     assert "verbosity" not in params
 
 
-def test_openai_compatible_params_can_downgrade_developer_role() -> None:
+def test_openai_params_preserve_assistant_reasoning_metadata() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "openai-responses-v1",
+            "index": 0,
+            "text": "hidden chain",
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="answer",
+                reasoning_content="hidden chain",
+                reasoning_details=reasoning_details,
+            )
+        ],
+    )
+
+    params = to_openai_chat_params(request, stream=False)
+
+    assert params["messages"] == [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "hidden chain",
+            "reasoning_details": reasoning_details,
+        }
+    ]
+
+
+def test_openai_params_can_downgrade_developer_role() -> None:
     params = to_openai_chat_params(_request(), stream=False, developer_role="system")
 
     assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert "stream_options" not in params
+
+
+def test_chat_completion_request_rejects_boolean_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="user", content="hello")],
+            reasoning_effort=True,
+        )
+
+
+async def test_routing_client_routes_completion_by_longest_prefix() -> None:
+    base_client = _RecordingChatCompletionClient("base")
+    specific_client = _RecordingChatCompletionClient("specific")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="openai/", client=base_client),
+            ModelRoute(prefix="openai/gpt-oss-120b", client=specific_client),
+        ]
+    )
+
+    result = await router.complete(
+        ChatCompletionRequest(
+            model="openai/gpt-oss-120b",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert result.message.content == "specific"
+    assert specific_client.complete_requests[0].model == "openai/gpt-oss-120b"
+    assert base_client.complete_requests == []
+
+
+async def test_routing_client_routes_stream_by_longest_prefix() -> None:
+    base_client = _RecordingChatCompletionClient("base")
+    specific_client = _RecordingChatCompletionClient("specific")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="deepseek/", client=base_client),
+            ModelRoute(prefix="deepseek/deepseek-v4-", client=specific_client),
+        ]
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="deepseek/deepseek-v4-flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].content_delta == "specific"
+    assert specific_client.stream_requests[0].model == "deepseek/deepseek-v4-flash"
+    assert base_client.stream_requests == []
+
+
+async def test_routing_client_rejects_unmatched_model() -> None:
+    router = RoutingChatCompletionClient(
+        [ModelRoute(prefix="openai/", client=_RecordingChatCompletionClient("openai"))]
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-20b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+
+def test_lightning_params_preserve_conformance_backed_fields() -> None:
+    params = to_lightning_chat_params(_request(), stream=True)
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_completion_tokens"] == 128
+    assert params["parallel_tool_calls"] is True
+    assert params["reasoning_effort"] == "low"
+    assert params["metadata"] == {"k": "v"}
+    assert "prompt_cache_key" not in params
+    assert "prediction" not in params
+    assert "service_tier" not in params
 
 
 def test_fireworks_params_preserve_supported_provider_hints() -> None:
-    params = to_fireworks_chat_params(_request())
+    params = to_fireworks_chat_params(_request(), stream=True)
 
     assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
     assert params["response_format"] == {
         "type": "json_schema",
         "json_schema": {
@@ -87,13 +224,151 @@ def test_fireworks_params_preserve_supported_provider_hints() -> None:
         },
     }
     assert params["max_completion_tokens"] == 128
+    assert params["reasoning_effort"] == "low"
     assert params["prompt_cache_key"] == "cache-a"
     assert params["metadata"] == {"k": "v"}
     assert params["service_tier"] == "flex"
     assert params["prediction"] == {"type": "content", "content": "expected"}
 
 
-async def test_openai_compatible_client_normalizes_completion_result() -> None:
+def test_fireworks_params_omit_stream_options_without_stream() -> None:
+    params = to_fireworks_chat_params(_request(), stream=False)
+
+    assert params["stream"] is False
+    assert "stream_options" not in params
+
+
+def test_novita_params_map_supported_provider_fields() -> None:
+    params = to_novita_chat_params(
+        _request_for_model("openai/gpt-oss-20b"), stream=True
+    )
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_tokens"] == 128
+    assert params["parallel_tool_calls"] is True
+    assert params["reasoning_effort"] == "low"
+    assert "max_completion_tokens" not in params
+    assert "extra_body" not in params
+    assert "prompt_cache_key" not in params
+    assert "metadata" not in params
+    assert "prediction" not in params
+    assert "service_tier" not in params
+    assert "top_logprobs" not in params
+    assert "user" not in params
+
+
+def test_novita_params_omit_reasoning_controls_when_effort_is_none() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek/deepseek-v4-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort=None,
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert "reasoning_effort" not in params
+    assert "extra_body" not in params
+
+
+def test_novita_params_pass_reasoning_effort_for_unknown_models() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="low",
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "low"
+    assert "extra_body" not in params
+
+
+def test_novita_gpt_oss_params_use_reasoning_effort() -> None:
+    request = ChatCompletionRequest(
+        model="openai/gpt-oss-20b",
+        messages=[ChatMessage(role="user", content="hello")],
+        parallel_tool_calls=True,
+        reasoning_effort="high",
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert params["parallel_tool_calls"] is True
+    assert params["reasoning_effort"] == "high"
+    assert "extra_body" not in params
+
+
+def test_novita_gpt_oss_params_pass_reasoning_effort_without_validation() -> None:
+    request = ChatCompletionRequest(
+        model="openai/gpt-oss-20b",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="xhigh",
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "xhigh"
+    assert "extra_body" not in params
+
+
+def test_novita_deepseek_v4_params_use_thinking_control() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek/deepseek-v4-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="high",
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "high"
+    assert params["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_novita_deepseek_v4_params_disable_thinking_for_none() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek/deepseek-v4-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="none",
+    )
+
+    params = to_novita_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "none"
+    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_novita_deepseek_v4_maps_single_forced_tool_choice_to_required() -> None:
+    params = to_novita_chat_params(
+        _request_for_model("deepseek/deepseek-v4-flash"), stream=False
+    )
+
+    assert params["tool_choice"] == "required"
+
+
+def test_novita_deepseek_v4_rejects_ambiguous_forced_tool_choice() -> None:
+    request = replace(
+        _request_for_model("deepseek/deepseek-v4-flash"),
+        tools=[
+            ChatTool(function=ChatFunctionTool(name="lookup")),
+            ChatTool(function=ChatFunctionTool(name="calculate")),
+        ],
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="forced function"):
+        to_novita_chat_params(request, stream=False)
+
+
+async def test_openai_client_normalizes_completion_result() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "openai-responses-v1",
+            "index": 0,
+            "text": "because",
+        }
+    ]
     fake_completion = _FakeOpenAICompletion(
         SimpleNamespace(
             id="chatcmpl_1",
@@ -108,6 +383,7 @@ async def test_openai_compatible_client_normalizes_completion_result() -> None:
                         content="answer",
                         refusal=None,
                         reasoning_content="because",
+                        reasoning_details=reasoning_details,
                         tool_calls=[
                             SimpleNamespace(
                                 id="call_1",
@@ -135,8 +411,10 @@ async def test_openai_compatible_client_normalizes_completion_result() -> None:
     result = await client.complete(_request())
 
     assert result.id == "chatcmpl_1"
+    assert result.message.role == "assistant"
     assert result.message.content == "answer"
     assert result.message.reasoning_content == "because"
+    assert result.message.reasoning_details == reasoning_details
     assert result.message.tool_calls == [
         ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}')
     ]
@@ -146,7 +424,15 @@ async def test_openai_compatible_client_normalizes_completion_result() -> None:
     assert result.usage.reasoning_tokens == 1
 
 
-async def test_openai_compatible_client_normalizes_stream_chunks() -> None:
+async def test_openai_client_normalizes_stream_chunks() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "openai-responses-v1",
+            "index": 0,
+            "text": "because",
+        }
+    ]
     fake_completion = _FakeOpenAICompletion(
         _async_iter(
             [
@@ -163,7 +449,8 @@ async def test_openai_compatible_client_normalizes_stream_chunks() -> None:
                             delta=SimpleNamespace(
                                 content="hel",
                                 refusal=None,
-                                reasoning_content=None,
+                                reasoning_content="because",
+                                reasoning_details=reasoning_details,
                                 tool_calls=None,
                             ),
                         )
@@ -210,6 +497,8 @@ async def test_openai_compatible_client_normalizes_stream_chunks() -> None:
     deltas = [delta async for delta in client.stream(_request())]
 
     assert deltas[0].content_delta == "hel"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[0].reasoning_details_delta == reasoning_details
     assert deltas[1].finish_reason == "tool_calls"
     assert deltas[1].tool_call_delta is not None
     assert deltas[1].tool_call_delta.name == "lookup"
@@ -278,6 +567,297 @@ async def test_lightning_client_maps_developer_role_to_system() -> None:
     }
 
 
+def test_lightning_client_defaults_to_lightning_openai_base_url() -> None:
+    client = LightningChatCompletionClient(api_key="test-key")
+
+    assert str(client._client.base_url).rstrip("/") == LIGHTNING_OPENAI_BASE_URL
+
+
+async def test_lightning_120b_response_format_fallback_omits_native_field() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(model="lightning-ai/gpt-oss-120b", content='{"ok":true}')
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(
+        ChatCompletionRequest(
+            model="lightning-ai/gpt-oss-120b",
+            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+            response_format=ChatResponseFormat(type="json_object"),
+            max_completion_tokens=128,
+        )
+    )
+
+    assert result.message.content == '{"ok":true}'
+    call = fake_completion.calls[0]
+    assert "response_format" not in call
+    assert call["messages"][0]["role"] == "system"
+    assert "valid JSON" in call["messages"][0]["content"]
+    assert call["messages"][1] == {
+        "role": "user",
+        "content": 'Return {"ok": true}.',
+    }
+
+
+async def test_lightning_120b_response_format_fallback_retries_schema_errors() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        [
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content='{"ok":"no"}',
+            ),
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content='{"ok":true}',
+            ),
+        ]
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(
+        ChatCompletionRequest(
+            model="lightning-ai/gpt-oss-120b",
+            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+            response_format=ChatResponseFormat(
+                type="json_schema",
+                name="ok_response",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
+            max_completion_tokens=128,
+        )
+    )
+
+    assert result.message.content == '{"ok":true}'
+    assert len(fake_completion.calls) == 2
+    assert "response_format" not in fake_completion.calls[0]
+    assert "response_format" not in fake_completion.calls[1]
+    assert "previous response" in fake_completion.calls[1]["messages"][-1]["content"]
+
+
+async def test_lightning_120b_response_format_fallback_raises_after_retry() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        [
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content="not json",
+            ),
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content="still not json",
+            ),
+        ]
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    with pytest.raises(ChatCompletionProviderError, match="invalid JSON"):
+        await client.complete(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-120b",
+                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+                response_format=ChatResponseFormat(type="json_object"),
+            )
+        )
+
+
+async def test_lightning_120b_response_format_fallback_streams_result() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="lightning-ai/gpt-oss-120b",
+            content='{"ok":true}',
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+        )
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [
+        delta
+        async for delta in client.stream(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-120b",
+                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+                response_format=ChatResponseFormat(type="json_object"),
+            )
+        )
+    ]
+
+    assert len(deltas) == 2
+    assert deltas[0].content_delta == '{"ok":true}'
+    assert deltas[0].finish_reason is None
+    assert deltas[0].usage is None
+    assert deltas[1].content_delta is None
+    assert deltas[1].finish_reason == "stop"
+    assert deltas[1].usage is not None
+    assert deltas[1].usage.total_tokens == 8
+    assert fake_completion.calls[0]["stream"] is False
+    assert "response_format" not in fake_completion.calls[0]
+
+
+async def test_lightning_120b_response_format_fallback_stream_retries() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        [
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content='{"ok":"no"}',
+            ),
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content='{"ok":true}',
+            ),
+        ]
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [
+        delta
+        async for delta in client.stream(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-120b",
+                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+                response_format=ChatResponseFormat(
+                    type="json_schema",
+                    schema={
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean"}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                ),
+            )
+        )
+    ]
+
+    assert [delta.content_delta for delta in deltas] == ['{"ok":true}', None]
+    assert len(fake_completion.calls) == 2
+    assert "previous response" in fake_completion.calls[1]["messages"][-1]["content"]
+
+
+async def test_lightning_120b_fallback_stream_raises_before_yield() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        [
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content="not json",
+            ),
+            _completion_response(
+                model="lightning-ai/gpt-oss-120b",
+                content="still not json",
+            ),
+        ]
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    with pytest.raises(ChatCompletionProviderError, match="invalid JSON"):
+        await anext(
+            client.stream(
+                ChatCompletionRequest(
+                    model="lightning-ai/gpt-oss-120b",
+                    messages=[
+                        ChatMessage(role="user", content='Return {"ok": true}.')
+                    ],
+                    response_format=ChatResponseFormat(type="json_object"),
+                )
+            )
+        )
+
+
+async def test_lightning_non_fallback_response_format_streams_from_provider() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _async_iter(
+            [
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="lightning-ai/gpt-oss-20b",
+                    created=10,
+                    system_fingerprint=None,
+                    service_tier=None,
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content='{"ok":true}',
+                                refusal=None,
+                                reasoning_content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                    usage=None,
+                )
+            ]
+        )
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [
+        delta
+        async for delta in client.stream(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-20b",
+                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+                response_format=ChatResponseFormat(type="json_object"),
+            )
+        )
+    ]
+
+    assert deltas[0].content_delta == '{"ok":true}'
+    assert fake_completion.calls[0]["stream"] is True
+    assert fake_completion.calls[0]["response_format"] == {"type": "json_object"}
+
+
+async def test_novita_client_uses_openai_create_with_novita_params() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "openai-responses-v1",
+            "index": 0,
+            "text": "because",
+        }
+    ]
+    fake_completion = _FakeOpenAICompletion(
+        SimpleNamespace(
+            id="novita_1",
+            model="model-a",
+            created=10,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content="ok",
+                        refusal=None,
+                        reasoning_content=None,
+                        reasoning_details=reasoning_details,
+                        tool_calls=None,
+                    ),
+                )
+            ],
+            usage=None,
+        )
+    )
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = NovitaChatCompletionClient(client=fake_client)
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+
+    assert fake_completion.calls[0]["stream"] is False
+    assert fake_completion.calls[0]["max_tokens"] == 128
+    assert fake_completion.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "be precise",
+    }
+    assert fake_completion.calls[0]["reasoning_effort"] == "low"
+    assert "extra_body" not in fake_completion.calls[0]
+    assert "max_completion_tokens" not in fake_completion.calls[0]
+    assert result.id == "novita_1"
+    assert result.message.reasoning_details == reasoning_details
+
+
 def _request() -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model="model-a",
@@ -315,7 +895,7 @@ def _request() -> ChatCompletionRequest:
         stop=["END"],
         seed=7,
         n=1,
-        reasoning_effort=True,
+        reasoning_effort="low",
         stream_options=ChatStreamOptions(include_usage=True),
         user="user-a",
         prompt_cache_key="cache-a",
@@ -325,19 +905,77 @@ def _request() -> ChatCompletionRequest:
     )
 
 
+def _request_for_model(model: str) -> ChatCompletionRequest:
+    return replace(_request(), model=model)
+
+
 class _FakeOpenAIClient:
     def __init__(self, completion: _FakeOpenAICompletion) -> None:
         self.chat = SimpleNamespace(completions=completion)
 
 
+def _completion_response(
+    *,
+    model: str = "model-a",
+    content: str = "ok",
+    usage: object | None = None,
+) -> object:
+    return SimpleNamespace(
+        id="chatcmpl_1",
+        model=model,
+        created=10,
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content=content,
+                    refusal=None,
+                    reasoning_content=None,
+                    tool_calls=None,
+                ),
+            )
+        ],
+        usage=usage,
+    )
+
+
 class _FakeOpenAICompletion:
-    def __init__(self, response: object) -> None:
-        self.response = response
+    def __init__(self, response: object | list[object]) -> None:
+        self.responses = response if isinstance(response, list) else [response]
         self.calls: list[dict[str, object]] = []
 
     async def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
-        return self.response
+        if len(self.responses) == 1:
+            return self.responses[0]
+        return self.responses.pop(0)
+
+
+class _RecordingChatCompletionClient:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.complete_requests: list[ChatCompletionRequest] = []
+        self.stream_requests: list[ChatCompletionRequest] = []
+
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        self.complete_requests.append(request)
+        return ChatCompletionResult(
+            id=self.name,
+            model=request.model,
+            created_at=None,
+            message=ChatMessage(role="assistant", content=self.name),
+            finish_reason="stop",
+        )
+
+    async def stream(self, request: ChatCompletionRequest):
+        self.stream_requests.append(request)
+        yield ChatCompletionDelta(
+            id=self.name,
+            model=request.model,
+            created_at=None,
+            choice_index=0,
+            content_delta=self.name,
+        )
 
 
 class _FakeFireworksClient:

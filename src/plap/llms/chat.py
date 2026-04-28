@@ -14,8 +14,12 @@ type ChatFinishReason = Literal[
     "content_filter",
     "function_call",
 ]
-type ReasoningEffort = str | int | bool
+type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 type ServiceTier = str
+
+REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(
+    ("none", "minimal", "low", "medium", "high", "xhigh")
+)
 
 
 @dataclass(frozen=True)
@@ -53,8 +57,11 @@ class ChatMessage:
     role: ChatRole
     content: str | None = None
     name: str | None = None
+    refusal: str | None = None
     tool_calls: list[ChatToolCall] | None = None
     tool_call_id: str | None = None
+    reasoning_content: str | None = None
+    reasoning_details: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -104,13 +111,13 @@ class ChatCompletionRequest:
     service_tier: ServiceTier | None = None
     prediction: ChatPrediction | None = None
 
-
-@dataclass(frozen=True)
-class ChatAssistantMessage:
-    content: str | None = None
-    refusal: str | None = None
-    reasoning_content: str | None = None
-    tool_calls: list[ChatToolCall] | None = None
+    def __post_init__(self) -> None:
+        if (
+            self.reasoning_effort is not None
+            and self.reasoning_effort not in REASONING_EFFORT_VALUES
+        ):
+            allowed = ", ".join(sorted(REASONING_EFFORT_VALUES))
+            raise ValueError(f"reasoning_effort must be one of: {allowed}")
 
 
 @dataclass(frozen=True)
@@ -127,7 +134,7 @@ class ChatCompletionResult:
     id: str | None
     model: str
     created_at: float | None
-    message: ChatAssistantMessage
+    message: ChatMessage
     finish_reason: ChatFinishReason | None
     usage: ChatUsage | None = None
     system_fingerprint: str | None = None
@@ -151,6 +158,7 @@ class ChatCompletionDelta:
     content_delta: str | None = None
     refusal_delta: str | None = None
     reasoning_delta: str | None = None
+    reasoning_details_delta: list[dict[str, Any]] | None = None
     tool_call_delta: ChatToolCallDelta | None = None
     finish_reason: ChatFinishReason | None = None
     usage: ChatUsage | None = None

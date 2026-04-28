@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import pytest
 
 from plap.llms.chat import (
-    ChatAssistantMessage,
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatMessage,
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool, WebSearchTool
@@ -301,7 +301,7 @@ class _FakeChatClient(IChatCompletionClient):
             id="chat_1",
             model=request.model,
             created_at=1.0,
-            message=ChatAssistantMessage(content=self.content),
+            message=ChatMessage(role="assistant", content=self.content),
             finish_reason="stop",
         )
 
@@ -322,7 +322,9 @@ class _SequenceChatClient(IChatCompletionClient):
             id=f"chat_{len(self.requests)}",
             model=request.model,
             created_at=1.0,
-            message=ChatAssistantMessage(content=self.contents[len(self.requests) - 1]),
+            message=ChatMessage(
+                role="assistant", content=self.contents[len(self.requests) - 1]
+            ),
             finish_reason="stop",
         )
 

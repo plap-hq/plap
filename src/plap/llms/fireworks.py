@@ -24,11 +24,29 @@ from plap.llms.errors import (
     ChatCompletionProviderError,
     ChatCompletionRateLimitError,
 )
-from plap.llms.openai_compatible import (
-    _set,
+from plap.llms.openai import (
+    COMMON_CHAT_FIELDS,
+    ChatProviderProfile,
+    build_chat_params,
     completion_result_from_provider,
     from_chat_completion_chunk,
-    to_openai_chat_params,
+)
+
+FIREWORKS_CHAT_FIELDS = (
+    *COMMON_CHAT_FIELDS,
+    "logprobs",
+    "top_logprobs",
+    "reasoning_effort",
+    "user",
+    "prompt_cache_key",
+    "metadata",
+    "service_tier",
+    "prediction",
+)
+
+FIREWORKS_CHAT_PROVIDER_PROFILE = ChatProviderProfile(
+    developer_role="system",
+    passthrough_fields=FIREWORKS_CHAT_FIELDS,
 )
 
 
@@ -43,11 +61,9 @@ class FireworksChatCompletionClient(IChatCompletionClient):
         self._client = client or AsyncFireworks(api_key=api_key, base_url=base_url)
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        params = to_fireworks_chat_params(request)
+        params = to_fireworks_chat_params(request, stream=False)
         try:
-            response = await self._client.chat.completions.acreate(
-                **params, stream=False
-            )
+            response = await self._client.chat.completions.acreate(**params)
         except Exception as exc:
             raise _normalize_fireworks_error(exc) from exc
         return completion_result_from_provider(response)
@@ -55,53 +71,25 @@ class FireworksChatCompletionClient(IChatCompletionClient):
     async def stream(
         self, request: ChatCompletionRequest
     ) -> AsyncIterator[ChatCompletionDelta]:
-        params = to_fireworks_chat_params(request)
+        params = to_fireworks_chat_params(request, stream=True)
         try:
-            stream = self._client.chat.completions.acreate(**params, stream=True)
+            stream = self._client.chat.completions.acreate(**params)
+            async for chunk in stream:
+                yield from_chat_completion_chunk(chunk)
         except Exception as exc:
             raise _normalize_fireworks_error(exc) from exc
-        async for chunk in stream:
-            yield from_chat_completion_chunk(chunk)
 
 
-def to_fireworks_chat_params(request: ChatCompletionRequest) -> dict[str, Any]:
-    openai_params = to_openai_chat_params(
+def to_fireworks_chat_params(
+    request: ChatCompletionRequest,
+    *,
+    stream: bool,
+) -> dict[str, Any]:
+    return build_chat_params(
         request,
-        stream=False,
-        developer_role="system",
+        stream=stream,
+        profile=FIREWORKS_CHAT_PROVIDER_PROFILE,
     )
-    params: dict[str, Any] = {
-        "model": openai_params["model"],
-        "messages": openai_params["messages"],
-    }
-
-    passthrough_fields = [
-        "tools",
-        "tool_choice",
-        "parallel_tool_calls",
-        "response_format",
-        "temperature",
-        "top_p",
-        "frequency_penalty",
-        "presence_penalty",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "stop",
-        "seed",
-        "n",
-        "reasoning_effort",
-        "user",
-        "prompt_cache_key",
-        "metadata",
-        "service_tier",
-        "prediction",
-    ]
-    for field in passthrough_fields:
-        _set(params, field, openai_params.get(field))
-
-    _set(params, "max_completion_tokens", request.max_completion_tokens)
-    return params
 
 
 def _normalize_fireworks_error(exc: Exception) -> ChatCompletionProviderError:

@@ -91,7 +91,12 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
 
 
 @pytest.fixture(autouse=True)
-def database_schema(test_settings: Settings) -> None:
+def database_schema(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("money") is not None:
+        return
+
+    test_settings: Settings = request.getfixturevalue("test_settings")
+
     async def reset_and_migrate() -> None:
         await _reset_database_schema(test_settings.database_url)
         await anyio.to_thread.run_sync(_run_migrations, test_settings.database_url)

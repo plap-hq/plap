@@ -33,8 +33,8 @@ class PromptReference(StrictModel):
 
 
 type ReasoningEffort = Literal[
-    # "none",
-    # "minimal",
+    "none",
+    "minimal",
     "low",
     "medium",
     "high",

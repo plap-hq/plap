@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
@@ -13,7 +14,6 @@ from openai import (
 )
 
 from plap.llms.chat import (
-    ChatAssistantMessage,
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -36,6 +36,39 @@ from plap.llms.errors import (
     ChatCompletionRateLimitError,
 )
 
+COMMON_CHAT_FIELDS = (
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "stop",
+    "seed",
+    "n",
+)
+
+OPENAI_CHAT_FIELDS = (
+    *COMMON_CHAT_FIELDS,
+    "logprobs",
+    "top_logprobs",
+    "reasoning_effort",
+    "user",
+    "prompt_cache_key",
+    "metadata",
+    "service_tier",
+    "prediction",
+)
+
+
+@dataclass(frozen=True)
+class ChatProviderProfile:
+    developer_role: Literal["developer", "system"]
+    passthrough_fields: tuple[str, ...]
+
 
 class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
     def __init__(
@@ -49,14 +82,22 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
         self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._developer_role = developer_role
 
+    def _chat_params(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        return to_openai_chat_params(
+            request,
+            stream=stream,
+            developer_role=self._developer_role,
+        )
+
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         try:
             response = await self._client.chat.completions.create(
-                **to_openai_chat_params(
-                    request,
-                    stream=False,
-                    developer_role=self._developer_role,
-                )
+                **self._chat_params(request, stream=False)
             )
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
@@ -67,16 +108,12 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
     ) -> AsyncIterator[ChatCompletionDelta]:
         try:
             stream = await self._client.chat.completions.create(
-                **to_openai_chat_params(
-                    request,
-                    stream=True,
-                    developer_role=self._developer_role,
-                )
+                **self._chat_params(request, stream=True)
             )
+            async for chunk in stream:
+                yield from_chat_completion_chunk(chunk)
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
-        async for chunk in stream:
-            yield from_chat_completion_chunk(chunk)
 
 
 def to_openai_chat_params(
@@ -85,7 +122,47 @@ def to_openai_chat_params(
     stream: bool,
     developer_role: Literal["developer", "system"] = "developer",
 ) -> dict[str, Any]:
+    return build_chat_params(
+        request,
+        stream=stream,
+        profile=ChatProviderProfile(
+            developer_role=developer_role,
+            passthrough_fields=OPENAI_CHAT_FIELDS,
+        ),
+    )
+
+
+def build_chat_params(
+    request: ChatCompletionRequest,
+    *,
+    stream: bool,
+    profile: ChatProviderProfile,
+) -> dict[str, Any]:
+    values = _chat_param_values(
+        request,
+        stream=stream,
+        developer_role=profile.developer_role,
+    )
     params: dict[str, Any] = {
+        "model": values["model"],
+        "messages": values["messages"],
+        "stream": stream,
+    }
+    for field in profile.passthrough_fields:
+        _set(params, field, values.get(field))
+    _set(params, "max_completion_tokens", values.get("max_completion_tokens"))
+    if stream:
+        _set(params, "stream_options", values.get("stream_options"))
+    return params
+
+
+def _chat_param_values(
+    request: ChatCompletionRequest,
+    *,
+    stream: bool,
+    developer_role: Literal["developer", "system"],
+) -> dict[str, Any]:
+    values: dict[str, Any] = {
         "model": request.model,
         "messages": [
             _message_to_param(message, developer_role=developer_role)
@@ -93,33 +170,31 @@ def to_openai_chat_params(
         ],
         "stream": stream,
     }
-    _set(
-        params,
-        "tools",
-        [_tool_to_param(tool) for tool in request.tools] if request.tools else None,
+    values["tools"] = (
+        [_tool_to_param(tool) for tool in request.tools] if request.tools else None
     )
-    _set(params, "tool_choice", _tool_choice_to_param(request.tool_choice))
-    _set(params, "parallel_tool_calls", request.parallel_tool_calls)
-    _set(params, "response_format", _response_format_to_param(request.response_format))
-    _set(params, "max_completion_tokens", request.max_completion_tokens)
-    _set(params, "temperature", request.temperature)
-    _set(params, "top_p", request.top_p)
-    _set(params, "frequency_penalty", request.frequency_penalty)
-    _set(params, "presence_penalty", request.presence_penalty)
-    _set(params, "logit_bias", request.logit_bias)
-    _set(params, "logprobs", request.logprobs)
-    _set(params, "top_logprobs", request.top_logprobs)
-    _set(params, "stop", request.stop)
-    _set(params, "seed", request.seed)
-    _set(params, "n", request.n)
-    _set(params, "reasoning_effort", request.reasoning_effort)
-    _set(params, "stream_options", _stream_options_to_param(request.stream_options))
-    _set(params, "user", request.user)
-    _set(params, "prompt_cache_key", request.prompt_cache_key)
-    _set(params, "metadata", request.metadata)
-    _set(params, "service_tier", request.service_tier)
-    _set(params, "prediction", _prediction_to_param(request.prediction))
-    return params
+    values["tool_choice"] = _tool_choice_to_param(request.tool_choice)
+    values["parallel_tool_calls"] = request.parallel_tool_calls
+    values["response_format"] = _response_format_to_param(request.response_format)
+    values["max_completion_tokens"] = request.max_completion_tokens
+    values["temperature"] = request.temperature
+    values["top_p"] = request.top_p
+    values["frequency_penalty"] = request.frequency_penalty
+    values["presence_penalty"] = request.presence_penalty
+    values["logit_bias"] = request.logit_bias
+    values["logprobs"] = request.logprobs
+    values["top_logprobs"] = request.top_logprobs
+    values["stop"] = request.stop
+    values["seed"] = request.seed
+    values["n"] = request.n
+    values["reasoning_effort"] = request.reasoning_effort
+    values["stream_options"] = _stream_options_to_param(request.stream_options)
+    values["user"] = request.user
+    values["prompt_cache_key"] = request.prompt_cache_key
+    values["metadata"] = request.metadata
+    values["service_tier"] = request.service_tier
+    values["prediction"] = _prediction_to_param(request.prediction)
+    return values
 
 
 def _message_to_param(
@@ -138,6 +213,10 @@ def _message_to_param(
         [_tool_call_to_param(tool_call) for tool_call in message.tool_calls or []]
         or None,
     )
+    if message.role == "assistant":
+        _set(value, "refusal", message.refusal)
+        _set(value, "reasoning_content", message.reasoning_content)
+        _set(value, "reasoning_details", message.reasoning_details)
     return value
 
 
@@ -204,10 +283,12 @@ def completion_result_from_provider(response: Any) -> ChatCompletionResult:
         id=_get(response, "id"),
         model=_get(response, "model"),
         created_at=_float_or_none(_get(response, "created")),
-        message=ChatAssistantMessage(
+        message=ChatMessage(
+            role="assistant",
             content=_get(message, "content"),
             refusal=_get(message, "refusal"),
             reasoning_content=_get(message, "reasoning_content"),
+            reasoning_details=_get(message, "reasoning_details"),
             tool_calls=_tool_calls_from_provider(_get(message, "tool_calls")),
         ),
         finish_reason=_finish_reason(_get(choice, "finish_reason")),
@@ -230,6 +311,7 @@ def from_chat_completion_chunk(chunk: Any) -> ChatCompletionDelta:
         content_delta=_get(delta, "content"),
         refusal_delta=_get(delta, "refusal"),
         reasoning_delta=_get(delta, "reasoning_content"),
+        reasoning_details_delta=_get(delta, "reasoning_details"),
         tool_call_delta=ChatToolCallDelta(
             index=_get(tool_call_delta, "index") or 0,
             id=_get(tool_call_delta, "id"),
