@@ -96,21 +96,6 @@ async def delete_response(
     return build_deleted_response(response_id)
 
 
-@post(
-    "/v1/responses/{response_id:str}/cancel",
-    status_code=200,
-    dependencies=HTTP_ROUTE_DEPENDENCIES,
-)
-async def cancel_response(
-    response_id: str,
-    auth_context: AuthContext,
-) -> ResponseObject:
-    _ = auth_context
-    return build_stub_response(
-        ResponseCreateRequest(), response_id=response_id, status="cancelled"
-    )
-
-
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
 async def compact_response(
     data: CompactRequest,
@@ -185,7 +170,9 @@ RESPONSE_ROUTE_HANDLERS = [
     create_response,
     retrieve_response,
     delete_response,
-    cancel_response,
+    # OpenAI exposes POST /v1/responses/{response_id}/cancel, but it only
+    # applies to background responses. We do not support background execution
+    # yet, so there is no detached response job to cancel.
     compact_response,
     list_input_items,
     count_input_tokens,

@@ -31,7 +31,6 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
         ],
     )
     retrieved = await openai_client.responses.retrieve(created.id)
-    cancelled = await openai_client.responses.cancel(created.id)
     compacted = await openai_client.responses.compact(
         model="gpt-4.1", input="compact me"
     )
@@ -48,7 +47,6 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert any(item.type == "function_call" for item in created.output)
     assert not any(item.type == "web_search_call" for item in created.output)
     assert retrieved.id == created.id
-    assert cancelled.status == "cancelled"
     assert compacted.object == "response.compaction"
     assert input_items.object == "list"
     assert input_items.data[0].type == "message"

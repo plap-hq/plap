@@ -55,7 +55,6 @@ async def test_authenticated_routes_return_stubbed_contracts(
         )
         retrieved = await client.get("/v1/responses/resp_test", headers=headers)
         deleted = await client.delete("/v1/responses/resp_test", headers=headers)
-        cancelled = await client.post("/v1/responses/resp_test/cancel", headers=headers)
         compacted = await client.post(
             "/v1/responses/compact",
             json={"input": "compact me", "model": "gpt-4.1"},
@@ -86,7 +85,6 @@ async def test_authenticated_routes_return_stubbed_contracts(
     assert retrieved.status_code == 200
     assert retrieved.json()["id"] == "resp_test"
     assert deleted.json() == {"deleted": True, "id": "resp_test", "object": "response"}
-    assert cancelled.json()["status"] == "cancelled"
     assert compacted.json()["object"] == "response.compaction"
     assert input_items.json()["object"] == "list"
     assert input_items.json()["data"][0]["type"] == "message"
