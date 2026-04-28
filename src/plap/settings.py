@@ -3,8 +3,18 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class RuntimeModelProfileConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    main_model: str
+    main_debate_model: str
+    reviewer_model: str
+    arbitrator_model: str
+    reasoning_summarizer_model: str
 
 
 class Settings(BaseSettings):
@@ -37,6 +47,9 @@ class Settings(BaseSettings):
     tool_classifier_max_concurrency: int = 4
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096
+    runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(
+        default_factory=dict
+    )
     web_search_brave_api_key: str | None = None
     web_search_mcp_url: str | None = None
     web_search_mcp_command: str = "npx"

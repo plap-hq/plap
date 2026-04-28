@@ -4,7 +4,6 @@ from collections.abc import AsyncIterator
 
 from litestar import delete, get, post, websocket
 from litestar.connection import WebSocket
-from litestar.exceptions import ValidationException
 from litestar.response import ServerSentEvent
 from pydantic import ValidationError
 
@@ -36,7 +35,7 @@ from plap.responses.stubs import (
     build_stream_events,
     build_stub_response,
 )
-from plap.responses.tools import IToolPolicyResolver, ToolPolicyError
+from plap.responses.tools import IToolPolicyResolver
 from plap.responses.tools.web_search import IWebSearchToolProvider
 
 
@@ -55,16 +54,13 @@ async def create_response(
     web_search_tool_provider: IWebSearchToolProvider | None,
 ) -> object:
     _ = auth_context
-    try:
-        ingested = await ingest_response_request(data, keyring=sealing_keyring)
-        await prepare_tools(
-            data,
-            ingested,
-            tool_policy_resolver,
-            web_search_tool_provider,
-        )
-    except ToolPolicyError as exc:
-        raise ValidationException(str(exc)) from exc
+    ingested = await ingest_response_request(data, keyring=sealing_keyring)
+    await prepare_tools(
+        data,
+        ingested,
+        tool_policy_resolver,
+        web_search_tool_provider,
+    )
     response = build_stub_response(data)
     if data.stream:
         return ServerSentEvent(
@@ -164,9 +160,9 @@ async def responses_socket(
 
         try:
             client_event = ResponseCreateClientEvent.model_validate(payload)
-        except ValidationError as exc:
+        except ValidationError:
             await socket.send_json(
-                build_error_event(exc.errors(include_url=False)[0]["msg"]).model_dump(
+                build_error_event("Invalid client event.").model_dump(
                     mode="json",
                     exclude_none=True,
                 )

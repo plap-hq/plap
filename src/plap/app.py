@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
+import structlog
 from cachetools import LRUCache
 from litestar import Litestar, Request, Response
 from litestar.datastructures import State
@@ -25,17 +27,31 @@ from plap.llms.router import (
 )
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
+from plap.responses.ingest import IngestionError
 from plap.responses.tools import (
     IToolCallClassifier,
     IToolClassifier,
     LLMToolCallClassifier,
     LLMToolClassifier,
+    ToolPolicyError,
 )
 from plap.responses.tools.web_search import (
     IWebSearchToolProvider,
     MCPWebSearchToolProvider,
 )
-from plap.settings import Settings, get_settings
+from plap.settings import RuntimeModelProfileConfig, Settings, get_settings
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicError:
+    status_code: int
+    message: str
+    error_type: str
+    code: str
+    headers: dict[str, str] | None = None
+    log_event: str = "request.failed"
 
 
 def _error_body(
@@ -77,41 +93,69 @@ def _error_response(
     )
 
 
-def handle_auth_exception(
-    _: Request[Any, Any, Any],
-    exc: NotAuthorizedException,
-) -> Response[dict[str, Any]]:
-    return _error_response(
-        message=exc.detail or "Not authorized",
-        status_code=401,
-        error_type="authentication_error",
-        code="invalid_api_key",
-        headers={"WWW-Authenticate": "Bearer"},
+def public_error_for(exc: Exception) -> PublicError:
+    if isinstance(exc, NotAuthorizedException):
+        return PublicError(
+            message="Not authorized.",
+            status_code=401,
+            error_type="authentication_error",
+            code="invalid_api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+            log_event="request.auth_failed",
+        )
+    if isinstance(exc, ValidationException | IngestionError):
+        return PublicError(
+            message="Invalid request.",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="invalid_request",
+            log_event="request.validation_failed",
+        )
+    if isinstance(exc, ToolPolicyError):
+        return PublicError(
+            message="Invalid request.",
+            status_code=400,
+            error_type="invalid_request_error",
+            code="invalid_tool",
+            log_event="request.tool_validation_failed",
+        )
+    if isinstance(exc, HTTPException):
+        return PublicError(
+            message="Request failed.",
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code="request_error",
+            log_event="request.http_failed",
+        )
+    return PublicError(
+        message="Response generation failed.",
+        status_code=500,
+        error_type="server_error",
+        code="server_error",
+        log_event="request.unhandled_failed",
     )
 
 
-def handle_validation_exception(
-    _: Request[Any, Any, Any],
-    exc: ValidationException,
+def handle_public_exception(
+    request: Request[Any, Any, Any],
+    exc: Exception,
 ) -> Response[dict[str, Any]]:
-    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail or exc)
-    return _error_response(
-        message=detail,
-        status_code=400,
-        error_type="invalid_request_error",
-        code="invalid_request",
+    public_error = public_error_for(exc)
+    log = logger.error if public_error.status_code >= 500 else logger.warning
+    log(
+        public_error.log_event,
+        exc_info=True,
+        exception_type=type(exc).__name__,
+        method=request.method,
+        path=request.url.path,
+        status_code=public_error.status_code,
     )
-
-
-def handle_http_exception(
-    _: Request[Any, Any, Any],
-    exc: HTTPException,
-) -> Response[dict[str, Any]]:
     return _error_response(
-        message=exc.detail or "Request failed",
-        status_code=exc.status_code,
-        error_type="invalid_request_error",
-        code="request_error",
+        message=public_error.message,
+        status_code=public_error.status_code,
+        error_type=public_error.error_type,
+        code=public_error.code,
+        headers=public_error.headers,
     )
 
 
@@ -201,6 +245,34 @@ def _create_web_search_tool_provider(
     return None
 
 
+def _validate_runtime_model_profiles(settings: Settings) -> None:
+    for name, profile in settings.runtime_model_profiles.items():
+        for model in (
+            profile.main_model,
+            profile.main_debate_model,
+            profile.reviewer_model,
+            profile.arbitrator_model,
+            profile.reasoning_summarizer_model,
+        ):
+            if not _has_configured_chat_completion_route(settings, model):
+                raise ValueError(
+                    "runtime model profile references an unconfigured LLM route: "
+                    f"{name!r} -> {model!r}"
+                )
+
+
+def _resolve_runtime_model_profile(
+    settings: Settings,
+    model: str | None,
+) -> RuntimeModelProfileConfig:
+    if model is None:
+        raise ValueError("model is required")
+    profile = settings.runtime_model_profiles.get(model)
+    if profile is None:
+        raise ValueError(f"unknown runtime model: {model!r}")
+    return profile
+
+
 def _brave_mcp_config(settings: Settings) -> dict[str, Any]:
     env = {"BRAVE_API_KEY": settings.web_search_brave_api_key}
     if settings.web_search_mcp_tool_names:
@@ -248,12 +320,14 @@ def create_app(settings: Settings | None = None) -> Litestar:
         chat_completion_client,
     )
     web_search_tool_provider = _create_web_search_tool_provider(resolved_settings)
+    _validate_runtime_model_profiles(resolved_settings)
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
             "chat_completion_client": chat_completion_client,
             "db_engine": db_engine,
             "owns_engine": True,
+            "runtime_model_profiles": resolved_settings.runtime_model_profiles,
             "session_maker": session_maker,
             "sealing_keyring": SealingKeyring.from_encoded(
                 resolved_settings.sealing_keys
@@ -274,9 +348,12 @@ def create_app(settings: Settings | None = None) -> Litestar:
     return Litestar(
         route_handlers=RESPONSE_ROUTE_HANDLERS,
         exception_handlers={
-            HTTPException: handle_http_exception,
-            NotAuthorizedException: handle_auth_exception,
-            ValidationException: handle_validation_exception,
+            HTTPException: handle_public_exception,
+            IngestionError: handle_public_exception,
+            NotAuthorizedException: handle_public_exception,
+            ToolPolicyError: handle_public_exception,
+            ValidationException: handle_public_exception,
+            Exception: handle_public_exception,
         },
         on_shutdown=[_shutdown_database],
         state=state,

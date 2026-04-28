@@ -131,6 +131,63 @@ async def test_http_validation_rejects_unsupported_context_management(
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["message"] == "Invalid request."
+
+
+async def test_create_response_sanitizes_ingestion_errors(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {
+                        "encrypted_content": "not-valid",
+                        "id": "rs_bad",
+                        "summary": [{"text": "bad", "type": "summary_text"}],
+                        "type": "reasoning",
+                    }
+                ],
+                "model": "gpt-4.1",
+            },
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["error"]["message"] == "Invalid request."
+    assert body["error"]["code"] == "invalid_request"
+    assert "sealed" not in body["error"]["message"]
+    assert "encrypted" not in body["error"]["message"]
+
+
+async def test_create_response_sanitizes_tool_preparation_errors(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "input": "search please",
+                "model": "gpt-4.1",
+                "tools": [{"type": "web_search"}],
+            },
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["error"]["message"] == "Invalid request."
+    assert body["error"]["code"] == "invalid_tool"
+    assert "web_search" not in body["error"]["message"]
+    assert "MCP" not in body["error"]["message"]
 
 
 async def test_websocket_streams_response_events_with_auth(

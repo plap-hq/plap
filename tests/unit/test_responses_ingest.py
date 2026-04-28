@@ -188,6 +188,88 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     assert result.in_temp_debate is False
 
 
+async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
+    temp_message = {
+        "role": "assistant",
+        "content": "temp reviewer",
+        "tool_calls": [_tool_call("up_temp_0")],
+    }
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=content_hash(temp_message),
+        upstream_tool_call_id="up_temp_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item("reviewer", True, [temp_message]),
+                _function_call(call_id),
+                _function_output(call_id, "temp output"),
+                _message("user", "new mainline request"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message["content"] for row in result.main_context] == [
+        "new mainline request"
+    ]
+    assert result.main_context == result.main_transcript
+    assert result.reviewer == ()
+    assert result.continuation_side == "main"
+    assert result.in_temp_debate is False
+
+
+async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _message("assistant", "stable assistant"),
+                _reasoning_item(
+                    "reviewer",
+                    True,
+                    [{"role": "assistant", "content": "temp reviewer"}],
+                ),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="client_call_0",
+                    name="read_file",
+                    type="function_call",
+                ),
+                _function_output("client_call_0", "client output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message for row in result.main_context] == [
+        {
+            "role": "assistant",
+            "content": "stable assistant",
+            "tool_calls": [
+                {
+                    "id": "client_call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "client_call_0",
+            "content": "client output",
+        },
+    ]
+    assert result.main_context == result.main_transcript
+    assert result.reviewer == ()
+    assert result.continuation_side == "main"
+    assert result.in_temp_debate is False
+
+
 async def test_ingestion_exposes_active_temp_debate_state() -> None:
     result = await ingest_response_request(
         _request(

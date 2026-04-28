@@ -69,6 +69,7 @@ class _DecodedItem:
     reasoning: ReasoningPayload | None = None
     call_id: SealedCallID | None = None
     temp_related: bool = False
+    resets_temp_debate: bool = False
 
 
 @dataclass(slots=True)
@@ -374,7 +375,11 @@ def _decode_sealed_items(
     in_temp_debate = False
     for item in input_items:
         if isinstance(item, RequestMessageItem):
-            decoded.append(_DecodedItem(item=item))
+            decoded.append(
+                _DecodedItem(item=item, resets_temp_debate=in_temp_debate)
+            )
+            if in_temp_debate:
+                in_temp_debate = False
             continue
         if isinstance(item, ReasoningItem):
             payload = _open_reasoning_item(item, keyring=keyring)
@@ -389,13 +394,17 @@ def _decode_sealed_items(
             continue
         if isinstance(item, RequestFunctionCallItem | RequestFunctionCallOutputItem):
             call_id = _open_call_id_or_none(item.call_id, keyring=keyring)
+            resets_temp_debate = in_temp_debate and call_id is None
             decoded.append(
                 _DecodedItem(
                     item=item,
                     call_id=call_id,
                     temp_related=in_temp_debate and call_id is not None,
+                    resets_temp_debate=resets_temp_debate,
                 )
             )
+            if resets_temp_debate:
+                in_temp_debate = False
     return decoded, in_temp_debate
 
 
@@ -410,7 +419,9 @@ def _open_reasoning_item(
 def _prune_temp_debate_globally(items: list[_DecodedItem]) -> list[_DecodedItem]:
     retained: list[_DecodedItem] = []
     for item in items:
-        if item.reasoning is not None and not item.reasoning.temp:
+        if item.resets_temp_debate or (
+            item.reasoning is not None and not item.reasoning.temp
+        ):
             retained = [
                 candidate for candidate in retained if not candidate.temp_related
             ]
