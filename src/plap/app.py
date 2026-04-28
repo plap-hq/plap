@@ -249,13 +249,7 @@ def _create_web_search_tool_provider(
 
 def _validate_runtime_model_profiles(settings: Settings) -> None:
     for name, profile in settings.runtime_model_profiles.items():
-        for model in (
-            profile.main_model,
-            profile.main_debate_model,
-            profile.reviewer_model,
-            profile.arbitrator_model,
-            profile.reasoning_summarizer_model,
-        ):
+        for model in _runtime_profile_models(profile):
             if not _has_configured_chat_completion_route(settings, model):
                 raise ValueError(
                     "runtime model profile references an unconfigured LLM route: "
@@ -266,13 +260,31 @@ def _validate_runtime_model_profiles(settings: Settings) -> None:
 def _resolve_runtime_model_profile(
     settings: Settings,
     model: str | None,
+    service_tier: str | None = None,
 ) -> RuntimeModelProfileConfig:
     if model is None:
         raise ValueError("model is required")
     profile = settings.runtime_model_profiles.get(model)
     if profile is None:
         raise ValueError(f"unknown runtime model: {model!r}")
-    return profile
+    if service_tier in (None, "auto", "default"):
+        return profile
+
+    override = profile.service_tier_overrides.get(service_tier)
+    if override is None:
+        return profile
+
+    return profile.model_copy(update=override.model_dump(exclude_none=True))
+
+
+def _runtime_profile_models(profile: RuntimeModelProfileConfig) -> Iterable[str]:
+    yield profile.main_model
+    yield profile.main_debate_model
+    yield profile.reviewer_model
+    yield profile.arbitrator_model
+    yield profile.reasoning_summarizer_model
+    for override in profile.service_tier_overrides.values():
+        yield from override.model_dump(exclude_none=True).values()
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:

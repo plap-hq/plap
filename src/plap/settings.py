@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+type RuntimeServiceTier = Literal["auto", "default", "priority", "flex"]
+
+
+class RuntimeModelProfileOverrideConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    main_model: str | None = None
+    main_debate_model: str | None = None
+    reviewer_model: str | None = None
+    arbitrator_model: str | None = None
+    reasoning_summarizer_model: str | None = None
 
 
 class RuntimeModelProfileConfig(BaseModel):
@@ -15,6 +27,10 @@ class RuntimeModelProfileConfig(BaseModel):
     reviewer_model: str
     arbitrator_model: str
     reasoning_summarizer_model: str
+    service_tier_overrides: dict[
+        RuntimeServiceTier,
+        RuntimeModelProfileOverrideConfig,
+    ] = Field(default_factory=dict)
 
 
 class Settings(BaseSettings):
