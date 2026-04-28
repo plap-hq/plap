@@ -7,7 +7,6 @@ import blake3
 import msgspec
 
 type Side = Literal["main", "reviewer", "arbitrator"]
-type Namespace = Literal["m", "s"]
 
 ChatMessage = dict[str, Any]
 
@@ -19,19 +18,29 @@ def chat_message_hash(message: ChatMessage) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class ChatMessageWithOrdinal:
-    namespace: Namespace
-    ordinal: int
+class ChatMessageSpan:
+    start: int
+    end: int
     message: ChatMessage
     content_hash: str = ""
 
     def __post_init__(self) -> None:
-        if self.ordinal < 0:
-            raise ValueError("message row ordinal must be non-negative")
-        if self.namespace not in {"m", "s"}:
-            raise ValueError("message row namespace is invalid")
+        if self.start < 0 or self.end < 0:
+            raise ValueError("message span bounds must be non-negative")
+        if self.start > self.end:
+            raise ValueError("message span start must not exceed end")
         if not self.content_hash:
             object.__setattr__(self, "content_hash", chat_message_hash(self.message))
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.start == self.end
+
+    @property
+    def citation(self) -> str:
+        if self.is_leaf:
+            return f"[~{self.start}]"
+        return f"[~{self.start}_{self.end}]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,8 +55,8 @@ class SideMessage:
 
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
-    active: tuple[ChatMessageWithOrdinal, ...]
-    source: tuple[ChatMessageWithOrdinal, ...]
+    active: tuple[ChatMessageSpan, ...]
+    source: tuple[ChatMessageSpan, ...]
     cursors: dict[str, int]
 
 
@@ -68,8 +77,8 @@ class SealedCallID:
 
 @dataclass(frozen=True, slots=True)
 class IngestedQueues:
-    main_context: tuple[ChatMessageWithOrdinal, ...]
-    main_transcript: tuple[ChatMessageWithOrdinal, ...]
+    main_context: tuple[ChatMessageSpan, ...]
+    main_transcript: tuple[ChatMessageSpan, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
     continuation_side: Side

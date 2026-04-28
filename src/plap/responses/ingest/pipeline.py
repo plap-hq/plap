@@ -20,7 +20,7 @@ from plap.responses.ingest.sealing import (
 )
 from plap.responses.ingest.types import (
     ChatMessage,
-    ChatMessageWithOrdinal,
+    ChatMessageSpan,
     CompactionPayload,
     IngestedQueues,
     IngestionError,
@@ -108,7 +108,7 @@ class _AssociatedQueues:
 class _QueueBase:
     def __init__(self, side: Side) -> None:
         self.side = side
-        self._entries: list[ChatMessageWithOrdinal | SideMessage] = []
+        self._entries: list[ChatMessageSpan | SideMessage] = []
         self._pending_tool_call_ids: set[str] = set()
 
     def add_reasoning(self, payload: ReasoningPayload) -> None:
@@ -225,31 +225,31 @@ class _MainQueue(_QueueBase):
     def __init__(self, cursors: dict[str, int]) -> None:
         super().__init__("main")
         self._cursors = cursors
-        self._seed_rows: list[ChatMessageWithOrdinal] = []
-        self._stable_rows: list[ChatMessageWithOrdinal] = []
-        self._temp_rows: list[ChatMessageWithOrdinal] = []
+        self._seed_rows: list[ChatMessageSpan] = []
+        self._stable_rows: list[ChatMessageSpan] = []
+        self._temp_rows: list[ChatMessageSpan] = []
 
     @property
-    def context_rows(self) -> list[ChatMessageWithOrdinal]:
+    def context_rows(self) -> list[ChatMessageSpan]:
         return [
             entry
             for entry in self._entries
-            if isinstance(entry, ChatMessageWithOrdinal)
+            if isinstance(entry, ChatMessageSpan)
         ]
 
     @property
-    def stable_rows(self) -> list[ChatMessageWithOrdinal]:
+    def stable_rows(self) -> list[ChatMessageSpan]:
         return self._stable_rows
 
     @property
-    def temp_rows(self) -> list[ChatMessageWithOrdinal]:
+    def temp_rows(self) -> list[ChatMessageSpan]:
         return self._temp_rows
 
-    def add_existing_row(self, row: ChatMessageWithOrdinal) -> None:
+    def add_existing_row(self, row: ChatMessageSpan) -> None:
         self._seed_rows.append(row)
         self._entries.append(row)
 
-    def add_message(self, message: ChatMessage) -> ChatMessageWithOrdinal:
+    def add_message(self, message: ChatMessage) -> ChatMessageSpan:
         return self._append_main_row(message)
 
     def attach_fabricated_call(self, call: RequestFunctionCallItem) -> None:
@@ -290,11 +290,11 @@ class _MainQueue(_QueueBase):
         *,
         allow_pending: bool = False,
         temp: bool = False,
-    ) -> ChatMessageWithOrdinal:
+    ) -> ChatMessageSpan:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
         ordinal = self._cursors.get("m", 0)
-        row = ChatMessageWithOrdinal(namespace="m", ordinal=ordinal, message=message)
+        row = ChatMessageSpan(start=ordinal, end=ordinal, message=message)
         self._cursors["m"] = ordinal + 1
         if temp:
             self._temp_rows.append(row)
@@ -510,7 +510,7 @@ def _associate_side_queues(
 
 def _main_transcript(
     compaction: CompactionPayload | None, main: _MainQueue
-) -> tuple[ChatMessageWithOrdinal, ...]:
+) -> tuple[ChatMessageSpan, ...]:
     root_rows = () if compaction is None else compaction.source
     return (*root_rows, *main.stable_rows)
 
@@ -566,9 +566,9 @@ def _assert_no_pending_tool_calls(queues: _AssociatedQueues) -> None:
 
 def _initial_cursors(compaction: CompactionPayload | None) -> dict[str, int]:
     if compaction is None:
-        return {"m": 0, "s": 0}
-    cursors = {"m": 0, "s": 0, **compaction.cursors}
-    if cursors["m"] < 0 or cursors["s"] < 0:
+        return {"m": 0}
+    cursors = {"m": 0, **compaction.cursors}
+    if cursors["m"] < 0:
         raise IngestionError("compaction cursors must be non-negative")
     return cursors
 

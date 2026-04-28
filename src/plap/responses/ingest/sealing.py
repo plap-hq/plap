@@ -12,7 +12,7 @@ from nacl.secret import Aead
 
 from plap.keyring import SealingKeyring, associated_data, purpose_label
 from plap.responses.ingest.types import (
-    ChatMessageWithOrdinal,
+    ChatMessageSpan,
     CompactionPayload,
     IngestionError,
     ReasoningPayload,
@@ -185,17 +185,18 @@ def _compaction_from_json(value: object) -> CompactionPayload:
         or value.get("type") != COMPACTION_PAYLOAD_TYPE
     ):
         raise IngestionError("unsupported compaction payload")
-    active = _rows_from_json(value.get("active"), allowed_namespaces={"m", "s"})
-    source = _rows_from_json(value.get("source"), allowed_namespaces={"m"})
+    active = _rows_from_json(value.get("active"))
+    source = _rows_from_json(value.get("source"))
     cursors = value.get("cursors")
     if not isinstance(cursors, dict):
         raise IngestionError("compaction cursors are required")
-    parsed_cursors = {str(key): int(cursor) for key, cursor in cursors.items()}
-    if "m" not in parsed_cursors or "s" not in parsed_cursors:
-        raise IngestionError("compaction cursors must include m and s")
-    if any(cursor < 0 for cursor in parsed_cursors.values()):
+    if "m" not in cursors:
+        raise IngestionError("compaction cursors must include m")
+    parsed_cursors = {"m": int(cursors["m"])}
+    if parsed_cursors["m"] < 0:
         raise IngestionError("compaction cursors must be non-negative")
     _validate_active_rows(active, parsed_cursors)
+    _validate_source_rows(source, parsed_cursors)
     return CompactionPayload(active=active, source=source, cursors=parsed_cursors)
 
 
@@ -315,53 +316,57 @@ def _decode_upstream_id(value: bytes) -> str:
         raise IngestionError("upstream_tool_call_id is not UTF-8") from exc
 
 
-def _row_to_json(value: ChatMessageWithOrdinal) -> dict[str, Any]:
+def _row_to_json(value: ChatMessageSpan) -> dict[str, Any]:
     return {
-        "namespace": value.namespace,
-        "ordinal": value.ordinal,
+        "start": value.start,
+        "end": value.end,
         "message": value.message,
     }
 
 
 def _validate_active_rows(
-    rows: tuple[ChatMessageWithOrdinal, ...], cursors: dict[str, int]
+    rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]
 ) -> None:
-    seen: set[tuple[str, int]] = set()
+    previous_end = -1
     for row in rows:
-        key = (row.namespace, row.ordinal)
-        if key in seen:
-            raise IngestionError("compaction active rows contain duplicate ordinal")
-        seen.add(key)
-        cursor = cursors[row.namespace]
-        if row.ordinal >= cursor:
-            raise IngestionError("compaction active row ordinal is outside cursor")
+        if row.start <= previous_end:
+            raise IngestionError("compaction active spans overlap or are out of order")
+        if row.end >= cursors["m"]:
+            raise IngestionError("compaction active span is outside cursor")
+        previous_end = row.end
 
 
-def _rows_from_json(
-    value: object,
-    *,
-    allowed_namespaces: set[str],
-) -> tuple[ChatMessageWithOrdinal, ...]:
+def _validate_source_rows(
+    rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]
+) -> None:
+    seen: set[int] = set()
+    for row in rows:
+        if not row.is_leaf:
+            raise IngestionError("compaction source rows must be leaf spans")
+        if row.start in seen:
+            raise IngestionError("compaction source rows contain duplicate span")
+        seen.add(row.start)
+        if row.start >= cursors["m"]:
+            raise IngestionError("compaction source span is outside cursor")
+
+
+def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
     if not isinstance(value, list):
         raise IngestionError("message rows must be an array")
-    rows: list[ChatMessageWithOrdinal] = []
+    rows: list[ChatMessageSpan] = []
     for row in value:
         if not isinstance(row, dict):
             raise IngestionError("message row must be an object")
-        namespace = row.get("namespace")
-        ordinal = row.get("ordinal")
+        start = row.get("start")
+        end = row.get("end")
         message = row.get("message")
-        if namespace not in allowed_namespaces:
-            raise IngestionError("message row namespace is invalid")
-        if not isinstance(ordinal, int) or ordinal < 0:
-            raise IngestionError("message row ordinal is invalid")
+        if not isinstance(start, int) or not isinstance(end, int):
+            raise IngestionError("message row span is invalid")
+        if start < 0 or end < 0 or start > end:
+            raise IngestionError("message row span is invalid")
         if not isinstance(message, dict):
             raise IngestionError("message row message is required")
-        rows.append(
-            ChatMessageWithOrdinal(
-                namespace=namespace, ordinal=ordinal, message=message
-            )
-        )
+        rows.append(ChatMessageSpan(start=start, end=end, message=message))
     return tuple(rows)
 
 

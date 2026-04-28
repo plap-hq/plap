@@ -20,7 +20,7 @@ from plap.responses.contracts import (
 )
 from plap.responses.ingest import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
-    ChatMessageWithOrdinal,
+    ChatMessageSpan,
     CompactionPayload,
     IngestedQueues,
     IngestionError,
@@ -54,14 +54,14 @@ async def ingest_response_request(
     )
 
 
-async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
+async def test_ingestion_preserves_last_compaction_spans() -> None:
     result = await ingest_response_request(
         _request(
             input=[
                 _message("user", "before"),
                 _compaction_item("discarded", 10),
                 _message("user", "between"),
-                _compaction_item("kept", 1),
+                _compaction_item("kept", 2),
                 _message("user", "after"),
             ]
         ),
@@ -69,33 +69,35 @@ async def test_ingestion_preserves_last_compaction_rows_and_ordinals() -> None:
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message["content"])
+        (row.start, row.end, row.message["content"])
         for row in result.main_context
     ] == [
-        ("m", 0, "kept active"),
-        ("s", 0, "kept summary"),
-        ("m", 1, "after"),
+        (0, 0, "kept active"),
+        (1, 1, "kept summary"),
+        (2, 2, "after"),
     ]
     assert [row.message["content"] for row in result.main_transcript] == [
         "kept source",
+        "kept summarized source",
         "after",
     ]
-    assert result.cursors == {"m": 2, "s": 1}
+    assert result.cursors == {"m": 3}
     assert result.continuation_side == "main"
 
 
 async def test_ingestion_compaction_only_continues_main() -> None:
     result = await ingest_response_request(
-        _request(input=[_compaction_item("only", 1)]),
+        _request(input=[_compaction_item("only", 2)]),
         keyring=_keyring(),
     )
 
-    assert [(row.namespace, row.ordinal) for row in result.main_context] == [
-        ("m", 0),
-        ("s", 0),
+    assert [(row.start, row.end) for row in result.main_context] == [
+        (0, 0),
+        (1, 1),
     ]
-    assert [(row.namespace, row.ordinal) for row in result.main_transcript] == [
-        ("m", 0)
+    assert [(row.start, row.end) for row in result.main_transcript] == [
+        (0, 0),
+        (1, 1),
     ]
     assert result.continuation_side == "main"
 
@@ -107,13 +109,13 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message["content"])
+        (row.start, row.end, row.message["content"])
         for row in result.main_context
     ] == [
-        ("m", 0, "u0"),
-        ("m", 1, "a0"),
+        (0, 0, "u0"),
+        (1, 1, "a0"),
     ]
-    assert result.cursors == {"m": 2, "s": 0}
+    assert result.cursors == {"m": 2}
     assert result.main_context == result.main_transcript
     assert result.continuation_side == "main"
 
@@ -344,10 +346,10 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message) for row in result.main_context
+        (row.start, row.end, row.message) for row in result.main_context
     ] == [
         (
-            "m",
+            0,
             0,
             {
                 "role": "assistant",
@@ -356,12 +358,12 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
             },
         ),
         (
-            "m",
+            1,
             1,
             {"role": "tool", "tool_call_id": "up_main_0", "content": "main output"},
         ),
     ]
-    assert result.cursors == {"m": 2, "s": 0}
+    assert result.cursors == {"m": 2}
     assert result.main_context == result.main_transcript
     assert result.continuation_side == "main"
 
@@ -384,10 +386,10 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
     )
 
     assert [
-        (row.namespace, row.ordinal, row.message) for row in result.main_context
+        (row.start, row.end, row.message) for row in result.main_context
     ] == [
         (
-            "m",
+            0,
             0,
             {
                 "role": "assistant",
@@ -405,7 +407,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
             },
         ),
         (
-            "m",
+            1,
             1,
             {
                 "role": "tool",
@@ -567,8 +569,9 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         keyring=_keyring(),
     )
 
-    assert [(row.ordinal, row.message) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message) for row in result.main_context] == [
         (
+            0,
             0,
             {
                 "role": "assistant",
@@ -578,6 +581,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         ),
         (
             1,
+            1,
             {
                 "role": "assistant",
                 "content": "new reasoning message",
@@ -585,7 +589,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
             },
         ),
     ]
-    assert result.cursors == {"m": 2, "s": 0}
+    assert result.cursors == {"m": 2}
     assert result.main_context == result.main_transcript
 
 
@@ -674,6 +678,14 @@ def test_payload_domain_objects_do_not_expose_version_or_type_truths() -> None:
     assert "type" not in ReasoningPayload.__dataclass_fields__
 
 
+def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
+    leaf = ChatMessageSpan(start=0, end=0, message={"role": "user"})
+    range_span = ChatMessageSpan(start=0, end=7, message={"role": "assistant"})
+
+    assert leaf.citation == "[~0]"
+    assert range_span.citation == "[~0_7]"
+
+
 def test_sealed_compaction_rejects_wrong_payload_type() -> None:
     token = _seal_raw_payload(
         COMPACTION_PURPOSE,
@@ -682,7 +694,7 @@ def test_sealed_compaction_rejects_wrong_payload_type() -> None:
             "type": "reasoning",
             "active": [],
             "source": [],
-            "cursors": {"m": 0, "s": 0},
+            "cursors": {"m": 0},
         },
     )
 
@@ -690,18 +702,18 @@ def test_sealed_compaction_rejects_wrong_payload_type() -> None:
         open_compaction_payload(token, keyring=_keyring())
 
 
-def test_sealed_compaction_rejects_active_ordinals_outside_cursors() -> None:
+def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
     token = seal_compaction_payload(
         CompactionPayload(
             active=(
-                ChatMessageWithOrdinal(
-                    namespace="m",
-                    ordinal=5,
+                ChatMessageSpan(
+                    start=5,
+                    end=5,
                     message={"role": "user", "content": "bad"},
                 ),
             ),
             source=(),
-            cursors={"m": 1, "s": 0},
+            cursors={"m": 1},
         ),
         keyring=_keyring(),
     )
@@ -710,28 +722,28 @@ def test_sealed_compaction_rejects_active_ordinals_outside_cursors() -> None:
         open_compaction_payload(token, keyring=_keyring())
 
 
-def test_sealed_compaction_rejects_duplicate_active_ordinals() -> None:
+def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
     token = seal_compaction_payload(
         CompactionPayload(
             active=(
-                ChatMessageWithOrdinal(
-                    namespace="m",
-                    ordinal=0,
+                ChatMessageSpan(
+                    start=0,
+                    end=1,
                     message={"role": "user", "content": "first"},
                 ),
-                ChatMessageWithOrdinal(
-                    namespace="m",
-                    ordinal=0,
+                ChatMessageSpan(
+                    start=1,
+                    end=1,
                     message={"role": "user", "content": "second"},
                 ),
             ),
             source=(),
-            cursors={"m": 1, "s": 0},
+            cursors={"m": 2},
         ),
         keyring=_keyring(),
     )
 
-    with pytest.raises(IngestionError, match="duplicate ordinal"):
+    with pytest.raises(IngestionError, match="overlap"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -768,27 +780,41 @@ def _message(role: str, content: str) -> RequestMessageItem:
 
 
 def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
-    payload = CompactionPayload(
-        active=(
-            ChatMessageWithOrdinal(
-                namespace="m",
-                ordinal=0,
-                message={"role": "user", "content": f"{label} active"},
-            ),
-            ChatMessageWithOrdinal(
-                namespace="s",
-                ordinal=0,
+    if cursor < 1:
+        raise ValueError("cursor must be positive")
+    active = [
+        ChatMessageSpan(
+            start=0,
+            end=0,
+            message={"role": "user", "content": f"{label} active"},
+        )
+    ]
+    if cursor > 1:
+        active.append(
+            ChatMessageSpan(
+                start=1,
+                end=cursor - 1,
                 message={"role": "assistant", "content": f"{label} summary"},
-            ),
+            )
+        )
+    payload = CompactionPayload(
+        active=tuple(active),
+        source=tuple(
+            ChatMessageSpan(
+                start=ordinal,
+                end=ordinal,
+                message={
+                    "role": "user",
+                    "content": (
+                        f"{label} source"
+                        if ordinal == 0
+                        else f"{label} summarized source"
+                    ),
+                },
+            )
+            for ordinal in range(cursor)
         ),
-        source=(
-            ChatMessageWithOrdinal(
-                namespace="m",
-                ordinal=0,
-                message={"role": "user", "content": f"{label} source"},
-            ),
-        ),
-        cursors={"m": cursor, "s": cursor},
+        cursors={"m": cursor},
     )
     return RequestCompactionItem(
         encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),

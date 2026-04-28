@@ -222,7 +222,7 @@ def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:
         continuation_side="main",
         in_temp_debate=in_temp_debate,
         compaction=None,
-        cursors={"m": 0, "s": 0},
+        cursors={"m": 0},
     )
 
 

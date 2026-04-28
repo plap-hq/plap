@@ -12,7 +12,7 @@ from plap.responses.ingest.sealing import (
 )
 from plap.responses.ingest.types import (
     ChatMessage,
-    ChatMessageWithOrdinal,
+    ChatMessageSpan,
     CompactionPayload,
     IngestedQueues,
     IngestionError,
@@ -24,7 +24,7 @@ from plap.responses.ingest.types import (
 __all__ = [
     "CALL_ID_CONTENT_HASH_PREFIX_BYTES",
     "ChatMessage",
-    "ChatMessageWithOrdinal",
+    "ChatMessageSpan",
     "CompactionPayload",
     "IngestedQueues",
     "IngestionError",
