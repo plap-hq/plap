@@ -172,7 +172,6 @@ def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
         "version": PAYLOAD_FORMAT_VERSION,
         "type": COMPACTION_PAYLOAD_TYPE,
         "active": [_row_to_json(row) for row in value.active],
-        "source": [_row_to_json(row) for row in value.source],
         "cursors": value.cursors,
     }
 
@@ -186,7 +185,6 @@ def _compaction_from_json(value: object) -> CompactionPayload:
     ):
         raise IngestionError("unsupported compaction payload")
     active = _rows_from_json(value.get("active"))
-    source = _rows_from_json(value.get("source"))
     cursors = value.get("cursors")
     if not isinstance(cursors, dict):
         raise IngestionError("compaction cursors are required")
@@ -196,8 +194,7 @@ def _compaction_from_json(value: object) -> CompactionPayload:
     if parsed_cursors["m"] < 0:
         raise IngestionError("compaction cursors must be non-negative")
     _validate_active_rows(active, parsed_cursors)
-    _validate_source_rows(source, parsed_cursors)
-    return CompactionPayload(active=active, source=source, cursors=parsed_cursors)
+    return CompactionPayload(active=active, cursors=parsed_cursors)
 
 
 def _reasoning_to_json(value: ReasoningPayload) -> dict[str, Any]:
@@ -321,33 +318,70 @@ def _row_to_json(value: ChatMessageSpan) -> dict[str, Any]:
         "start": value.start,
         "end": value.end,
         "message": value.message,
+        "token_count": value.token_count,
+        "children_token_count": value.children_token_count,
+        "expanded_token_count": value.expanded_token_count,
+        "children_pruned": value.children_pruned,
+        "children": [_row_to_json(child) for child in value.children],
     }
 
 
 def _validate_active_rows(
     rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]
 ) -> None:
+    _validate_span_rows(rows, cursors=cursors, parent=None)
+
+
+def _validate_span_rows(
+    rows: tuple[ChatMessageSpan, ...],
+    *,
+    cursors: dict[str, int],
+    parent: ChatMessageSpan | None,
+) -> None:
     previous_end = -1
+    expected_start = parent.start if parent is not None else None
     for row in rows:
         if row.start <= previous_end:
             raise IngestionError("compaction active spans overlap or are out of order")
+        if expected_start is not None and row.start != expected_start:
+            raise IngestionError("compaction child spans do not cover parent")
         if row.end >= cursors["m"]:
             raise IngestionError("compaction active span is outside cursor")
+        _validate_span_node(row, cursors=cursors)
         previous_end = row.end
+        if expected_start is not None:
+            # Spans are inclusive, so the next contiguous child starts at end + 1.
+            expected_start = row.end + 1
+    if parent is not None and previous_end != parent.end:
+        raise IngestionError("compaction child spans do not cover parent")
 
 
-def _validate_source_rows(
-    rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]
+def _validate_span_node(
+    row: ChatMessageSpan, *, cursors: dict[str, int]
 ) -> None:
-    seen: set[int] = set()
-    for row in rows:
-        if not row.is_leaf:
-            raise IngestionError("compaction source rows must be leaf spans")
-        if row.start in seen:
-            raise IngestionError("compaction source rows contain duplicate span")
-        seen.add(row.start)
-        if row.start >= cursors["m"]:
-            raise IngestionError("compaction source span is outside cursor")
+    if row.is_leaf:
+        if row.children:
+            raise IngestionError("compaction leaf span cannot have children")
+        if row.children_pruned:
+            raise IngestionError("compaction leaf span cannot be pruned")
+        return
+
+    if row.children:
+        if row.children_pruned:
+            raise IngestionError("compaction span cannot have children and be pruned")
+        _validate_span_rows(row.children, cursors=cursors, parent=row)
+        children_token_count = sum(child.token_count for child in row.children)
+        expanded_token_count = sum(
+            child.expanded_token_count for child in row.children
+        )
+        if row.children_token_count != children_token_count:
+            raise IngestionError("compaction children_token_count is invalid")
+        if row.expanded_token_count != expanded_token_count:
+            raise IngestionError("compaction expanded_token_count is invalid")
+        return
+
+    if not row.children_pruned:
+        raise IngestionError("compaction summary span has no children")
 
 
 def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
@@ -360,14 +394,37 @@ def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
         start = row.get("start")
         end = row.get("end")
         message = row.get("message")
+        children = row.get("children", [])
         if not isinstance(start, int) or not isinstance(end, int):
             raise IngestionError("message row span is invalid")
         if start < 0 or end < 0 or start > end:
             raise IngestionError("message row span is invalid")
         if not isinstance(message, dict):
             raise IngestionError("message row message is required")
-        rows.append(ChatMessageSpan(start=start, end=end, message=message))
+        rows.append(
+            ChatMessageSpan(
+                start=start,
+                end=end,
+                message=message,
+                token_count=_non_negative_int(row, "token_count"),
+                children_token_count=_non_negative_int(
+                    row, "children_token_count"
+                ),
+                expanded_token_count=_non_negative_int(
+                    row, "expanded_token_count"
+                ),
+                children=_rows_from_json(children),
+                children_pruned=bool(row.get("children_pruned", False)),
+            )
+        )
     return tuple(rows)
+
+
+def _non_negative_int(row: dict[str, Any], key: str) -> int:
+    value = row.get(key, 0)
+    if not isinstance(value, int) or value < 0:
+        raise IngestionError(f"message row {key} is invalid")
+    return value
 
 
 def _b64url_encode(value: bytes) -> str:

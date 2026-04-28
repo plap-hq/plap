@@ -23,14 +23,41 @@ class ChatMessageSpan:
     end: int
     message: ChatMessage
     content_hash: str = ""
+    token_count: int = 0
+    children_token_count: int = 0
+    expanded_token_count: int = 0
+    children: tuple[ChatMessageSpan, ...] = ()
+    children_pruned: bool = False
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end < 0:
             raise ValueError("message span bounds must be non-negative")
         if self.start > self.end:
             raise ValueError("message span start must not exceed end")
+        for field_name, value in (
+            ("token_count", self.token_count),
+            ("children_token_count", self.children_token_count),
+            ("expanded_token_count", self.expanded_token_count),
+        ):
+            if value < 0:
+                raise ValueError(f"message span {field_name} must be non-negative")
         if not self.content_hash:
             object.__setattr__(self, "content_hash", chat_message_hash(self.message))
+        if self.children:
+            if not self.children_token_count:
+                object.__setattr__(
+                    self,
+                    "children_token_count",
+                    sum(child.token_count for child in self.children),
+                )
+            if not self.expanded_token_count:
+                object.__setattr__(
+                    self,
+                    "expanded_token_count",
+                    sum(child.expanded_token_count for child in self.children),
+                )
+        elif self.is_leaf and not self.expanded_token_count:
+            object.__setattr__(self, "expanded_token_count", self.token_count)
 
     @property
     def is_leaf(self) -> bool:
@@ -56,7 +83,6 @@ class SideMessage:
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
     active: tuple[ChatMessageSpan, ...]
-    source: tuple[ChatMessageSpan, ...]
     cursors: dict[str, int]
 
 

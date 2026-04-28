@@ -47,10 +47,12 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
+    transcript_token_budget: int = 0,
 ) -> IngestedQueues:
     return await _ingest_response_request(
         request,
         keyring=keyring,
+        transcript_token_budget=transcript_token_budget,
     )
 
 
@@ -72,8 +74,8 @@ async def test_ingestion_preserves_last_compaction_spans() -> None:
         (row.start, row.end, row.message["content"])
         for row in result.main_context
     ] == [
-        (0, 0, "kept active"),
-        (1, 1, "kept summary"),
+        (0, 0, "kept source"),
+        (1, 1, "kept summarized source"),
         (2, 2, "after"),
     ]
     assert [row.message["content"] for row in result.main_transcript] == [
@@ -783,7 +785,6 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
                     message={"role": "user", "content": "bad"},
                 ),
             ),
-            source=(),
             cursors={"m": 1},
         ),
         keyring=_keyring(),
@@ -801,6 +802,7 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                     start=0,
                     end=1,
                     message={"role": "user", "content": "first"},
+                    children_pruned=True,
                 ),
                 ChatMessageSpan(
                     start=1,
@@ -808,7 +810,6 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                     message={"role": "user", "content": "second"},
                 ),
             ),
-            source=(),
             cursors={"m": 2},
         ),
         keyring=_keyring(),
@@ -816,6 +817,72 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
 
     with pytest.raises(IngestionError, match="overlap"):
         open_compaction_payload(token, keyring=_keyring())
+
+
+async def test_ingestion_main_context_active_transcript_budgeted() -> None:
+    first_summary = ChatMessageSpan(
+        start=0,
+        end=1,
+        message={"role": "assistant", "content": "summary 0-1"},
+        token_count=1,
+        children=(
+            ChatMessageSpan(
+                start=0,
+                end=0,
+                message={"role": "user", "content": "m0"},
+                token_count=2,
+            ),
+            ChatMessageSpan(
+                start=1,
+                end=1,
+                message={"role": "assistant", "content": "m1"},
+                token_count=3,
+            ),
+        ),
+    )
+    second_summary = ChatMessageSpan(
+        start=2,
+        end=3,
+        message={"role": "assistant", "content": "summary 2-3"},
+        token_count=1,
+        children=(
+            ChatMessageSpan(
+                start=2,
+                end=2,
+                message={"role": "user", "content": "m2"},
+                token_count=2,
+            ),
+            ChatMessageSpan(
+                start=3,
+                end=3,
+                message={"role": "assistant", "content": "m3"},
+                token_count=3,
+            ),
+        ),
+    )
+    compaction = RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(
+            CompactionPayload(
+                active=(first_summary, second_summary),
+                cursors={"m": 4},
+            ),
+            keyring=_keyring(),
+        ),
+        type="compaction",
+    )
+
+    result = await ingest_response_request(
+        _request(input=[compaction]),
+        keyring=_keyring(),
+        transcript_token_budget=6,
+    )
+
+    assert [row.citation for row in result.main_context] == ["[~0_1]", "[~2_3]"]
+    assert [row.citation for row in result.main_transcript] == [
+        "[~0]",
+        "[~1]",
+        "[~2_3]",
+    ]
 
 
 def test_call_id_binary_encoding_is_compact_and_roundtrips() -> None:
@@ -853,38 +920,35 @@ def _message(role: str, content: str) -> RequestMessageItem:
 def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
     if cursor < 1:
         raise ValueError("cursor must be positive")
-    active = [
+    source = tuple(
         ChatMessageSpan(
-            start=0,
-            end=0,
-            message={"role": "user", "content": f"{label} active"},
+            start=ordinal,
+            end=ordinal,
+            message={
+                "role": "user",
+                "content": (
+                    f"{label} source"
+                    if ordinal == 0
+                    else f"{label} summarized source"
+                ),
+            },
         )
-    ]
-    if cursor > 1:
+        for ordinal in range(cursor)
+    )
+    active = [source[0]]
+    if cursor == 2:
+        active.append(source[1])
+    elif cursor > 2:
         active.append(
             ChatMessageSpan(
                 start=1,
                 end=cursor - 1,
                 message={"role": "assistant", "content": f"{label} summary"},
+                children=source[1:],
             )
         )
     payload = CompactionPayload(
         active=tuple(active),
-        source=tuple(
-            ChatMessageSpan(
-                start=ordinal,
-                end=ordinal,
-                message={
-                    "role": "user",
-                    "content": (
-                        f"{label} source"
-                        if ordinal == 0
-                        else f"{label} summarized source"
-                    ),
-                },
-            )
-            for ordinal in range(cursor)
-        ),
         cursors={"m": cursor},
     )
     return RequestCompactionItem(

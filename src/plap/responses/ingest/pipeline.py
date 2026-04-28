@@ -44,6 +44,7 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
+    transcript_token_budget: int,
 ) -> IngestedQueues:
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
@@ -53,7 +54,11 @@ async def ingest_response_request(
     queues = _associate_side_queues(compaction, routed)
     return IngestedQueues(
         main_context=tuple(queues.main.context_rows),
-        main_transcript=_main_transcript(compaction, queues.main),
+        main_transcript=_main_transcript(
+            compaction,
+            queues.main,
+            transcript_token_budget=transcript_token_budget,
+        ),
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
         continuation_side=routed.continuation_side,
@@ -539,10 +544,70 @@ def _associate_side_queues(
 
 
 def _main_transcript(
-    compaction: CompactionPayload | None, main: _MainQueue
+    compaction: CompactionPayload | None,
+    main: _MainQueue,
+    *,
+    transcript_token_budget: int,
 ) -> tuple[ChatMessageSpan, ...]:
-    root_rows = () if compaction is None else compaction.source
+    root_rows = (
+        ()
+        if compaction is None
+        else render_budgeted_spans(
+            compaction.active,
+            token_budget=transcript_token_budget,
+        )
+    )
     return (*root_rows, *main.stable_rows)
+
+
+def render_budgeted_spans(
+    spans: tuple[ChatMessageSpan, ...],
+    *,
+    token_budget: int,
+) -> tuple[ChatMessageSpan, ...]:
+    if token_budget < 0:
+        raise ValueError("token budget must be non-negative")
+    current_tokens = sum(span.token_count for span in spans)
+    stopped = False
+    rendered: list[ChatMessageSpan] = []
+    for span in spans:
+        if stopped:
+            rendered.append(span)
+            continue
+        rows, current_tokens, stopped = _render_budgeted_span(
+            span,
+            current_tokens=current_tokens,
+            token_budget=token_budget,
+        )
+        rendered.extend(rows)
+    return tuple(rendered)
+
+
+def _render_budgeted_span(
+    span: ChatMessageSpan,
+    *,
+    current_tokens: int,
+    token_budget: int,
+) -> tuple[tuple[ChatMessageSpan, ...], int, bool]:
+    if not span.children:
+        return (span,), current_tokens, False
+    delta = span.children_token_count - span.token_count
+    if current_tokens + delta > token_budget:
+        return (span,), current_tokens, True
+    current_tokens += delta
+    rendered: list[ChatMessageSpan] = []
+    for index, child in enumerate(span.children):
+        rows, current_tokens, stopped = _render_budgeted_span(
+            child,
+            current_tokens=current_tokens,
+            token_budget=token_budget,
+        )
+        rendered.extend(rows)
+        if stopped:
+            remaining = span.children[index + 1 :]
+            rendered.extend(remaining)
+            return tuple(rendered), current_tokens, True
+    return tuple(rendered), current_tokens, False
 
 
 def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:

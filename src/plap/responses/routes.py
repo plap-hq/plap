@@ -38,6 +38,8 @@ from plap.responses.stubs import (
 from plap.responses.tools import IToolPolicyResolver
 from plap.responses.tools.web_search import IMCPToolProvider
 
+TRANSCRIPT_TOKEN_BUDGET = 0
+
 
 async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
     for event in build_stream_events(response):
@@ -54,7 +56,11 @@ async def create_response(
     web_search_tool_provider: IMCPToolProvider | None,
 ) -> object:
     _ = auth_context
-    ingested = await ingest_response_request(data, keyring=sealing_keyring)
+    ingested = await ingest_response_request(
+        data,
+        keyring=sealing_keyring,
+        transcript_token_budget=TRANSCRIPT_TOKEN_BUDGET,
+    )
     await prepare_tools(
         data,
         ingested,
