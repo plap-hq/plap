@@ -9,17 +9,20 @@ from plap.responses.contracts import FunctionTool, ResponseCreateRequest, WebSea
 from plap.responses.ingest import IngestedQueues
 from plap.responses.runtime import (
     COMPRESS_TOOL_NAME,
-    WEB_SEARCH_TOOL_NAME,
     prepare_tools,
     resolve_tool_calls,
 )
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
+    IWebSearchToolProvider,
     ToolCall,
     ToolPolicy,
     ToolPolicyError,
 )
+
+BRAVE_WEB_SEARCH_TOOL_NAME = "brave_web_search"
+BRAVE_NEWS_SEARCH_TOOL_NAME = "brave_news_search"
 
 
 async def test_prepare_tools_injects_compress_and_classifies_client_tools() -> None:
@@ -56,15 +59,26 @@ async def test_prepare_tools_adds_web_search_only_when_requested() -> None:
         ),
         _ingested(),
         _RecordingResolver(),
+        _FakeWebSearchProvider(),
     )
 
     assert [tool.name for tool in tools] == [
         "read_file",
-        WEB_SEARCH_TOOL_NAME,
+        BRAVE_WEB_SEARCH_TOOL_NAME,
+        BRAVE_NEWS_SEARCH_TOOL_NAME,
         COMPRESS_TOOL_NAME,
     ]
-    assert policies[WEB_SEARCH_TOOL_NAME].source == "server"
-    assert policies[WEB_SEARCH_TOOL_NAME].effect_class == "safe"
+    assert policies[BRAVE_WEB_SEARCH_TOOL_NAME].source == "server"
+    assert policies[BRAVE_WEB_SEARCH_TOOL_NAME].effect_class == "safe"
+
+
+async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> None:
+    with pytest.raises(ToolPolicyError, match="web_search requested"):
+        await prepare_tools(
+            ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
+            _ingested(),
+            _RecordingResolver(),
+        )
 
 
 async def test_prepare_tools_rejects_client_server_name_collision() -> None:
@@ -77,9 +91,15 @@ async def test_prepare_tools_rejects_client_server_name_collision() -> None:
 
     with pytest.raises(ToolPolicyError, match="reserved"):
         await prepare_tools(
-            ResponseCreateRequest(tools=[_tool(WEB_SEARCH_TOOL_NAME)]),
+            ResponseCreateRequest(
+                tools=[
+                    _tool(BRAVE_WEB_SEARCH_TOOL_NAME),
+                    WebSearchTool(type="web_search"),
+                ]
+            ),
             _ingested(),
             _RecordingResolver(),
+            _FakeWebSearchProvider(),
         )
 
 
@@ -91,12 +111,17 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
         ),
         _ingested(),
         _RecordingResolver(),
+        _FakeWebSearchProvider(),
     )
     call_resolver = _RecordingCallResolver()
 
     resolved = await resolve_tool_calls(
         [
-            ChatToolCall(id="call_1", name="web_search", arguments='{"query":"x"}'),
+            ChatToolCall(
+                id="call_1",
+                name=BRAVE_WEB_SEARCH_TOOL_NAME,
+                arguments='{"query":"x"}',
+            ),
             ChatToolCall(id="call_2", name="read_file", arguments='{"path":"a"}'),
             ChatToolCall(id="call_3", name="read_file", arguments='{"path":"b"}'),
         ],
@@ -106,7 +131,7 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
     )
 
     assert [policy.name for policy in resolved] == [
-        "web_search",
+        BRAVE_WEB_SEARCH_TOOL_NAME,
         "read_file",
         "read_file",
     ]
@@ -121,13 +146,18 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
         ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
         _ingested(),
         _RecordingResolver(),
+        _FakeWebSearchProvider(),
     )
 
     with pytest.raises(ToolPolicyError, match="compress must be called alone"):
         await resolve_tool_calls(
             [
                 ChatToolCall(id="call_1", name="compress", arguments="{}"),
-                ChatToolCall(id="call_2", name="web_search", arguments='{"query":"x"}'),
+                ChatToolCall(
+                    id="call_2",
+                    name=BRAVE_WEB_SEARCH_TOOL_NAME,
+                    arguments='{"query":"x"}',
+                ),
             ],
             tools={},
             tool_policies=policies,
@@ -169,6 +199,18 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
             )
             for call in calls
         )
+
+
+class _FakeWebSearchProvider(IWebSearchToolProvider):
+    async def tools(self) -> tuple[FunctionTool, ...]:
+        return (
+            _tool(BRAVE_WEB_SEARCH_TOOL_NAME),
+            _tool(BRAVE_NEWS_SEARCH_TOOL_NAME),
+        )
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> str:
+        _ = name, arguments
+        return "search result"
 
 
 def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:

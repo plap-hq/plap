@@ -18,33 +18,41 @@ from plap.responses.tools.compress import (
     compress_tool,
 )
 from plap.responses.tools.web_search import (
-    WEB_SEARCH_TOOL_NAME,
+    IWebSearchToolProvider,
     web_search_policy,
-    web_search_tool,
 )
 
-SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME, WEB_SEARCH_TOOL_NAME})
+SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
 
 
 async def prepare_tools(
     request: ResponseCreateRequest,
     ingested: IngestedQueues,
     resolver: IToolPolicyResolver,
+    web_search_tool_provider: IWebSearchToolProvider | None = None,
 ) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy]]:
     client_tools = _client_tools(request.tools or ())
-    _reject_server_name_collisions(client_tools)
 
-    tools = list(client_tools)
-    tool_policies = await resolver.resolve(client_tools)
-
-    web_search = _web_search(request.tools or ())
-    if web_search is not None:
-        tools.append(web_search_tool(web_search))
-        tool_policies[WEB_SEARCH_TOOL_NAME] = web_search_policy()
+    server_tools: list[FunctionTool] = []
+    if _has_web_search(request.tools or ()):
+        if web_search_tool_provider is None:
+            raise ToolPolicyError("web_search requested but no MCP provider configured")
+        server_tools.extend(await web_search_tool_provider.tools())
 
     if not ingested.in_temp_debate:
-        tools.append(compress_tool())
-        tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
+        server_tools.append(compress_tool())
+
+    _reject_server_name_collisions(client_tools, server_tools)
+
+    tools = [*client_tools, *server_tools]
+    tool_policies = await resolver.resolve(client_tools)
+
+    for tool in server_tools:
+        if tool.name == COMPRESS_TOOL_NAME:
+            tool_policies[tool.name] = compress_policy()
+        else:
+            tool_policies[tool.name] = web_search_policy(tool.name)
+
 
     return tuple(tools), tool_policies
 
@@ -96,16 +104,20 @@ def _client_tools(tools: Sequence[object]) -> list[FunctionTool]:
     return [tool for tool in tools if isinstance(tool, FunctionTool)]
 
 
-def _web_search(tools: Sequence[object]) -> WebSearchTool | None:
-    for tool in tools:
-        if isinstance(tool, WebSearchTool):
-            return tool
-    return None
+def _has_web_search(tools: Sequence[object]) -> bool:
+    return any(isinstance(tool, WebSearchTool) for tool in tools)
 
 
-def _reject_server_name_collisions(tools: Sequence[FunctionTool]) -> None:
-    for tool in tools:
-        if tool.name in SERVER_TOOL_NAMES:
+def _reject_server_name_collisions(
+    client_tools: Sequence[FunctionTool],
+    server_tools: Sequence[FunctionTool],
+) -> None:
+    server_names = [tool.name for tool in server_tools]
+    if len(set(server_names)) != len(server_names):
+        raise ToolPolicyError("server tool names must be unique")
+    server_tool_names = set(server_names) | SERVER_TOOL_NAMES
+    for tool in client_tools:
+        if tool.name in server_tool_names:
             raise ToolPolicyError(f"function tool name is reserved: {tool.name}")
 
 

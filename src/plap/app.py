@@ -31,6 +31,10 @@ from plap.responses.tools import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
+from plap.responses.tools.web_search import (
+    IWebSearchToolProvider,
+    MCPWebSearchToolProvider,
+)
 from plap.settings import Settings, get_settings
 
 
@@ -155,7 +159,6 @@ def _create_tool_classifier(
         )
     return LLMToolClassifier(
         client=chat_completion_client,
-        classifier=settings.tool_classifier_name,
         classifier_model=settings.tool_classifier_model,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
@@ -177,10 +180,42 @@ def _create_tool_call_classifier(
         )
     return LLMToolCallClassifier(
         client=chat_completion_client,
-        classifier=settings.tool_call_classifier_name,
         classifier_model=classifier_model,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
+
+
+def _create_web_search_tool_provider(
+    settings: Settings,
+) -> IWebSearchToolProvider | None:
+    if settings.web_search_mcp_url:
+        return MCPWebSearchToolProvider(
+            settings.web_search_mcp_url,
+            tool_names=settings.web_search_mcp_tool_names,
+        )
+    if settings.web_search_brave_api_key:
+        return MCPWebSearchToolProvider(
+            _brave_mcp_config(settings),
+            tool_names=settings.web_search_mcp_tool_names,
+        )
+    return None
+
+
+def _brave_mcp_config(settings: Settings) -> dict[str, Any]:
+    env = {"BRAVE_API_KEY": settings.web_search_brave_api_key}
+    if settings.web_search_mcp_tool_names:
+        env["BRAVE_MCP_ENABLED_TOOLS"] = ",".join(
+            settings.web_search_mcp_tool_names
+        )
+    return {
+        "mcpServers": {
+            "brave": {
+                "command": settings.web_search_mcp_command,
+                "args": settings.web_search_mcp_args,
+                "env": env,
+            }
+        }
+    }
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
@@ -212,6 +247,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         resolved_settings,
         chat_completion_client,
     )
+    web_search_tool_provider = _create_web_search_tool_provider(resolved_settings)
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
@@ -231,6 +267,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "tool_policy_l1_cache": LRUCache(
                 maxsize=resolved_settings.tool_policy_l1_maxsize
             ),
+            "web_search_tool_provider": web_search_tool_provider,
         }
     )
 

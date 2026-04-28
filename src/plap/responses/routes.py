@@ -37,6 +37,7 @@ from plap.responses.stubs import (
     build_stub_response,
 )
 from plap.responses.tools import IToolPolicyResolver, ToolPolicyError
+from plap.responses.tools.web_search import IWebSearchToolProvider
 
 
 async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
@@ -51,11 +52,17 @@ async def create_response(
     auth_context: AuthContext,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
+    web_search_tool_provider: IWebSearchToolProvider | None,
 ) -> object:
     _ = auth_context
     try:
         ingested = await ingest_response_request(data, keyring=sealing_keyring)
-        await prepare_tools(data, ingested, tool_policy_resolver)
+        await prepare_tools(
+            data,
+            ingested,
+            tool_policy_resolver,
+            web_search_tool_provider,
+        )
     except ToolPolicyError as exc:
         raise ValidationException(str(exc)) from exc
     response = build_stub_response(data)

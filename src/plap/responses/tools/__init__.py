@@ -1,5 +1,7 @@
 from plap.responses.tools.classify import (
+    TOOL_CALL_EFFECT_CLASSIFIER_NAME,
     TOOL_CALL_EFFECT_CLASSIFIER_PROMPT,
+    TOOL_EFFECT_CLASSIFIER_NAME,
     TOOL_EFFECT_CLASSIFIER_PROMPT,
     LLMToolCallClassifier,
     LLMToolClassifier,
@@ -39,16 +41,17 @@ from plap.responses.tools.policy import (
 )
 from plap.responses.tools.repository import ToolClassificationRepository
 from plap.responses.tools.web_search import (
-    WEB_SEARCH_TOOL_NAME,
+    IWebSearchToolProvider,
+    MCPWebSearchToolProvider,
     web_search_policy,
-    web_search_tool,
 )
 
 __all__ = [
     "COMPRESS_TOOL_NAME",
+    "TOOL_CALL_EFFECT_CLASSIFIER_NAME",
     "TOOL_CALL_EFFECT_CLASSIFIER_PROMPT",
+    "TOOL_EFFECT_CLASSIFIER_NAME",
     "TOOL_EFFECT_CLASSIFIER_PROMPT",
-    "WEB_SEARCH_TOOL_NAME",
     "CachedToolCallPolicyResolver",
     "CachedToolPolicyResolver",
     "ClassificationL1Cache",
@@ -57,8 +60,10 @@ __all__ = [
     "IToolCallPolicyResolver",
     "IToolClassifier",
     "IToolPolicyResolver",
+    "IWebSearchToolProvider",
     "LLMToolCallClassifier",
     "LLMToolClassifier",
+    "MCPWebSearchToolProvider",
     "StaticToolCallPolicyResolver",
     "StaticToolPolicyResolver",
     "ToolCall",
@@ -81,5 +86,4 @@ __all__ = [
     "signature_hash_hex",
     "tool_arguments_hash",
     "web_search_policy",
-    "web_search_tool",
 ]

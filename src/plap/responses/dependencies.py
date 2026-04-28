@@ -30,6 +30,7 @@ from plap.responses.tools import (
     StaticToolPolicyResolver,
 )
 from plap.responses.tools.repository import ToolClassificationRepository
+from plap.responses.tools.web_search import IWebSearchToolProvider
 from plap.settings import Settings
 
 
@@ -41,6 +42,12 @@ def provide_sealing_keyring(
     request: Request[Any, Any, Any],
 ) -> SealingKeyring:
     return request.app.state.sealing_keyring
+
+
+def provide_web_search_tool_provider(
+    request: Request[Any, Any, Any],
+) -> IWebSearchToolProvider | None:
+    return request.app.state.web_search_tool_provider
 
 
 async def provide_tool_policy_resolver(
@@ -102,6 +109,11 @@ HTTP_ROUTE_DEPENDENCIES = {
     "tool_call_policy_resolver": Provide(
         provide_tool_call_policy_resolver,
     ),
+    "web_search_tool_provider": Provide(
+        provide_web_search_tool_provider,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
 }
 
 
@@ -123,5 +135,10 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
     ),
     "tool_call_policy_resolver": Provide(
         provide_tool_call_policy_resolver,
+    ),
+    "web_search_tool_provider": Provide(
+        provide_web_search_tool_provider,
+        use_cache=True,
+        sync_to_thread=False,
     ),
 }

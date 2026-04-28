@@ -36,6 +36,7 @@ Definitions:
   SQL, HTTP, or command execution tools.
 - unknown: ambiguous or insufficient information.
 """
+TOOL_EFFECT_CLASSIFIER_NAME = "llm_tool_effect_classifier"
 
 TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -75,6 +76,7 @@ Definitions:
 
 Do not return contextual. You are classifying this concrete call, not the tool family.
 """
+TOOL_CALL_EFFECT_CLASSIFIER_NAME = "llm_tool_call_effect_classifier"
 
 TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -105,8 +107,8 @@ class LLMToolClassifier(IToolClassifier):
         self,
         client: IChatCompletionClient,
         *,
-        classifier: str,
         classifier_model: str,
+        classifier: str = TOOL_EFFECT_CLASSIFIER_NAME,
         prompt: str = TOOL_EFFECT_CLASSIFIER_PROMPT,
         max_concurrency: int = 4,
     ) -> None:
@@ -193,8 +195,8 @@ class LLMToolCallClassifier(IToolCallClassifier):
         self,
         client: IChatCompletionClient,
         *,
-        classifier: str,
         classifier_model: str,
+        classifier: str = TOOL_CALL_EFFECT_CLASSIFIER_NAME,
         prompt: str = TOOL_CALL_EFFECT_CLASSIFIER_PROMPT,
         max_concurrency: int = 4,
     ) -> None:

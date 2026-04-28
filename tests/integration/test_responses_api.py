@@ -1,6 +1,10 @@
 from litestar.testing import AsyncTestClient
 
-from plap.responses.tools import IToolClassifier, ToolClassification, ToolSignature
+from plap.responses.tools import (
+    IToolClassifier,
+    ToolClassification,
+    ToolSignature,
+)
 
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
@@ -24,7 +28,6 @@ def _request_payload(stream: bool = False) -> dict[str, object]:
                 "strict": True,
                 "type": "function",
             },
-            {"type": "web_search"},
         ],
     }
 
