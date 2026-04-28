@@ -64,7 +64,6 @@ UPGRADE_SQL = r"""
 set search_path = responses, public;
 
 create table tool_call_classifications (
-  scope_id uuid not null,
   signature_hash bytea not null
     references tool_signatures (signature_hash)
     on delete cascade,
@@ -79,7 +78,6 @@ create table tool_call_classifications (
   created_at timestamptz not null default now(),
 
   primary key (
-    scope_id,
     signature_hash,
     arguments_hash,
     classifier,

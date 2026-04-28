@@ -1,5 +1,3 @@
-from uuid import uuid4
-
 from plap.responses.contracts import FunctionTool
 from plap.responses.tools import (
     CachedToolPolicyResolver,
@@ -163,14 +161,11 @@ async def test_cached_policy_resolver_batches_cache_lookup(
     assert classifier.calls == 1
 
 
-async def test_tool_call_classification_repository_is_scoped(
+async def test_tool_call_classification_repository_is_unscoped(
     db_session_maker,
 ) -> None:
     signature = function_tool_signature(_bash_tool())
-    first_scope = uuid4()
-    second_scope = uuid4()
-    first = ToolCallClassification(
-        scope_id=first_scope,
+    classification = ToolCallClassification(
         signature_hash=signature.signature_hash,
         arguments_hash=b"a" * 32,
         classifier="fake",
@@ -181,38 +176,16 @@ async def test_tool_call_classification_repository_is_scoped(
         rationale="read-only command",
         raw_output={"effect_class": "safe"},
     )
-    second = ToolCallClassification(
-        scope_id=second_scope,
-        signature_hash=signature.signature_hash,
-        arguments_hash=b"a" * 32,
-        classifier="fake",
-        classifier_model="fake/model",
-        prompt_hash=b"p" * 32,
-        effect_class="mutation",
-        confidence=0.9,
-        rationale="mutating command",
-        raw_output={"effect_class": "mutation"},
-    )
 
     async with db_session_maker() as session:
         repository = ToolClassificationRepository(session)
         await repository.get_or_create_signature(signature)
-        await repository.store_tool_call_classification(first)
-        await repository.store_tool_call_classification(second)
+        await repository.store_tool_call_classification(classification)
         await session.commit()
 
     async with db_session_maker() as session:
         repository = ToolClassificationRepository(session)
-        stored_first = await repository.get_tool_call_classification(
-            scope_id=first_scope,
-            signature_hash=signature.signature_hash,
-            arguments_hash=b"a" * 32,
-            classifier="fake",
-            classifier_model="fake/model",
-            prompt_hash=b"p" * 32,
-        )
-        stored_second = await repository.get_tool_call_classification(
-            scope_id=second_scope,
+        stored = await repository.get_tool_call_classification(
             signature_hash=signature.signature_hash,
             arguments_hash=b"a" * 32,
             classifier="fake",
@@ -220,8 +193,7 @@ async def test_tool_call_classification_repository_is_scoped(
             prompt_hash=b"p" * 32,
         )
 
-    assert stored_first == first
-    assert stored_second == second
+    assert stored == classification
 
 
 def _read_file_tool() -> FunctionTool:

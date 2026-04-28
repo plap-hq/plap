@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
 
 import msgspec
 from sqlalchemy import text
@@ -227,7 +226,6 @@ class ToolClassificationRepository:
     async def get_tool_call_classification(
         self,
         *,
-        scope_id: UUID,
         signature_hash: bytes,
         arguments_hash: bytes,
         classifier: str,
@@ -238,7 +236,6 @@ class ToolClassificationRepository:
             text(
                 """
                 select
-                  scope_id,
                   signature_hash,
                   arguments_hash,
                   classifier,
@@ -249,8 +246,7 @@ class ToolClassificationRepository:
                   rationale,
                   raw_output
                 from responses.tool_call_classifications
-                where scope_id = :scope_id
-                  and signature_hash = :signature_hash
+                where signature_hash = :signature_hash
                   and arguments_hash = :arguments_hash
                   and classifier = :classifier
                   and classifier_model = :classifier_model
@@ -258,7 +254,6 @@ class ToolClassificationRepository:
                 """
             ),
             {
-                "scope_id": scope_id,
                 "signature_hash": signature_hash,
                 "arguments_hash": arguments_hash,
                 "classifier": classifier,
@@ -278,7 +273,6 @@ class ToolClassificationRepository:
             text(
                 """
                 insert into responses.tool_call_classifications (
-                  scope_id,
                   signature_hash,
                   arguments_hash,
                   classifier,
@@ -289,7 +283,6 @@ class ToolClassificationRepository:
                   rationale,
                   raw_output
                 ) values (
-                  :scope_id,
                   :signature_hash,
                   :arguments_hash,
                   :classifier,
@@ -301,7 +294,6 @@ class ToolClassificationRepository:
                   cast(:raw_output as jsonb)
                 )
                 on conflict (
-                  scope_id,
                   signature_hash,
                   arguments_hash,
                   classifier,
@@ -311,7 +303,6 @@ class ToolClassificationRepository:
                 """
             ),
             {
-                "scope_id": classification.scope_id,
                 "signature_hash": classification.signature_hash,
                 "arguments_hash": classification.arguments_hash,
                 "classifier": classification.classifier,
@@ -324,7 +315,6 @@ class ToolClassificationRepository:
             },
         )
         stored = await self.get_tool_call_classification(
-            scope_id=classification.scope_id,
             signature_hash=classification.signature_hash,
             arguments_hash=classification.arguments_hash,
             classifier=classification.classifier,
@@ -351,7 +341,6 @@ def _classification_from_row(row: Any) -> ToolClassification:
 
 def _tool_call_classification_from_row(row: Any) -> ToolCallClassification:
     return ToolCallClassification(
-        scope_id=row.scope_id,
         signature_hash=bytes(row.signature_hash),
         arguments_hash=bytes(row.arguments_hash),
         classifier=row.classifier,

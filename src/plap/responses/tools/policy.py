@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
-from uuid import UUID
 
 import blake3
 import msgspec
@@ -40,7 +39,6 @@ type ClassificationL1Cache = MutableMapping[_ClassificationL1Key, ToolClassifica
 
 @dataclass(frozen=True, slots=True)
 class ToolCallClassification:
-    scope_id: UUID
     signature_hash: bytes
     arguments_hash: bytes
     classifier: str
