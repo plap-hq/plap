@@ -17,6 +17,7 @@ class RuntimeModelProfileOverrideConfig(BaseModel):
     reviewer_model: str | None = None
     arbitrator_model: str | None = None
     reasoning_summarizer_model: str | None = None
+    transcript_token_budget: int | None = Field(default=None, ge=0)
 
 
 class RuntimeModelProfileConfig(BaseModel):
@@ -27,10 +28,22 @@ class RuntimeModelProfileConfig(BaseModel):
     reviewer_model: str
     arbitrator_model: str
     reasoning_summarizer_model: str
+    transcript_token_budget: int = Field(default=0, ge=0)
     service_tier_overrides: dict[
         RuntimeServiceTier,
         RuntimeModelProfileOverrideConfig,
     ] = Field(default_factory=dict)
+
+    def for_service_tier(
+        self,
+        service_tier: RuntimeServiceTier | str | None,
+    ) -> RuntimeModelProfileConfig:
+        if service_tier in (None, "auto", "default"):
+            return self
+        override = self.service_tier_overrides.get(service_tier)  # type: ignore[arg-type]
+        if override is None:
+            return self
+        return self.model_copy(update=override.model_dump(exclude_none=True))
 
 
 class Settings(BaseSettings):

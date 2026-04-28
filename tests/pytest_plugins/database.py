@@ -23,7 +23,7 @@ from plap.persistence.models import (
     UserEmail,
     UserIdentity,
 )
-from plap.settings import Settings
+from plap.settings import RuntimeModelProfileConfig, Settings
 
 POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
 
@@ -86,6 +86,17 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
     return Settings(
         api_key_pepper="test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
+        llm_crof_api_key="test-crof-key",
+        runtime_model_profiles={
+            "plap/test": RuntimeModelProfileConfig(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                transcript_token_budget=0,
+            )
+        },
         sealing_keys=["a" * 43],
     )
 

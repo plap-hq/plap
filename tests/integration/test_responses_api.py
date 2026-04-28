@@ -17,7 +17,7 @@ def _request_payload(stream: bool = False) -> dict[str, object]:
                 "type": "message",
             }
         ],
-        "model": "gpt-4.1",
+        "model": "plap/test",
         "stream": stream,
         "tool_choice": "auto",
         "tools": [
@@ -34,7 +34,7 @@ def _request_payload(stream: bool = False) -> dict[str, object]:
 
 async def test_http_routes_require_bearer_auth(test_app) -> None:
     async with AsyncTestClient(app=test_app) as client:
-        response = await client.post("/v1/responses", json={"model": "gpt-4.1"})
+        response = await client.post("/v1/responses", json={"model": "plap/test"})
 
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
@@ -60,7 +60,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
         deleted = await client.delete("/v1/responses/resp_test", headers=headers)
         compacted = await client.post(
             "/v1/responses/compact",
-            json={"input": "compact me", "model": "gpt-4.1"},
+            json={"input": "compact me", "model": "plap/test"},
             headers=headers,
         )
         input_items = await client.get(
@@ -68,7 +68,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
         )
         input_tokens = await client.post(
             "/v1/responses/input_tokens",
-            json={"input": "count these tokens", "model": "gpt-4.1"},
+            json={"input": "count these tokens", "model": "plap/test"},
             headers=headers,
         )
 
@@ -124,7 +124,7 @@ async def test_http_validation_rejects_unsupported_context_management(
             "/v1/responses",
             json={
                 "context_management": [{"type": "retain_all"}],
-                "model": "gpt-4.1",
+                "model": "plap/test",
             },
             headers=headers,
         )
@@ -152,7 +152,7 @@ async def test_create_response_sanitizes_ingestion_errors(
                         "type": "reasoning",
                     }
                 ],
-                "model": "gpt-4.1",
+                "model": "plap/test",
             },
             headers=headers,
         )
@@ -176,7 +176,7 @@ async def test_create_response_sanitizes_tool_preparation_errors(
             "/v1/responses",
             json={
                 "input": "search please",
-                "model": "gpt-4.1",
+                "model": "plap/test",
                 "tools": [{"type": "web_search"}],
             },
             headers=headers,

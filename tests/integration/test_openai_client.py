@@ -16,7 +16,7 @@ async def openai_client(live_server, seeded_auth_data):
 
 async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> None:
     created = await openai_client.responses.create(
-        model="gpt-4.1",
+        model="plap/test",
         input="hello world",
         context_management=[{"type": "compaction", "compact_threshold": 128}],
         tool_choice="auto",
@@ -27,16 +27,15 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
                 "parameters": {"type": "object"},
                 "strict": True,
             },
-            {"type": "web_search"},
         ],
     )
     retrieved = await openai_client.responses.retrieve(created.id)
     compacted = await openai_client.responses.compact(
-        model="gpt-4.1", input="compact me"
+        model="plap/test", input="compact me"
     )
     input_items = await openai_client.responses.input_items.list(created.id)
     token_count = await openai_client.responses.input_tokens.count(
-        model="gpt-4.1",
+        model="plap/test",
         input="count these tokens",
     )
     deleted = await openai_client.responses.delete(created.id)
@@ -57,7 +56,7 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
 
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:
     stream = await openai_client.responses.create(
-        model="gpt-4.1",
+        model="plap/test",
         input="hello stream",
         stream=True,
     )
@@ -78,7 +77,7 @@ async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None
             {
                 "type": "response.create",
                 "response": {
-                    "model": "gpt-4.1",
+                    "model": "plap/test",
                     "input": "hello websocket",
                 },
             }
@@ -108,6 +107,6 @@ async def test_async_openai_client_rejects_invalid_api_key(live_server) -> None:
 
     try:
         with pytest.raises(AuthenticationError):
-            await client.responses.create(model="gpt-4.1", input="hello")
+            await client.responses.create(model="plap/test", input="hello")
     finally:
         await client.close()

@@ -267,14 +267,7 @@ def _resolve_runtime_model_profile(
     profile = settings.runtime_model_profiles.get(model)
     if profile is None:
         raise ValueError(f"unknown runtime model: {model!r}")
-    if service_tier in (None, "auto", "default"):
-        return profile
-
-    override = profile.service_tier_overrides.get(service_tier)
-    if override is None:
-        return profile
-
-    return profile.model_copy(update=override.model_dump(exclude_none=True))
+    return profile.for_service_tier(service_tier)
 
 
 def _runtime_profile_models(profile: RuntimeModelProfileConfig) -> Iterable[str]:
@@ -284,7 +277,16 @@ def _runtime_profile_models(profile: RuntimeModelProfileConfig) -> Iterable[str]
     yield profile.arbitrator_model
     yield profile.reasoning_summarizer_model
     for override in profile.service_tier_overrides.values():
-        yield from override.model_dump(exclude_none=True).values()
+        if override.main_model is not None:
+            yield override.main_model
+        if override.main_debate_model is not None:
+            yield override.main_debate_model
+        if override.reviewer_model is not None:
+            yield override.reviewer_model
+        if override.arbitrator_model is not None:
+            yield override.arbitrator_model
+        if override.reasoning_summarizer_model is not None:
+            yield override.reasoning_summarizer_model
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:

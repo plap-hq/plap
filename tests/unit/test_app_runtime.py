@@ -216,6 +216,7 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
                     "priority": RuntimeModelProfileOverrideConfig(
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
+                        transcript_token_budget=4096,
                     )
                 },
             )
@@ -257,6 +258,7 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
+                transcript_token_budget=1024,
             )
         },
     )
@@ -265,6 +267,7 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
+    assert profile.transcript_token_budget == 1024
     assert (
         _resolve_runtime_model_profile(settings, "plap/standard", "default")
         is profile
@@ -289,6 +292,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                     "priority": RuntimeModelProfileOverrideConfig(
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
+                        transcript_token_budget=8192,
                     )
                 },
             )
@@ -308,6 +312,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     assert priority.reviewer_model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.main_debate_model == "crof/qwen3.5-9b"
     assert priority.arbitrator_model == "crof/qwen3.5-9b"
+    assert priority.transcript_token_budget == 8192
     assert flex is base
 
 
@@ -328,6 +333,7 @@ def _profile_config(
     reviewer_model: str,
     arbitrator_model: str,
     reasoning_summarizer_model: str,
+    transcript_token_budget: int = 0,
     service_tier_overrides: dict[
         str,
         RuntimeModelProfileOverrideConfig,
@@ -340,5 +346,6 @@ def _profile_config(
         reviewer_model=reviewer_model,
         arbitrator_model=arbitrator_model,
         reasoning_summarizer_model=reasoning_summarizer_model,
+        transcript_token_budget=transcript_token_budget,
         service_tier_overrides=service_tier_overrides or {},
     )

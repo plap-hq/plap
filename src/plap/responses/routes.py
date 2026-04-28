@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 
 from litestar import delete, get, post, websocket
 from litestar.connection import WebSocket
+from litestar.exceptions import ValidationException
 from litestar.response import ServerSentEvent
 from pydantic import ValidationError
 
@@ -37,8 +38,7 @@ from plap.responses.stubs import (
 )
 from plap.responses.tools import IToolPolicyResolver
 from plap.responses.tools.web_search import IMCPToolProvider
-
-TRANSCRIPT_TOKEN_BUDGET = 0
+from plap.settings import RuntimeModelProfileConfig, Settings
 
 
 async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
@@ -51,15 +51,17 @@ async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
 async def create_response(
     data: ResponseCreateRequest,
     auth_context: AuthContext,
+    settings: Settings,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
     web_search_tool_provider: IMCPToolProvider | None,
 ) -> object:
     _ = auth_context
+    profile = _runtime_model_profile(settings, data)
     ingested = await ingest_response_request(
         data,
         keyring=sealing_keyring,
-        transcript_token_budget=TRANSCRIPT_TOKEN_BUDGET,
+        transcript_token_budget=profile.transcript_token_budget,
     )
     await prepare_tools(
         data,
@@ -74,6 +76,18 @@ async def create_response(
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
     return response
+
+
+def _runtime_model_profile(
+    settings: Settings,
+    request: ResponseCreateRequest,
+) -> RuntimeModelProfileConfig:
+    if request.model is None:
+        raise ValidationException("Invalid request.")
+    profile = settings.runtime_model_profiles.get(request.model)
+    if profile is None:
+        raise ValidationException("Invalid request.")
+    return profile.for_service_tier(request.service_tier)
 
 
 @get("/v1/responses/{response_id:str}", dependencies=HTTP_ROUTE_DEPENDENCIES)
