@@ -232,43 +232,114 @@ class ToolClassificationRepository:
         classifier_model: str,
         prompt_hash: bytes,
     ) -> ToolCallClassification | None:
+        classifications = await self.get_tool_call_classifications(
+            [(signature_hash, arguments_hash)],
+            classifier=classifier,
+            classifier_model=classifier_model,
+            prompt_hash=prompt_hash,
+        )
+        return classifications.get((signature_hash, arguments_hash))
+
+    async def get_tool_call_classifications(
+        self,
+        keys: list[tuple[bytes, bytes]],
+        *,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        if not keys:
+            return {}
+        keys_json = _json_string(
+            [
+                {
+                    "signature_hash": signature_hash.hex(),
+                    "arguments_hash": arguments_hash.hex(),
+                }
+                for signature_hash, arguments_hash in keys
+            ]
+        )
         result = await self._session.execute(
             text(
                 """
+                with requested(signature_hash, arguments_hash) as (
+                  select
+                    decode(value ->> 'signature_hash', 'hex'),
+                    decode(value ->> 'arguments_hash', 'hex')
+                  from jsonb_array_elements(cast(:keys as jsonb)) value
+                )
                 select
-                  signature_hash,
-                  arguments_hash,
-                  classifier,
-                  classifier_model,
-                  prompt_hash,
-                  effect_class,
-                  confidence,
-                  rationale,
-                  raw_output
-                from responses.tool_call_classifications
-                where signature_hash = :signature_hash
-                  and arguments_hash = :arguments_hash
-                  and classifier = :classifier
-                  and classifier_model = :classifier_model
-                  and prompt_hash = :prompt_hash
+                  classifications.signature_hash,
+                  classifications.arguments_hash,
+                  classifications.classifier,
+                  classifications.classifier_model,
+                  classifications.prompt_hash,
+                  classifications.effect_class,
+                  classifications.confidence,
+                  classifications.rationale,
+                  classifications.raw_output
+                from responses.tool_call_classifications classifications
+                join requested
+                  on requested.signature_hash = classifications.signature_hash
+                 and requested.arguments_hash = classifications.arguments_hash
+                where classifications.classifier = :classifier
+                  and classifications.classifier_model = :classifier_model
+                  and classifications.prompt_hash = :prompt_hash
                 """
             ),
             {
-                "signature_hash": signature_hash,
-                "arguments_hash": arguments_hash,
+                "keys": keys_json,
                 "classifier": classifier,
                 "classifier_model": classifier_model,
                 "prompt_hash": prompt_hash,
             },
         )
-        row = result.one_or_none()
-        if row is None:
-            return None
-        return _tool_call_classification_from_row(row)
+        classifications = [_tool_call_classification_from_row(row) for row in result]
+        return {
+            (
+                classification.signature_hash,
+                classification.arguments_hash,
+            ): classification
+            for classification in classifications
+        }
 
     async def store_tool_call_classification(
         self, classification: ToolCallClassification
     ) -> ToolCallClassification:
+        stored = await self.store_tool_call_classifications([classification])
+        return stored[(classification.signature_hash, classification.arguments_hash)]
+
+    async def store_tool_call_classifications(
+        self, classifications: list[ToolCallClassification]
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        if not classifications:
+            return {}
+        first = classifications[0]
+        if any(
+            classification.classifier != first.classifier
+            or classification.classifier_model != first.classifier_model
+            or classification.prompt_hash != first.prompt_hash
+            for classification in classifications
+        ):
+            raise ValueError(
+                "batched tool call classifications must share classifier identity"
+            )
+        classifications_json = _json_string(
+            [
+                {
+                    "signature_hash": classification.signature_hash.hex(),
+                    "arguments_hash": classification.arguments_hash.hex(),
+                    "classifier": classification.classifier,
+                    "classifier_model": classification.classifier_model,
+                    "prompt_hash": classification.prompt_hash.hex(),
+                    "effect_class": classification.effect_class,
+                    "confidence": classification.confidence,
+                    "rationale": classification.rationale,
+                    "raw_output": classification.raw_output,
+                }
+                for classification in classifications
+            ]
+        )
         await self._session.execute(
             text(
                 """
@@ -282,17 +353,18 @@ class ToolClassificationRepository:
                   confidence,
                   rationale,
                   raw_output
-                ) values (
-                  :signature_hash,
-                  :arguments_hash,
-                  :classifier,
-                  :classifier_model,
-                  :prompt_hash,
-                  :effect_class,
-                  :confidence,
-                  :rationale,
-                  cast(:raw_output as jsonb)
                 )
+                select
+                  decode(value ->> 'signature_hash', 'hex'),
+                  decode(value ->> 'arguments_hash', 'hex'),
+                  value ->> 'classifier',
+                  value ->> 'classifier_model',
+                  decode(value ->> 'prompt_hash', 'hex'),
+                  value ->> 'effect_class',
+                  (value ->> 'confidence')::numeric,
+                  value ->> 'rationale',
+                  value -> 'raw_output'
+                from jsonb_array_elements(cast(:classifications as jsonb)) value
                 on conflict (
                   signature_hash,
                   arguments_hash,
@@ -302,26 +374,20 @@ class ToolClassificationRepository:
                 ) do nothing
                 """
             ),
-            {
-                "signature_hash": classification.signature_hash,
-                "arguments_hash": classification.arguments_hash,
-                "classifier": classification.classifier,
-                "classifier_model": classification.classifier_model,
-                "prompt_hash": classification.prompt_hash,
-                "effect_class": classification.effect_class,
-                "confidence": classification.confidence,
-                "rationale": classification.rationale,
-                "raw_output": _json_string(classification.raw_output),
-            },
+            {"classifications": classifications_json},
         )
-        stored = await self.get_tool_call_classification(
-            signature_hash=classification.signature_hash,
-            arguments_hash=classification.arguments_hash,
-            classifier=classification.classifier,
-            classifier_model=classification.classifier_model,
-            prompt_hash=classification.prompt_hash,
+        stored = await self.get_tool_call_classifications(
+            [
+                (classification.signature_hash, classification.arguments_hash)
+                for classification in classifications
+            ],
+            classifier=first.classifier,
+            classifier_model=first.classifier_model,
+            prompt_hash=first.prompt_hash,
         )
-        if stored is None:
+        if len(stored) != len(
+            {(item.signature_hash, item.arguments_hash) for item in classifications}
+        ):
             raise RuntimeError("tool call classification insert did not produce a row")
         return stored
 

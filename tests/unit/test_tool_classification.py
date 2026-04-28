@@ -14,16 +14,27 @@ from plap.llms.chat import (
 )
 from plap.responses.contracts import FunctionTool, WebSearchTool
 from plap.responses.tools import (
+    CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
+    IToolCallClassifier,
     IToolClassifier,
+    LLMToolCallClassifier,
     LLMToolClassifier,
+    StaticToolCallPolicyResolver,
     StaticToolPolicyResolver,
+    ToolCallClassification,
+    ToolCallPolicy,
+    ToolCallSignature,
     ToolClassification,
+    ToolPolicy,
     ToolPolicyError,
     ToolSignature,
+    canonical_tool_arguments,
     function_tool_signature,
+    tool_arguments_hash,
 )
 from plap.responses.tools.classify import (
+    TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
     TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
 )
 
@@ -162,10 +173,14 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
     assert classifications[list_signature.signature_hash].confidence == 0.8
     assert len(classifier._client.requests) == 2
     first_request, second_request = classifier._client.requests
-    assert read_signature.signature_hash.hex() in (
+    assert "read_file" in (first_request.messages[1].content or "")
+    assert "signature_hash" not in (first_request.messages[1].content or "")
+    assert read_signature.signature_hash.hex() not in (
         first_request.messages[1].content or ""
     )
-    assert list_signature.signature_hash.hex() in (
+    assert "list_files" in (second_request.messages[1].content or "")
+    assert "signature_hash" not in (second_request.messages[1].content or "")
+    assert list_signature.signature_hash.hex() not in (
         second_request.messages[1].content or ""
     )
 
@@ -185,6 +200,84 @@ async def test_llm_tool_classifier_parses_contextual_json() -> None:
 
     assert result.effect_class == "contextual"
     assert result.confidence == 0.8
+
+
+def test_tool_arguments_hash_is_canonical_for_key_order() -> None:
+    first = canonical_tool_arguments('{"path":"README.md","limit":10}')
+    second = canonical_tool_arguments('{"limit":10,"path":"README.md"}')
+
+    assert first == second
+    assert tool_arguments_hash(first) == tool_arguments_hash(second)
+
+
+def test_tool_arguments_reject_non_object_json() -> None:
+    with pytest.raises(ToolPolicyError, match="JSON object"):
+        canonical_tool_arguments('["not", "object"]')
+
+
+def test_tool_arguments_reject_malformed_json() -> None:
+    with pytest.raises(ToolPolicyError, match="valid JSON"):
+        canonical_tool_arguments("not json")
+
+
+async def test_llm_tool_call_classifier_parses_valid_json() -> None:
+    signature = function_tool_signature(_bash_tool())
+    arguments = {"command": "ls"}
+    arguments_hash = tool_arguments_hash(arguments)
+    classifier = LLMToolCallClassifier(
+        client=_FakeChatClient(
+            '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'
+        ),
+        classifier="fake",
+        classifier_model="fake/model",
+    )
+
+    result = await classifier.classify(
+        ToolCallSignature(
+            signature=signature,
+            arguments=arguments,
+        )
+    )
+
+    assert result.effect_class == "safe"
+    assert result.arguments_hash == arguments_hash
+    request = classifier._client.requests[0]
+    assert request.response_format is not None
+    assert request.response_format.type == "json_schema"
+    assert request.response_format.schema is not None
+    assert request.response_format.schema["properties"]["effect_class"]["enum"] == [
+        "safe",
+        "mutation",
+        "unknown",
+    ]
+    assert "contextual" not in str(request.response_format.schema)
+    assert request.max_completion_tokens == TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS
+    assert "bash" in (request.messages[1].content or "")
+    assert "command" in (request.messages[1].content or "")
+    assert "arguments_hash" not in (request.messages[1].content or "")
+    assert "signature_hash" not in (request.messages[1].content or "")
+    assert arguments_hash.hex() not in (request.messages[1].content or "")
+    assert signature.signature_hash.hex() not in (request.messages[1].content or "")
+
+
+async def test_llm_tool_call_classifier_malformed_json_returns_unknown() -> None:
+    signature = function_tool_signature(_bash_tool())
+    arguments = {"command": "rm -rf tmp"}
+    classifier = LLMToolCallClassifier(
+        client=_FakeChatClient("not json"),
+        classifier="fake",
+        classifier_model="fake/model",
+    )
+
+    result = await classifier.classify(
+        ToolCallSignature(
+            signature=signature,
+            arguments=arguments,
+        )
+    )
+
+    assert result.effect_class == "unknown"
+    assert result.confidence == 0.0
 
 
 async def test_static_policy_resolver_uses_registry_and_unknown_client_tools() -> None:
@@ -248,6 +341,28 @@ async def test_cached_policy_resolver_uses_l1_before_repository() -> None:
     assert repository.store_classifications_calls == 1
 
 
+async def test_cached_policy_resolver_uses_shared_empty_l1() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _RecordingClassifier()
+    shared_l1 = {}
+    first = CachedToolPolicyResolver(
+        repository,
+        classifier,
+        classification_l1=shared_l1,
+    )
+    second = CachedToolPolicyResolver(
+        repository,
+        classifier,
+        classification_l1=shared_l1,
+    )
+
+    await first.resolve([_read_file_tool()])
+    await second.resolve([_read_file_tool()])
+
+    assert classifier.calls == 1
+    assert repository.get_classifications_calls == 1
+
+
 async def test_cached_policy_resolver_preserves_contextual_classification() -> None:
     resolver = CachedToolPolicyResolver(
         _MemoryClassificationRepository(),
@@ -258,6 +373,151 @@ async def test_cached_policy_resolver_preserves_contextual_classification() -> N
 
     assert policies["bash"].effect_class == "contextual"
     assert policies["bash"].classification is not None
+
+
+async def test_static_tool_call_policy_resolver_maps_contextual_to_unknown() -> None:
+    resolver = StaticToolCallPolicyResolver()
+
+    policies = await resolver.resolve(
+        [
+            ToolCallPolicy(
+                tool=_bash_tool(),
+                tool_policy=ToolPolicy(
+                    name="bash", source="client", effect_class="contextual"
+                ),
+                arguments='{"command":"ls"}',
+            )
+        ]
+    )
+
+    policy = policies[0]
+    assert policy.effect_class == "unknown"
+    assert policy.classification is None
+
+
+async def test_cached_tool_call_policy_resolver_skips_non_contextual_policies() -> None:
+    classifier = _RecordingToolCallClassifier()
+    resolver = CachedToolCallPolicyResolver(
+        _MemoryClassificationRepository(),
+        classifier,
+    )
+
+    policies = await resolver.resolve(
+        [
+            ToolCallPolicy(
+                tool=_read_file_tool(),
+                tool_policy=ToolPolicy(
+                    name="read_file",
+                    source="client",
+                    effect_class="safe",
+                ),
+                arguments='{"path":"README.md"}',
+            )
+        ]
+    )
+
+    policy = policies[0]
+    assert policy.effect_class == "safe"
+    assert policy.classification is None
+    assert classifier.calls == 0
+
+
+async def test_cached_tool_call_policy_resolver_classifies_contextual_calls() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _RecordingToolCallClassifier()
+    resolver = CachedToolCallPolicyResolver(repository, classifier)
+
+    calls = [
+        ToolCallPolicy(
+            tool=_bash_tool(),
+            tool_policy=ToolPolicy(
+                name="bash", source="client", effect_class="contextual"
+            ),
+            arguments='{"command":"ls"}',
+        )
+    ]
+
+    first = await resolver.resolve(calls)
+    second = await resolver.resolve(calls)
+
+    assert first[0].effect_class == "safe"
+    assert first[0].classification is not None
+    assert second[0].classification == first[0].classification
+    assert classifier.calls == 1
+    assert repository.get_tool_call_classifications_calls == 1
+    assert repository.store_tool_call_classifications_calls == 1
+
+
+async def test_cached_tool_call_policy_resolver_preserves_order() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _RecordingToolCallClassifier()
+    resolver = CachedToolCallPolicyResolver(repository, classifier)
+
+    policies = await resolver.resolve(
+        [
+            ToolCallPolicy(
+                tool=_read_file_tool(),
+                tool_policy=ToolPolicy(
+                    name="read_file",
+                    source="client",
+                    effect_class="safe",
+                ),
+                arguments='{"path":"README.md"}',
+            ),
+            ToolCallPolicy(
+                tool=_bash_tool(),
+                tool_policy=ToolPolicy(
+                    name="bash", source="client", effect_class="contextual"
+                ),
+                arguments='{"command":"ls"}',
+            ),
+            ToolCallPolicy(
+                tool=_list_files_tool(),
+                tool_policy=ToolPolicy(
+                    name="list_files",
+                    source="client",
+                    effect_class="mutation",
+                ),
+                arguments='{"path":"tmp"}',
+            ),
+        ]
+    )
+
+    assert [policy.name for policy in policies] == ["read_file", "bash", "list_files"]
+    assert [policy.effect_class for policy in policies] == ["safe", "safe", "mutation"]
+
+
+async def test_cached_tool_call_policy_resolver_uses_shared_empty_l1() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _RecordingToolCallClassifier()
+    shared_l1 = {}
+    first = CachedToolCallPolicyResolver(
+        repository,
+        classifier,
+        classification_l1=shared_l1,
+    )
+    second = CachedToolCallPolicyResolver(
+        repository,
+        classifier,
+        classification_l1=shared_l1,
+    )
+
+    calls = [
+        ToolCallPolicy(
+            tool=_bash_tool(),
+            tool_policy=ToolPolicy(
+                name="bash",
+                source="client",
+                effect_class="contextual",
+            ),
+            arguments='{"command":"ls"}',
+        )
+    ]
+    await first.resolve(calls)
+    await second.resolve(calls)
+
+    assert classifier.calls == 1
+    assert repository.get_tool_call_classifications_calls == 1
 
 
 def _read_file_tool() -> FunctionTool:
@@ -380,12 +640,46 @@ class _ContextualClassifier(_RecordingClassifier):
         }
 
 
+@dataclass(slots=True)
+class _RecordingToolCallClassifier(IToolCallClassifier):
+    calls: int = 0
+    classifier: str = "fake"
+    classifier_model: str = "fake/model"
+    prompt_hash: bytes = b"c" * 32
+
+    async def classify_many(
+        self, calls: list[ToolCallSignature]
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        self.calls += 1
+        return {
+            call.classification_key: ToolCallClassification(
+                signature_hash=call.signature_hash,
+                arguments_hash=call.arguments_hash,
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                prompt_hash=self.prompt_hash,
+                effect_class="safe",
+                confidence=1.0,
+                rationale="read-only call",
+                raw_output={"effect_class": "safe"},
+            )
+            for call in calls
+        }
+
+
 class _MemoryClassificationRepository:
     def __init__(self) -> None:
         self._cache: dict[bytes, ToolClassification] = {}
+        self._call_cache: dict[tuple[bytes, bytes], ToolCallClassification] = {}
         self.get_or_create_signatures_calls = 0
         self.get_classifications_calls = 0
         self.store_classifications_calls = 0
+        self.get_tool_call_classifications_calls = 0
+        self.store_tool_call_classifications_calls = 0
+
+    async def get_or_create_signature(self, signature: ToolSignature) -> ToolSignature:
+        self.get_or_create_signatures_calls += 1
+        return signature
 
     async def get_or_create_signatures(
         self, signatures: list[ToolSignature]
@@ -419,5 +713,62 @@ class _MemoryClassificationRepository:
             self._cache[classification.signature_hash] = classification
         return {
             classification.signature_hash: classification
+            for classification in classifications
+        }
+
+    async def get_tool_call_classification(
+        self,
+        *,
+        signature_hash: bytes,
+        arguments_hash: bytes,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> ToolCallClassification | None:
+        classifications = await self.get_tool_call_classifications(
+            [(signature_hash, arguments_hash)],
+            classifier=classifier,
+            classifier_model=classifier_model,
+            prompt_hash=prompt_hash,
+        )
+        return classifications.get((signature_hash, arguments_hash))
+
+    async def get_tool_call_classifications(
+        self,
+        keys: list[tuple[bytes, bytes]],
+        *,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        self.get_tool_call_classifications_calls += 1
+        return {
+            key: cached
+            for key in keys
+            if (cached := self._call_cache.get(key)) is not None
+            and cached.classifier == classifier
+            and cached.classifier_model == classifier_model
+            and cached.prompt_hash == prompt_hash
+        }
+
+    async def store_tool_call_classification(
+        self, classification: ToolCallClassification
+    ) -> ToolCallClassification:
+        stored = await self.store_tool_call_classifications([classification])
+        return stored[(classification.signature_hash, classification.arguments_hash)]
+
+    async def store_tool_call_classifications(
+        self, classifications: list[ToolCallClassification]
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        self.store_tool_call_classifications_calls += 1
+        for classification in classifications:
+            self._call_cache[
+                (classification.signature_hash, classification.arguments_hash)
+            ] = classification
+        return {
+            (
+                classification.signature_hash,
+                classification.arguments_hash,
+            ): classification
             for classification in classifications
         }

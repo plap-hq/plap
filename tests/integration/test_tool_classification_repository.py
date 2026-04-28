@@ -196,6 +196,58 @@ async def test_tool_call_classification_repository_is_unscoped(
     assert stored == classification
 
 
+async def test_tool_call_classification_repository_batches_lookup(
+    db_session_maker,
+) -> None:
+    signature = function_tool_signature(_bash_tool())
+    first = ToolCallClassification(
+        signature_hash=signature.signature_hash,
+        arguments_hash=b"a" * 32,
+        classifier="fake",
+        classifier_model="fake/model",
+        prompt_hash=b"p" * 32,
+        effect_class="safe",
+        confidence=0.7,
+        rationale="read-only command",
+        raw_output={"effect_class": "safe"},
+    )
+    second = ToolCallClassification(
+        signature_hash=signature.signature_hash,
+        arguments_hash=b"b" * 32,
+        classifier="fake",
+        classifier_model="fake/model",
+        prompt_hash=b"p" * 32,
+        effect_class="mutation",
+        confidence=0.8,
+        rationale="mutating command",
+        raw_output={"effect_class": "mutation"},
+    )
+
+    async with db_session_maker() as session:
+        repository = ToolClassificationRepository(session)
+        await repository.get_or_create_signature(signature)
+        await repository.store_tool_call_classifications([first, second])
+        await session.commit()
+
+    async with db_session_maker() as session:
+        repository = ToolClassificationRepository(session)
+        stored = await repository.get_tool_call_classifications(
+            [
+                (signature.signature_hash, b"a" * 32),
+                (signature.signature_hash, b"b" * 32),
+                (signature.signature_hash, b"c" * 32),
+            ],
+            classifier="fake",
+            classifier_model="fake/model",
+            prompt_hash=b"p" * 32,
+        )
+
+    assert stored == {
+        (signature.signature_hash, b"a" * 32): first,
+        (signature.signature_hash, b"b" * 32): second,
+    }
+
+
 def _read_file_tool() -> FunctionTool:
     return FunctionTool(
         description="Read a file without changing it.",

@@ -25,7 +25,12 @@ from plap.llms.router import (
 )
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
-from plap.responses.tools import IToolClassifier, LLMToolClassifier
+from plap.responses.tools import (
+    IToolCallClassifier,
+    IToolClassifier,
+    LLMToolCallClassifier,
+    LLMToolClassifier,
+)
 from plap.settings import Settings, get_settings
 
 
@@ -156,6 +161,28 @@ def _create_tool_classifier(
     )
 
 
+def _create_tool_call_classifier(
+    settings: Settings,
+    chat_completion_client: IChatCompletionClient,
+) -> IToolCallClassifier | None:
+    classifier_model = (
+        settings.tool_call_classifier_model or settings.tool_classifier_model
+    )
+    if classifier_model is None:
+        return None
+    if not _has_configured_chat_completion_route(settings, classifier_model):
+        raise ValueError(
+            "tool_call_classifier_model does not match any configured LLM route: "
+            f"{classifier_model!r}"
+        )
+    return LLMToolCallClassifier(
+        client=chat_completion_client,
+        classifier=settings.tool_call_classifier_name,
+        classifier_model=classifier_model,
+        max_concurrency=settings.tool_classifier_max_concurrency,
+    )
+
+
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
     return any(
         model.startswith(prefix)
@@ -181,6 +208,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
         resolved_settings,
         chat_completion_client,
     )
+    tool_call_classifier = _create_tool_call_classifier(
+        resolved_settings,
+        chat_completion_client,
+    )
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
@@ -192,6 +223,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
                 resolved_settings.sealing_keys
             ),
             "settings": resolved_settings,
+            "tool_call_classifier": tool_call_classifier,
+            "tool_call_policy_l1_cache": LRUCache(
+                maxsize=resolved_settings.tool_call_policy_l1_maxsize
+            ),
             "tool_classifier": tool_classifier,
             "tool_policy_l1_cache": LRUCache(
                 maxsize=resolved_settings.tool_policy_l1_maxsize

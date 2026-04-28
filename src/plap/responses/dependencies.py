@@ -21,8 +21,11 @@ from plap.persistence.dependencies import (
     provide_socket_db_session,
 )
 from plap.responses.tools import (
+    CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
+    IToolCallPolicyResolver,
     IToolPolicyResolver,
+    StaticToolCallPolicyResolver,
     StaticToolPolicyResolver,
 )
 from plap.responses.tools.repository import ToolClassificationRepository
@@ -50,6 +53,23 @@ async def provide_tool_policy_resolver(
         yield resolver
 
 
+async def provide_tool_call_policy_resolver(
+    request: Request[Any, Any, Any],
+) -> AsyncIterator[IToolCallPolicyResolver]:
+    classifier = request.app.state.tool_call_classifier
+    if classifier is None:
+        yield StaticToolCallPolicyResolver()
+        return
+
+    async with request.app.state.session_maker.begin() as session:
+        resolver = CachedToolCallPolicyResolver(
+            ToolClassificationRepository(session),
+            classifier,
+            classification_l1=request.app.state.tool_call_policy_l1_cache,
+        )
+        yield resolver
+
+
 HTTP_ROUTE_DEPENDENCIES = {
     "api_key_manager": Provide(
         provide_request_api_key_manager,
@@ -67,6 +87,9 @@ HTTP_ROUTE_DEPENDENCIES = {
     "tool_policy_resolver": Provide(
         provide_tool_policy_resolver,
     ),
+    "tool_call_policy_resolver": Provide(
+        provide_tool_call_policy_resolver,
+    ),
 }
 
 
@@ -82,5 +105,11 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
         provide_socket_chat_completion_client,
         use_cache=True,
         sync_to_thread=False,
+    ),
+    "tool_policy_resolver": Provide(
+        provide_tool_policy_resolver,
+    ),
+    "tool_call_policy_resolver": Provide(
+        provide_tool_call_policy_resolver,
     ),
 }
