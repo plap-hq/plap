@@ -518,6 +518,77 @@ async def test_ingestion_allows_stripped_tool_call_association() -> None:
     ]
 
 
+async def test_ingestion_requires_reasoning_tool_call_public_replay() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": "need file",
+        "tool_calls": [_tool_call("up_reasoning_0")],
+    }
+
+    with pytest.raises(IngestionError, match="missing function_call item"):
+        await ingest_response_request(
+            _request(input=[_reasoning_item("reviewer", False, [assistant])]),
+            keyring=_keyring(),
+        )
+
+
+async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": "need file",
+        "tool_calls": [_tool_call("up_reasoning_0")],
+    }
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=content_hash(assistant),
+        upstream_tool_call_id="up_reasoning_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item("reviewer", False, [assistant]),
+                _function_call(call_id),
+                _function_output(call_id, "reasoning output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message for row in result.reviewer] == [
+        assistant,
+        {
+            "role": "tool",
+            "tool_call_id": "up_reasoning_0",
+            "content": "reasoning output",
+        },
+    ]
+
+
+async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": "need file",
+        "tool_calls": [_tool_call("up_reasoning_0")],
+    }
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=content_hash(assistant),
+        upstream_tool_call_id="up_reasoning_0",
+    )
+
+    with pytest.raises(IngestionError, match="missing function_call_output"):
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item("reviewer", False, [assistant]),
+                    _function_call(call_id),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+
 async def test_ingestion_rejects_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 

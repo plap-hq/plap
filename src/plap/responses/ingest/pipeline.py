@@ -110,12 +110,14 @@ class _QueueBase:
         self.side = side
         self._entries: list[ChatMessageSpan | SideMessage] = []
         self._pending_tool_call_ids: set[str] = set()
+        self._unreplayed_reasoning_tool_call_ids: set[str] = set()
 
     def add_reasoning(self, payload: ReasoningPayload) -> None:
         for message in payload.messages:
             content_hash_value = message.get("content_hash")
             if content_hash_value is None:
-                self._append_message(dict(message), temp=payload.temp)
+                appended = self._append_message(dict(message), temp=payload.temp)
+                self._track_reasoning_tool_calls(appended)
                 continue
             if not isinstance(content_hash_value, str):
                 raise IngestionError("reasoning content_hash must be a string")
@@ -125,6 +127,8 @@ class _QueueBase:
             for key, value in message.items():
                 if key != "content_hash":
                     target[key] = value
+            if "tool_calls" in message:
+                self._track_reasoning_tool_calls(target)
 
     def associate_function_call(
         self,
@@ -141,6 +145,9 @@ class _QueueBase:
                 raise IngestionError("target tool call is malformed")
             if existing.get("id") != call_id.upstream_tool_call_id:
                 raise IngestionError("sealed function_call upstream id mismatch")
+            self._mark_reasoning_tool_call_replayed(
+                call_id.upstream_tool_call_id
+            )
             self._mark_pending_tool_call(call_id.upstream_tool_call_id)
             return
         if call_id.tool_call_index != len(tool_calls):
@@ -211,12 +218,35 @@ class _QueueBase:
             raise IngestionError("duplicate pending function_call")
         self._pending_tool_call_ids.add(call_id)
 
+    def _mark_reasoning_tool_call_replayed(self, call_id: str) -> None:
+        self._unreplayed_reasoning_tool_call_ids.discard(call_id)
+
     def _consume_pending_tool_call(self, call_id: str) -> None:
         if call_id not in self._pending_tool_call_ids:
             raise IngestionError("function_call_output has no pending function_call")
         self._pending_tool_call_ids.remove(call_id)
 
+    def _track_reasoning_tool_calls(self, message: ChatMessage) -> None:
+        if message.get("role") != "assistant":
+            return
+        tool_calls = message.get("tool_calls")
+        if tool_calls is None:
+            return
+        if not isinstance(tool_calls, list):
+            raise IngestionError("reasoning tool_calls is not an array")
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                raise IngestionError("reasoning tool call is malformed")
+            tool_call_id = tool_call.get("id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise IngestionError("reasoning tool call id is missing")
+            self._unreplayed_reasoning_tool_call_ids.add(tool_call_id)
+
     def assert_no_pending_tool_calls(self) -> None:
+        if self._unreplayed_reasoning_tool_call_ids:
+            raise IngestionError(
+                "reasoning tool call is missing function_call item"
+            )
         if self._pending_tool_call_ids:
             raise IngestionError("function_call is missing function_call_output")
 
