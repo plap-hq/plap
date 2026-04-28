@@ -18,6 +18,7 @@ from plap.llms.chat import (
     ChatToolCall,
     ChatToolChoiceFunction,
 )
+from plap.llms.crof import CrofChatCompletionClient, to_crof_chat_params
 from plap.llms.errors import (
     ChatCompletionProviderError,
     ChatCompletionUnsupportedRequestError,
@@ -136,51 +137,43 @@ def test_chat_completion_request_rejects_boolean_reasoning_effort() -> None:
         )
 
 
-async def test_routing_client_routes_completion_by_longest_prefix() -> None:
-    base_client = _RecordingChatCompletionClient("base")
-    specific_client = _RecordingChatCompletionClient("specific")
+async def test_routing_client_strips_route_prefix_for_completion() -> None:
+    client = _RecordingChatCompletionClient("crof")
     router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="openai/", client=base_client),
-            ModelRoute(prefix="openai/gpt-oss-120b", client=specific_client),
-        ]
+        [ModelRoute(prefix="crof/", client=client)]
     )
 
     result = await router.complete(
         ChatCompletionRequest(
-            model="openai/gpt-oss-120b",
+            model="crof/qwen3.5-9b",
             messages=[ChatMessage(role="user", content="hello")],
         )
     )
 
-    assert result.message.content == "specific"
-    assert specific_client.complete_requests[0].model == "openai/gpt-oss-120b"
-    assert base_client.complete_requests == []
+    assert result.model == "crof/qwen3.5-9b"
+    assert result.message.content == "crof"
+    assert client.complete_requests[0].model == "qwen3.5-9b"
 
 
-async def test_routing_client_routes_stream_by_longest_prefix() -> None:
-    base_client = _RecordingChatCompletionClient("base")
-    specific_client = _RecordingChatCompletionClient("specific")
+async def test_routing_client_strips_route_prefix_for_stream() -> None:
+    client = _RecordingChatCompletionClient("fireworks")
     router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="deepseek/", client=base_client),
-            ModelRoute(prefix="deepseek/deepseek-v4-", client=specific_client),
-        ]
+        [ModelRoute(prefix="fireworks/", client=client)]
     )
 
     deltas = [
         delta
         async for delta in router.stream(
             ChatCompletionRequest(
-                model="deepseek/deepseek-v4-flash",
+                model="fireworks/accounts/fireworks/models/gpt-oss-20b",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
     ]
 
-    assert deltas[0].content_delta == "specific"
-    assert specific_client.stream_requests[0].model == "deepseek/deepseek-v4-flash"
-    assert base_client.stream_requests == []
+    assert deltas[0].model == "fireworks/accounts/fireworks/models/gpt-oss-20b"
+    assert deltas[0].content_delta == "fireworks"
+    assert client.stream_requests[0].model == "accounts/fireworks/models/gpt-oss-20b"
 
 
 async def test_routing_client_rejects_unmatched_model() -> None:
@@ -192,6 +185,20 @@ async def test_routing_client_rejects_unmatched_model() -> None:
         await router.complete(
             ChatCompletionRequest(
                 model="lightning-ai/gpt-oss-20b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+
+async def test_routing_client_rejects_empty_provider_model() -> None:
+    router = RoutingChatCompletionClient(
+        [ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))]
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No provider"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="crof/",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
@@ -389,6 +396,79 @@ def test_novita_deepseek_v4_rejects_ambiguous_forced_tool_choice() -> None:
         to_novita_chat_params(request, stream=False)
 
 
+def test_crof_params_map_supported_provider_fields() -> None:
+    request = replace(_request_for_model("glm-4.7-flash"), reasoning_effort=None)
+
+    params = to_crof_chat_params(request, stream=True)
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_tokens"] == 128
+    assert params["parallel_tool_calls"] is True
+    assert "reasoning_effort" not in params
+    assert "max_completion_tokens" not in params
+    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "prompt_cache_key" not in params
+    assert "metadata" not in params
+    assert "prediction" not in params
+    assert "service_tier" not in params
+    assert "top_logprobs" not in params
+    assert "user" not in params
+
+
+def test_crof_params_keep_thinking_for_explicit_reasoning_effort() -> None:
+    request = ChatCompletionRequest(
+        model="glm-4.7-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="high",
+    )
+
+    params = to_crof_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "high"
+    assert "extra_body" not in params
+
+
+def test_crof_params_disable_thinking_for_none_effort() -> None:
+    request = ChatCompletionRequest(
+        model="glm-4.7-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="none",
+    )
+
+    params = to_crof_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "none"
+    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_crof_qwen_params_use_native_response_format() -> None:
+    params = to_crof_chat_params(_request_for_model("qwen3.5-9b"), stream=False)
+
+    assert params["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object"},
+            "strict": True,
+            "description": "answer schema",
+        },
+    }
+    assert "extra_body" not in params
+
+
+def test_crof_newer_glm_params_do_not_use_flash_thinking_quirk() -> None:
+    request = ChatCompletionRequest(
+        model="glm-5.1",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    params = to_crof_chat_params(request, stream=False)
+
+    assert "extra_body" not in params
+
+
 async def test_openai_client_normalizes_completion_result() -> None:
     reasoning_details = [
         {
@@ -451,6 +531,41 @@ async def test_openai_client_normalizes_completion_result() -> None:
     assert result.usage is not None
     assert result.usage.cached_tokens == 2
     assert result.usage.reasoning_tokens == 1
+
+
+async def test_openai_client_reads_top_level_reasoning_tokens() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        SimpleNamespace(
+            id="chatcmpl_1",
+            model="model-a",
+            created=10,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content="answer",
+                        refusal=None,
+                        reasoning_content=None,
+                        tool_calls=None,
+                    ),
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=3,
+                completion_tokens=5,
+                total_tokens=8,
+                reasoning_tokens=4,
+            ),
+        )
+    )
+    client = OpenAICompatibleChatCompletionClient(
+        client=_FakeOpenAIClient(fake_completion)
+    )
+
+    result = await client.complete(_request())
+
+    assert result.usage is not None
+    assert result.usage.reasoning_tokens == 4
 
 
 async def test_openai_client_normalizes_stream_chunks() -> None:
@@ -840,6 +955,60 @@ async def test_lightning_non_fallback_response_format_streams_from_provider() ->
     assert fake_completion.calls[0]["response_format"] == {"type": "json_object"}
 
 
+async def test_crof_client_uses_openai_create_with_crof_params() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(model="glm-4.7-flash", content="ok")
+    )
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = CrofChatCompletionClient(client=fake_client)
+
+    result = await client.complete(
+        ChatCompletionRequest(
+            model="glm-4.7-flash",
+            messages=[ChatMessage(role="developer", content="be precise")],
+            max_completion_tokens=128,
+        )
+    )
+
+    assert fake_completion.calls[0]["stream"] is False
+    assert fake_completion.calls[0]["max_tokens"] == 128
+    assert fake_completion.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "be precise",
+    }
+    assert fake_completion.calls[0]["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
+    assert "max_completion_tokens" not in fake_completion.calls[0]
+    assert result.message.content == "ok"
+
+
+async def test_crof_glm_4_7_flash_copies_json_from_reasoning_content() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="glm-4.7-flash",
+            content="",
+            reasoning_content='{"ok":true}',
+        )
+    )
+    client = CrofChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(
+        ChatCompletionRequest(
+            model="glm-4.7-flash",
+            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+            response_format=ChatResponseFormat(type="json_object"),
+            max_completion_tokens=128,
+        )
+    )
+
+    assert result.message.content == '{"ok":true}'
+    assert result.message.reasoning_content == '{"ok":true}'
+    call = fake_completion.calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 async def test_novita_client_uses_openai_create_with_novita_params() -> None:
     reasoning_details = [
         {
@@ -947,6 +1116,7 @@ def _completion_response(
     *,
     model: str = "model-a",
     content: str = "ok",
+    reasoning_content: str | None = None,
     usage: object | None = None,
 ) -> object:
     return SimpleNamespace(
@@ -959,7 +1129,7 @@ def _completion_response(
                 message=SimpleNamespace(
                     content=content,
                     refusal=None,
-                    reasoning_content=None,
+                    reasoning_content=reasoning_content,
                     tool_calls=None,
                 ),
             )

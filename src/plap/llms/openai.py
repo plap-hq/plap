@@ -357,7 +357,8 @@ def _usage_from_provider(usage: Any) -> ChatUsage | None:
         output_tokens=_get(usage, "completion_tokens") or 0,
         total_tokens=_get(usage, "total_tokens") or 0,
         cached_tokens=_get(prompt_details, "cached_tokens"),
-        reasoning_tokens=_get(completion_details, "reasoning_tokens"),
+        reasoning_tokens=_get(completion_details, "reasoning_tokens")
+        or _get(usage, "reasoning_tokens"),
     )
 
 

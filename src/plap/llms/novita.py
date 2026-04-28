@@ -16,6 +16,8 @@ from plap.llms.openai import (
 )
 
 NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
+NOVITA_FORCED_TOOL_CHOICE_QUIRK_MODELS = frozenset({"deepseek/deepseek-v4-flash"})
+NOVITA_THINKING_CONTROL_MODELS = frozenset({"deepseek/deepseek-v4-flash"})
 
 NOVITA_CHAT_FIELDS = (*COMMON_CHAT_FIELDS, "logprobs", "reasoning_effort")
 
@@ -70,7 +72,10 @@ def to_novita_chat_params(
 def _deepseek_v4_thinking_extra_body(
     request: ChatCompletionRequest,
 ) -> dict[str, Any] | None:
-    if not _is_deepseek_v4(request.model) or request.reasoning_effort is None:
+    if (
+        request.model not in NOVITA_THINKING_CONTROL_MODELS
+        or request.reasoning_effort is None
+    ):
         return None
     thinking_type = "disabled" if request.reasoning_effort == "none" else "enabled"
     return {"thinking": {"type": thinking_type}}
@@ -80,7 +85,7 @@ def _apply_novita_tool_choice_quirks(
     params: dict[str, Any],
     request: ChatCompletionRequest,
 ) -> None:
-    if not _is_deepseek_v4(request.model):
+    if request.model not in NOVITA_FORCED_TOOL_CHOICE_QUIRK_MODELS:
         return
     if not isinstance(request.tool_choice, ChatToolChoiceFunction):
         return
@@ -91,10 +96,6 @@ def _apply_novita_tool_choice_quirks(
         params["tool_choice"] = "required"
         return
     raise ChatCompletionUnsupportedRequestError(
-        "Novita DeepSeek V4 rejects forced function tool_choice objects; "
+        "Novita model rejects forced function tool_choice objects; "
         "use tool_choice='required' or provide exactly one matching tool"
     )
-
-
-def _is_deepseek_v4(model: str) -> bool:
-    return model.startswith("deepseek/deepseek-v4-")

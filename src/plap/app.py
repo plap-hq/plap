@@ -17,6 +17,7 @@ from litestar.exceptions import (
 from plap.auth import APIKeyManager
 from plap.keyring import SealingKeyring
 from plap.llms.chat import IChatCompletionClient
+from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.fireworks import FireworksChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
@@ -174,18 +175,19 @@ def _create_chat_completion_client(settings: Settings) -> IChatCompletionClient:
 def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
     if settings.llm_lightning_api_key:
         client = LightningChatCompletionClient(api_key=settings.llm_lightning_api_key)
-        for prefix in settings.llm_lightning_model_prefixes:
-            yield ModelRoute(prefix=prefix, client=client)
+        yield ModelRoute(prefix="lightning/", client=client)
 
     if settings.llm_novita_api_key:
         client = NovitaChatCompletionClient(api_key=settings.llm_novita_api_key)
-        for prefix in settings.llm_novita_model_prefixes:
-            yield ModelRoute(prefix=prefix, client=client)
+        yield ModelRoute(prefix="novita/", client=client)
 
     if settings.llm_fireworks_api_key:
         client = FireworksChatCompletionClient(api_key=settings.llm_fireworks_api_key)
-        for prefix in settings.llm_fireworks_model_prefixes:
-            yield ModelRoute(prefix=prefix, client=client)
+        yield ModelRoute(prefix="fireworks/", client=client)
+
+    if settings.llm_crof_api_key:
+        client = CrofChatCompletionClient(api_key=settings.llm_crof_api_key)
+        yield ModelRoute(prefix="crof/", client=client)
 
 
 def _create_tool_classifier(
@@ -299,11 +301,13 @@ def _has_configured_chat_completion_route(settings: Settings, model: str) -> boo
 
 def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
     if settings.llm_lightning_api_key:
-        yield from settings.llm_lightning_model_prefixes
+        yield "lightning/"
     if settings.llm_novita_api_key:
-        yield from settings.llm_novita_model_prefixes
+        yield "novita/"
     if settings.llm_fireworks_api_key:
-        yield from settings.llm_fireworks_model_prefixes
+        yield "fireworks/"
+    if settings.llm_crof_api_key:
+        yield "crof/"
 
 
 def create_app(settings: Settings | None = None) -> Litestar:

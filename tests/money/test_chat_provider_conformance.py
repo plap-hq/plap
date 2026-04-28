@@ -20,19 +20,62 @@ from plap.llms.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
+from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import ChatCompletionProviderError
 from plap.llms.fireworks import FireworksChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.router import ModelRoute, RoutingChatCompletionClient
 
 pytestmark = pytest.mark.money
 
-LIGHTNING_GPT_OSS_20B_MODEL = "lightning-ai/gpt-oss-20b"
-LIGHTNING_GPT_OSS_120B_MODEL = "lightning-ai/gpt-oss-120b"
-LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning-ai/llama-3.3-70b"
-NOVITA_GPT_OSS_120B_MODEL = "openai/gpt-oss-120b"
-NOVITA_DEEPSEEK_V4_FLASH_MODEL = "deepseek/deepseek-v4-flash"
-FIREWORKS_GPT_OSS_20B_MODEL = "accounts/fireworks/models/gpt-oss-20b"
+
+def _lightning_client(api_key: str) -> IChatCompletionClient:
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="lightning/",
+                client=LightningChatCompletionClient(api_key=api_key),
+            )
+        ]
+    )
+
+
+def _novita_client(api_key: str) -> IChatCompletionClient:
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="novita/",
+                client=NovitaChatCompletionClient(api_key=api_key),
+            )
+        ]
+    )
+
+
+def _fireworks_client(api_key: str) -> IChatCompletionClient:
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="fireworks/",
+                client=FireworksChatCompletionClient(api_key=api_key),
+            )
+        ]
+    )
+
+
+def _crof_client(api_key: str) -> IChatCompletionClient:
+    return RoutingChatCompletionClient(
+        [ModelRoute(prefix="crof/", client=CrofChatCompletionClient(api_key=api_key))]
+    )
+
+
+LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
+LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
+LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning/lightning-ai/llama-3.3-70b"
+NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
+NOVITA_DEEPSEEK_V4_FLASH_MODEL = "novita/deepseek/deepseek-v4-flash"
+FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
+CROF_QWEN_3_5_9B_MODEL = "crof/qwen3.5-9b"
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "low"
 _UNAVAILABLE_PROVIDER_REASONS: dict[str, str] = {}
 
@@ -51,9 +94,7 @@ GPT_OSS_PROVIDERS = (
             name="lightning",
             api_key_env="LIGHTNING_API_KEY",
             model=LIGHTNING_GPT_OSS_20B_MODEL,
-            client_factory=lambda api_key: LightningChatCompletionClient(
-                api_key=api_key
-            ),
+            client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-20b",
     ),
@@ -62,7 +103,7 @@ GPT_OSS_PROVIDERS = (
             name="novita",
             api_key_env="NOVITA_API_KEY",
             model=NOVITA_GPT_OSS_120B_MODEL,
-            client_factory=lambda api_key: NovitaChatCompletionClient(api_key=api_key),
+            client_factory=_novita_client,
         ),
         id="novita-gpt-oss-120b",
     ),
@@ -71,9 +112,7 @@ GPT_OSS_PROVIDERS = (
             name="fireworks",
             api_key_env="FIREWORKS_API_KEY",
             model=FIREWORKS_GPT_OSS_20B_MODEL,
-            client_factory=lambda api_key: FireworksChatCompletionClient(
-                api_key=api_key
-            ),
+            client_factory=_fireworks_client,
         ),
         id="fireworks-gpt-oss-20b",
     ),
@@ -87,9 +126,7 @@ TOOL_PROVIDERS = (
             name="lightning",
             api_key_env="LIGHTNING_API_KEY",
             model=LIGHTNING_GPT_OSS_120B_MODEL,
-            client_factory=lambda api_key: LightningChatCompletionClient(
-                api_key=api_key
-            ),
+            client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-120b",
     ),
@@ -98,11 +135,27 @@ TOOL_PROVIDERS = (
             name="novita",
             api_key_env="NOVITA_API_KEY",
             model=NOVITA_DEEPSEEK_V4_FLASH_MODEL,
-            client_factory=lambda api_key: NovitaChatCompletionClient(api_key=api_key),
+            client_factory=_novita_client,
         ),
         id="novita-deepseek-v4-flash",
     ),
     GPT_OSS_PROVIDERS[2],
+    pytest.param(
+        ProviderCase(
+            name="crof",
+            api_key_env="CROF_API_KEY",
+            model=CROF_QWEN_3_5_9B_MODEL,
+            client_factory=_crof_client,
+        ),
+        id="crof-qwen3.5-9b",
+    ),
+)
+
+CROF_PROVIDER = ProviderCase(
+    name="crof",
+    api_key_env="CROF_API_KEY",
+    model=CROF_QWEN_3_5_9B_MODEL,
+    client_factory=_crof_client,
 )
 
 
@@ -227,7 +280,7 @@ async def test_live_lightning_llama_3_3_70b_response_format(
         name="lightning",
         api_key_env="LIGHTNING_API_KEY",
         model=LIGHTNING_LLAMA_3_3_70B_MODEL,
-        client_factory=lambda api_key: LightningChatCompletionClient(api_key=api_key),
+        client_factory=_lightning_client,
     )
 
     result = await _complete(
@@ -277,7 +330,7 @@ async def test_live_novita_deepseek_v4_flash_reasoning_content() -> None:
         name="novita",
         api_key_env="NOVITA_API_KEY",
         model=NOVITA_DEEPSEEK_V4_FLASH_MODEL,
-        client_factory=lambda api_key: NovitaChatCompletionClient(api_key=api_key),
+        client_factory=_novita_client,
     )
 
     result = await _complete(
@@ -298,6 +351,94 @@ async def test_live_novita_deepseek_v4_flash_reasoning_content() -> None:
 
     assert result.message.reasoning_content or result.message.reasoning_details
     assert _message_has_output(result.message)
+
+
+async def test_live_crof_qwen_3_5_9b_basic_completion() -> None:
+    result = await _complete(
+        CROF_PROVIDER,
+        ChatCompletionRequest(
+            model=CROF_PROVIDER.model,
+            messages=[ChatMessage(role="user", content="Reply with exactly: pong")],
+            max_completion_tokens=256,
+            temperature=0,
+        ),
+    )
+
+    assert (result.message.content or "").strip()
+
+
+async def test_live_crof_qwen_3_5_9b_stream() -> None:
+    deltas = await _stream(
+        CROF_PROVIDER,
+        ChatCompletionRequest(
+            model=CROF_PROVIDER.model,
+            messages=[ChatMessage(role="user", content="Reply with exactly: pong")],
+            max_completion_tokens=256,
+            stream_options=ChatStreamOptions(include_usage=True),
+            temperature=0,
+        ),
+    )
+
+    assert any((delta.content_delta or "").strip() for delta in deltas)
+    assert any(delta.usage is not None for delta in deltas)
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        pytest.param(ChatResponseFormat(type="json_object"), id="json-object"),
+        pytest.param(
+            ChatResponseFormat(
+                type="json_schema",
+                name="ok_response",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
+            id="json-schema",
+        ),
+    ],
+)
+async def test_live_crof_qwen_3_5_9b_response_format(
+    response_format: ChatResponseFormat,
+) -> None:
+    result = await _complete(
+        CROF_PROVIDER,
+        ChatCompletionRequest(
+            model=CROF_PROVIDER.model,
+            messages=[ChatMessage(role="user", content='Return exactly {"ok": true}.')],
+            response_format=response_format,
+            max_completion_tokens=512,
+            temperature=0,
+        ),
+    )
+
+    parsed = json.loads(result.message.content or "")
+    assert parsed == {"ok": True}
+
+
+async def test_live_crof_qwen_3_5_9b_reasoning_request() -> None:
+    result = await _complete(
+        CROF_PROVIDER,
+        ChatCompletionRequest(
+            model=CROF_PROVIDER.model,
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content="Think through 17 + 25. Keep the final answer short.",
+                )
+            ],
+            reasoning_effort="low",
+            max_completion_tokens=256,
+            temperature=0,
+        ),
+    )
+
+    assert result.message.reasoning_content or result.message.reasoning_details
 
 
 def _client(provider: ProviderCase) -> IChatCompletionClient:

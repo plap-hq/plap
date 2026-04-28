@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -77,7 +77,7 @@ class LightningChatCompletionClient(OpenAICompatibleChatCompletionClient):
     ) -> AsyncIterator[ChatCompletionDelta]:
         if _uses_response_format_fallback(request):
             result = await self._complete_with_response_format_fallback(request)
-            for delta in _response_format_fallback_stream_deltas(result):
+            for delta in response_format_fallback_stream_deltas(result):
                 yield delta
             return
         async for delta in super().stream(request):
@@ -87,35 +87,10 @@ class LightningChatCompletionClient(OpenAICompatibleChatCompletionClient):
         self,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResult:
-        response_format = request.response_format
-        if response_format is None:
-            return await super().complete(request)
-
-        result = await super().complete(_response_format_fallback_request(request))
-        validation_error = _response_format_validation_error(
-            result.message.content,
-            response_format,
-        )
-        if validation_error is None:
-            return result
-
-        retry_result = await super().complete(
-            _response_format_fallback_request(
-                request,
-                invalid_content=result.message.content,
-                validation_error=validation_error,
-            )
-        )
-        retry_validation_error = _response_format_validation_error(
-            retry_result.message.content,
-            response_format,
-        )
-        if retry_validation_error is None:
-            return retry_result
-
-        raise ChatCompletionProviderError(
-            "Lightning response_format fallback returned invalid JSON: "
-            f"{retry_validation_error}"
+        return await complete_with_response_format_fallback(
+            request,
+            complete=super().complete,
+            provider_name="Lightning",
         )
 
 
@@ -139,7 +114,45 @@ def _uses_response_format_fallback(request: ChatCompletionRequest) -> bool:
     )
 
 
-def _response_format_fallback_stream_deltas(
+async def complete_with_response_format_fallback(
+    request: ChatCompletionRequest,
+    *,
+    complete: Callable[[ChatCompletionRequest], Awaitable[ChatCompletionResult]],
+    provider_name: str,
+) -> ChatCompletionResult:
+    response_format = request.response_format
+    if response_format is None:
+        return await complete(request)
+
+    result = await complete(response_format_fallback_request(request))
+    validation_error = response_format_validation_error(
+        result.message.content,
+        response_format,
+    )
+    if validation_error is None:
+        return result
+
+    retry_result = await complete(
+        response_format_fallback_request(
+            request,
+            invalid_content=result.message.content,
+            validation_error=validation_error,
+        )
+    )
+    retry_validation_error = response_format_validation_error(
+        retry_result.message.content,
+        response_format,
+    )
+    if retry_validation_error is None:
+        return retry_result
+
+    raise ChatCompletionProviderError(
+        f"{provider_name} response_format fallback returned invalid JSON: "
+        f"{retry_validation_error}"
+    )
+
+
+def response_format_fallback_stream_deltas(
     result: ChatCompletionResult,
 ) -> tuple[ChatCompletionDelta, ChatCompletionDelta]:
     return (
@@ -166,7 +179,7 @@ def _response_format_fallback_stream_deltas(
     )
 
 
-def _response_format_fallback_request(
+def response_format_fallback_request(
     request: ChatCompletionRequest,
     *,
     invalid_content: str | None = None,
@@ -179,7 +192,7 @@ def _response_format_fallback_request(
     messages = [
         ChatMessage(
             role="system",
-            content=_response_format_instruction(response_format),
+            content=response_format_instruction(response_format),
         ),
         *request.messages,
     ]
@@ -198,7 +211,7 @@ def _response_format_fallback_request(
     return replace(request, messages=messages, response_format=None)
 
 
-def _response_format_instruction(response_format: ChatResponseFormat) -> str:
+def response_format_instruction(response_format: ChatResponseFormat) -> str:
     lines = [
         "Return exactly one valid JSON value.",
         "Do not include prose, markdown fences, comments, or extra text.",
@@ -220,7 +233,7 @@ def _response_format_instruction(response_format: ChatResponseFormat) -> str:
     return "\n".join(lines)
 
 
-def _response_format_validation_error(
+def response_format_validation_error(
     content: str | None,
     response_format: ChatResponseFormat,
 ) -> str | None:

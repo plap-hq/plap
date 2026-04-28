@@ -21,6 +21,7 @@ from plap.llms.chat import (
     ReasoningEffort,
     ServiceTier,
 )
+from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
     ChatCompletionError,
@@ -61,6 +62,7 @@ __all__ = [
     "ChatToolChoiceFunction",
     "ChatToolChoiceMode",
     "ChatUsage",
+    "CrofChatCompletionClient",
     "IChatCompletionClient",
     "ModelRoute",
     "NovitaChatCompletionClient",

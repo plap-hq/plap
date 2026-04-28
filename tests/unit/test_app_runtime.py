@@ -35,10 +35,28 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
         _settings(
             llm_lightning_api_key="lightning-key",
             llm_novita_api_key="novita-key",
+            llm_crof_api_key="crof-key",
         )
     )
 
     assert isinstance(client, RoutingChatCompletionClient)
+
+
+def test_app_runtime_validates_crof_provider_prefix() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        runtime_model_profiles={
+            "plap/glm": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/glm-4.7-flash",
+                arbitrator_model="crof/glm-4.7-flash",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+            )
+        },
+    )
+
+    _validate_runtime_model_profiles(settings)
 
 
 def test_app_runtime_rejects_unrouted_tool_classifier_model() -> None:
@@ -46,7 +64,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_model() -> None:
 
     with pytest.raises(ValueError, match="tool_classifier_model"):
         _create_tool_classifier(
-            _settings(tool_classifier_model="lightning-ai/gpt-oss-20b"),
+            _settings(tool_classifier_model="lightning/lightning-ai/gpt-oss-20b"),
             client,
         )
 
@@ -54,7 +72,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_model() -> None:
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning-ai/gpt-oss-20b",
+        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -63,13 +81,13 @@ def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
 
     assert isinstance(classifier, LLMToolClassifier)
     assert classifier.classifier == TOOL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "lightning-ai/gpt-oss-20b"
+    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-20b"
 
 
 def test_app_runtime_builds_tool_call_classifier_from_tool_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning-ai/gpt-oss-20b",
+        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
     )
     client = _create_chat_completion_client(settings)
 
@@ -77,21 +95,21 @@ def test_app_runtime_builds_tool_call_classifier_from_tool_model() -> None:
 
     assert isinstance(classifier, LLMToolCallClassifier)
     assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "lightning-ai/gpt-oss-20b"
+    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-20b"
 
 
 def test_app_runtime_tool_call_classifier_model_can_override_tool_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning-ai/gpt-oss-20b",
-        tool_call_classifier_model="lightning-ai/gpt-oss-120b",
+        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
+        tool_call_classifier_model="lightning/lightning-ai/gpt-oss-120b",
     )
     client = _create_chat_completion_client(settings)
 
     classifier = _create_tool_call_classifier(settings, client)
 
     assert isinstance(classifier, LLMToolCallClassifier)
-    assert classifier.classifier_model == "lightning-ai/gpt-oss-120b"
+    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-120b"
 
 
 def test_app_runtime_rejects_unrouted_tool_call_classifier_model() -> None:
@@ -99,7 +117,9 @@ def test_app_runtime_rejects_unrouted_tool_call_classifier_model() -> None:
 
     with pytest.raises(ValueError, match="tool_call_classifier_model"):
         _create_tool_call_classifier(
-            _settings(tool_call_classifier_model="lightning-ai/gpt-oss-20b"),
+            _settings(
+                tool_call_classifier_model="lightning/lightning-ai/gpt-oss-20b"
+            ),
             client,
         )
 
@@ -132,11 +152,11 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
         llm_lightning_api_key="lightning-key",
         runtime_model_profiles={
             "plap/standard": _profile_config(
-                main_model="lightning-ai/gpt-oss-20b",
-                main_debate_model="lightning-ai/gpt-oss-120b",
-                reviewer_model="lightning-ai/gpt-oss-20b",
-                arbitrator_model="lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning-ai/llama-3.3-70b",
+                main_model="lightning/lightning-ai/gpt-oss-20b",
+                main_debate_model="lightning/lightning-ai/gpt-oss-120b",
+                reviewer_model="lightning/lightning-ai/gpt-oss-20b",
+                arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
+                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
             )
         },
     )
@@ -144,9 +164,12 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap/standard"]
-    assert profile.main_model == "lightning-ai/gpt-oss-20b"
-    assert profile.main_debate_model == "lightning-ai/gpt-oss-120b"
-    assert profile.reasoning_summarizer_model == "lightning-ai/llama-3.3-70b"
+    assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
+    assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
+    assert (
+        profile.reasoning_summarizer_model
+        == "lightning/lightning-ai/llama-3.3-70b"
+    )
 
 
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
@@ -154,11 +177,11 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
         llm_lightning_api_key="lightning-key",
         runtime_model_profiles={
             "plap/standard": _profile_config(
-                main_model="lightning-ai/gpt-oss-20b",
+                main_model="lightning/lightning-ai/gpt-oss-20b",
                 main_debate_model="openai/gpt-oss-120b",
-                reviewer_model="lightning-ai/gpt-oss-20b",
-                arbitrator_model="lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning-ai/llama-3.3-70b",
+                reviewer_model="lightning/lightning-ai/gpt-oss-20b",
+                arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
+                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
             )
         },
     )
@@ -171,11 +194,11 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     settings = _settings(
         runtime_model_profiles={
             "plap/standard": _profile_config(
-                main_model="lightning-ai/gpt-oss-20b",
-                main_debate_model="lightning-ai/gpt-oss-120b",
-                reviewer_model="lightning-ai/gpt-oss-20b",
-                arbitrator_model="lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning-ai/llama-3.3-70b",
+                main_model="lightning/lightning-ai/gpt-oss-20b",
+                main_debate_model="lightning/lightning-ai/gpt-oss-120b",
+                reviewer_model="lightning/lightning-ai/gpt-oss-20b",
+                arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
+                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
             )
         },
     )
@@ -183,11 +206,11 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     profile = _resolve_runtime_model_profile(settings, "plap/standard")
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
-    assert profile.main_model == "lightning-ai/gpt-oss-20b"
+    assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     with pytest.raises(ValueError, match="model is required"):
         _resolve_runtime_model_profile(settings, None)
     with pytest.raises(ValueError, match="unknown runtime model"):
-        _resolve_runtime_model_profile(settings, "lightning-ai/gpt-oss-20b")
+        _resolve_runtime_model_profile(settings, "lightning/lightning-ai/gpt-oss-20b")
 
 
 def _settings(**overrides: object) -> Settings:

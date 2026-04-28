@@ -26,22 +26,7 @@ class Settings(BaseSettings):
     llm_lightning_api_key: str | None = None
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None
-    llm_lightning_model_prefixes: list[str] = Field(
-        default_factory=lambda: ["lightning-ai/"]
-    )
-    llm_novita_model_prefixes: list[str] = Field(
-        default_factory=lambda: [
-            "deepseek/",
-            "minimax/",
-            "moonshotai/",
-            "openai/",
-            "qwen/",
-            "zai-org/",
-        ]
-    )
-    llm_fireworks_model_prefixes: list[str] = Field(
-        default_factory=lambda: ["accounts/fireworks/"]
-    )
+    llm_crof_api_key: str | None = None
     tool_classifier_model: str | None = None
     tool_call_classifier_model: str | None = None
     tool_classifier_max_concurrency: int = 4
@@ -66,15 +51,12 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "llm_lightning_model_prefixes",
-        "llm_novita_model_prefixes",
-        "llm_fireworks_model_prefixes",
         "web_search_mcp_args",
         "web_search_mcp_tool_names",
         mode="before",
     )
     @classmethod
-    def split_model_prefixes(cls, value: Any) -> Any:
+    def split_comma_separated_values(cls, value: Any) -> Any:
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
