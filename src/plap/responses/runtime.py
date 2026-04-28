@@ -18,7 +18,7 @@ from plap.responses.tools.compress import (
     compress_tool,
 )
 from plap.responses.tools.web_search import (
-    IWebSearchToolProvider,
+    IMCPToolProvider,
     web_search_policy,
 )
 
@@ -29,7 +29,7 @@ async def prepare_tools(
     request: ResponseCreateRequest,
     ingested: IngestedQueues,
     resolver: IToolPolicyResolver,
-    web_search_tool_provider: IWebSearchToolProvider | None = None,
+    web_search_tool_provider: IMCPToolProvider | None = None,
 ) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy]]:
     client_tools = _client_tools(request.tools or ())
 

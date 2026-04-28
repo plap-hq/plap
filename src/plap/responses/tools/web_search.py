@@ -11,13 +11,13 @@ from plap.responses.tools.policy import ToolPolicy
 
 
 @runtime_checkable
-class IWebSearchToolProvider(Protocol):
+class IMCPToolProvider(Protocol):
     async def tools(self) -> tuple[FunctionTool, ...]: ...
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
 
 
-class MCPWebSearchToolProvider(IWebSearchToolProvider):
+class MCPToolProvider(IMCPToolProvider):
     def __init__(
         self,
         transport: object,
@@ -38,11 +38,11 @@ class MCPWebSearchToolProvider(IWebSearchToolProvider):
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if self._tool_names and name not in self._tool_names:
-            raise ValueError(f"web search MCP tool is not enabled: {name}")
+            raise ValueError(f"MCP tool is not enabled: {name}")
         async with Client(self._transport) as client:
             result = await client.call_tool(name, arguments)
         if result.is_error:
-            raise RuntimeError(_mcp_call_result_text(result) or "web search MCP failed")
+            raise RuntimeError(_mcp_call_result_text(result) or "MCP tool call failed")
         return _mcp_call_result_text(result)
 
 

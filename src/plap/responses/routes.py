@@ -36,7 +36,7 @@ from plap.responses.stubs import (
     build_stub_response,
 )
 from plap.responses.tools import IToolPolicyResolver
-from plap.responses.tools.web_search import IWebSearchToolProvider
+from plap.responses.tools.web_search import IMCPToolProvider
 
 
 async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
@@ -51,7 +51,7 @@ async def create_response(
     auth_context: AuthContext,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
-    web_search_tool_provider: IWebSearchToolProvider | None,
+    web_search_tool_provider: IMCPToolProvider | None,
 ) -> object:
     _ = auth_context
     ingested = await ingest_response_request(data, keyring=sealing_keyring)

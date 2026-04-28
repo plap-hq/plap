@@ -35,12 +35,8 @@ class Settings(BaseSettings):
     runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(
         default_factory=dict
     )
-    web_search_brave_api_key: str | None = None
     web_search_mcp_url: str | None = None
-    web_search_mcp_command: str = "npx"
-    web_search_mcp_args: list[str] = Field(
-        default_factory=lambda: ["-y", "@brave/brave-search-mcp-server"]
-    )
+    web_search_mcp_config: dict[str, Any] | None = None
     web_search_mcp_tool_names: list[str] | None = None
 
     @field_validator("sealing_keys", mode="before")
@@ -51,7 +47,6 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "web_search_mcp_args",
         "web_search_mcp_tool_names",
         mode="before",
     )

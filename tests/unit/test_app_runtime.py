@@ -20,7 +20,7 @@ from plap.responses.tools import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.web_search import MCPWebSearchToolProvider
+from plap.responses.tools.web_search import MCPToolProvider
 from plap.settings import RuntimeModelProfileConfig, Settings
 
 
@@ -128,15 +128,22 @@ def test_app_runtime_omits_web_search_provider_without_config() -> None:
     assert _create_web_search_tool_provider(_settings()) is None
 
 
-def test_app_runtime_builds_brave_web_search_provider_from_api_key() -> None:
+def test_app_runtime_builds_mcp_web_search_provider_from_config() -> None:
     provider = _create_web_search_tool_provider(
         _settings(
-            web_search_brave_api_key="brave-key",
-            web_search_mcp_tool_names=["brave_web_search"],
+            web_search_mcp_config={
+                "mcpServers": {
+                    "search": {
+                        "command": "search-server",
+                        "args": ["--stdio"],
+                    }
+                }
+            },
+            web_search_mcp_tool_names=["search_web"],
         )
     )
 
-    assert isinstance(provider, MCPWebSearchToolProvider)
+    assert isinstance(provider, MCPToolProvider)
 
 
 def test_app_runtime_builds_web_search_provider_from_mcp_url() -> None:
@@ -144,7 +151,7 @@ def test_app_runtime_builds_web_search_provider_from_mcp_url() -> None:
         _settings(web_search_mcp_url="http://localhost:8765/mcp")
     )
 
-    assert isinstance(provider, MCPWebSearchToolProvider)
+    assert isinstance(provider, MCPToolProvider)
 
 
 def test_app_runtime_validates_synthetic_model_profiles() -> None:

@@ -37,8 +37,8 @@ from plap.responses.tools import (
     ToolPolicyError,
 )
 from plap.responses.tools.web_search import (
-    IWebSearchToolProvider,
-    MCPWebSearchToolProvider,
+    IMCPToolProvider,
+    MCPToolProvider,
 )
 from plap.settings import RuntimeModelProfileConfig, Settings, get_settings
 
@@ -233,15 +233,15 @@ def _create_tool_call_classifier(
 
 def _create_web_search_tool_provider(
     settings: Settings,
-) -> IWebSearchToolProvider | None:
+) -> IMCPToolProvider | None:
     if settings.web_search_mcp_url:
-        return MCPWebSearchToolProvider(
+        return MCPToolProvider(
             settings.web_search_mcp_url,
             tool_names=settings.web_search_mcp_tool_names,
         )
-    if settings.web_search_brave_api_key:
-        return MCPWebSearchToolProvider(
-            _brave_mcp_config(settings),
+    if settings.web_search_mcp_config:
+        return MCPToolProvider(
+            settings.web_search_mcp_config,
             tool_names=settings.web_search_mcp_tool_names,
         )
     return None
@@ -273,23 +273,6 @@ def _resolve_runtime_model_profile(
     if profile is None:
         raise ValueError(f"unknown runtime model: {model!r}")
     return profile
-
-
-def _brave_mcp_config(settings: Settings) -> dict[str, Any]:
-    env = {"BRAVE_API_KEY": settings.web_search_brave_api_key}
-    if settings.web_search_mcp_tool_names:
-        env["BRAVE_MCP_ENABLED_TOOLS"] = ",".join(
-            settings.web_search_mcp_tool_names
-        )
-    return {
-        "mcpServers": {
-            "brave": {
-                "command": settings.web_search_mcp_command,
-                "args": settings.web_search_mcp_args,
-                "env": env,
-            }
-        }
-    }
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:

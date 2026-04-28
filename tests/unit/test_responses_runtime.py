@@ -13,16 +13,16 @@ from plap.responses.runtime import (
     resolve_tool_calls,
 )
 from plap.responses.tools import (
+    IMCPToolProvider,
     IToolCallPolicyResolver,
     IToolPolicyResolver,
-    IWebSearchToolProvider,
     ToolCall,
     ToolPolicy,
     ToolPolicyError,
 )
 
-BRAVE_WEB_SEARCH_TOOL_NAME = "brave_web_search"
-BRAVE_NEWS_SEARCH_TOOL_NAME = "brave_news_search"
+MCP_SEARCH_TOOL_NAME = "search_web"
+MCP_NEWS_TOOL_NAME = "search_news"
 
 
 async def test_prepare_tools_injects_compress_and_classifies_client_tools() -> None:
@@ -64,12 +64,12 @@ async def test_prepare_tools_adds_web_search_only_when_requested() -> None:
 
     assert [tool.name for tool in tools] == [
         "read_file",
-        BRAVE_WEB_SEARCH_TOOL_NAME,
-        BRAVE_NEWS_SEARCH_TOOL_NAME,
+        MCP_SEARCH_TOOL_NAME,
+        MCP_NEWS_TOOL_NAME,
         COMPRESS_TOOL_NAME,
     ]
-    assert policies[BRAVE_WEB_SEARCH_TOOL_NAME].source == "server"
-    assert policies[BRAVE_WEB_SEARCH_TOOL_NAME].effect_class == "safe"
+    assert policies[MCP_SEARCH_TOOL_NAME].source == "server"
+    assert policies[MCP_SEARCH_TOOL_NAME].effect_class == "safe"
 
 
 async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> None:
@@ -93,7 +93,7 @@ async def test_prepare_tools_rejects_client_server_name_collision() -> None:
         await prepare_tools(
             ResponseCreateRequest(
                 tools=[
-                    _tool(BRAVE_WEB_SEARCH_TOOL_NAME),
+                    _tool(MCP_SEARCH_TOOL_NAME),
                     WebSearchTool(type="web_search"),
                 ]
             ),
@@ -119,7 +119,7 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
         [
             ChatToolCall(
                 id="call_1",
-                name=BRAVE_WEB_SEARCH_TOOL_NAME,
+                name=MCP_SEARCH_TOOL_NAME,
                 arguments='{"query":"x"}',
             ),
             ChatToolCall(id="call_2", name="read_file", arguments='{"path":"a"}'),
@@ -131,7 +131,7 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
     )
 
     assert [policy.name for policy in resolved] == [
-        BRAVE_WEB_SEARCH_TOOL_NAME,
+        MCP_SEARCH_TOOL_NAME,
         "read_file",
         "read_file",
     ]
@@ -155,7 +155,7 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
                 ChatToolCall(id="call_1", name="compress", arguments="{}"),
                 ChatToolCall(
                     id="call_2",
-                    name=BRAVE_WEB_SEARCH_TOOL_NAME,
+                    name=MCP_SEARCH_TOOL_NAME,
                     arguments='{"query":"x"}',
                 ),
             ],
@@ -201,11 +201,11 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
         )
 
 
-class _FakeWebSearchProvider(IWebSearchToolProvider):
+class _FakeWebSearchProvider(IMCPToolProvider):
     async def tools(self) -> tuple[FunctionTool, ...]:
         return (
-            _tool(BRAVE_WEB_SEARCH_TOOL_NAME),
-            _tool(BRAVE_NEWS_SEARCH_TOOL_NAME),
+            _tool(MCP_SEARCH_TOOL_NAME),
+            _tool(MCP_NEWS_TOOL_NAME),
         )
 
     async def call_tool(self, name: str, arguments: dict[str, object]) -> str:

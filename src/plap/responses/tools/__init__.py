@@ -41,8 +41,8 @@ from plap.responses.tools.policy import (
 )
 from plap.responses.tools.repository import ToolClassificationRepository
 from plap.responses.tools.web_search import (
-    IWebSearchToolProvider,
-    MCPWebSearchToolProvider,
+    IMCPToolProvider,
+    MCPToolProvider,
     web_search_policy,
 )
 
@@ -56,14 +56,14 @@ __all__ = [
     "CachedToolPolicyResolver",
     "ClassificationL1Cache",
     "EffectClass",
+    "IMCPToolProvider",
     "IToolCallClassifier",
     "IToolCallPolicyResolver",
     "IToolClassifier",
     "IToolPolicyResolver",
-    "IWebSearchToolProvider",
     "LLMToolCallClassifier",
     "LLMToolClassifier",
-    "MCPWebSearchToolProvider",
+    "MCPToolProvider",
     "StaticToolCallPolicyResolver",
     "StaticToolPolicyResolver",
     "ToolCall",

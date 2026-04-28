@@ -30,7 +30,7 @@ from plap.responses.tools import (
     StaticToolPolicyResolver,
 )
 from plap.responses.tools.repository import ToolClassificationRepository
-from plap.responses.tools.web_search import IWebSearchToolProvider
+from plap.responses.tools.web_search import IMCPToolProvider
 from plap.settings import Settings
 
 
@@ -46,7 +46,7 @@ def provide_sealing_keyring(
 
 def provide_web_search_tool_provider(
     request: Request[Any, Any, Any],
-) -> IWebSearchToolProvider | None:
+) -> IMCPToolProvider | None:
     return request.app.state.web_search_tool_provider
 
 
