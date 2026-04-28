@@ -12,7 +12,7 @@ from plap.llms.chat import (
     ChatMessage,
     IChatCompletionClient,
 )
-from plap.responses.contracts import FunctionTool, WebSearchTool
+from plap.responses.contracts import FunctionTool
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -22,8 +22,8 @@ from plap.responses.tools import (
     LLMToolClassifier,
     StaticToolCallPolicyResolver,
     StaticToolPolicyResolver,
+    ToolCall,
     ToolCallClassification,
-    ToolCallPolicy,
     ToolCallSignature,
     ToolClassification,
     ToolPolicy,
@@ -280,15 +280,11 @@ async def test_llm_tool_call_classifier_malformed_json_returns_unknown() -> None
     assert result.confidence == 0.0
 
 
-async def test_static_policy_resolver_uses_registry_and_unknown_client_tools() -> None:
-    policies = await StaticToolPolicyResolver().resolve(
-        [_read_file_tool(), WebSearchTool(type="web_search")]
-    )
+async def test_static_policy_resolver_returns_unknown_client_tools() -> None:
+    policies = await StaticToolPolicyResolver().resolve([_read_file_tool()])
 
     assert policies["read_file"].source == "client"
     assert policies["read_file"].effect_class == "unknown"
-    assert policies["web_search"].source == "server"
-    assert policies["web_search"].effect_class == "safe"
 
 
 async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> (
@@ -315,14 +311,11 @@ async def test_cached_policy_resolver_classifies_client_tools() -> None:
     classifier = _RecordingClassifier()
     resolver = CachedToolPolicyResolver(_MemoryClassificationRepository(), classifier)
 
-    policies = await resolver.resolve(
-        [_read_file_tool(), _list_files_tool(), WebSearchTool(type="web_search")]
-    )
+    policies = await resolver.resolve([_read_file_tool(), _list_files_tool()])
 
     assert policies["read_file"].effect_class == "safe"
     assert policies["list_files"].effect_class == "safe"
     assert policies["read_file"].classification is not None
-    assert policies["web_search"].source == "server"
     assert classifier.calls == 1
 
 
@@ -380,9 +373,9 @@ async def test_static_tool_call_policy_resolver_maps_contextual_to_unknown() -> 
 
     policies = await resolver.resolve(
         [
-            ToolCallPolicy(
+            ToolCall(
                 tool=_bash_tool(),
-                tool_policy=ToolPolicy(
+                policy=ToolPolicy(
                     name="bash", source="client", effect_class="contextual"
                 ),
                 arguments='{"command":"ls"}',
@@ -404,9 +397,9 @@ async def test_cached_tool_call_policy_resolver_skips_non_contextual_policies() 
 
     policies = await resolver.resolve(
         [
-            ToolCallPolicy(
+            ToolCall(
                 tool=_read_file_tool(),
-                tool_policy=ToolPolicy(
+                policy=ToolPolicy(
                     name="read_file",
                     source="client",
                     effect_class="safe",
@@ -428,9 +421,9 @@ async def test_cached_tool_call_policy_resolver_classifies_contextual_calls() ->
     resolver = CachedToolCallPolicyResolver(repository, classifier)
 
     calls = [
-        ToolCallPolicy(
+        ToolCall(
             tool=_bash_tool(),
-            tool_policy=ToolPolicy(
+            policy=ToolPolicy(
                 name="bash", source="client", effect_class="contextual"
             ),
             arguments='{"command":"ls"}',
@@ -455,25 +448,25 @@ async def test_cached_tool_call_policy_resolver_preserves_order() -> None:
 
     policies = await resolver.resolve(
         [
-            ToolCallPolicy(
+            ToolCall(
                 tool=_read_file_tool(),
-                tool_policy=ToolPolicy(
+                policy=ToolPolicy(
                     name="read_file",
                     source="client",
                     effect_class="safe",
                 ),
                 arguments='{"path":"README.md"}',
             ),
-            ToolCallPolicy(
+            ToolCall(
                 tool=_bash_tool(),
-                tool_policy=ToolPolicy(
+                policy=ToolPolicy(
                     name="bash", source="client", effect_class="contextual"
                 ),
                 arguments='{"command":"ls"}',
             ),
-            ToolCallPolicy(
+            ToolCall(
                 tool=_list_files_tool(),
-                tool_policy=ToolPolicy(
+                policy=ToolPolicy(
                     name="list_files",
                     source="client",
                     effect_class="mutation",
@@ -503,9 +496,9 @@ async def test_cached_tool_call_policy_resolver_uses_shared_empty_l1() -> None:
     )
 
     calls = [
-        ToolCallPolicy(
+        ToolCall(
             tool=_bash_tool(),
-            tool_policy=ToolPolicy(
+            policy=ToolPolicy(
                 name="bash",
                 source="client",
                 effect_class="contextual",

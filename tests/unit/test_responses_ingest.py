@@ -10,7 +10,6 @@ from nacl.secret import Aead
 
 from plap.keyring import SealingKeyring, purpose_label
 from plap.responses.contracts import (
-    FunctionTool,
     ReasoningItem,
     RequestCompactionItem,
     RequestFunctionCallItem,
@@ -18,7 +17,6 @@ from plap.responses.contracts import (
     RequestMessageItem,
     ResponseCreateRequest,
     SummaryTextContent,
-    WebSearchTool,
 )
 from plap.responses.ingest import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
@@ -43,7 +41,6 @@ from plap.responses.ingest.sealing import (
     COMPACTION_PURPOSE,
     PAYLOAD_FORMAT_VERSION,
 )
-from plap.responses.tools import StaticToolPolicyResolver
 
 
 async def ingest_response_request(
@@ -54,7 +51,6 @@ async def ingest_response_request(
     return await _ingest_response_request(
         request,
         keyring=keyring,
-        tool_policy_resolver=StaticToolPolicyResolver(),
     )
 
 
@@ -589,16 +585,6 @@ async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
         )
 
 
-async def test_ingestion_classifies_declared_tools_first() -> None:
-    result = await ingest_response_request(
-        _request(tools=[_read_file_tool(), WebSearchTool(type="web_search")]),
-        keyring=_keyring(),
-    )
-
-    assert result.tool_policies["read_file"].effect_class == "unknown"
-    assert result.tool_policies["web_search"].effect_class == "safe"
-
-
 def test_payload_domain_objects_do_not_expose_version_or_type_truths() -> None:
     assert "version" not in CompactionPayload.__dataclass_fields__
     assert "type" not in CompactionPayload.__dataclass_fields__
@@ -790,16 +776,6 @@ def _tool_call(upstream_id: str) -> dict[str, object]:
         "type": "function",
         "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
     }
-
-
-def _read_file_tool() -> FunctionTool:
-    return FunctionTool(
-        description="Read a file.",
-        name="read_file",
-        parameters={"type": "object"},
-        strict=True,
-        type="function",
-    )
 
 
 def _seal_raw_payload(purpose: str, value: object) -> str:

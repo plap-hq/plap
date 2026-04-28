@@ -9,6 +9,7 @@ from litestar.response import ServerSentEvent
 from pydantic import ValidationError
 
 from plap.auth import AuthContext
+from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
@@ -24,6 +25,8 @@ from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
+from plap.responses.ingest import ingest_response_request
+from plap.responses.runtime import prepare_tools
 from plap.responses.stubs import (
     build_compacted_response,
     build_deleted_response,
@@ -46,11 +49,13 @@ async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
 async def create_response(
     data: ResponseCreateRequest,
     auth_context: AuthContext,
+    sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
 ) -> object:
     _ = auth_context
     try:
-        await tool_policy_resolver.resolve(data.tools or [])
+        ingested = await ingest_response_request(data, keyring=sealing_keyring)
+        await prepare_tools(data, ingested, tool_policy_resolver)
     except ToolPolicyError as exc:
         raise ValidationException(str(exc)) from exc
     response = build_stub_response(data)

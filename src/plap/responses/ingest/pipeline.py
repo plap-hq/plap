@@ -29,9 +29,6 @@ from plap.responses.ingest.types import (
     Side,
     SideMessage,
 )
-from plap.responses.tools import (
-    IToolPolicyResolver,
-)
 
 type _EventKind = Literal[
     "message",
@@ -47,9 +44,7 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
-    tool_policy_resolver: IToolPolicyResolver,
 ) -> IngestedQueues:
-    tool_policies = await tool_policy_resolver.resolve(request.tools or [])
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
     decoded, in_temp_debate = _decode_sealed_items(remaining, keyring=keyring)
@@ -65,7 +60,6 @@ async def ingest_response_request(
         in_temp_debate=in_temp_debate,
         compaction=compaction,
         cursors=queues.cursors,
-        tool_policies=tool_policies,
     )
 
 

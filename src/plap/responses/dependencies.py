@@ -12,6 +12,7 @@ from plap.auth.dependencies import (
     provide_socket_api_key_manager,
     provide_socket_auth_context,
 )
+from plap.keyring import SealingKeyring
 from plap.llms.dependencies import (
     provide_request_chat_completion_client,
     provide_socket_chat_completion_client,
@@ -34,6 +35,12 @@ from plap.settings import Settings
 
 def provide_settings(request: Request[Any, Any, Any]) -> Settings:
     return request.app.state.settings
+
+
+def provide_sealing_keyring(
+    request: Request[Any, Any, Any],
+) -> SealingKeyring:
+    return request.app.state.sealing_keyring
 
 
 async def provide_tool_policy_resolver(
@@ -79,6 +86,11 @@ HTTP_ROUTE_DEPENDENCIES = {
     "auth_context": Provide(provide_request_auth_context),
     "db_session": Provide(provide_request_db_session),
     "settings": Provide(provide_settings, use_cache=True, sync_to_thread=False),
+    "sealing_keyring": Provide(
+        provide_sealing_keyring,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
     "chat_completion_client": Provide(
         provide_request_chat_completion_client,
         use_cache=True,

@@ -8,7 +8,7 @@ import blake3
 import msgspec
 from cachetools import LRUCache
 
-from plap.responses.contracts import FunctionTool, SupportedTool, WebSearchTool
+from plap.responses.contracts import FunctionTool
 
 type EffectClass = Literal["safe", "mutation", "contextual", "unknown"]
 type ToolCallEffectClass = Literal["safe", "mutation", "unknown"]
@@ -63,9 +63,9 @@ type ToolCallClassificationL1Cache = MutableMapping[
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCallPolicy:
+class ToolCall:
     tool: FunctionTool
-    tool_policy: ToolPolicy
+    policy: ToolPolicy
     arguments: str
 
 
@@ -98,7 +98,7 @@ class ToolPolicy:
 @runtime_checkable
 class IToolPolicyResolver(Protocol):
     async def resolve(
-        self, tools: Sequence[SupportedTool]
+        self, tools: Sequence[FunctionTool]
     ) -> dict[str, ToolPolicy]: ...
 
 
@@ -127,21 +127,12 @@ class IToolCallClassifier(Protocol):
 @runtime_checkable
 class IToolCallPolicyResolver(Protocol):
     async def resolve(
-        self, calls: Sequence[ToolCallPolicy]
+        self, calls: Sequence[ToolCall]
     ) -> tuple[ToolPolicy, ...]: ...
 
 
 class ToolPolicyError(ValueError):
     pass
-
-
-SERVER_TOOL_POLICIES: dict[str, ToolPolicy] = {
-    "web_search": ToolPolicy(
-        name="web_search",
-        source="server",
-        effect_class="safe",
-    )
-}
 
 
 def normalize_function_tool(tool: FunctionTool) -> dict[str, object]:
@@ -189,10 +180,6 @@ def tool_arguments_hash(arguments: Any) -> bytes:
     ).digest()
 
 
-def get_server_tool_policy(name: str) -> ToolPolicy | None:
-    return SERVER_TOOL_POLICIES.get(name)
-
-
 class CachedToolPolicyResolver(IToolPolicyResolver):
     def __init__(
         self,
@@ -210,35 +197,24 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             else LRUCache(maxsize=l1_maxsize)
         )
 
-    async def resolve(self, tools: Sequence[SupportedTool]) -> dict[str, ToolPolicy]:
+    async def resolve(self, tools: Sequence[FunctionTool]) -> dict[str, ToolPolicy]:
         policies: dict[str, ToolPolicy] = {}
         signatures_by_name: dict[str, bytes] = {}
         client_signatures_by_name: dict[str, ToolSignature] = {}
         for tool in tools:
-            if isinstance(tool, WebSearchTool):
-                policy = get_server_tool_policy(tool.type)
-                if policy is None:
-                    raise ToolPolicyError(f"unknown server tool: {tool.type}")
-                policies[tool.type] = policy
-                continue
-
-            if isinstance(tool, FunctionTool):
-                signature = function_tool_signature(tool)
-                previous_hash = signatures_by_name.get(tool.name)
-                if (
-                    previous_hash is not None
-                    and previous_hash != signature.signature_hash
-                ):
-                    raise ToolPolicyError(
-                        "duplicate function tool name with different signature: "
-                        f"{tool.name}"
-                    )
-                signatures_by_name[tool.name] = signature.signature_hash
-                if (
-                    tool.name not in policies
-                    and tool.name not in client_signatures_by_name
-                ):
-                    client_signatures_by_name[tool.name] = signature
+            signature = function_tool_signature(tool)
+            previous_hash = signatures_by_name.get(tool.name)
+            if (
+                previous_hash is not None
+                and previous_hash != signature.signature_hash
+            ):
+                raise ToolPolicyError(
+                    "duplicate function tool name with different signature: "
+                    f"{tool.name}"
+                )
+            signatures_by_name[tool.name] = signature.signature_hash
+            if tool.name not in client_signatures_by_name:
+                client_signatures_by_name[tool.name] = signature
         classifications: dict[bytes, ToolClassification] = {}
         l2_signatures: list[ToolSignature] = []
         for signature in client_signatures_by_name.values():
@@ -316,7 +292,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
         )
 
     async def resolve(
-        self, calls: Sequence[ToolCallPolicy]
+        self, calls: Sequence[ToolCall]
     ) -> tuple[ToolPolicy, ...]:
         resolved: list[ToolPolicy | None] = []
         contextual_by_index: dict[int, ToolCallSignature] = {}
@@ -324,8 +300,8 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
         classifications: dict[tuple[bytes, bytes], ToolCallClassification] = {}
 
         for call in calls:
-            if call.tool_policy.effect_class != "contextual":
-                resolved.append(call.tool_policy)
+            if call.policy.effect_class != "contextual":
+                resolved.append(call.policy)
                 continue
 
             call_signature = function_tool_call_signature(
@@ -397,7 +373,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             call = calls[index]
             resolved[index] = ToolPolicy(
                 name=call.tool.name,
-                source=call.tool_policy.source,
+                source=call.policy.source,
                 effect_class=classification.effect_class,
                 classification=classification,
             )
@@ -423,51 +399,45 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
 
 
 class StaticToolPolicyResolver(IToolPolicyResolver):
-    async def resolve(self, tools: Sequence[SupportedTool]) -> dict[str, ToolPolicy]:
+    async def resolve(self, tools: Sequence[FunctionTool]) -> dict[str, ToolPolicy]:
         policies: dict[str, ToolPolicy] = {}
         signatures_by_name: dict[str, bytes] = {}
         for tool in tools:
-            if isinstance(tool, WebSearchTool):
-                policy = get_server_tool_policy(tool.type)
-                if policy is not None:
-                    policies[tool.type] = policy
-                continue
-            if isinstance(tool, FunctionTool):
-                signature = function_tool_signature(tool)
-                previous_hash = signatures_by_name.get(tool.name)
-                if (
-                    previous_hash is not None
-                    and previous_hash != signature.signature_hash
-                ):
-                    raise ToolPolicyError(
-                        "duplicate function tool name with different signature: "
-                        f"{tool.name}"
-                    )
-                signatures_by_name[tool.name] = signature.signature_hash
-                policies.setdefault(
-                    tool.name,
-                    ToolPolicy(
-                        name=tool.name,
-                        source="client",
-                        effect_class="unknown",
-                    ),
+            signature = function_tool_signature(tool)
+            previous_hash = signatures_by_name.get(tool.name)
+            if (
+                previous_hash is not None
+                and previous_hash != signature.signature_hash
+            ):
+                raise ToolPolicyError(
+                    "duplicate function tool name with different signature: "
+                    f"{tool.name}"
                 )
+            signatures_by_name[tool.name] = signature.signature_hash
+            policies.setdefault(
+                tool.name,
+                ToolPolicy(
+                    name=tool.name,
+                    source="client",
+                    effect_class="unknown",
+                ),
+            )
         return policies
 
 
 class StaticToolCallPolicyResolver(IToolCallPolicyResolver):
     async def resolve(
-        self, calls: Sequence[ToolCallPolicy]
+        self, calls: Sequence[ToolCall]
     ) -> tuple[ToolPolicy, ...]:
         policies: list[ToolPolicy] = []
         for call in calls:
-            if call.tool_policy.effect_class != "contextual":
-                policies.append(call.tool_policy)
+            if call.policy.effect_class != "contextual":
+                policies.append(call.policy)
                 continue
             policies.append(
                 ToolPolicy(
                     name=call.tool.name,
-                    source=call.tool_policy.source,
+                    source=call.policy.source,
                     effect_class="unknown",
                 )
             )

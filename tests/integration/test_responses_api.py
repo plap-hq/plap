@@ -91,7 +91,7 @@ async def test_authenticated_routes_return_stubbed_contracts(
     assert input_tokens.json()["object"] == "response.input_tokens"
 
 
-async def test_create_response_resolves_tool_policies_without_changing_behavior(
+async def test_create_response_prepares_runtime_tools_without_changing_behavior(
     test_app,
     seeded_auth_data,
 ) -> None:

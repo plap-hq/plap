@@ -4,6 +4,11 @@ from plap.responses.tools.classify import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
+from plap.responses.tools.compress import (
+    COMPRESS_TOOL_NAME,
+    compress_policy,
+    compress_tool,
+)
 from plap.responses.tools.policy import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -15,10 +20,10 @@ from plap.responses.tools.policy import (
     IToolPolicyResolver,
     StaticToolCallPolicyResolver,
     StaticToolPolicyResolver,
+    ToolCall,
     ToolCallClassification,
     ToolCallClassificationL1Cache,
     ToolCallEffectClass,
-    ToolCallPolicy,
     ToolCallSignature,
     ToolClassification,
     ToolPolicy,
@@ -33,10 +38,17 @@ from plap.responses.tools.policy import (
     tool_arguments_hash,
 )
 from plap.responses.tools.repository import ToolClassificationRepository
+from plap.responses.tools.web_search import (
+    WEB_SEARCH_TOOL_NAME,
+    web_search_policy,
+    web_search_tool,
+)
 
 __all__ = [
+    "COMPRESS_TOOL_NAME",
     "TOOL_CALL_EFFECT_CLASSIFIER_PROMPT",
     "TOOL_EFFECT_CLASSIFIER_PROMPT",
+    "WEB_SEARCH_TOOL_NAME",
     "CachedToolCallPolicyResolver",
     "CachedToolPolicyResolver",
     "ClassificationL1Cache",
@@ -49,10 +61,10 @@ __all__ = [
     "LLMToolClassifier",
     "StaticToolCallPolicyResolver",
     "StaticToolPolicyResolver",
+    "ToolCall",
     "ToolCallClassification",
     "ToolCallClassificationL1Cache",
     "ToolCallEffectClass",
-    "ToolCallPolicy",
     "ToolCallSignature",
     "ToolClassification",
     "ToolClassificationRepository",
@@ -61,9 +73,13 @@ __all__ = [
     "ToolSignature",
     "ToolSource",
     "canonical_tool_arguments",
+    "compress_policy",
+    "compress_tool",
     "function_tool_call_signature",
     "function_tool_signature",
     "normalize_function_tool",
     "signature_hash_hex",
     "tool_arguments_hash",
+    "web_search_policy",
+    "web_search_tool",
 ]

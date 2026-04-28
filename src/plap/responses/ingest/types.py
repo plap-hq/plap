@@ -6,8 +6,6 @@ from typing import Any, Literal
 import blake3
 import msgspec
 
-from plap.responses.tools import ToolPolicy
-
 type Side = Literal["main", "reviewer", "arbitrator"]
 type Namespace = Literal["m", "s"]
 
@@ -78,7 +76,6 @@ class IngestedQueues:
     in_temp_debate: bool
     compaction: CompactionPayload | None
     cursors: dict[str, int]
-    tool_policies: dict[str, ToolPolicy]
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
 
 
