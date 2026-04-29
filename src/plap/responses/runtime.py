@@ -1,27 +1,55 @@
 from __future__ import annotations
 
+import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any
 
 import anyio
-from anyio.abc import ObjectSendStream
 
 from plap.keyring import SealingKeyring
-from plap.llms.chat import ChatToolCall
+from plap.llms.chat import (
+    ChatCompletionRequest,
+    ChatFunctionTool,
+    ChatMessage,
+    ChatResponseFormat,
+    ChatTool,
+    ChatToolCall,
+    ChatToolChoiceFunction,
+    ChatUsage,
+    IChatCompletionClient,
+)
 from plap.responses.contracts import (
     FunctionTool,
-    ResponseCompletedEvent,
+    OutputTextContent,
+    ReasoningItem,
+    ReasoningSummary,
     ResponseCreateRequest,
-    ResponseObject,
+    ResponseFunctionCallItem,
+    ResponseMessageItem,
     ResponseStreamEvent,
+    ResponseUsage,
+    ResponseUsageInputTokensDetails,
+    ResponseUsageOutputTokensDetails,
+    TextFormatJSONObject,
+    TextFormatJSONSchema,
+    ToolChoiceFunction,
     WebSearchTool,
 )
-from plap.responses.events import build_stream_events
 from plap.responses.ingest import (
-    IngestedQueues,
+    ChatMessageSpan,
     IngestionError,
+    ReasoningPayload,
+    SealedCallID,
     ingest_response_request,
 )
-from plap.responses.objects import build_response_object
+from plap.responses.ingest.sealing import (
+    content_hash,
+    content_hash_prefix,
+    seal_call_id,
+    seal_reasoning_payload,
+)
+from plap.responses.io import ResponseEventIO
+from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
@@ -30,18 +58,20 @@ from plap.responses.tools import (
     ToolPolicyError,
 )
 from plap.responses.tools.compress import (
+    COMPRESS_DEVELOPER_PROMPT,
     COMPRESS_TOOL_NAME,
     compress_policy,
     compress_tool,
 )
-from plap.responses.tools.web_search import (
-    IMCPToolProvider,
-    web_search_policy,
-)
+from plap.responses.tools.web_search import IMCPToolProvider, web_search_policy
 from plap.settings import RuntimeModelProfileConfig, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
 
+MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
+Be accurate, direct, and helpful. Follow the user's instructions. Ask clarifying
+questions when needed. Use tools when they help you answer better. Do not invent
+facts, tool results, or citations. When you make a mistake, correct it plainly."""
 
 async def stream_response_events(
     request: ResponseCreateRequest,
@@ -50,9 +80,10 @@ async def stream_response_events(
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
+    chat_completion_client: IChatCompletionClient,
+    reasoning_summarizer: IReasoningSummarizer,
     web_search_tool_provider: IMCPToolProvider | None = None,
 ) -> AsyncIterator[ResponseStreamEvent]:
-    _ = tool_call_policy_resolver
     send, receive = anyio.create_memory_object_stream[ResponseStreamEvent](16)
     producer_error: Exception | None = None
 
@@ -60,16 +91,36 @@ async def stream_response_events(
         nonlocal producer_error
         async with send:
             try:
-                await _produce_response_events(
-                    send,
-                    request,
-                    settings=settings,
-                    sealing_keyring=sealing_keyring,
-                    tool_policy_resolver=tool_policy_resolver,
-                    web_search_tool_provider=web_search_tool_provider,
-                )
+                async with anyio.create_task_group() as task_group:
+                    out = ResponseEventIO(
+                        request=request,
+                        reasoning_summarizer=reasoning_summarizer,
+                        reasoning_summarizer_model=_runtime_model_profile(
+                            settings,
+                            request,
+                        ).reasoning_summarizer_model,
+                        reasoning_summary_mode=_reasoning_summary_mode(request),
+                        send=send,
+                    )
+                    out.start(task_group)
+                    try:
+                        await _run_response(
+                            out,
+                            request,
+                            settings=settings,
+                            sealing_keyring=sealing_keyring,
+                            tool_policy_resolver=tool_policy_resolver,
+                            tool_call_policy_resolver=tool_call_policy_resolver,
+                            chat_completion_client=chat_completion_client,
+                            web_search_tool_provider=web_search_tool_provider,
+                        )
+                    finally:
+                        await out.aclose()
             except Exception as exc:
-                producer_error = exc
+                if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+                    producer_error = exc.exceptions[0]
+                else:
+                    producer_error = exc
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(produce)
@@ -80,22 +131,15 @@ async def stream_response_events(
         raise producer_error
 
 
-def completed_response_from_events(
-    events: Sequence[ResponseStreamEvent],
-) -> ResponseObject:
-    for event in reversed(events):
-        if isinstance(event, ResponseCompletedEvent):
-            return event.response
-    raise RuntimeError("response stream did not complete")
-
-
-async def _produce_response_events(
-    send: ObjectSendStream[ResponseStreamEvent],
+async def _run_response(
+    out: ResponseEventIO,
     request: ResponseCreateRequest,
     *,
     settings: Settings,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    chat_completion_client: IChatCompletionClient,
     web_search_tool_provider: IMCPToolProvider | None,
 ) -> None:
     profile = _runtime_model_profile(settings, request)
@@ -104,15 +148,194 @@ async def _produce_response_events(
         keyring=sealing_keyring,
         transcript_token_budget=profile.transcript_token_budget,
     )
-    await prepare_tools(
+
+    main_context = list(ingested.main_context)
+    main_context_temp = list(ingested.main_context_temp)
+    main_transcript = list(ingested.main_transcript)
+    reviewer = list(ingested.reviewer)
+    arbitrator = list(ingested.arbitrator)
+    cursors = dict(ingested.cursors)
+    continuation_side = ingested.continuation_side
+    in_temp_debate = ingested.in_temp_debate
+
+    _ = (
+        main_transcript,
+        main_context_temp,
+        reviewer,
+        arbitrator,
+        cursors,
+        continuation_side,
+        in_temp_debate,
+    )
+
+    base_tools, base_tool_policies = await prepare_tools(
         request,
-        ingested,
         tool_policy_resolver,
         web_search_tool_provider,
     )
-    response = build_response_object(request)
-    for event in build_stream_events(response):
-        await send.send(event)
+
+    effective_tools = [*base_tools]
+    effective_tool_policies = dict(base_tool_policies)
+
+    if in_temp_debate:
+        effective_tools = [
+            tool
+            for tool in effective_tools
+            if effective_tool_policies[tool.name].effect_class == "safe"
+        ]
+        effective_tool_policies = {
+            name: policy
+            for name, policy in effective_tool_policies.items()
+            if policy.effect_class == "safe"
+        }
+    else:
+        effective_tools.append(compress_tool())
+        effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
+
+    await out.created()
+    await out.in_progress()
+
+    developer_prompt_parts = [
+        MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
+    ]
+    if COMPRESS_TOOL_NAME in effective_tool_policies:
+        developer_prompt_parts.append(COMPRESS_DEVELOPER_PROMPT)
+    if request.instructions:
+        developer_prompt_parts.append(f"User instructions:\n{request.instructions}")
+
+    messages: list[ChatMessage] = [
+        ChatMessage(
+            role="developer",
+            content="\n\n".join(developer_prompt_parts),
+        )
+    ]
+    effective_main_context = [*main_context, *main_context_temp]
+    messages.extend(
+        _chat_message_from_dict(row.message) for row in effective_main_context
+    )
+
+    model_request = ChatCompletionRequest(
+        model=profile.main_model,
+        messages=messages,
+        tools=[_chat_tool(tool) for tool in effective_tools],
+        tool_choice=_chat_tool_choice(request),
+        parallel_tool_calls=request.parallel_tool_calls,
+        response_format=_chat_response_format(request),
+        max_completion_tokens=request.max_output_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        top_logprobs=request.top_logprobs,
+        reasoning_effort=request.reasoning.effort if request.reasoning else None,
+        prompt_cache_key=request.prompt_cache_key,
+        user=request.user,
+    )
+
+    result = await chat_completion_client.complete(model_request)
+
+    public_assistant_message: dict[str, Any] = {"role": "assistant"}
+    if result.message.content is not None:
+        public_assistant_message["content"] = result.message.content
+    elif (
+        result.message.reasoning_content
+        or result.message.reasoning_details
+        or result.message.tool_calls
+    ):
+        public_assistant_message["content"] = ""
+    assistant_hash = content_hash(public_assistant_message)
+
+    if result.message.tool_calls:
+        resolved_policies = await resolve_tool_calls(
+            result.message.tool_calls,
+            tools={tool.name: tool for tool in effective_tools},
+            tool_policies=effective_tool_policies,
+            resolver=tool_call_policy_resolver,
+        )
+        _reject_unsupported_tool_call_policies(resolved_policies)
+
+    if result.message.content is not None or (
+        result.message.reasoning_content
+        or result.message.reasoning_details
+        or result.message.tool_calls
+    ):
+        message_item = ResponseMessageItem(
+            content=[
+                OutputTextContent(
+                    text=result.message.content or "",
+                    type="output_text",
+                )
+            ],
+            id=f"msg_{secrets.token_urlsafe(18)}",
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        await out.output(message_item)
+
+    if result.message.reasoning_content or result.message.reasoning_details:
+        reasoning_message: dict[str, Any] = {"content_hash": assistant_hash}
+        if result.message.reasoning_content is not None:
+            reasoning_message["reasoning_content"] = result.message.reasoning_content
+        if result.message.reasoning_details is not None:
+            reasoning_message["reasoning_details"] = result.message.reasoning_details
+        reasoning_payload = ReasoningPayload(
+            side="main",
+            temp=False,
+            messages=(reasoning_message,),
+        )
+        reasoning_item = ReasoningItem(
+            encrypted_content=seal_reasoning_payload(
+                reasoning_payload,
+                keyring=sealing_keyring,
+            ),
+            id=f"rs_{secrets.token_urlsafe(18)}",
+            status="completed",
+            summary=[],
+            type="reasoning",
+        )
+        await out.output(
+            reasoning_item,
+            reasoning_side=reasoning_payload.side,
+            reasoning_messages=reasoning_payload.messages,
+        )
+
+    if result.message.tool_calls:
+        for index, call in enumerate(result.message.tool_calls):
+            function_call_item = ResponseFunctionCallItem(
+                arguments=call.arguments,
+                call_id=seal_call_id(
+                    SealedCallID(
+                        side="main",
+                        content_hash_prefix=content_hash_prefix(assistant_hash),
+                        tool_call_index=index,
+                        upstream_tool_call_id=call.id,
+                    ),
+                    keyring=sealing_keyring,
+                ),
+                id=f"fc_{secrets.token_urlsafe(18)}",
+                name=call.name,
+                status="completed",
+                type="function_call",
+            )
+            await out.output(function_call_item)
+
+    if result.message.content is not None or (
+        result.message.reasoning_content
+        or result.message.reasoning_details
+        or result.message.tool_calls
+    ):
+        next_ordinal = max((span.end for span in main_context), default=-1) + 1
+        main_context.append(
+            ChatMessageSpan(
+                start=next_ordinal,
+                end=next_ordinal,
+                message=public_assistant_message,
+            )
+        )
+
+    await out.completed(
+        service_tier=result.service_tier,
+        usage=_response_usage(result.usage),
+    )
 
 
 def _runtime_model_profile(
@@ -127,9 +350,14 @@ def _runtime_model_profile(
     return profile.for_service_tier(request.service_tier)
 
 
+def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary | None:
+    if request.reasoning is None:
+        return None
+    return request.reasoning.summary or request.reasoning.generate_summary
+
+
 async def prepare_tools(
     request: ResponseCreateRequest,
-    ingested: IngestedQueues,
     resolver: IToolPolicyResolver,
     web_search_tool_provider: IMCPToolProvider | None = None,
 ) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy]]:
@@ -141,20 +369,13 @@ async def prepare_tools(
             raise ToolPolicyError("web_search requested but no MCP provider configured")
         server_tools.extend(await web_search_tool_provider.tools())
 
-    if not ingested.in_temp_debate:
-        server_tools.append(compress_tool())
-
     _reject_server_name_collisions(client_tools, server_tools)
 
     tools = [*client_tools, *server_tools]
     tool_policies = await resolver.resolve(client_tools)
 
     for tool in server_tools:
-        if tool.name == COMPRESS_TOOL_NAME:
-            tool_policies[tool.name] = compress_policy()
-        else:
-            tool_policies[tool.name] = web_search_policy(tool.name)
-
+        tool_policies[tool.name] = web_search_policy(tool.name)
 
     return tuple(tools), tool_policies
 
@@ -200,6 +421,130 @@ async def resolve_tool_calls(
     if any(policy is None for policy in resolved):
         raise RuntimeError("tool call policy resolution did not produce all outputs")
     return tuple(policy for policy in resolved if policy is not None)
+
+
+def _chat_message_from_dict(message: Mapping[str, Any]) -> ChatMessage:
+    role = message.get("role")
+    if role not in {"system", "developer", "user", "assistant", "tool"}:
+        raise IngestionError("chat message role is invalid")
+    return ChatMessage(
+        role=role,
+        content=_message_content_text(message.get("content")),
+        name=_string_or_none(message.get("name")),
+        tool_call_id=_string_or_none(message.get("tool_call_id")),
+        tool_calls=_chat_tool_calls(message.get("tool_calls")),
+        reasoning_content=_string_or_none(message.get("reasoning_content")),
+        reasoning_details=_reasoning_details(message.get("reasoning_details")),
+    )
+
+
+def _chat_tool(tool: FunctionTool) -> ChatTool:
+    return ChatTool(
+        function=ChatFunctionTool(
+            description=tool.description,
+            name=tool.name,
+            parameters=tool.parameters,
+            strict=tool.strict,
+        )
+    )
+
+
+def _chat_tool_choice(request: ResponseCreateRequest):
+    choice = request.tool_choice
+    if isinstance(choice, ToolChoiceFunction):
+        return ChatToolChoiceFunction(name=choice.name)
+    return choice
+
+
+def _chat_response_format(request: ResponseCreateRequest) -> ChatResponseFormat | None:
+    if request.text is None or request.text.format is None:
+        return None
+    text_format = request.text.format
+    if isinstance(text_format, TextFormatJSONObject):
+        return ChatResponseFormat(type="json_object")
+    if isinstance(text_format, TextFormatJSONSchema):
+        return ChatResponseFormat(
+            description=text_format.description,
+            name=text_format.name,
+            schema=text_format.schema_,
+            strict=text_format.strict,
+            type="json_schema",
+        )
+    return ChatResponseFormat(type="text")
+
+
+def _response_usage(usage: ChatUsage | None) -> ResponseUsage | None:
+    if usage is None:
+        return None
+    return ResponseUsage(
+        input_tokens=usage.input_tokens,
+        input_tokens_details=ResponseUsageInputTokensDetails(
+            cached_tokens=usage.cached_tokens or 0
+        ),
+        output_tokens=usage.output_tokens,
+        output_tokens_details=ResponseUsageOutputTokensDetails(
+            reasoning_tokens=usage.reasoning_tokens or 0
+        ),
+        total_tokens=usage.total_tokens,
+    )
+
+
+def _reject_unsupported_tool_call_policies(
+    policies: Sequence[ToolPolicy],
+) -> None:
+    for policy in policies:
+        if policy.source == "server":
+            raise ToolPolicyError("server tool execution is not implemented")
+        if policy.effect_class not in {"safe", "visible"}:
+            raise ToolPolicyError("tool call requires unsupported policy path")
+
+
+def _chat_tool_calls(value: object) -> list[ChatToolCall] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise IngestionError("chat message tool_calls is invalid")
+    calls: list[ChatToolCall] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise IngestionError("chat message tool_call is invalid")
+        function = item.get("function")
+        if not isinstance(function, dict):
+            raise IngestionError("chat message tool_call function is invalid")
+        call_id = item.get("id")
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(call_id, str) or not isinstance(name, str):
+            raise IngestionError("chat message tool_call identity is invalid")
+        if not isinstance(arguments, str):
+            arguments = "{}"
+        calls.append(ChatToolCall(id=call_id, name=name, arguments=arguments))
+    return calls
+
+
+def _message_content_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [
+            item["text"]
+            for item in value
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        return "\n".join(parts) if parts else None
+    return str(value)
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _reasoning_details(value: object) -> list[dict[str, Any]] | None:
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return value
+    return None
 
 
 def _client_tools(tools: Sequence[object]) -> list[FunctionTool]:

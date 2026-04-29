@@ -31,7 +31,8 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     )
     assert created.object == "response"
     assert created.id.startswith("resp_")
-    assert created.output == []
+    assert created.output[0].type == "message"
+    assert created.output[0].content[0].text == "test response"
 
 
 async def test_async_openai_client_unsupported_methods(
@@ -69,7 +70,7 @@ async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> Non
 
     assert event_types[0] == "response.created"
     assert "response.in_progress" in event_types
-    assert "response.output_item.added" not in event_types
+    assert "response.output_item.added" in event_types
     assert event_types[-1] == "response.completed"
 
 
@@ -99,7 +100,7 @@ async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None
 
     assert event_types[0] == "response.created"
     assert "response.in_progress" in event_types
-    assert "response.output_item.added" not in event_types
+    assert "response.output_item.added" in event_types
     assert event_types[-1] == "response.completed"
 
 

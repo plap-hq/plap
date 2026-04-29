@@ -175,6 +175,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap/standard"]
+    assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
     assert (
@@ -266,6 +267,7 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     profile = _resolve_runtime_model_profile(settings, "plap/standard")
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
+    assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.transcript_token_budget == 1024
     assert (
@@ -308,6 +310,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     flex = _resolve_runtime_model_profile(settings, "plap/standard", "flex")
 
     assert priority is not base
+    assert priority.display_name == "Test Model"
     assert priority.main_model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.reviewer_model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.main_debate_model == "crof/qwen3.5-9b"
@@ -328,6 +331,7 @@ def _settings(**overrides: object) -> Settings:
 
 def _profile_config(
     *,
+    display_name: str = "Test Model",
     main_model: str,
     main_debate_model: str,
     reviewer_model: str,
@@ -341,6 +345,7 @@ def _profile_config(
     | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
+        display_name=display_name,
         main_model=main_model,
         main_debate_model=main_debate_model,
         reviewer_model=reviewer_model,

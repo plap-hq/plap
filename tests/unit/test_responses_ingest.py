@@ -186,6 +186,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     assert [row.message["content"] for row in result.main_context] == [
         "final debate result"
     ]
+    assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.continuation_side == "main"
@@ -219,6 +220,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     assert [row.message["content"] for row in result.main_context] == [
         "new mainline request"
     ]
+    assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.continuation_side == "main"
@@ -268,6 +270,7 @@ async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None
             "content": "client output",
         },
     ]
+    assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
     assert result.continuation_side == "main"
@@ -288,7 +291,8 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == [
+    assert result.main_context == ()
+    assert [row.message["content"] for row in result.main_context_temp] == [
         "temp debate tail"
     ]
     assert result.main_transcript == ()

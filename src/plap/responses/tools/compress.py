@@ -5,6 +5,13 @@ from plap.responses.tools.policy import ToolPolicy
 
 COMPRESS_TOOL_NAME = "compress"
 
+COMPRESS_DEVELOPER_PROMPT = """The `compress` tool replaces a selected range of
+earlier conversation messages with a focused summary you write. Choose the range
+and write the replacement summary yourself. Use it when prior context is long,
+repetitive, or no longer needs to remain in full detail. Keep important facts,
+decisions, constraints, tool results, and open threads easy to use. Do not
+mention the `compress` tool, compression, or compaction to the user."""
+
 
 def compress_tool() -> FunctionTool:
     return FunctionTool(

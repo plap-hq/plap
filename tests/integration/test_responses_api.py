@@ -41,7 +41,7 @@ async def test_http_routes_require_bearer_auth(test_app) -> None:
     assert response.json()["error"]["type"] == "authentication_error"
 
 
-async def test_authenticated_create_routes_return_minimal_contracts(
+async def test_authenticated_create_routes_return_model_output(
     test_app,
     seeded_auth_data,
 ) -> None:
@@ -61,7 +61,8 @@ async def test_authenticated_create_routes_return_minimal_contracts(
     assert response.status_code == 200, response.text
     assert body["object"] == "response"
     assert body["status"] == "completed"
-    assert body["output"] == []
+    assert body["output"][0]["type"] == "message"
+    assert body["output"][0]["content"][0]["text"] == "test response"
     assert body["usage"] is None
 
     assert streamed.status_code == 200
@@ -69,7 +70,8 @@ async def test_authenticated_create_routes_return_minimal_contracts(
     assert "response.created" in streamed.text
     assert "response.in_progress" in streamed.text
     assert "response.completed" in streamed.text
-    assert "response.output_item.added" not in streamed.text
+    assert "response.output_item.added" in streamed.text
+    assert "test response" in streamed.text
 
 
 async def test_unimplemented_response_routes_return_honest_errors(
@@ -118,7 +120,7 @@ async def test_create_response_prepares_runtime_tools_without_changing_behavior(
 
     assert response.status_code == 200, response.text
     assert response.json()["object"] == "response"
-    assert response.json()["output"] == []
+    assert response.json()["output"][0]["type"] == "message"
     assert classifier.tool_names == [["lookup_record"]]
 
 
@@ -220,7 +222,7 @@ async def test_websocket_streams_response_events_with_auth(
 
     assert event_types[0] == "response.created"
     assert "response.in_progress" in event_types
-    assert "response.output_item.added" not in event_types
+    assert "response.output_item.added" in event_types
     assert event_types[-1] == "response.completed"
 
 

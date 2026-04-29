@@ -420,7 +420,7 @@ def _tool_call_classification_from_row(row: Any) -> ToolCallClassification:
 
 
 def _effect_class(value: str) -> EffectClass:
-    if value in {"safe", "mutation", "contextual", "unknown"}:
+    if value in {"safe", "visible", "mutation", "contextual", "unknown"}:
         return value
     raise ValueError(f"unsupported effect class: {value}")
 

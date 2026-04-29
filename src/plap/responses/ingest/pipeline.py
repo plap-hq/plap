@@ -54,6 +54,7 @@ async def ingest_response_request(
     queues = _associate_side_queues(compaction, routed)
     return IngestedQueues(
         main_context=tuple(queues.main.context_rows),
+        main_context_temp=tuple(queues.main.context_temp_rows),
         main_transcript=_main_transcript(
             compaction,
             queues.main,
@@ -266,11 +267,11 @@ class _MainQueue(_QueueBase):
 
     @property
     def context_rows(self) -> list[ChatMessageSpan]:
-        return [
-            entry
-            for entry in self._entries
-            if isinstance(entry, ChatMessageSpan)
-        ]
+        return [*self._seed_rows, *self._stable_rows]
+
+    @property
+    def context_temp_rows(self) -> list[ChatMessageSpan]:
+        return self._temp_rows
 
     @property
     def stable_rows(self) -> list[ChatMessageSpan]:

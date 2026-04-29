@@ -3,12 +3,20 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import pytest
 import uvicorn
 
 from plap.app import create_app
+from plap.llms.chat import (
+    ChatCompletionDelta,
+    ChatCompletionRequest,
+    ChatCompletionResult,
+    ChatMessage,
+    IChatCompletionClient,
+)
 from plap.settings import Settings
 
 
@@ -26,13 +34,16 @@ class LiveServer:
 
 @pytest.fixture
 def test_app(test_settings: Settings):
-    return create_app(test_settings)
+    app = create_app(test_settings)
+    app.state.chat_completion_client = _StaticChatCompletionClient()
+    return app
 
 
 @pytest.fixture
 def live_server(test_settings: Settings) -> LiveServer:
     port = _find_free_port()
     app = create_app(test_settings)
+    app.state.chat_completion_client = _StaticChatCompletionClient()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -53,3 +64,30 @@ def live_server(test_settings: Settings) -> LiveServer:
 
     server.should_exit = True
     thread.join(timeout=10)
+
+
+class _StaticChatCompletionClient(IChatCompletionClient):
+    async def complete(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResult:
+        return ChatCompletionResult(
+            id="chatcmpl_test",
+            model=request.model,
+            created_at=None,
+            message=ChatMessage(role="assistant", content="test response"),
+            finish_reason="stop",
+        )
+
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        _ = request
+        if False:
+            yield ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=None,
+                created_at=None,
+                choice_index=0,
+            )

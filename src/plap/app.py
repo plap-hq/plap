@@ -30,6 +30,7 @@ from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
 from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.ingest import IngestionError
+from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.tools import (
     IToolCallClassifier,
     IToolClassifier,
@@ -321,6 +322,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
     db_engine = create_database_engine(resolved_settings.database_url)
     session_maker = create_session_maker(db_engine)
     chat_completion_client = _create_chat_completion_client(resolved_settings)
+    reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
     tool_classifier = _create_tool_classifier(
         resolved_settings,
         chat_completion_client,
@@ -338,6 +340,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "db_engine": db_engine,
             "owns_engine": True,
             "runtime_model_profiles": resolved_settings.runtime_model_profiles,
+            "reasoning_summarizer": reasoning_summarizer,
             "session_maker": session_maker,
             "sealing_keyring": SealingKeyring.from_encoded(
                 resolved_settings.sealing_keys

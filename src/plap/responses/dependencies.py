@@ -22,6 +22,7 @@ from plap.persistence.dependencies import (
     provide_request_db_session,
     provide_socket_db_session,
 )
+from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -63,6 +64,18 @@ def provide_socket_web_search_tool_provider(
     socket: WebSocket,
 ) -> IMCPToolProvider | None:
     return socket.app.state.web_search_tool_provider
+
+
+def provide_reasoning_summarizer(
+    request: Request[Any, Any, Any],
+) -> IReasoningSummarizer:
+    return request.app.state.reasoning_summarizer
+
+
+def provide_socket_reasoning_summarizer(
+    socket: WebSocket,
+) -> IReasoningSummarizer:
+    return socket.app.state.reasoning_summarizer
 
 
 async def provide_tool_policy_resolver(
@@ -147,13 +160,18 @@ HTTP_ROUTE_DEPENDENCIES = {
         sync_to_thread=False,
     ),
     "tool_policy_resolver": Provide(
-        provide_socket_tool_policy_resolver,
+        provide_tool_policy_resolver,
     ),
     "tool_call_policy_resolver": Provide(
-        provide_socket_tool_call_policy_resolver,
+        provide_tool_call_policy_resolver,
     ),
     "web_search_tool_provider": Provide(
-        provide_socket_web_search_tool_provider,
+        provide_web_search_tool_provider,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
+    "reasoning_summarizer": Provide(
+        provide_reasoning_summarizer,
         use_cache=True,
         sync_to_thread=False,
     ),
@@ -180,13 +198,18 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
         sync_to_thread=False,
     ),
     "tool_policy_resolver": Provide(
-        provide_tool_policy_resolver,
+        provide_socket_tool_policy_resolver,
     ),
     "tool_call_policy_resolver": Provide(
-        provide_tool_call_policy_resolver,
+        provide_socket_tool_call_policy_resolver,
     ),
     "web_search_tool_provider": Provide(
-        provide_web_search_tool_provider,
+        provide_socket_web_search_tool_provider,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
+    "reasoning_summarizer": Provide(
+        provide_socket_reasoning_summarizer,
         use_cache=True,
         sync_to_thread=False,
     ),

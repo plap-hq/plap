@@ -10,7 +10,7 @@ from cachetools import LRUCache
 
 from plap.responses.contracts import FunctionTool
 
-type EffectClass = Literal["safe", "mutation", "contextual", "unknown"]
+type EffectClass = Literal["safe", "visible", "mutation", "contextual", "unknown"]
 type ToolCallEffectClass = Literal["safe", "mutation", "unknown"]
 type ToolSource = Literal["client", "server"]
 type _ClassificationL1Key = tuple[bytes, str, str, bytes]

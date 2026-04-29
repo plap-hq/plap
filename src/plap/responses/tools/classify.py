@@ -26,10 +26,12 @@ from plap.responses.tools.policy import (
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
 Return only JSON matching this schema:
-{"effect_class":"safe|mutation|contextual|unknown","confidence":0.0,"rationale":"short"}
+{"effect_class":"safe|visible|mutation|contextual|unknown","confidence":0.0,"rationale":"short"}
 
 Definitions:
 - safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
+- visible: changes visible user-facing state or agent control flow, but does not
+  mutate files, repositories, clients, services, or external systems.
 - mutation: writes files, runs mutating commands, changes external state, or has
   irreversible side effects.
 - contextual: can be safe or mutating depending on call arguments, such as shell,
@@ -43,7 +45,7 @@ TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "properties": {
         "effect_class": {
             "type": "string",
-            "enum": ["safe", "mutation", "contextual", "unknown"],
+            "enum": ["safe", "visible", "mutation", "contextual", "unknown"],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string"},
@@ -414,7 +416,7 @@ def _unknown_tool_call_classification(
 
 
 def _effect_class(value: object) -> EffectClass:
-    if value in {"safe", "mutation", "contextual", "unknown"}:
+    if value in {"safe", "visible", "mutation", "contextual", "unknown"}:
         return value
     raise ValueError("classifier effect_class is invalid")
 

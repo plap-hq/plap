@@ -89,6 +89,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
         llm_crof_api_key="test-crof-key",
         runtime_model_profiles={
             "plap/test": RuntimeModelProfileConfig(
+                display_name="Test Model",
                 main_model="crof/qwen3.5-9b",
                 main_debate_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",

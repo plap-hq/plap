@@ -114,6 +114,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         "enum"
     ] == [
         "safe",
+        "visible",
         "mutation",
         "contextual",
         "unknown",
@@ -200,6 +201,31 @@ async def test_llm_tool_classifier_parses_contextual_json() -> None:
 
     assert result.effect_class == "contextual"
     assert result.confidence == 0.8
+
+
+async def test_llm_tool_classifier_parses_visible_json() -> None:
+    signature = function_tool_signature(
+        FunctionTool(
+            description="Update the visible plan.",
+            name="update_plan",
+            parameters={"type": "object"},
+            strict=True,
+            type="function",
+        )
+    )
+    classifier = LLMToolClassifier(
+        client=_FakeChatClient(
+            '{"effect_class":"visible","confidence":0.85,'
+            '"rationale":"Updates user-visible agent plan only."}'
+        ),
+        classifier="fake",
+        classifier_model="fake/model",
+    )
+
+    result = await classifier.classify(signature)
+
+    assert result.effect_class == "visible"
+    assert result.confidence == 0.85
 
 
 def test_tool_arguments_hash_is_canonical_for_key_order() -> None:

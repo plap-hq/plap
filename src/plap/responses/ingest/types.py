@@ -104,6 +104,7 @@ class SealedCallID:
 @dataclass(frozen=True, slots=True)
 class IngestedQueues:
     main_context: tuple[ChatMessageSpan, ...]
+    main_context_temp: tuple[ChatMessageSpan, ...]
     main_transcript: tuple[ChatMessageSpan, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]

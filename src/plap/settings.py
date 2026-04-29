@@ -23,6 +23,7 @@ class RuntimeModelProfileOverrideConfig(BaseModel):
 class RuntimeModelProfileConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
+    display_name: str
     main_model: str
     main_debate_model: str
     reviewer_model: str
