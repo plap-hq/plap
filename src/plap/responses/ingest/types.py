@@ -22,8 +22,8 @@ class ChatMessageSpan:
     start: int
     end: int
     message: ChatMessage
+    token_count: int
     content_hash: str = ""
-    token_count: int = 0
     children_token_count: int = 0
     expanded_token_count: int = 0
     children: tuple[ChatMessageSpan, ...] = ()
@@ -34,8 +34,9 @@ class ChatMessageSpan:
             raise ValueError("message span bounds must be non-negative")
         if self.start > self.end:
             raise ValueError("message span start must not exceed end")
+        if self.token_count <= 0:
+            raise ValueError("message span token_count must be positive")
         for field_name, value in (
-            ("token_count", self.token_count),
             ("children_token_count", self.children_token_count),
             ("expanded_token_count", self.expanded_token_count),
         ):

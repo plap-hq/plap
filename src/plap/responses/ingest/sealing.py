@@ -359,13 +359,6 @@ def _validate_span_rows(
 def _validate_span_node(
     row: ChatMessageSpan, *, cursors: dict[str, int]
 ) -> None:
-    if row.is_leaf:
-        if row.children:
-            raise IngestionError("compaction leaf span cannot have children")
-        if row.children_pruned:
-            raise IngestionError("compaction leaf span cannot be pruned")
-        return
-
     if row.children:
         if row.children_pruned:
             raise IngestionError("compaction span cannot have children and be pruned")
@@ -378,6 +371,11 @@ def _validate_span_node(
             raise IngestionError("compaction children_token_count is invalid")
         if row.expanded_token_count != expanded_token_count:
             raise IngestionError("compaction expanded_token_count is invalid")
+        return
+
+    if row.is_leaf:
+        if row.children_pruned:
+            raise IngestionError("compaction leaf span cannot be pruned")
         return
 
     if not row.children_pruned:
@@ -406,7 +404,7 @@ def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
                 start=start,
                 end=end,
                 message=message,
-                token_count=_non_negative_int(row, "token_count"),
+                token_count=_positive_int(row, "token_count"),
                 children_token_count=_non_negative_int(
                     row, "children_token_count"
                 ),
@@ -423,6 +421,13 @@ def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
 def _non_negative_int(row: dict[str, Any], key: str) -> int:
     value = row.get(key, 0)
     if not isinstance(value, int) or value < 0:
+        raise IngestionError(f"message row {key} is invalid")
+    return value
+
+
+def _positive_int(row: dict[str, Any], key: str) -> int:
+    value = row.get(key)
+    if not isinstance(value, int) or value <= 0:
         raise IngestionError(f"message row {key} is invalid")
     return value
 

@@ -3,10 +3,24 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 type RuntimeServiceTier = Literal["auto", "default", "priority", "flex"]
+
+
+def _validate_compression_thresholds(
+    thresholds: list[int],
+    hard_budget: int | None,
+) -> None:
+    if any(value < 0 for value in thresholds):
+        raise ValueError("compression token thresholds must be non-negative")
+    if len(set(thresholds)) != len(thresholds) or thresholds != sorted(thresholds):
+        raise ValueError("compression token thresholds must be strictly increasing")
+    if hard_budget is not None and thresholds and hard_budget <= thresholds[-1]:
+        raise ValueError(
+            "compression hard token budget must exceed the last token threshold"
+        )
 
 
 class RuntimeModelProfileOverrideConfig(BaseModel):
@@ -18,6 +32,18 @@ class RuntimeModelProfileOverrideConfig(BaseModel):
     arbitrator_model: str | None = None
     reasoning_summarizer_model: str | None = None
     transcript_token_budget: int | None = Field(default=None, ge=0)
+    compression_token_thresholds: list[int] | None = None
+    compression_hard_token_budget: int | None = Field(default=None, ge=0)
+    compression_max_rounds: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_compression_config(self) -> RuntimeModelProfileOverrideConfig:
+        if self.compression_token_thresholds is not None:
+            _validate_compression_thresholds(
+                self.compression_token_thresholds,
+                self.compression_hard_token_budget,
+            )
+        return self
 
 
 class RuntimeModelProfileConfig(BaseModel):
@@ -30,10 +56,33 @@ class RuntimeModelProfileConfig(BaseModel):
     arbitrator_model: str
     reasoning_summarizer_model: str
     transcript_token_budget: int = Field(default=0, ge=0)
+    compression_token_thresholds: list[int] = Field(default_factory=list)
+    compression_hard_token_budget: int | None = Field(default=None, ge=0)
+    compression_max_rounds: int = Field(default=3, ge=0)
     service_tier_overrides: dict[
         RuntimeServiceTier,
         RuntimeModelProfileOverrideConfig,
     ] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_compression_config(self) -> RuntimeModelProfileConfig:
+        _validate_compression_thresholds(
+            self.compression_token_thresholds,
+            self.compression_hard_token_budget,
+        )
+        for override in self.service_tier_overrides.values():
+            thresholds = (
+                override.compression_token_thresholds
+                if override.compression_token_thresholds is not None
+                else self.compression_token_thresholds
+            )
+            hard_budget = (
+                override.compression_hard_token_budget
+                if override.compression_hard_token_budget is not None
+                else self.compression_hard_token_budget
+            )
+            _validate_compression_thresholds(thresholds, hard_budget)
+        return self
 
     def for_service_tier(
         self,
@@ -44,7 +93,12 @@ class RuntimeModelProfileConfig(BaseModel):
         override = self.service_tier_overrides.get(service_tier)  # type: ignore[arg-type]
         if override is None:
             return self
-        return self.model_copy(update=override.model_dump(exclude_none=True))
+        profile = self.model_copy(update=override.model_dump(exclude_none=True))
+        _validate_compression_thresholds(
+            profile.compression_token_thresholds,
+            profile.compression_hard_token_budget,
+        )
+        return profile
 
 
 class Settings(BaseSettings):

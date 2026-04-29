@@ -31,8 +31,8 @@ from plap.responses.tools import (
     StaticToolCallPolicyResolver,
     StaticToolPolicyResolver,
 )
+from plap.responses.tools.mcp import IMCPToolProvider
 from plap.responses.tools.repository import ToolClassificationRepository
-from plap.responses.tools.web_search import IMCPToolProvider
 from plap.settings import Settings
 
 

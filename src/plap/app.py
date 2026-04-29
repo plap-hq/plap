@@ -38,7 +38,7 @@ from plap.responses.tools import (
     LLMToolClassifier,
     ToolPolicyError,
 )
-from plap.responses.tools.web_search import (
+from plap.responses.tools.mcp import (
     IMCPToolProvider,
     MCPToolProvider,
 )

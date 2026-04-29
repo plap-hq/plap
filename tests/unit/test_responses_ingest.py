@@ -756,8 +756,19 @@ def test_payload_domain_objects_do_not_expose_version_or_type_truths() -> None:
 
 
 def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
-    leaf = ChatMessageSpan(start=0, end=0, message={"role": "user"})
-    range_span = ChatMessageSpan(start=0, end=7, message={"role": "assistant"})
+    leaf = ChatMessageSpan(
+        start=0,
+        end=0,
+        message={"role": "user"},
+        token_count=1,
+    )
+    range_span = ChatMessageSpan(
+        start=0,
+        end=7,
+        message={"role": "assistant"},
+        token_count=1,
+        children_pruned=True,
+    )
 
     assert leaf.citation == "[~0]"
     assert range_span.citation == "[~0_7]"
@@ -787,6 +798,7 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
                     start=5,
                     end=5,
                     message={"role": "user", "content": "bad"},
+                    token_count=1,
                 ),
             ),
             cursors={"m": 1},
@@ -798,6 +810,27 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
         open_compaction_payload(token, keyring=_keyring())
 
 
+def test_sealed_compaction_requires_token_count() -> None:
+    token = _seal_raw_payload(
+        COMPACTION_PURPOSE,
+        {
+            "version": PAYLOAD_FORMAT_VERSION,
+            "type": "compaction",
+            "active": [
+                {
+                    "start": 0,
+                    "end": 0,
+                    "message": {"role": "user", "content": "missing count"},
+                }
+            ],
+            "cursors": {"m": 1},
+        },
+    )
+
+    with pytest.raises(IngestionError, match="token_count"):
+        open_compaction_payload(token, keyring=_keyring())
+
+
 def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
     token = seal_compaction_payload(
         CompactionPayload(
@@ -806,12 +839,14 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                     start=0,
                     end=1,
                     message={"role": "user", "content": "first"},
+                    token_count=1,
                     children_pruned=True,
                 ),
                 ChatMessageSpan(
                     start=1,
                     end=1,
                     message={"role": "user", "content": "second"},
+                    token_count=1,
                 ),
             ),
             cursors={"m": 2},
@@ -936,6 +971,7 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
                     else f"{label} summarized source"
                 ),
             },
+            token_count=1,
         )
         for ordinal in range(cursor)
     )
@@ -948,6 +984,7 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
                 start=1,
                 end=cursor - 1,
                 message={"role": "assistant", "content": f"{label} summary"},
+                token_count=1,
                 children=source[1:],
             )
         )

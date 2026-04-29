@@ -28,7 +28,7 @@ from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import stream_response_events
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
-from plap.responses.tools.web_search import IMCPToolProvider
+from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import Settings
 
 

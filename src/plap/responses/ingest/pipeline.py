@@ -29,6 +29,7 @@ from plap.responses.ingest.types import (
     Side,
     SideMessage,
 )
+from plap.responses.tokens import estimate_message_tokens
 
 type _EventKind = Literal[
     "message",
@@ -330,7 +331,12 @@ class _MainQueue(_QueueBase):
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
         ordinal = self._cursors.get("m", 0)
-        row = ChatMessageSpan(start=ordinal, end=ordinal, message=message)
+        row = ChatMessageSpan(
+            start=ordinal,
+            end=ordinal,
+            message=message,
+            token_count=estimate_message_tokens(message),
+        )
         self._cursors["m"] = ordinal + 1
         if temp:
             self._temp_rows.append(row)

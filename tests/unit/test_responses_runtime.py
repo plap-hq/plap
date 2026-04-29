@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -11,20 +12,27 @@ from plap.llms.chat import (
     ChatCompletionResult,
     ChatMessage,
     ChatToolCall,
+    ChatToolChoiceFunction,
     IChatCompletionClient,
 )
 from plap.responses.contracts import (
     FunctionTool,
     ReasoningConfig,
     ReasoningItem,
+    RequestCompactionItem,
+    RequestMessageItem,
     ResponseCreateRequest,
     WebSearchTool,
 )
 from plap.responses.ingest import (
+    ChatMessageSpan,
+    CompactionPayload,
     IngestedQueues,
     ReasoningPayload,
     content_hash,
+    open_compaction_payload,
     open_reasoning_payload,
+    seal_compaction_payload,
     seal_reasoning_payload,
 )
 from plap.responses.reasoning import IReasoningSummarizer
@@ -34,15 +42,16 @@ from plap.responses.runtime import (
     resolve_tool_calls,
     stream_response_events,
 )
+from plap.responses.tokens import estimate_message_tokens
 from plap.responses.tools import (
     EffectClass,
-    IMCPToolProvider,
     IToolCallPolicyResolver,
     IToolPolicyResolver,
     ToolCall,
     ToolPolicy,
     ToolPolicyError,
 )
+from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import RuntimeModelProfileConfig, Settings
 
 MCP_SEARCH_TOOL_NAME = "search_web"
@@ -210,6 +219,7 @@ async def test_stream_response_events_emits_model_message_output() -> None:
     assert "You are Test Model" in (developer_prompt.content or "")
     assert "Be accurate, direct, and helpful" in (developer_prompt.content or "")
     assert "The `compress` tool replaces" in (developer_prompt.content or "")
+    assert client.requests[0].messages[1].content == "[~0]\nhello"
 
 
 async def test_stream_response_events_appends_user_instructions_to_prompt() -> None:
@@ -427,6 +437,416 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
 
 
+async def test_stream_response_events_executes_batched_compression() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~1]",
+                                        "summary": "alpha beta summary",
+                                    },
+                                    {
+                                        "start": "[~2]",
+                                        "end": "[~3]",
+                                        "summary": "gamma delta summary",
+                                    },
+                                ]
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _message("user", "alpha"),
+                    _message("assistant", "beta"),
+                    _message("user", "gamma"),
+                    _message("assistant", "delta"),
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["compaction", "message"]
+    payload = open_compaction_payload(
+        completed.output[0].encrypted_content,
+        keyring=_keyring(),
+    )
+    assert [(row.start, row.end) for row in payload.active] == [(0, 1), (2, 3)]
+    assert [row.message["content"] for row in payload.active] == [
+        "alpha beta summary",
+        "gamma delta summary",
+    ]
+    assert all(row.token_count > 0 for row in payload.active)
+    assert [len(row.children) for row in payload.active] == [2, 2]
+    assert len(client.requests) == 2
+    assert [message.content for message in client.requests[1].messages[1:]] == [
+        "[~0_1]\nalpha beta summary",
+        "[~2_3]\ngamma delta summary",
+    ]
+
+
+async def test_stream_response_events_rejects_overlapping_compression_ranges() -> None:
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="compress_call_1",
+                    name="compress",
+                    arguments=json.dumps(
+                        {
+                            "ranges": [
+                                {
+                                    "start": "[~0]",
+                                    "end": "[~1]",
+                                    "summary": "first",
+                                },
+                                {
+                                    "start": "[~1]",
+                                    "end": "[~2]",
+                                    "summary": "second",
+                                },
+                            ]
+                        }
+                    ),
+                )
+            ],
+        )
+    )
+
+    with pytest.raises(ToolPolicyError, match="overlap"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[
+                        _message("user", "alpha"),
+                        _message("assistant", "beta"),
+                        _message("user", "gamma"),
+                    ],
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
+async def test_stream_response_events_rejects_hidden_compression_citation() -> None:
+    keyring = _keyring()
+    leaf_zero = ChatMessageSpan(
+        start=0,
+        end=0,
+        message={"role": "user", "content": "alpha"},
+        token_count=1,
+    )
+    leaf_one = ChatMessageSpan(
+        start=1,
+        end=1,
+        message={"role": "assistant", "content": "beta"},
+        token_count=1,
+    )
+    active = (
+        ChatMessageSpan(
+            start=0,
+            end=1,
+            message={"role": "assistant", "content": "alpha beta summary"},
+            token_count=1,
+            children=(leaf_zero, leaf_one),
+        ),
+        ChatMessageSpan(
+            start=2,
+            end=2,
+            message={"role": "user", "content": "gamma"},
+            token_count=1,
+        ),
+    )
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="compress_call_1",
+                    name="compress",
+                    arguments=json.dumps(
+                        {
+                            "ranges": [
+                                {
+                                    "start": "[~0]",
+                                    "end": "[~1]",
+                                    "summary": "invalid partial cut",
+                                }
+                            ]
+                        }
+                    ),
+                )
+            ],
+        )
+    )
+
+    with pytest.raises(ToolPolicyError, match="not visible"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[
+                        RequestCompactionItem(
+                            encrypted_content=seal_compaction_payload(
+                                CompactionPayload(
+                                    active=active,
+                                    cursors={"m": 3},
+                                ),
+                                keyring=keyring,
+                            ),
+                            type="compaction",
+                        )
+                    ],
+                ),
+                settings=_settings(),
+                sealing_keyring=keyring,
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
+async def test_stream_response_events_rejects_non_reducing_compression() -> None:
+    summary = "same size"
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="compress_call_1",
+                    name="compress",
+                    arguments=json.dumps(
+                        {
+                            "ranges": [
+                                {
+                                    "start": "[~0]",
+                                    "end": "[~0]",
+                                    "summary": summary,
+                                }
+                            ]
+                        }
+                    ),
+                )
+            ],
+        )
+    )
+
+    with pytest.raises(ToolPolicyError, match="reduce token count"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[
+                        _compaction_item(
+                            _span(
+                                0,
+                                "alpha",
+                                token_count=estimate_message_tokens(
+                                    {"role": "assistant", "content": summary}
+                                ),
+                            )
+                        )
+                    ],
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
+async def test_stream_response_events_accepts_empty_compression_bailout() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps({"ranges": []}),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["message"]
+    assert len(client.requests) == 2
+    assert [tool.function.name for tool in client.requests[0].tools] == [
+        COMPRESS_TOOL_NAME
+    ]
+    assert [tool.function.name for tool in client.requests[1].tools] == [
+        COMPRESS_TOOL_NAME
+    ]
+    assert all(
+        "Context is getting long" not in (message.content or "")
+        for message in client.requests[1].messages
+    )
+
+
+async def test_stream_response_events_adds_soft_compression_reminder() -> None:
+    profile = _profile_config(
+        compression_token_thresholds=[50],
+        compression_hard_token_budget=100,
+    )
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(_span(0, "alpha", token_count=75))],
+            ),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    request = client.requests[0]
+    assert request.messages[-1].role == "user"
+    assert "Context is getting long" in (request.messages[-1].content or "")
+    assert '{"ranges": []}' in (request.messages[-1].content or "")
+    assert request.tool_choice is None
+    assert events[-1].response.output[0].content[0].text == "done"
+
+
+async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
+    profile = _profile_config(
+        compression_token_thresholds=[50],
+        compression_hard_token_budget=100,
+    )
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps({"ranges": []}),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(_span(0, "alpha", token_count=125))],
+            ),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    request = client.requests[0]
+    assert isinstance(request.tool_choice, ChatToolChoiceFunction)
+    assert request.tool_choice.name == COMPRESS_TOOL_NAME
+    assert "compression limit" in (request.messages[-1].content or "")
+    assert [tool.function.name for tool in client.requests[1].tools] == [
+        COMPRESS_TOOL_NAME
+    ]
+    assert client.requests[1].tool_choice is None
+    assert all(
+        "compression limit" not in (message.content or "")
+        for message in client.requests[1].messages
+    )
+
+
+async def test_stream_response_events_rejects_hard_budget_without_compress() -> None:
+    profile = _profile_config(
+        compression_token_thresholds=[50],
+        compression_hard_token_budget=100,
+    )
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    with pytest.raises(ToolPolicyError, match="hard compression budget"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[_compaction_item(_span(0, "alpha", token_count=125))],
+                ),
+                settings=_settings(profile=profile),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
 async def test_stream_response_events_patches_reasoning_to_unsealed_message() -> None:
     events = [
         event
@@ -625,20 +1045,26 @@ class _FakeReasoningSummarizer(IReasoningSummarizer):
 
 
 class _StaticChatClient(IChatCompletionClient):
-    def __init__(self, message: ChatMessage) -> None:
-        self.message = message
+    def __init__(self, message: ChatMessage | Sequence[ChatMessage]) -> None:
+        if isinstance(message, ChatMessage):
+            self.messages = (message,)
+        else:
+            self.messages = tuple(message)
         self.requests: list[ChatCompletionRequest] = []
+        self._index = 0
 
     async def complete(
         self,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResult:
         self.requests.append(request)
+        message = self.messages[min(self._index, len(self.messages) - 1)]
+        self._index += 1
         return ChatCompletionResult(
             id="chatcmpl_test",
             model=request.model,
             created_at=None,
-            message=self.message,
+            message=message,
             finish_reason="stop",
         )
 
@@ -670,22 +1096,32 @@ def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:
     )
 
 
-def _settings() -> Settings:
+def _settings(*, profile: RuntimeModelProfileConfig | None = None) -> Settings:
     return Settings(
         api_key_pepper="test-pepper",
         database_url="postgresql+asyncpg://test:test@localhost/test",
         llm_crof_api_key="test-crof-key",
-        runtime_model_profiles={
-            "plap/test": RuntimeModelProfileConfig(
-                display_name="Test Model",
-                main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
-                reviewer_model="crof/qwen3.5-9b",
-                arbitrator_model="crof/qwen3.5-9b",
-                reasoning_summarizer_model="crof/qwen3.5-9b",
-            )
-        },
+        runtime_model_profiles={"plap/test": profile or _profile_config()},
         sealing_keys=["a" * 43],
+    )
+
+
+def _profile_config(
+    *,
+    compression_token_thresholds: list[int] | None = None,
+    compression_hard_token_budget: int | None = None,
+    compression_max_rounds: int = 3,
+) -> RuntimeModelProfileConfig:
+    return RuntimeModelProfileConfig(
+        display_name="Test Model",
+        main_model="crof/qwen3.5-9b",
+        main_debate_model="crof/qwen3.5-9b",
+        reviewer_model="crof/qwen3.5-9b",
+        arbitrator_model="crof/qwen3.5-9b",
+        reasoning_summarizer_model="crof/qwen3.5-9b",
+        compression_token_thresholds=compression_token_thresholds or [],
+        compression_hard_token_budget=compression_hard_token_budget,
+        compression_max_rounds=compression_max_rounds,
     )
 
 
@@ -695,6 +1131,32 @@ def _keyring() -> SealingKeyring:
 
 def _read_file_tool() -> FunctionTool:
     return _tool("read_file")
+
+
+def _message(role: str, content: str) -> RequestMessageItem:
+    return RequestMessageItem(content=content, role=role, type="message")
+
+
+def _span(ordinal: int, content: str, *, token_count: int = 1) -> ChatMessageSpan:
+    return ChatMessageSpan(
+        start=ordinal,
+        end=ordinal,
+        message={"role": "user", "content": content},
+        token_count=token_count,
+    )
+
+
+def _compaction_item(*active: ChatMessageSpan) -> RequestCompactionItem:
+    return RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(
+            CompactionPayload(
+                active=active,
+                cursors={"m": 1 + max(row.end for row in active)},
+            ),
+            keyring=_keyring(),
+        ),
+        type="compaction",
+    )
 
 
 def _tool(name: str) -> FunctionTool:

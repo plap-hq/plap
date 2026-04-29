@@ -20,7 +20,7 @@ from plap.responses.tools import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.web_search import MCPToolProvider
+from plap.responses.tools.mcp import MCPToolProvider
 from plap.settings import (
     RuntimeModelProfileConfig,
     RuntimeModelProfileOverrideConfig,
@@ -218,6 +218,9 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
                         transcript_token_budget=4096,
+                        compression_token_thresholds=[2048, 4096],
+                        compression_hard_token_budget=8192,
+                        compression_max_rounds=1,
                     )
                 },
             )
@@ -290,11 +293,17 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
+                compression_token_thresholds=[1000, 2000],
+                compression_hard_token_budget=3000,
+                compression_max_rounds=2,
                 service_tier_overrides={
                     "priority": RuntimeModelProfileOverrideConfig(
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
                         transcript_token_budget=8192,
+                        compression_token_thresholds=[4000, 5000],
+                        compression_hard_token_budget=6000,
+                        compression_max_rounds=1,
                     )
                 },
             )
@@ -316,7 +325,36 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     assert priority.main_debate_model == "crof/qwen3.5-9b"
     assert priority.arbitrator_model == "crof/qwen3.5-9b"
     assert priority.transcript_token_budget == 8192
+    assert priority.compression_token_thresholds == [4000, 5000]
+    assert priority.compression_hard_token_budget == 6000
+    assert priority.compression_max_rounds == 1
+    assert base.compression_token_thresholds == [1000, 2000]
+    assert base.compression_hard_token_budget == 3000
+    assert base.compression_max_rounds == 2
     assert flex is base
+
+
+def test_runtime_profile_rejects_invalid_compression_thresholds() -> None:
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            compression_token_thresholds=[1000, 1000],
+        )
+
+    with pytest.raises(ValueError, match="hard token budget"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            compression_token_thresholds=[1000],
+            compression_hard_token_budget=1000,
+        )
 
 
 def _settings(**overrides: object) -> Settings:
@@ -338,6 +376,9 @@ def _profile_config(
     arbitrator_model: str,
     reasoning_summarizer_model: str,
     transcript_token_budget: int = 0,
+    compression_token_thresholds: list[int] | None = None,
+    compression_hard_token_budget: int | None = None,
+    compression_max_rounds: int = 3,
     service_tier_overrides: dict[
         str,
         RuntimeModelProfileOverrideConfig,
@@ -352,5 +393,8 @@ def _profile_config(
         arbitrator_model=arbitrator_model,
         reasoning_summarizer_model=reasoning_summarizer_model,
         transcript_token_budget=transcript_token_budget,
+        compression_token_thresholds=compression_token_thresholds or [],
+        compression_hard_token_budget=compression_hard_token_budget,
+        compression_max_rounds=compression_max_rounds,
         service_tier_overrides=service_tier_overrides or {},
     )

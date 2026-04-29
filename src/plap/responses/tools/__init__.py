@@ -11,6 +11,7 @@ from plap.responses.tools.compress import (
     compress_policy,
     compress_tool,
 )
+from plap.responses.tools.mcp import IMCPToolProvider, MCPToolProvider
 from plap.responses.tools.policy import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -40,11 +41,7 @@ from plap.responses.tools.policy import (
     tool_arguments_hash,
 )
 from plap.responses.tools.repository import ToolClassificationRepository
-from plap.responses.tools.web_search import (
-    IMCPToolProvider,
-    MCPToolProvider,
-    web_search_policy,
-)
+from plap.responses.tools.web_search import web_search_policy
 
 __all__ = [
     "COMPRESS_TOOL_NAME",
