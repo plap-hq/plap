@@ -1,5 +1,5 @@
 import pytest
-from openai import AsyncOpenAI, AuthenticationError
+from openai import APIStatusError, AsyncOpenAI, AuthenticationError
 
 
 @pytest.fixture
@@ -29,29 +29,33 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
             },
         ],
     )
-    retrieved = await openai_client.responses.retrieve(created.id)
-    compacted = await openai_client.responses.compact(
-        model="plap/test", input="compact me"
-    )
-    input_items = await openai_client.responses.input_items.list(created.id)
-    token_count = await openai_client.responses.input_tokens.count(
-        model="plap/test",
-        input="count these tokens",
-    )
-    deleted = await openai_client.responses.delete(created.id)
-
     assert created.object == "response"
     assert created.id.startswith("resp_")
-    assert any(item.type == "message" for item in created.output)
-    assert any(item.type == "function_call" for item in created.output)
-    assert not any(item.type == "web_search_call" for item in created.output)
-    assert retrieved.id == created.id
-    assert compacted.object == "response.compaction"
-    assert input_items.object == "list"
-    assert input_items.data[0].type == "message"
-    assert token_count.object == "response.input_tokens"
-    assert token_count.input_tokens == 3
-    assert deleted is None
+    assert created.output == []
+
+
+async def test_async_openai_client_unsupported_methods(
+    openai_client: AsyncOpenAI,
+) -> None:
+    with pytest.raises(APIStatusError) as retrieved:
+        await openai_client.responses.retrieve("resp_missing")
+    with pytest.raises(APIStatusError) as compacted:
+        await openai_client.responses.compact(model="plap/test", input="compact me")
+    with pytest.raises(APIStatusError) as input_items:
+        await openai_client.responses.input_items.list("resp_missing")
+    with pytest.raises(APIStatusError) as token_count:
+        await openai_client.responses.input_tokens.count(
+            model="plap/test",
+            input="count these tokens",
+        )
+    with pytest.raises(APIStatusError) as deleted:
+        await openai_client.responses.delete("resp_missing")
+
+    assert retrieved.value.status_code == 404
+    assert input_items.value.status_code == 404
+    assert deleted.value.status_code == 404
+    assert compacted.value.status_code == 501
+    assert token_count.value.status_code == 501
 
 
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:
@@ -64,7 +68,8 @@ async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> Non
     event_types = [event.type async for event in stream]
 
     assert event_types[0] == "response.created"
-    assert "response.output_item.added" in event_types
+    assert "response.in_progress" in event_types
+    assert "response.output_item.added" not in event_types
     assert event_types[-1] == "response.completed"
 
 
@@ -93,7 +98,8 @@ async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None
         await connection.close()
 
     assert event_types[0] == "response.created"
-    assert "response.output_item.added" in event_types
+    assert "response.in_progress" in event_types
+    assert "response.output_item.added" not in event_types
     assert event_types[-1] == "response.completed"
 
 

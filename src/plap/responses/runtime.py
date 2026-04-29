@@ -1,10 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
+import anyio
+from anyio.abc import ObjectSendStream
+
+from plap.keyring import SealingKeyring
 from plap.llms.chat import ChatToolCall
-from plap.responses.contracts import FunctionTool, ResponseCreateRequest, WebSearchTool
-from plap.responses.ingest import IngestedQueues
+from plap.responses.contracts import (
+    FunctionTool,
+    ResponseCompletedEvent,
+    ResponseCreateRequest,
+    ResponseObject,
+    ResponseStreamEvent,
+    WebSearchTool,
+)
+from plap.responses.events import build_stream_events
+from plap.responses.ingest import (
+    IngestedQueues,
+    IngestionError,
+    ingest_response_request,
+)
+from plap.responses.objects import build_response_object
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
@@ -21,8 +38,93 @@ from plap.responses.tools.web_search import (
     IMCPToolProvider,
     web_search_policy,
 )
+from plap.settings import RuntimeModelProfileConfig, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
+
+
+async def stream_response_events(
+    request: ResponseCreateRequest,
+    *,
+    settings: Settings,
+    sealing_keyring: SealingKeyring,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    web_search_tool_provider: IMCPToolProvider | None = None,
+) -> AsyncIterator[ResponseStreamEvent]:
+    _ = tool_call_policy_resolver
+    send, receive = anyio.create_memory_object_stream[ResponseStreamEvent](16)
+    producer_error: Exception | None = None
+
+    async def produce() -> None:
+        nonlocal producer_error
+        async with send:
+            try:
+                await _produce_response_events(
+                    send,
+                    request,
+                    settings=settings,
+                    sealing_keyring=sealing_keyring,
+                    tool_policy_resolver=tool_policy_resolver,
+                    web_search_tool_provider=web_search_tool_provider,
+                )
+            except Exception as exc:
+                producer_error = exc
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(produce)
+        async with receive:
+            async for event in receive:
+                yield event
+    if producer_error is not None:
+        raise producer_error
+
+
+def completed_response_from_events(
+    events: Sequence[ResponseStreamEvent],
+) -> ResponseObject:
+    for event in reversed(events):
+        if isinstance(event, ResponseCompletedEvent):
+            return event.response
+    raise RuntimeError("response stream did not complete")
+
+
+async def _produce_response_events(
+    send: ObjectSendStream[ResponseStreamEvent],
+    request: ResponseCreateRequest,
+    *,
+    settings: Settings,
+    sealing_keyring: SealingKeyring,
+    tool_policy_resolver: IToolPolicyResolver,
+    web_search_tool_provider: IMCPToolProvider | None,
+) -> None:
+    profile = _runtime_model_profile(settings, request)
+    ingested = await ingest_response_request(
+        request,
+        keyring=sealing_keyring,
+        transcript_token_budget=profile.transcript_token_budget,
+    )
+    await prepare_tools(
+        request,
+        ingested,
+        tool_policy_resolver,
+        web_search_tool_provider,
+    )
+    response = build_response_object(request)
+    for event in build_stream_events(response):
+        await send.send(event)
+
+
+def _runtime_model_profile(
+    settings: Settings,
+    request: ResponseCreateRequest,
+) -> RuntimeModelProfileConfig:
+    if request.model is None:
+        raise IngestionError("model is required")
+    profile = settings.runtime_model_profiles.get(request.model)
+    if profile is None:
+        raise IngestionError("unknown runtime model")
+    return profile.for_service_tier(request.service_tier)
 
 
 async def prepare_tools(

@@ -41,7 +41,7 @@ async def test_http_routes_require_bearer_auth(test_app) -> None:
     assert response.json()["error"]["type"] == "authentication_error"
 
 
-async def test_authenticated_routes_return_stubbed_contracts(
+async def test_authenticated_create_routes_return_minimal_contracts(
     test_app,
     seeded_auth_data,
 ) -> None:
@@ -56,6 +56,29 @@ async def test_authenticated_routes_return_stubbed_contracts(
             json=_request_payload(stream=True),
             headers=headers,
         )
+
+    body = response.json()
+    assert response.status_code == 200, response.text
+    assert body["object"] == "response"
+    assert body["status"] == "completed"
+    assert body["output"] == []
+    assert body["usage"] is None
+
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    assert "response.created" in streamed.text
+    assert "response.in_progress" in streamed.text
+    assert "response.completed" in streamed.text
+    assert "response.output_item.added" not in streamed.text
+
+
+async def test_unimplemented_response_routes_return_honest_errors(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
         retrieved = await client.get("/v1/responses/resp_test", headers=headers)
         deleted = await client.delete("/v1/responses/resp_test", headers=headers)
         compacted = await client.post(
@@ -72,26 +95,11 @@ async def test_authenticated_routes_return_stubbed_contracts(
             headers=headers,
         )
 
-    body = response.json()
-    assert response.status_code == 200, response.text
-    assert body["object"] == "response"
-    assert body["status"] == "completed"
-    assert any(item["type"] == "message" for item in body["output"])
-    assert any(item["type"] == "function_call" for item in body["output"])
-    assert not any(item["type"] == "web_search_call" for item in body["output"])
-
-    assert streamed.status_code == 200
-    assert streamed.headers["content-type"].startswith("text/event-stream")
-    assert "response.created" in streamed.text
-    assert "response.completed" in streamed.text
-
-    assert retrieved.status_code == 200
-    assert retrieved.json()["id"] == "resp_test"
-    assert deleted.json() == {"deleted": True, "id": "resp_test", "object": "response"}
-    assert compacted.json()["object"] == "response.compaction"
-    assert input_items.json()["object"] == "list"
-    assert input_items.json()["data"][0]["type"] == "message"
-    assert input_tokens.json()["object"] == "response.input_tokens"
+    assert _error_code(retrieved) == (404, "unsupported_operation")
+    assert _error_code(deleted) == (404, "unsupported_operation")
+    assert _error_code(input_items) == (404, "unsupported_operation")
+    assert _error_code(compacted) == (501, "unsupported_operation")
+    assert _error_code(input_tokens) == (501, "unsupported_operation")
 
 
 async def test_create_response_prepares_runtime_tools_without_changing_behavior(
@@ -110,6 +118,7 @@ async def test_create_response_prepares_runtime_tools_without_changing_behavior(
 
     assert response.status_code == 200, response.text
     assert response.json()["object"] == "response"
+    assert response.json()["output"] == []
     assert classifier.tool_names == [["lookup_record"]]
 
 
@@ -210,9 +219,29 @@ async def test_websocket_streams_response_events_with_auth(
                     break
 
     assert event_types[0] == "response.created"
-    assert "response.output_item.added" in event_types
-    assert "response.function_call_arguments.done" in event_types
+    assert "response.in_progress" in event_types
+    assert "response.output_item.added" not in event_types
     assert event_types[-1] == "response.completed"
+
+
+async def test_websocket_create_uses_runtime_validation(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        with await client.websocket_connect("/v1/responses", headers=headers) as socket:
+            socket.send_json(
+                {
+                    "type": "response.create",
+                    "response": {"input": "hello", "model": "unknown/model"},
+                }
+            )
+            event = socket.receive_json()
+
+    assert event["type"] == "error"
+    assert event["message"] == "Invalid request."
 
 
 class _RecordingToolClassifier(IToolClassifier):
@@ -242,3 +271,9 @@ class _RecordingToolClassifier(IToolClassifier):
             )
             for signature in signatures
         }
+
+
+def _error_code(response) -> tuple[int, str | None]:
+    body = response.json()
+    assert body["error"]["message"] == "Operation is not supported."
+    return response.status_code, body["error"]["code"]

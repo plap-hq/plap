@@ -28,6 +28,7 @@ from plap.llms.router import (
 )
 from plap.persistence import create_database_engine, create_session_maker
 from plap.responses import RESPONSE_ROUTE_HANDLERS
+from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.ingest import IngestionError
 from plap.responses.tools import (
     IToolCallClassifier,
@@ -119,6 +120,14 @@ def public_error_for(exc: Exception) -> PublicError:
             error_type="invalid_request_error",
             code="invalid_tool",
             log_event="request.tool_validation_failed",
+        )
+    if isinstance(exc, ResponseOperationUnsupportedError):
+        return PublicError(
+            message="Operation is not supported.",
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code="unsupported_operation",
+            log_event="request.unsupported_operation",
         )
     if isinstance(exc, HTTPException):
         return PublicError(
@@ -352,6 +361,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             HTTPException: handle_public_exception,
             IngestionError: handle_public_exception,
             NotAuthorizedException: handle_public_exception,
+            ResponseOperationUnsupportedError: handle_public_exception,
             ToolPolicyError: handle_public_exception,
             ValidationException: handle_public_exception,
             Exception: handle_public_exception,

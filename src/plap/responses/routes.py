@@ -4,45 +4,37 @@ from collections.abc import AsyncIterator
 
 from litestar import delete, get, post, websocket
 from litestar.connection import WebSocket
-from litestar.exceptions import ValidationException
 from litestar.response import ServerSentEvent
 from pydantic import ValidationError
 
 from plap.auth import AuthContext
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
-    CompactedResponseObject,
     CompactRequest,
-    InputItemsPage,
-    InputTokenCountResponse,
     InputTokensCountRequest,
     ResponseCreateClientEvent,
     ResponseCreateRequest,
-    ResponseDeleted,
-    ResponseObject,
+    ResponseStreamEvent,
 )
 from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
-from plap.responses.ingest import ingest_response_request
-from plap.responses.runtime import prepare_tools
-from plap.responses.stubs import (
-    build_compacted_response,
-    build_deleted_response,
-    build_error_event,
-    build_input_items_page,
-    build_input_token_count,
-    build_stream_events,
-    build_stub_response,
+from plap.responses.errors import ResponseOperationUnsupportedError
+from plap.responses.events import build_error_event
+from plap.responses.runtime import (
+    completed_response_from_events,
+    stream_response_events,
 )
-from plap.responses.tools import IToolPolicyResolver
+from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.web_search import IMCPToolProvider
-from plap.settings import RuntimeModelProfileConfig, Settings
+from plap.settings import Settings
 
 
-async def _sse_payload(response: ResponseObject) -> AsyncIterator[str]:
-    for event in build_stream_events(response):
+async def _sse_payload(
+    events: AsyncIterator[ResponseStreamEvent],
+) -> AsyncIterator[str]:
+    async for event in events:
         yield event.model_dump_json(exclude_none=True)
     yield "[DONE]"
 
@@ -54,40 +46,24 @@ async def create_response(
     settings: Settings,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     web_search_tool_provider: IMCPToolProvider | None,
 ) -> object:
     _ = auth_context
-    profile = _runtime_model_profile(settings, data)
-    ingested = await ingest_response_request(
+    events = stream_response_events(
         data,
-        keyring=sealing_keyring,
-        transcript_token_budget=profile.transcript_token_budget,
+        settings=settings,
+        sealing_keyring=sealing_keyring,
+        tool_policy_resolver=tool_policy_resolver,
+        tool_call_policy_resolver=tool_call_policy_resolver,
+        web_search_tool_provider=web_search_tool_provider,
     )
-    await prepare_tools(
-        data,
-        ingested,
-        tool_policy_resolver,
-        web_search_tool_provider,
-    )
-    response = build_stub_response(data)
     if data.stream:
         return ServerSentEvent(
-            _sse_payload(response),
+            _sse_payload(events),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
-    return response
-
-
-def _runtime_model_profile(
-    settings: Settings,
-    request: ResponseCreateRequest,
-) -> RuntimeModelProfileConfig:
-    if request.model is None:
-        raise ValidationException("Invalid request.")
-    profile = settings.runtime_model_profiles.get(request.model)
-    if profile is None:
-        raise ValidationException("Invalid request.")
-    return profile.for_service_tier(request.service_tier)
+    return completed_response_from_events([event async for event in events])
 
 
 @get("/v1/responses/{response_id:str}", dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -100,15 +76,8 @@ async def retrieve_response(
     stream: bool | None = None,
 ) -> object:
     _ = auth_context
-    _ = include_obfuscation, starting_after
-    request = ResponseCreateRequest(include=include)
-    response = build_stub_response(request, response_id=response_id)
-    if stream:
-        return ServerSentEvent(
-            _sse_payload(response),
-            headers={"content-type": "text/event-stream; charset=utf-8"},
-        )
-    return response
+    _ = response_id, include, include_obfuscation, starting_after, stream
+    raise ResponseOperationUnsupportedError(status_code=404)
 
 
 @delete(
@@ -119,18 +88,20 @@ async def retrieve_response(
 async def delete_response(
     response_id: str,
     auth_context: AuthContext,
-) -> ResponseDeleted:
+) -> object:
     _ = auth_context
-    return build_deleted_response(response_id)
+    _ = response_id
+    raise ResponseOperationUnsupportedError(status_code=404)
 
 
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
 async def compact_response(
     data: CompactRequest,
     auth_context: AuthContext,
-) -> CompactedResponseObject:
+) -> object:
     _ = auth_context
-    return build_compacted_response(data)
+    _ = data
+    raise ResponseOperationUnsupportedError()
 
 
 @get(
@@ -144,10 +115,10 @@ async def list_input_items(
     include: list[str] | None = None,
     limit: int | None = None,
     order: str | None = None,
-) -> InputItemsPage:
+) -> object:
     _ = auth_context
-    _ = after, include, limit, order
-    return build_input_items_page(response_id)
+    _ = response_id, after, include, limit, order
+    raise ResponseOperationUnsupportedError(status_code=404)
 
 
 @post(
@@ -158,15 +129,21 @@ async def list_input_items(
 async def count_input_tokens(
     data: InputTokensCountRequest,
     auth_context: AuthContext,
-) -> InputTokenCountResponse:
+) -> object:
     _ = auth_context
-    return build_input_token_count(data)
+    _ = data
+    raise ResponseOperationUnsupportedError()
 
 
 @websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
 async def responses_socket(
     socket: WebSocket,
     auth_context: AuthContext,
+    settings: Settings,
+    sealing_keyring: SealingKeyring,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    web_search_tool_provider: IMCPToolProvider | None,
 ) -> None:
     _ = auth_context
 
@@ -189,9 +166,26 @@ async def responses_socket(
             )
             continue
 
-        response = build_stub_response(client_event.response)
-        for event in build_stream_events(response):
-            await socket.send_json(event.model_dump(mode="json", exclude_none=True))
+        try:
+            events = stream_response_events(
+                client_event.response,
+                settings=settings,
+                sealing_keyring=sealing_keyring,
+                tool_policy_resolver=tool_policy_resolver,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                web_search_tool_provider=web_search_tool_provider,
+            )
+            async for event in events:
+                await socket.send_json(
+                    event.model_dump(mode="json", exclude_none=True)
+                )
+        except Exception:
+            await socket.send_json(
+                build_error_event("Invalid request.").model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
 
 
 RESPONSE_ROUTE_HANDLERS = [
