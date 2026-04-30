@@ -15,7 +15,9 @@ from plap.llms.router import (
     UnavailableChatCompletionClient,
 )
 from plap.responses.tools import (
+    TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_CALL_EFFECT_CLASSIFIER_NAME,
+    TOOL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_NAME,
     LLMToolCallClassifier,
     LLMToolClassifier,
@@ -46,6 +48,29 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     assert isinstance(client, RoutingChatCompletionClient)
 
 
+def test_app_runtime_includes_wisp_nano_default_profile() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        llm_lightning_api_key="lightning-key",
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+    profile = settings.runtime_model_profiles["plap-ai/wisp-nano"]
+    assert profile.display_name == "Wisp Nano"
+    assert profile.main_model == "crof/qwen3.5-9b"
+    assert profile.main_debate_model == "crof/qwen3.5-9b"
+    assert profile.reviewer_model == "crof/qwen3.5-9b"
+    assert profile.arbitrator_model == "crof/qwen3.5-9b"
+    assert profile.reasoning_summarizer_model == (
+        "lightning/lightning-ai/gpt-oss-120b"
+    )
+    assert profile.transcript_token_budget == 200_000
+    assert profile.compression_soft_token_budget == 100_000
+    assert profile.compression_hard_token_budget == 150_000
+    assert profile.compression_max_rounds == 3
+
+
 def test_app_runtime_validates_crof_provider_prefix() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
@@ -63,20 +88,16 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
     _validate_runtime_model_profiles(settings)
 
 
-def test_app_runtime_rejects_unrouted_tool_classifier_model() -> None:
+def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
     client = _create_chat_completion_client(_settings())
 
-    with pytest.raises(ValueError, match="tool_classifier_model"):
-        _create_tool_classifier(
-            _settings(tool_classifier_model="lightning/lightning-ai/gpt-oss-20b"),
-            client,
-        )
+    with pytest.raises(ValueError, match="tool effect classifier model"):
+        _create_tool_classifier(_settings(), client)
 
 
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -85,47 +106,25 @@ def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
 
     assert isinstance(classifier, LLMToolClassifier)
     assert classifier.classifier == TOOL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-20b"
+    assert classifier.classifier_model == TOOL_EFFECT_CLASSIFIER_MODEL
 
 
-def test_app_runtime_builds_tool_call_classifier_from_tool_model() -> None:
-    settings = _settings(
-        llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
-    )
+def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
+    settings = _settings(llm_lightning_api_key="lightning-key")
     client = _create_chat_completion_client(settings)
 
     classifier = _create_tool_call_classifier(settings, client)
 
     assert isinstance(classifier, LLMToolCallClassifier)
     assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-20b"
+    assert classifier.classifier_model == TOOL_CALL_EFFECT_CLASSIFIER_MODEL
 
 
-def test_app_runtime_tool_call_classifier_model_can_override_tool_model() -> None:
-    settings = _settings(
-        llm_lightning_api_key="lightning-key",
-        tool_classifier_model="lightning/lightning-ai/gpt-oss-20b",
-        tool_call_classifier_model="lightning/lightning-ai/gpt-oss-120b",
-    )
-    client = _create_chat_completion_client(settings)
-
-    classifier = _create_tool_call_classifier(settings, client)
-
-    assert isinstance(classifier, LLMToolCallClassifier)
-    assert classifier.classifier_model == "lightning/lightning-ai/gpt-oss-120b"
-
-
-def test_app_runtime_rejects_unrouted_tool_call_classifier_model() -> None:
+def test_app_runtime_rejects_unrouted_tool_call_classifier_route() -> None:
     client = _create_chat_completion_client(_settings())
 
-    with pytest.raises(ValueError, match="tool_call_classifier_model"):
-        _create_tool_call_classifier(
-            _settings(
-                tool_call_classifier_model="lightning/lightning-ai/gpt-oss-20b"
-            ),
-            client,
-        )
+    with pytest.raises(ValueError, match="tool call classifier model"):
+        _create_tool_call_classifier(_settings(), client)
 
 
 def test_app_runtime_omits_mcp_provider_without_config() -> None:
@@ -218,7 +217,7 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
                         transcript_token_budget=4096,
-                        compression_token_thresholds=[2048, 4096],
+                        compression_soft_token_budget=4096,
                         compression_hard_token_budget=8192,
                         compression_max_rounds=1,
                     )
@@ -293,7 +292,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                compression_token_thresholds=[1000, 2000],
+                compression_soft_token_budget=2000,
                 compression_hard_token_budget=3000,
                 compression_max_rounds=2,
                 service_tier_overrides={
@@ -301,7 +300,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                         main_model="lightning/lightning-ai/gpt-oss-120b",
                         reviewer_model="lightning/lightning-ai/gpt-oss-120b",
                         transcript_token_budget=8192,
-                        compression_token_thresholds=[4000, 5000],
+                        compression_soft_token_budget=5000,
                         compression_hard_token_budget=6000,
                         compression_max_rounds=1,
                     )
@@ -325,26 +324,16 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     assert priority.main_debate_model == "crof/qwen3.5-9b"
     assert priority.arbitrator_model == "crof/qwen3.5-9b"
     assert priority.transcript_token_budget == 8192
-    assert priority.compression_token_thresholds == [4000, 5000]
+    assert priority.compression_soft_token_budget == 5000
     assert priority.compression_hard_token_budget == 6000
     assert priority.compression_max_rounds == 1
-    assert base.compression_token_thresholds == [1000, 2000]
+    assert base.compression_soft_token_budget == 2000
     assert base.compression_hard_token_budget == 3000
     assert base.compression_max_rounds == 2
     assert flex is base
 
 
-def test_runtime_profile_rejects_invalid_compression_thresholds() -> None:
-    with pytest.raises(ValueError, match="strictly increasing"):
-        _profile_config(
-            main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
-            reviewer_model="crof/qwen3.5-9b",
-            arbitrator_model="crof/qwen3.5-9b",
-            reasoning_summarizer_model="crof/qwen3.5-9b",
-            compression_token_thresholds=[1000, 1000],
-        )
-
+def test_runtime_profile_rejects_invalid_compression_budgets() -> None:
     with pytest.raises(ValueError, match="hard token budget"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
@@ -352,7 +341,7 @@ def test_runtime_profile_rejects_invalid_compression_thresholds() -> None:
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
-            compression_token_thresholds=[1000],
+            compression_soft_token_budget=1000,
             compression_hard_token_budget=1000,
         )
 
@@ -376,7 +365,7 @@ def _profile_config(
     arbitrator_model: str,
     reasoning_summarizer_model: str,
     transcript_token_budget: int = 0,
-    compression_token_thresholds: list[int] | None = None,
+    compression_soft_token_budget: int | None = None,
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
     service_tier_overrides: dict[
@@ -393,7 +382,7 @@ def _profile_config(
         arbitrator_model=arbitrator_model,
         reasoning_summarizer_model=reasoning_summarizer_model,
         transcript_token_budget=transcript_token_budget,
-        compression_token_thresholds=compression_token_thresholds or [],
+        compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
         service_tier_overrides=service_tier_overrides or {},

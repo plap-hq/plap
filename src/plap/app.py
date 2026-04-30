@@ -32,6 +32,8 @@ from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.ingest import IngestionError
 from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.tools import (
+    TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
+    TOOL_EFFECT_CLASSIFIER_MODEL,
     IToolCallClassifier,
     IToolClassifier,
     LLMToolCallClassifier,
@@ -203,19 +205,18 @@ def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
 def _create_tool_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
-) -> IToolClassifier | None:
-    if settings.tool_classifier_model is None:
-        return None
+) -> IToolClassifier:
     if not _has_configured_chat_completion_route(
-        settings, settings.tool_classifier_model
+        settings,
+        TOOL_EFFECT_CLASSIFIER_MODEL,
     ):
         raise ValueError(
-            "tool_classifier_model does not match any configured LLM route: "
-            f"{settings.tool_classifier_model!r}"
+            "tool effect classifier model does not match any configured LLM route: "
+            f"{TOOL_EFFECT_CLASSIFIER_MODEL!r}"
         )
     return LLMToolClassifier(
         client=chat_completion_client,
-        classifier_model=settings.tool_classifier_model,
+        classifier_model=TOOL_EFFECT_CLASSIFIER_MODEL,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
 
@@ -223,20 +224,18 @@ def _create_tool_classifier(
 def _create_tool_call_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
-) -> IToolCallClassifier | None:
-    classifier_model = (
-        settings.tool_call_classifier_model or settings.tool_classifier_model
-    )
-    if classifier_model is None:
-        return None
-    if not _has_configured_chat_completion_route(settings, classifier_model):
+) -> IToolCallClassifier:
+    if not _has_configured_chat_completion_route(
+        settings,
+        TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
+    ):
         raise ValueError(
-            "tool_call_classifier_model does not match any configured LLM route: "
-            f"{classifier_model!r}"
+            "tool call classifier model does not match any configured LLM route: "
+            f"{TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}"
         )
     return LLMToolCallClassifier(
         client=chat_completion_client,
-        classifier_model=classifier_model,
+        classifier_model=TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
 

@@ -51,6 +51,7 @@ anyio_mode = "auto"
 filterwarnings = [
   "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
   "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
+  "ignore:'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16:DeprecationWarning:asyncio\\.threads",
   "ignore:'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16:DeprecationWarning:litestar\\.concurrency",
   "ignore:remove second argument of ws_handler:DeprecationWarning",
   "ignore:Pydantic V1 style `@validator` validators are deprecated:pydantic.warnings.PydanticDeprecatedSince20:fireworks\\.client\\.image_api",

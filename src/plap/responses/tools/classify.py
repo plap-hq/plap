@@ -39,6 +39,7 @@ Definitions:
 - unknown: ambiguous or insufficient information.
 """
 TOOL_EFFECT_CLASSIFIER_NAME = "llm_tool_effect_classifier"
+TOOL_EFFECT_CLASSIFIER_MODEL = "lightning/lightning-ai/gpt-oss-120b"
 
 TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -79,6 +80,7 @@ Definitions:
 Do not return contextual. You are classifying this concrete call, not the tool family.
 """
 TOOL_CALL_EFFECT_CLASSIFIER_NAME = "llm_tool_call_effect_classifier"
+TOOL_CALL_EFFECT_CLASSIFIER_MODEL = TOOL_EFFECT_CLASSIFIER_MODEL
 
 TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",

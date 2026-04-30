@@ -4,7 +4,7 @@ import json
 import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 
@@ -79,7 +79,9 @@ from plap.responses.tools.web_search import web_search_policy
 from plap.settings import RuntimeModelProfileConfig, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
-_CITATION_RE = re.compile(r"^\[~(\d+)(?:_(\d+))?\]$")
+_CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
+type _CompressionBailout = Literal["none", "soft", "hard"]
+type _CompressionReminderLevel = Literal["none", "soft", "hard"]
 
 SOFT_COMPRESSION_REMINDER = (
     "Context is getting long. If earlier cited conversation ranges can be safely "
@@ -128,14 +130,19 @@ def _context_token_count(
 def _compression_reminder(
     profile: RuntimeModelProfileConfig,
     token_count: int,
-) -> str | None:
+    bailout: _CompressionBailout,
+) -> tuple[_CompressionReminderLevel, str | None]:
     if _hard_compression_budget_crossed(profile, token_count):
-        return HARD_COMPRESSION_REMINDER
-    if any(
-        token_count >= threshold for threshold in profile.compression_token_thresholds
+        if bailout != "hard":
+            return "hard", HARD_COMPRESSION_REMINDER
+        return "none", None
+    if (
+        profile.compression_soft_token_budget is not None
+        and token_count >= profile.compression_soft_token_budget
+        and bailout == "none"
     ):
-        return SOFT_COMPRESSION_REMINDER
-    return None
+        return "soft", SOFT_COMPRESSION_REMINDER
+    return "none", None
 
 
 def _hard_compression_budget_crossed(
@@ -236,6 +243,11 @@ def _apply_compression(
     if not isinstance(payload, dict):
         raise ToolPolicyError("compress arguments must be an object")
     ranges = payload.get("ranges")
+    if isinstance(ranges, str):
+        try:
+            ranges = json.loads(ranges)
+        except json.JSONDecodeError as exc:
+            raise ToolPolicyError("compress ranges must be valid JSON") from exc
     if not isinstance(ranges, list):
         raise ToolPolicyError("compress ranges are required")
     if not ranges:
@@ -255,8 +267,8 @@ def _apply_compression(
             raise ToolPolicyError("compress range citations are required")
         if not isinstance(summary, str) or not summary.strip():
             raise ToolPolicyError("compress range summary is required")
-        _parse_citation(start)
-        _parse_citation(end)
+        start = _normalize_citation(start)
+        end = _normalize_citation(end)
         start_index = index_by_citation.get(start)
         end_index = index_by_citation.get(end)
         if start_index is None or end_index is None:
@@ -296,7 +308,12 @@ def _apply_compression(
     return compressed, True
 
 
-def _parse_citation(value: str) -> tuple[int, int]:
+def _normalize_citation(value: str) -> str:
+    if value.startswith("[") or value.endswith("]"):
+        if not (value.startswith("[") and value.endswith("]")):
+            raise ToolPolicyError("compress range citation is invalid")
+        value = value[1:-1]
+
     match = _CITATION_RE.fullmatch(value)
     if match is None:
         raise ToolPolicyError("compress range citation is invalid")
@@ -304,7 +321,8 @@ def _parse_citation(value: str) -> tuple[int, int]:
     end = int(match.group(2) or start)
     if start > end:
         raise ToolPolicyError("compress range citation is invalid")
-    return start, end
+    suffix = f"_{end}" if match.group(2) is not None else ""
+    return f"[~{start}{suffix}]"
 
 
 def _chat_message_from_span(
@@ -519,7 +537,7 @@ async def _run_response(
     await out.in_progress()
 
     compression_rounds = 0
-    compression_reminder_disabled = False
+    compression_bailout: _CompressionBailout = "none"
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
@@ -571,22 +589,20 @@ async def _run_response(
             effective_main_context,
             include_citations=include_citations,
         )
+        compression_reminder_level: _CompressionReminderLevel = "none"
         compression_reminder = None
-        if (
-            COMPRESS_TOOL_NAME in effective_tool_policies
-            and not compression_reminder_disabled
-        ):
-            compression_reminder = _compression_reminder(profile, token_count)
+        if COMPRESS_TOOL_NAME in effective_tool_policies:
+            compression_reminder_level, compression_reminder = _compression_reminder(
+                profile,
+                token_count,
+                compression_bailout,
+            )
         if compression_reminder is not None:
             messages.append(ChatMessage(role="user", content=compression_reminder))
 
         tool_choice = _chat_tool_choice(request)
         forced_compression = False
-        if (
-            COMPRESS_TOOL_NAME in effective_tool_policies
-            and _hard_compression_budget_crossed(profile, token_count)
-            and compression_reminder is not None
-        ):
+        if compression_reminder_level == "hard":
             tool_choice = ChatToolChoiceFunction(name=COMPRESS_TOOL_NAME)
             forced_compression = True
 
@@ -626,6 +642,7 @@ async def _run_response(
                     tool_calls[0].arguments,
                 )
                 if compressed:
+                    compression_bailout = "none"
                     compaction_payload = CompactionPayload(
                         active=tuple(main_context),
                         cursors=cursors,
@@ -641,10 +658,15 @@ async def _run_response(
                             type="compaction",
                         )
                     )
-                else:
-                    compression_reminder_disabled = True
+                elif compression_reminder_level == "hard":
+                    compression_bailout = "hard"
+                elif compression_reminder_level == "soft":
+                    compression_bailout = "soft"
                 compression_rounds += 1
                 continue
+
+            if compression_reminder_level == "soft":
+                compression_bailout = "soft"
 
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
