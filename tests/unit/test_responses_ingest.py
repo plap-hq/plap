@@ -141,6 +141,45 @@ async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
     assert result.continuation_side == "arbitrator"
 
 
+async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_when_last() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    True,
+                    [{"role": "assistant", "content": "candidate mutation"}],
+                    continuation_side="reviewer",
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message["content"] for row in result.main_context_temp] == ["candidate mutation"]
+    assert result.reviewer == ()
+    assert result.continuation_side == "reviewer"
+    assert result.in_temp_debate is True
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    False,
+                    [{"role": "assistant", "content": "main reasoning"}],
+                    continuation_side="reviewer",
+                ),
+                _message("user", "follow-up"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message["content"] for row in result.main_context] == ["main reasoning", "follow-up"]
+    assert result.continuation_side == "main"
+
+
 async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     temp_message = {"role": "assistant", "content": "temp reviewer"}
     call_id = _call_id(
@@ -508,6 +547,27 @@ async def test_ingestion_requires_reasoning_tool_call_public_replay() -> None:
             _request(input=[_reasoning_item("reviewer", False, [assistant])]),
             keyring=_keyring(),
         )
+
+
+async def test_ingestion_accepts_reasoning_tool_call_satisfied_by_hidden_output() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": "need file",
+        "tool_calls": [_tool_call("up_reasoning_0")],
+    }
+    hidden_output = {
+        "role": "tool",
+        "tool_call_id": "up_reasoning_0",
+        "content": "intercepted by reviewer",
+    }
+
+    result = await ingest_response_request(
+        _request(input=[_reasoning_item("reviewer", False, [assistant, hidden_output])]),
+        keyring=_keyring(),
+    )
+
+    assert [row.message for row in result.reviewer] == [assistant, hidden_output]
+    assert result.continuation_side == "reviewer"
 
 
 async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
@@ -970,8 +1030,10 @@ def _reasoning_item(
     side: str,
     temp: bool,
     messages: list[dict[str, object]],
+    *,
+    continuation_side: str | None = None,
 ) -> ReasoningItem:
-    payload = ReasoningPayload(side=side, temp=temp, messages=tuple(messages))
+    payload = ReasoningPayload(side=side, temp=temp, messages=tuple(messages), continuation_side=continuation_side)
     return ReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
         id="rs_test",

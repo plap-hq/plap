@@ -118,13 +118,14 @@ class _QueueBase:
         self._entries: list[ChatMessageSpan | SideMessage] = []
         self._pending_tool_call_ids: set[str] = set()
         self._unreplayed_reasoning_tool_call_ids: set[str] = set()
+        self._reasoning_tool_call_ids_seen: set[str] = set()
 
     def add_reasoning(self, payload: ReasoningPayload) -> None:
         for message in payload.messages:
             content_hash_value = message.get("content_hash")
             if content_hash_value is None:
                 appended = self._append_message(dict(message), temp=payload.temp)
-                self._track_reasoning_tool_calls(appended)
+                self._track_reasoning_message(appended)
                 continue
             if not isinstance(content_hash_value, str):
                 raise IngestionError("reasoning content_hash must be a string")
@@ -134,8 +135,8 @@ class _QueueBase:
             for key, value in message.items():
                 if key != "content_hash":
                     target[key] = value
-            if "tool_calls" in message:
-                self._track_reasoning_tool_calls(target)
+            if "tool_calls" in message or message.get("role") == "tool" or (target.get("role") == "tool" and "tool_call_id" in message):
+                self._track_reasoning_message(target)
 
     def associate_function_call(
         self,
@@ -238,7 +239,24 @@ class _QueueBase:
             tool_call_id = tool_call.get("id")
             if not isinstance(tool_call_id, str) or not tool_call_id:
                 raise IngestionError("reasoning tool call id is missing")
+            if tool_call_id in self._reasoning_tool_call_ids_seen:
+                raise IngestionError("duplicate reasoning tool call")
+            self._reasoning_tool_call_ids_seen.add(tool_call_id)
             self._unreplayed_reasoning_tool_call_ids.add(tool_call_id)
+
+    def _satisfy_reasoning_tool_call_from_hidden_output(self, message: ChatMessage) -> None:
+        if message.get("role") != "tool":
+            return
+        tool_call_id = message.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            raise IngestionError("reasoning tool output tool_call_id is missing")
+        if tool_call_id not in self._unreplayed_reasoning_tool_call_ids:
+            raise IngestionError("reasoning tool output has no pending tool call")
+        self._unreplayed_reasoning_tool_call_ids.remove(tool_call_id)
+
+    def _track_reasoning_message(self, message: ChatMessage) -> None:
+        self._track_reasoning_tool_calls(message)
+        self._satisfy_reasoning_tool_call_from_hidden_output(message)
 
     def assert_no_pending_tool_calls(self) -> None:
         if self._unreplayed_reasoning_tool_call_ids:
@@ -453,7 +471,7 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
             routed.main.append(_SideEvent(kind="message", item=item.item))
             continue
         if item.reasoning is not None:
-            routed.continuation_side = item.reasoning.side
+            routed.continuation_side = item.reasoning.continuation_side or item.reasoning.side
             routed.side(item.reasoning.side).append(_SideEvent(kind="reasoning", reasoning=item.reasoning))
             continue
         if isinstance(item.item, RequestFunctionCallItem):

@@ -90,6 +90,7 @@ class ReasoningPayload:
     side: Side
     temp: bool
     messages: tuple[ChatMessage, ...]
+    continuation_side: Side | None = None
 
 
 @dataclass(frozen=True, slots=True)

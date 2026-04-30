@@ -189,13 +189,16 @@ def _compaction_from_json(value: object) -> CompactionPayload:
 
 
 def _reasoning_to_json(value: ReasoningPayload) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "version": PAYLOAD_FORMAT_VERSION,
         "type": REASONING_PAYLOAD_TYPE,
         "side": value.side,
         "temp": value.temp,
         "messages": list(value.messages),
     }
+    if value.continuation_side is not None:
+        payload["continuation_side"] = value.continuation_side
+    return payload
 
 
 def _reasoning_from_json(value: object) -> ReasoningPayload:
@@ -212,7 +215,10 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
     messages = value.get("messages")
     if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
         raise IngestionError("reasoning messages must be an array of objects")
-    return ReasoningPayload(side=side, temp=temp, messages=tuple(messages))
+    continuation_side = value.get("continuation_side")
+    if continuation_side is not None and continuation_side not in {"main", "reviewer", "arbitrator"}:
+        raise IngestionError("invalid reasoning continuation_side")
+    return ReasoningPayload(side=side, temp=temp, messages=tuple(messages), continuation_side=continuation_side)
 
 
 def _pack_call_id(value: SealedCallID) -> bytes:
