@@ -26,6 +26,7 @@ class ChatMessageSpan:
     expanded_token_count: int = 0
     children: tuple[ChatMessageSpan, ...] = ()
     children_pruned: bool = False
+    summary_fidelity: int | None = None
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end < 0:
@@ -40,6 +41,10 @@ class ChatMessageSpan:
         ):
             if value < 0:
                 raise ValueError(f"message span {field_name} must be non-negative")
+        if self.summary_fidelity is not None and (
+            not isinstance(self.summary_fidelity, int) or isinstance(self.summary_fidelity, bool) or not 1 <= self.summary_fidelity <= 5
+        ):
+            raise ValueError("message span summary_fidelity must be between 1 and 5")
         if not self.content_hash:
             object.__setattr__(self, "content_hash", chat_message_hash(self.message))
         if self.children:

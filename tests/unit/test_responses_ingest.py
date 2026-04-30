@@ -800,6 +800,7 @@ def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
         message={"role": "assistant"},
         token_count=1,
         children_pruned=True,
+        summary_fidelity=3,
     )
 
     assert leaf.citation == "[~0]"
@@ -863,6 +864,34 @@ def test_sealed_compaction_requires_token_count() -> None:
         open_compaction_payload(token, keyring=_keyring())
 
 
+def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None:
+    token = _seal_raw_payload(
+        COMPACTION_PURPOSE,
+        {
+            "version": PAYLOAD_FORMAT_VERSION,
+            "type": "compaction",
+            "active": [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "message": {"role": "assistant", "content": "summary"},
+                    "token_count": 1,
+                    "children_token_count": 2,
+                    "expanded_token_count": 2,
+                    "children": [
+                        {"start": 0, "end": 0, "message": {"role": "user", "content": "a"}, "token_count": 1},
+                        {"start": 1, "end": 1, "message": {"role": "user", "content": "b"}, "token_count": 1},
+                    ],
+                }
+            ],
+            "cursors": {"m": 2},
+        },
+    )
+
+    with pytest.raises(IngestionError, match="summary_fidelity"):
+        open_compaction_payload(token, keyring=_keyring())
+
+
 def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
     token = seal_compaction_payload(
         CompactionPayload(
@@ -873,6 +902,7 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                     message={"role": "user", "content": "first"},
                     token_count=1,
                     children_pruned=True,
+                    summary_fidelity=3,
                 ),
                 ChatMessageSpan(
                     start=1,
@@ -896,6 +926,7 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
         end=1,
         message={"role": "assistant", "content": "summary 0-1"},
         token_count=1,
+        summary_fidelity=4,
         children=(
             ChatMessageSpan(
                 start=0,
@@ -916,6 +947,7 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
         end=3,
         message={"role": "assistant", "content": "summary 2-3"},
         token_count=1,
+        summary_fidelity=2,
         children=(
             ChatMessageSpan(
                 start=2,
@@ -949,10 +981,55 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
     )
 
     assert [row.citation for row in result.main_context] == ["[~0_1]", "[~2_3]"]
+    assert [row.summary_fidelity for row in result.main_context] == [4, 2]
     assert [row.citation for row in result.main_transcript] == [
-        "[~0]",
-        "[~1]",
-        "[~2_3]",
+        "[~0_1]",
+        "[~2]",
+        "[~3]",
+    ]
+
+
+async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
+    first_summary = ChatMessageSpan(
+        start=0,
+        end=1,
+        message={"role": "assistant", "content": "summary 0-1"},
+        token_count=1,
+        summary_fidelity=3,
+        children=(
+            ChatMessageSpan(start=0, end=0, message={"role": "user", "content": "m0"}, token_count=2),
+            ChatMessageSpan(start=1, end=1, message={"role": "assistant", "content": "m1"}, token_count=3),
+        ),
+    )
+    second_summary = ChatMessageSpan(
+        start=2,
+        end=3,
+        message={"role": "assistant", "content": "summary 2-3"},
+        token_count=1,
+        summary_fidelity=3,
+        children=(
+            ChatMessageSpan(start=2, end=2, message={"role": "user", "content": "m2"}, token_count=2),
+            ChatMessageSpan(start=3, end=3, message={"role": "assistant", "content": "m3"}, token_count=3),
+        ),
+    )
+    compaction = RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(
+            CompactionPayload(active=(first_summary, second_summary), cursors={"m": 4}),
+            keyring=_keyring(),
+        ),
+        type="compaction",
+    )
+
+    result = await ingest_response_request(
+        _request(input=[compaction]),
+        keyring=_keyring(),
+        transcript_token_budget=6,
+    )
+
+    assert [row.citation for row in result.main_transcript] == [
+        "[~0_1]",
+        "[~2]",
+        "[~3]",
     ]
 
 
@@ -1013,6 +1090,7 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
                 end=cursor - 1,
                 message={"role": "assistant", "content": f"{label} summary"},
                 token_count=1,
+                summary_fidelity=3,
                 children=source[1:],
             )
         )

@@ -302,7 +302,7 @@ def _decode_upstream_id(value: bytes) -> str:
 
 
 def _row_to_json(value: ChatMessageSpan) -> dict[str, Any]:
-    return {
+    row = {
         "start": value.start,
         "end": value.end,
         "message": value.message,
@@ -312,6 +312,9 @@ def _row_to_json(value: ChatMessageSpan) -> dict[str, Any]:
         "children_pruned": value.children_pruned,
         "children": [_row_to_json(child) for child in value.children],
     }
+    if value.summary_fidelity is not None:
+        row["summary_fidelity"] = value.summary_fidelity
+    return row
 
 
 def _validate_active_rows(rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]) -> None:
@@ -344,6 +347,8 @@ def _validate_span_rows(
 
 def _validate_span_node(row: ChatMessageSpan, *, cursors: dict[str, int]) -> None:
     if row.children:
+        if row.summary_fidelity is None:
+            raise IngestionError("compaction summary_fidelity is required")
         if row.children_pruned:
             raise IngestionError("compaction span cannot have children and be pruned")
         _validate_span_rows(row.children, cursors=cursors, parent=row)
@@ -356,10 +361,14 @@ def _validate_span_node(row: ChatMessageSpan, *, cursors: dict[str, int]) -> Non
         return
 
     if row.is_leaf:
+        if row.summary_fidelity is not None:
+            raise IngestionError("compaction leaf span cannot have summary_fidelity")
         if row.children_pruned:
             raise IngestionError("compaction leaf span cannot be pruned")
         return
 
+    if row.summary_fidelity is None:
+        raise IngestionError("compaction summary_fidelity is required")
     if not row.children_pruned:
         raise IngestionError("compaction summary span has no children")
 
@@ -391,9 +400,19 @@ def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
                 expanded_token_count=_non_negative_int(row, "expanded_token_count"),
                 children=_rows_from_json(children),
                 children_pruned=bool(row.get("children_pruned", False)),
+                summary_fidelity=_optional_summary_fidelity(row),
             )
         )
     return tuple(rows)
+
+
+def _optional_summary_fidelity(row: dict[str, Any]) -> int | None:
+    value = row.get("summary_fidelity")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 5:
+        raise IngestionError("message row summary_fidelity is invalid")
+    return value
 
 
 def _non_negative_int(row: dict[str, Any], key: str) -> int:

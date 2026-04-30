@@ -263,17 +263,20 @@ def _apply_compression(
         return main_context, False
 
     index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
-    parsed_ranges: list[tuple[int, int, str]] = []
+    parsed_ranges: list[tuple[int, int, str, int]] = []
     for item in ranges:
         if not isinstance(item, dict):
             raise ToolPolicyError("compress range must be an object")
         start = item.get("start")
         end = item.get("end")
         summary = item.get("summary")
+        summary_fidelity = item.get("summary_fidelity")
         if not isinstance(start, str) or not isinstance(end, str):
             raise ToolPolicyError("compress range citations are required")
         if not isinstance(summary, str) or not summary.strip():
             raise ToolPolicyError("compress range summary is required")
+        if not isinstance(summary_fidelity, int) or isinstance(summary_fidelity, bool) or not 1 <= summary_fidelity <= 5:
+            raise ToolPolicyError("compress range summary_fidelity must be an integer from 1 to 5")
         start = _normalize_citation(start)
         end = _normalize_citation(end)
         start_index = index_by_citation.get(start)
@@ -282,18 +285,18 @@ def _apply_compression(
             raise ToolPolicyError("compress range citation is not visible")
         if start_index > end_index:
             raise ToolPolicyError("compress range start must not follow end")
-        parsed_ranges.append((start_index, end_index, summary.strip()))
+        parsed_ranges.append((start_index, end_index, summary.strip(), summary_fidelity))
 
     parsed_ranges.sort(key=lambda item: (item[0], item[1]))
     previous_end = -1
-    for start_index, end_index, _ in parsed_ranges:
+    for start_index, end_index, _, _ in parsed_ranges:
         if start_index <= previous_end:
             raise ToolPolicyError("compress ranges must not overlap")
         previous_end = end_index
 
     compressed: list[ChatMessageSpan] = []
     cursor = 0
-    for start_index, end_index, summary in parsed_ranges:
+    for start_index, end_index, summary, summary_fidelity in parsed_ranges:
         compressed.extend(main_context[cursor:start_index])
         selected = tuple(main_context[start_index : end_index + 1])
         summary_message = {"role": "assistant", "content": summary}
@@ -308,6 +311,7 @@ def _apply_compression(
                 message=summary_message,
                 token_count=summary_token_count,
                 children=selected,
+                summary_fidelity=summary_fidelity,
             )
         )
         cursor = end_index + 1

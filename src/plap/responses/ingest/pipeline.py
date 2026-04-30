@@ -112,6 +112,15 @@ class _AssociatedQueues:
     cursors: dict[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpansionCandidate:
+    index: int
+    summary_fidelity: int
+    token_delta: int
+    start: int
+    end: int
+
+
 class _QueueBase:
     def __init__(self, side: Side) -> None:
         self.side = side
@@ -558,46 +567,41 @@ def render_budgeted_spans(
     if token_budget < 0:
         raise ValueError("token budget must be non-negative")
     current_tokens = sum(span.token_count for span in spans)
-    stopped = False
-    rendered: list[ChatMessageSpan] = []
-    for span in spans:
-        if stopped:
-            rendered.append(span)
-            continue
-        rows, current_tokens, stopped = _render_budgeted_span(
-            span,
-            current_tokens=current_tokens,
-            token_budget=token_budget,
-        )
-        rendered.extend(rows)
+    rendered = list(spans)
+    while candidate := _best_expansion_candidate(rendered, current_tokens=current_tokens, token_budget=token_budget):
+        span = rendered[candidate.index]
+        rendered[candidate.index : candidate.index + 1] = span.children
+        current_tokens += candidate.token_delta
     return tuple(rendered)
 
 
-def _render_budgeted_span(
-    span: ChatMessageSpan,
+def _best_expansion_candidate(
+    spans: list[ChatMessageSpan],
     *,
     current_tokens: int,
     token_budget: int,
-) -> tuple[tuple[ChatMessageSpan, ...], int, bool]:
-    if not span.children:
-        return (span,), current_tokens, False
-    delta = span.children_token_count - span.token_count
-    if current_tokens + delta > token_budget:
-        return (span,), current_tokens, True
-    current_tokens += delta
-    rendered: list[ChatMessageSpan] = []
-    for index, child in enumerate(span.children):
-        rows, current_tokens, stopped = _render_budgeted_span(
-            child,
-            current_tokens=current_tokens,
-            token_budget=token_budget,
+) -> _ExpansionCandidate | None:
+    candidates: list[_ExpansionCandidate] = []
+    for index, span in enumerate(spans):
+        if not span.children:
+            continue
+        token_delta = span.children_token_count - span.token_count
+        if current_tokens + token_delta > token_budget:
+            continue
+        candidates.append(
+            _ExpansionCandidate(
+                index=index,
+                summary_fidelity=span.summary_fidelity if span.summary_fidelity is not None else 3,
+                token_delta=token_delta,
+                start=span.start,
+                end=span.end,
+            )
         )
-        rendered.extend(rows)
-        if stopped:
-            remaining = span.children[index + 1 :]
-            rendered.extend(remaining)
-            return tuple(rendered), current_tokens, True
-    return tuple(rendered), current_tokens, False
+    return min(
+        candidates,
+        key=lambda candidate: (candidate.summary_fidelity, candidate.token_delta, -candidate.end, -candidate.start, candidate.index),
+        default=None,
+    )
 
 
 def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:

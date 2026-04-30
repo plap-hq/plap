@@ -658,11 +658,13 @@ async def test_stream_response_events_executes_batched_compression() -> None:
                                         "start": "[~0]",
                                         "end": "[~1]",
                                         "summary": "alpha beta summary",
+                                        "summary_fidelity": 4,
                                     },
                                     {
                                         "start": "[~2]",
                                         "end": "[~3]",
                                         "summary": "gamma delta summary",
+                                        "summary_fidelity": 3,
                                     },
                                 ]
                             }
@@ -706,6 +708,7 @@ async def test_stream_response_events_executes_batched_compression() -> None:
         "alpha beta summary",
         "gamma delta summary",
     ]
+    assert [row.summary_fidelity for row in payload.active] == [4, 3]
     assert all(row.token_count > 0 for row in payload.active)
     assert [len(row.children) for row in payload.active] == [2, 2]
     assert len(client.requests) == 2
@@ -732,6 +735,7 @@ async def test_stream_response_events_accepts_stringified_compression_ranges() -
                                             "start": "[~0]",
                                             "end": "[~1]",
                                             "summary": "alpha beta summary",
+                                            "summary_fidelity": 4,
                                         }
                                     ]
                                 )
@@ -780,6 +784,7 @@ async def test_stream_response_events_accepts_bracketless_compress_citations() -
                                         "start": "~0",
                                         "end": "~1",
                                         "summary": "alpha beta summary",
+                                        "summary_fidelity": 4,
                                     }
                                 ]
                             }
@@ -811,6 +816,48 @@ async def test_stream_response_events_accepts_bracketless_compress_citations() -
     assert [item.type for item in completed.output] == ["compaction", "message"]
 
 
+async def test_stream_response_events_rejects_missing_compression_fidelity() -> None:
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="compress_call_1",
+                    name="compress",
+                    arguments=json.dumps(
+                        {
+                            "ranges": [
+                                {
+                                    "start": "[~0]",
+                                    "end": "[~1]",
+                                    "summary": "alpha beta summary",
+                                }
+                            ]
+                        }
+                    ),
+                )
+            ],
+        )
+    )
+
+    with pytest.raises(ToolPolicyError, match="summary_fidelity"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[_message("user", "alpha"), _message("assistant", "beta")],
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
 async def test_stream_response_events_rejects_overlapping_compression_ranges() -> None:
     client = _StaticChatClient(
         ChatMessage(
@@ -826,11 +873,13 @@ async def test_stream_response_events_rejects_overlapping_compression_ranges() -
                                     "start": "[~0]",
                                     "end": "[~1]",
                                     "summary": "first",
+                                    "summary_fidelity": 3,
                                 },
                                 {
                                     "start": "[~1]",
                                     "end": "[~2]",
                                     "summary": "second",
+                                    "summary_fidelity": 3,
                                 },
                             ]
                         }
@@ -883,6 +932,7 @@ async def test_stream_response_events_rejects_hidden_compression_citation() -> N
             message={"role": "assistant", "content": "alpha beta summary"},
             token_count=1,
             children=(leaf_zero, leaf_one),
+            summary_fidelity=3,
         ),
         ChatMessageSpan(
             start=2,
@@ -905,6 +955,7 @@ async def test_stream_response_events_rejects_hidden_compression_citation() -> N
                                     "start": "[~0]",
                                     "end": "[~1]",
                                     "summary": "invalid partial cut",
+                                    "summary_fidelity": 2,
                                 }
                             ]
                         }
@@ -959,6 +1010,7 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
                                     "start": "[~0]",
                                     "end": "[~0]",
                                     "summary": summary,
+                                    "summary_fidelity": 4,
                                 }
                             ]
                         }

@@ -20,6 +20,13 @@ exploration, failed attempts that no longer matter, and incidental noise. If a
 range contains an earlier summary, carry forward its important substance rather
 than merely mentioning that it existed.
 
+For each summary, set `summary_fidelity` using this anchored rubric: 5 =
+reliable working replacement where expansion is unlikely to change future work
+except for exact wording or minor detail; 4 = solid summary that preserves the
+main reusable information but may need expansion if exactness matters; 3 =
+usable gist with useful details missing; 2 = lossy orientation; 1 = minimal
+breadcrumb that should be expanded before relying on it substantively.
+
 Do not include citation markers in summaries. Do not add meta-commentary like
 "this was compressed" or "this summary replaces earlier messages"; if
 compression or compaction is part of the actual conversation, preserve the
@@ -37,12 +44,10 @@ possible, call `compress` with {"ranges": []}."""
 def compress_tool() -> FunctionTool:
     return FunctionTool(
         description=(
-            "Replace one or more earlier visible citation ranges with focused "
-            "summaries so you can continue with less context. Ranges are inclusive, "
-            "must use citations exactly as shown, and must not overlap. Never call "
-            'this tool in parallel with any other tool. Use {"ranges": []} only '
-            "when context management is requested and no useful safe compression is "
-            "possible right now."
+            "Replace visible cited conversation ranges with focused summaries. Ranges "
+            "are inclusive, non-overlapping, and must use citations exactly as shown. "
+            'Never call this tool in parallel with any other tool. Use {"ranges": []} '
+            "only when no useful safe compression is possible."
         ),
         name=COMPRESS_TOOL_NAME,
         parameters={
@@ -76,8 +81,14 @@ def compress_tool() -> FunctionTool:
                                     "Replacement summary for the selected range. Do not include citation markers or meta-commentary."
                                 ),
                             },
+                            "summary_fidelity": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5,
+                                "description": "Anchored 1-5 fidelity score for how well the summary can stand in for the selected range.",
+                            },
                         },
-                        "required": ["start", "end", "summary"],
+                        "required": ["start", "end", "summary", "summary_fidelity"],
                         "additionalProperties": False,
                     },
                 }
