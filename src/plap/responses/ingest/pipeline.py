@@ -87,6 +87,7 @@ class _SideEvent:
     call_id: SealedCallID | None = None
     call: RequestFunctionCallItem | None = None
     output: RequestFunctionCallOutputItem | None = None
+    temp: bool = False
 
 
 @dataclass(slots=True)
@@ -174,6 +175,8 @@ class _QueueBase:
         self,
         item: RequestFunctionCallOutputItem,
         call_id: SealedCallID,
+        *,
+        temp: bool = False,
     ) -> None:
         self._require_tool_call(call_id)
         self._consume_pending_tool_call(call_id.upstream_tool_call_id)
@@ -182,13 +185,15 @@ class _QueueBase:
                 "role": "tool",
                 "tool_call_id": call_id.upstream_tool_call_id,
                 "content": _function_output_text(item),
-            }
+            },
+            temp=temp,
         )
 
     def _append_message(self, message: ChatMessage, *, temp: bool = False) -> ChatMessage:
         raise NotImplementedError
 
-    def _append_tool_output(self, message: ChatMessage) -> None:
+    def _append_tool_output(self, message: ChatMessage, *, temp: bool = False) -> None:
+        _ = temp
         self._append_message(message)
 
     def _message_by_hash(self, hash_value: str) -> ChatMessage | None:
@@ -332,8 +337,8 @@ class _MainQueue(_QueueBase):
     def _append_message(self, message: ChatMessage, *, temp: bool = False) -> ChatMessage:
         return self._append_main_row(message, temp=temp).message
 
-    def _append_tool_output(self, message: ChatMessage) -> None:
-        self._append_main_row(message, allow_pending=True)
+    def _append_tool_output(self, message: ChatMessage, *, temp: bool = False) -> None:
+        self._append_main_row(message, allow_pending=True, temp=temp)
 
     def _append_main_row(
         self,
@@ -382,7 +387,8 @@ class _PrivateSideQueue(_QueueBase):
         self._entries.append(row)
         return row.message
 
-    def _append_tool_output(self, message: ChatMessage) -> None:
+    def _append_tool_output(self, message: ChatMessage, *, temp: bool = False) -> None:
+        _ = temp
         row = SideMessage(message=message)
         self._entries.append(row)
 
@@ -514,6 +520,7 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
                         kind="function_call_output",
                         item=item.item,
                         call_id=item.call_id,
+                        temp=item.temp_related,
                     )
                 )
     if pending_unsealed:
@@ -624,7 +631,7 @@ def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:
         if event.kind == "function_call_output":
             if not isinstance(event.item, RequestFunctionCallOutputItem) or event.call_id is None:
                 raise TypeError("function_call_output event is malformed")
-            queue.associate_function_call_output(event.item, event.call_id)
+            queue.associate_function_call_output(event.item, event.call_id, temp=event.temp)
             continue
         if event.kind == "fabricated_function_call":
             if not isinstance(queue, _MainQueue):

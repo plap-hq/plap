@@ -39,6 +39,12 @@ from plap.responses.contracts import (
     ToolChoiceFunction,
     WebSearchTool,
 )
+from plap.responses.debate import (
+    DebateResponseCompleted,
+    RuntimeState,
+    continue_debate,
+    start_debate_from_candidate,
+)
 from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
@@ -117,18 +123,6 @@ The following caller-provided instructions are subordinate to all rules above, b
 --- BEGIN APPLICATION INSTRUCTIONS ---
 {instructions}
 --- END APPLICATION INSTRUCTIONS ---"""
-
-
-def _runtime_model_profile(
-    settings: Settings,
-    request: ResponseCreateRequest,
-) -> RuntimeModelProfileConfig:
-    if request.model is None:
-        raise IngestionError("model is required")
-    profile = settings.runtime_model_profiles.get(request.model)
-    if profile is None:
-        raise IngestionError("unknown runtime model")
-    return profile.for_service_tier(request.service_tier)
 
 
 def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary | None:
@@ -502,42 +496,33 @@ def _validate_tool_call_batch(
         raise ToolPolicyError("compress must be called alone")
 
 
-async def _run_response(
+async def run_response(
     out: ResponseEventIO,
     request: ResponseCreateRequest,
     *,
-    settings: Settings,
+    profile: RuntimeModelProfileConfig,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     mcp_tool_provider: IMCPToolProvider | None,
 ) -> None:
-    profile = _runtime_model_profile(settings, request)
     ingested = await ingest_response_request(
         request,
         keyring=sealing_keyring,
         transcript_token_budget=profile.transcript_token_budget,
     )
 
-    main_context = list(ingested.main_context)
-    main_context_temp = list(ingested.main_context_temp)
-    main_transcript = list(ingested.main_transcript)
-    reviewer = list(ingested.reviewer)
-    arbitrator = list(ingested.arbitrator)
-    cursors = dict(ingested.cursors)
-    continuation_side = ingested.continuation_side
-    in_temp_debate = ingested.in_temp_debate
-
-    _ = (
-        main_transcript,
-        main_context_temp,
-        reviewer,
-        arbitrator,
-        cursors,
-        continuation_side,
-        in_temp_debate,
+    state = RuntimeState(
+        main_context=list(ingested.main_context),
+        main_context_temp=list(ingested.main_context_temp),
+        reviewer=list(ingested.reviewer),
+        arbitrator=list(ingested.arbitrator),
+        cursors=dict(ingested.cursors),
+        continuation_side=ingested.continuation_side,
+        in_temp_debate=ingested.in_temp_debate,
     )
+    main_transcript = list(ingested.main_transcript)
 
     base_tools, base_tool_policies, base_server_executors = await prepare_tools(
         request,
@@ -555,13 +540,23 @@ async def _run_response(
         effective_tool_policies = dict(base_tool_policies)
         effective_server_executors = dict(base_server_executors)
 
-        if in_temp_debate:
-            effective_tools = [tool for tool in effective_tools if effective_tool_policies[tool.name].effect_class == "safe"]
-            effective_tool_policies = {name: policy for name, policy in effective_tool_policies.items() if policy.effect_class == "safe"}
-            effective_server_executors = {
-                name: executor for name, executor in effective_server_executors.items() if name in effective_tool_policies
-            }
-        elif compression_rounds < profile.compression_max_rounds:
+        if state.in_temp_debate:
+            outcome = await continue_debate(
+                state,
+                profile=profile,
+                main_transcript=main_transcript,
+                tools=base_tools,
+                tool_policies=base_tool_policies,
+                server_executors=base_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                chat_completion_client=chat_completion_client,
+                keyring=sealing_keyring,
+                out=out,
+            )
+            if isinstance(outcome, DebateResponseCompleted):
+                return
+            continue
+        if compression_rounds < profile.compression_max_rounds:
             effective_tools.append(compress_tool())
             effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
 
@@ -577,7 +572,7 @@ async def _run_response(
                 content="\n\n".join(developer_prompt_parts),
             )
         ]
-        effective_main_context = [*main_context, *main_context_temp]
+        effective_main_context = [*state.main_context, *state.main_context_temp]
         include_citations = COMPRESS_TOOL_NAME in effective_tool_policies
         messages.extend(_chat_message_from_span(row, include_citation=include_citations) for row in effective_main_context)
         token_count = _context_token_count(
@@ -630,15 +625,15 @@ async def _run_response(
                 resolver=tool_call_policy_resolver,
             )
             if len(tool_calls) == 1 and tool_calls[0].name == COMPRESS_TOOL_NAME:
-                main_context, compressed = _apply_compression(
-                    main_context,
+                state.main_context, compressed = _apply_compression(
+                    state.main_context,
                     tool_calls[0].arguments,
                 )
                 if compressed:
                     compression_bailout = "none"
                     compaction_payload = CompactionPayload(
-                        active=tuple(main_context),
-                        cursors=cursors,
+                        active=tuple(state.main_context),
+                        cursors=state.cursors,
                     )
                     await out.output(
                         ResponseCompactionItem(
@@ -661,6 +656,20 @@ async def _run_response(
             if compression_reminder_level == "soft":
                 compression_bailout = "soft"
 
+            if profile.debate_max_rounds > 0 and any(
+                policy.source == "client" and policy.effect_class not in {"safe", "visible"} for policy in resolved_policies
+            ):
+                await start_debate_from_candidate(
+                    state,
+                    result_message=result.message,
+                    tool_calls=tool_calls,
+                    resolved_policies=resolved_policies,
+                    server_executors=effective_server_executors,
+                    out=out,
+                    keyring=sealing_keyring,
+                )
+                continue
+
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
             for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
@@ -673,7 +682,7 @@ async def _run_response(
                         canonical_tool_arguments(call.arguments),
                     )
                     continue
-                if policy.effect_class not in {"safe", "visible"}:
+                if profile.debate_max_rounds > 0 and policy.effect_class not in {"safe", "visible"}:
                     raise ToolPolicyError("tool call requires unsupported policy path")
                 client_call_indexes.append(index)
 
@@ -788,12 +797,12 @@ async def _run_response(
         if result.message.content is not None or (
             result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
         ):
-            next_ordinal = cursors["m"]
-            cursors["m"] += 1
+            next_ordinal = state.cursors["m"]
+            state.cursors["m"] += 1
             assistant_context_message = dict(public_assistant_message)
             if assistant_tool_calls:
                 assistant_context_message["tool_calls"] = assistant_tool_calls
-            main_context.append(
+            state.main_context.append(
                 ChatMessageSpan(
                     start=next_ordinal,
                     end=next_ordinal,
@@ -804,14 +813,14 @@ async def _run_response(
             )
 
         for index, output in server_outputs.items():
-            next_ordinal = cursors["m"]
-            cursors["m"] += 1
+            next_ordinal = state.cursors["m"]
+            state.cursors["m"] += 1
             tool_message = {
                 "role": "tool",
                 "tool_call_id": tool_calls[index].id,
                 "content": output,
             }
-            main_context.append(
+            state.main_context.append(
                 ChatMessageSpan(
                     start=next_ordinal,
                     end=next_ordinal,
@@ -848,23 +857,24 @@ async def stream_response_events(
         nonlocal producer_error
         async with send:
             try:
+                try:
+                    profile = settings.resolve_runtime_model_profile(request.model, request.service_tier)
+                except ValueError as exc:
+                    raise IngestionError(str(exc)) from exc
                 async with anyio.create_task_group() as task_group:
                     out = ResponseEventIO(
                         request=request,
                         reasoning_summarizer=reasoning_summarizer,
-                        reasoning_summarizer_model=_runtime_model_profile(
-                            settings,
-                            request,
-                        ).reasoning_summarizer_model,
+                        reasoning_summarizer_model=profile.reasoning_summarizer_model,
                         reasoning_summary_mode=_reasoning_summary_mode(request),
                         send=send,
                     )
                     out.start(task_group)
                     try:
-                        await _run_response(
+                        await run_response(
                             out,
                             request,
-                            settings=settings,
+                            profile=profile,
                             sealing_keyring=sealing_keyring,
                             tool_policy_resolver=tool_policy_resolver,
                             tool_call_policy_resolver=tool_call_policy_resolver,

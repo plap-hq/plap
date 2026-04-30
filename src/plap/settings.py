@@ -22,6 +22,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             compression_soft_token_budget=100_000,
             compression_hard_token_budget=150_000,
             compression_max_rounds=3,
+            debate_max_rounds=2,
         )
     }
 
@@ -46,6 +47,7 @@ class RuntimeModelProfileOverrideConfig(BaseModel):
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int | None = Field(default=None, ge=0)
+    debate_max_rounds: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_compression_config(self) -> RuntimeModelProfileOverrideConfig:
@@ -69,6 +71,7 @@ class RuntimeModelProfileConfig(BaseModel):
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int = Field(default=3, ge=0)
+    debate_max_rounds: int = Field(default=2, ge=0)
     service_tier_overrides: dict[
         RuntimeServiceTier,
         RuntimeModelProfileOverrideConfig,
@@ -110,6 +113,27 @@ class RuntimeModelProfileConfig(BaseModel):
         )
         return profile
 
+    def all_models(self) -> tuple[str, ...]:
+        models = [
+            self.main_model,
+            self.main_debate_model,
+            self.reviewer_model,
+            self.arbitrator_model,
+            self.reasoning_summarizer_model,
+        ]
+        for override in self.service_tier_overrides.values():
+            if override.main_model is not None:
+                models.append(override.main_model)
+            if override.main_debate_model is not None:
+                models.append(override.main_debate_model)
+            if override.reviewer_model is not None:
+                models.append(override.reviewer_model)
+            if override.arbitrator_model is not None:
+                models.append(override.arbitrator_model)
+            if override.reasoning_summarizer_model is not None:
+                models.append(override.reasoning_summarizer_model)
+        return tuple(models)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PLAP_", extra="ignore")
@@ -145,6 +169,18 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
+
+    def resolve_runtime_model_profile(
+        self,
+        model: str | None,
+        service_tier: RuntimeServiceTier | str | None = None,
+    ) -> RuntimeModelProfileConfig:
+        if model is None:
+            raise ValueError("model is required")
+        profile = self.runtime_model_profiles.get(model)
+        if profile is None:
+            raise ValueError(f"unknown runtime model: {model!r}")
+        return profile.for_service_tier(service_tier)
 
 
 @lru_cache(maxsize=1)

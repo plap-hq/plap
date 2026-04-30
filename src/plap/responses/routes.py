@@ -24,12 +24,17 @@ from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
-from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import stream_response_events
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import Settings
+
+
+class ResponseOperationUnsupportedError(Exception):
+    def __init__(self, *, status_code: int = 501) -> None:
+        super().__init__("response operation is not supported")
+        self.status_code = status_code
 
 
 async def _sse_payload(

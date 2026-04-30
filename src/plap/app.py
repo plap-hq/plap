@@ -27,10 +27,9 @@ from plap.llms.router import (
     UnavailableChatCompletionClient,
 )
 from plap.persistence import create_database_engine, create_session_maker
-from plap.responses import RESPONSE_ROUTE_HANDLERS
-from plap.responses.errors import ResponseOperationUnsupportedError
 from plap.responses.ingest import IngestionError
 from plap.responses.reasoning import LLMReasoningSummarizer
+from plap.responses.routes import RESPONSE_ROUTE_HANDLERS, ResponseOperationUnsupportedError
 from plap.responses.tools import (
     TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_MODEL,
@@ -44,7 +43,7 @@ from plap.responses.tools.mcp import (
     IMCPToolProvider,
     MCPToolProvider,
 )
-from plap.settings import RuntimeModelProfileConfig, Settings, get_settings
+from plap.settings import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -252,41 +251,9 @@ def _create_mcp_tool_provider(
 
 def _validate_runtime_model_profiles(settings: Settings) -> None:
     for name, profile in settings.runtime_model_profiles.items():
-        for model in _runtime_profile_models(profile):
+        for model in profile.all_models():
             if not _has_configured_chat_completion_route(settings, model):
                 raise ValueError(f"runtime model profile references an unconfigured LLM route: {name!r} -> {model!r}")
-
-
-def _resolve_runtime_model_profile(
-    settings: Settings,
-    model: str | None,
-    service_tier: str | None = None,
-) -> RuntimeModelProfileConfig:
-    if model is None:
-        raise ValueError("model is required")
-    profile = settings.runtime_model_profiles.get(model)
-    if profile is None:
-        raise ValueError(f"unknown runtime model: {model!r}")
-    return profile.for_service_tier(service_tier)
-
-
-def _runtime_profile_models(profile: RuntimeModelProfileConfig) -> Iterable[str]:
-    yield profile.main_model
-    yield profile.main_debate_model
-    yield profile.reviewer_model
-    yield profile.arbitrator_model
-    yield profile.reasoning_summarizer_model
-    for override in profile.service_tier_overrides.values():
-        if override.main_model is not None:
-            yield override.main_model
-        if override.main_debate_model is not None:
-            yield override.main_debate_model
-        if override.reviewer_model is not None:
-            yield override.reviewer_model
-        if override.arbitrator_model is not None:
-            yield override.arbitrator_model
-        if override.reasoning_summarizer_model is not None:
-            yield override.reasoning_summarizer_model
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:

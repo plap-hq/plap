@@ -7,7 +7,6 @@ from plap.app import (
     _create_mcp_tool_provider,
     _create_tool_call_classifier,
     _create_tool_classifier,
-    _resolve_runtime_model_profile,
     _validate_runtime_model_profiles,
 )
 from plap.llms.router import (
@@ -67,6 +66,7 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.compression_soft_token_budget == 100_000
     assert profile.compression_hard_token_budget == 150_000
     assert profile.compression_max_rounds == 3
+    assert profile.debate_max_rounds == 2
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -213,6 +213,7 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
                         compression_soft_token_budget=4096,
                         compression_hard_token_budget=8192,
                         compression_max_rounds=1,
+                        debate_max_rounds=1,
                     )
                 },
             )
@@ -255,18 +256,18 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
         },
     )
 
-    profile = _resolve_runtime_model_profile(settings, "plap/standard")
+    profile = settings.resolve_runtime_model_profile("plap/standard")
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
     assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.transcript_token_budget == 1024
-    assert _resolve_runtime_model_profile(settings, "plap/standard", "default") is profile
-    assert _resolve_runtime_model_profile(settings, "plap/standard", "auto") is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", "default") is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", "auto") is profile
     with pytest.raises(ValueError, match="model is required"):
-        _resolve_runtime_model_profile(settings, None)
+        settings.resolve_runtime_model_profile(None)
     with pytest.raises(ValueError, match="unknown runtime model"):
-        _resolve_runtime_model_profile(settings, "lightning/lightning-ai/gpt-oss-20b")
+        settings.resolve_runtime_model_profile("lightning/lightning-ai/gpt-oss-20b")
 
 
 def test_app_runtime_resolves_service_tier_overrides() -> None:
@@ -281,6 +282,7 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                 compression_soft_token_budget=2000,
                 compression_hard_token_budget=3000,
                 compression_max_rounds=2,
+                debate_max_rounds=2,
                 service_tier_overrides={
                     "priority": RuntimeModelProfileOverrideConfig(
                         main_model="lightning/lightning-ai/gpt-oss-120b",
@@ -289,19 +291,19 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                         compression_soft_token_budget=5000,
                         compression_hard_token_budget=6000,
                         compression_max_rounds=1,
+                        debate_max_rounds=1,
                     )
                 },
             )
         },
     )
 
-    base = _resolve_runtime_model_profile(settings, "plap/standard")
-    priority = _resolve_runtime_model_profile(
-        settings,
+    base = settings.resolve_runtime_model_profile("plap/standard")
+    priority = settings.resolve_runtime_model_profile(
         "plap/standard",
         "priority",
     )
-    flex = _resolve_runtime_model_profile(settings, "plap/standard", "flex")
+    flex = settings.resolve_runtime_model_profile("plap/standard", "flex")
 
     assert priority is not base
     assert priority.display_name == "Test Model"
@@ -313,9 +315,11 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     assert priority.compression_soft_token_budget == 5000
     assert priority.compression_hard_token_budget == 6000
     assert priority.compression_max_rounds == 1
+    assert priority.debate_max_rounds == 1
     assert base.compression_soft_token_budget == 2000
     assert base.compression_hard_token_budget == 3000
     assert base.compression_max_rounds == 2
+    assert base.debate_max_rounds == 2
     assert flex is base
 
 
@@ -354,6 +358,7 @@ def _profile_config(
     compression_soft_token_budget: int | None = None,
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
+    debate_max_rounds: int = 2,
     service_tier_overrides: dict[
         str,
         RuntimeModelProfileOverrideConfig,
@@ -371,5 +376,6 @@ def _profile_config(
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
+        debate_max_rounds=debate_max_rounds,
         service_tier_overrides=service_tier_overrides or {},
     )
