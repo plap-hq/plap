@@ -61,7 +61,7 @@ MCP_NEWS_TOOL_NAME = "search_news"
 async def test_prepare_tools_classifies_client_tools_without_compress() -> None:
     resolver = _RecordingResolver()
 
-    tools, policies = await prepare_tools(
+    tools, policies, executors = await prepare_tools(
         ResponseCreateRequest(tools=[_read_file_tool()]),
         resolver,
     )
@@ -69,15 +69,16 @@ async def test_prepare_tools_classifies_client_tools_without_compress() -> None:
     assert [tool.name for tool in tools] == ["read_file"]
     assert resolver.tool_names == [["read_file"]]
     assert policies["read_file"].source == "client"
+    assert executors == {}
 
 
 async def test_prepare_tools_adds_web_search_only_when_requested() -> None:
-    tools, policies = await prepare_tools(
+    tools, policies, executors = await prepare_tools(
         ResponseCreateRequest(
             tools=[_read_file_tool(), WebSearchTool(type="web_search")]
         ),
         _RecordingResolver(),
-        _FakeWebSearchProvider(),
+        _FakeMCPToolProvider(),
     )
 
     assert [tool.name for tool in tools] == [
@@ -87,6 +88,7 @@ async def test_prepare_tools_adds_web_search_only_when_requested() -> None:
     ]
     assert policies[MCP_SEARCH_TOOL_NAME].source == "server"
     assert policies[MCP_SEARCH_TOOL_NAME].effect_class == "safe"
+    assert set(executors) == {MCP_SEARCH_TOOL_NAME, MCP_NEWS_TOOL_NAME}
 
 
 async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> None:
@@ -113,18 +115,18 @@ async def test_prepare_tools_rejects_client_server_name_collision() -> None:
                 ]
             ),
             _RecordingResolver(),
-            _FakeWebSearchProvider(),
+            _FakeMCPToolProvider(),
         )
 
 
 async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> None:
     tool = _read_file_tool()
-    tools, policies = await prepare_tools(
+    tools, policies, _ = await prepare_tools(
         ResponseCreateRequest(
             tools=[tool, WebSearchTool(type="web_search")]
         ),
         _RecordingResolver(),
-        _FakeWebSearchProvider(),
+        _FakeMCPToolProvider(),
     )
     call_resolver = _RecordingCallResolver()
 
@@ -155,10 +157,10 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
 
 
 async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> None:
-    _, policies = await prepare_tools(
+    _, policies, _ = await prepare_tools(
         ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
         _RecordingResolver(),
-        _FakeWebSearchProvider(),
+        _FakeMCPToolProvider(),
     )
     policies[COMPRESS_TOOL_NAME] = ToolPolicy(
         name=COMPRESS_TOOL_NAME,
@@ -350,7 +352,7 @@ async def test_stream_response_events_debate_exposes_only_safe_tools() -> None:
             tool_call_policy_resolver=_RecordingCallResolver(),
             chat_completion_client=client,
             reasoning_summarizer=_FakeReasoningSummarizer(),
-            web_search_tool_provider=_FakeWebSearchProvider(),
+            mcp_tool_provider=_FakeMCPToolProvider(),
         )
     ]
 
@@ -435,6 +437,151 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert [item.type for item in completed.output] == ["message", "function_call"]
     assert completed.output[1].name == "update_plan"
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
+
+
+async def test_stream_response_events_executes_server_tool_and_loops_back() -> None:
+    provider = _FakeMCPToolProvider(output="search result for cats")
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="upstream_search_1",
+                        name=MCP_SEARCH_TOOL_NAME,
+                        arguments='{"query":"cats"}',
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="cats found"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="search for cats",
+                tools=[WebSearchTool(type="web_search")],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_provider=provider,
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert completed.output[1].name == MCP_SEARCH_TOOL_NAME
+    assert completed.output[2].created_by == "server"
+    assert completed.output[2].call_id == completed.output[1].call_id
+    assert completed.output[2].output == "search result for cats"
+    assert completed.output[3].content[0].text == "cats found"
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
+    assert len(client.requests) == 2
+    loop_messages = client.requests[1].messages[1:]
+    assert loop_messages[-2].role == "assistant"
+    assert loop_messages[-2].tool_calls[0].id == "upstream_search_1"
+    assert loop_messages[-1].role == "tool"
+    assert loop_messages[-1].tool_call_id == "upstream_search_1"
+    assert loop_messages[-1].content == "[~2]\nsearch result for cats"
+
+
+async def test_stream_response_events_mixed_server_client_tools_do_not_loop() -> None:
+    provider = _FakeMCPToolProvider(output="search result")
+    call_resolver = _RecordingCallResolver()
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="upstream_search_1",
+                    name=MCP_SEARCH_TOOL_NAME,
+                    arguments='{"query":"cats"}',
+                ),
+                ChatToolCall(
+                    id="upstream_read_1",
+                    name="read_file",
+                    arguments='{"path":"README.md"}',
+                ),
+            ],
+        )
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                tools=[_read_file_tool(), WebSearchTool(type="web_search")],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=call_resolver,
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_provider=provider,
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == [
+        "message",
+        "function_call",
+        "function_call",
+        "function_call_output",
+    ]
+    assert completed.output[1].name == MCP_SEARCH_TOOL_NAME
+    assert completed.output[2].name == "read_file"
+    assert completed.output[3].call_id == completed.output[1].call_id
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
+    assert call_resolver.calls == [[("read_file", '{"path":"README.md"}')]]
+    assert len(client.requests) == 1
+
+
+async def test_stream_response_events_server_tool_failure_raises_early() -> None:
+    provider = _FakeMCPToolProvider(fail=True)
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="upstream_search_1",
+                    name=MCP_SEARCH_TOOL_NAME,
+                    arguments='{"query":"cats"}',
+                )
+            ],
+        )
+    )
+    with pytest.raises(RuntimeError, match="mcp failed"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    tools=[WebSearchTool(type="web_search")],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                mcp_tool_provider=provider,
+            )
+        ]
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
 
 
 async def test_stream_response_events_executes_batched_compression() -> None:
@@ -1014,7 +1161,12 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
         )
 
 
-class _FakeWebSearchProvider(IMCPToolProvider):
+class _FakeMCPToolProvider(IMCPToolProvider):
+    def __init__(self, *, output: str = "search result", fail: bool = False) -> None:
+        self.output = output
+        self.fail = fail
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
     async def tools(self) -> tuple[FunctionTool, ...]:
         return (
             _tool(MCP_SEARCH_TOOL_NAME),
@@ -1022,8 +1174,10 @@ class _FakeWebSearchProvider(IMCPToolProvider):
         )
 
     async def call_tool(self, name: str, arguments: dict[str, object]) -> str:
-        _ = name, arguments
-        return "search result"
+        self.calls.append((name, arguments))
+        if self.fail:
+            raise RuntimeError("mcp failed")
+        return self.output
 
 
 class _FakeReasoningSummarizer(IReasoningSummarizer):

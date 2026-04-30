@@ -59,7 +59,7 @@ async def create_response(
     reasoning_summarizer: IReasoningSummarizer,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
-    web_search_tool_provider: IMCPToolProvider | None,
+    mcp_tool_provider: IMCPToolProvider | None,
 ) -> object:
     _ = auth_context
     events = stream_response_events(
@@ -70,7 +70,7 @@ async def create_response(
         reasoning_summarizer=reasoning_summarizer,
         tool_policy_resolver=tool_policy_resolver,
         tool_call_policy_resolver=tool_call_policy_resolver,
-        web_search_tool_provider=web_search_tool_provider,
+        mcp_tool_provider=mcp_tool_provider,
     )
     if data.stream:
         return ServerSentEvent(
@@ -159,7 +159,7 @@ async def responses_socket(
     reasoning_summarizer: IReasoningSummarizer,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
-    web_search_tool_provider: IMCPToolProvider | None,
+    mcp_tool_provider: IMCPToolProvider | None,
 ) -> None:
     _ = auth_context
 
@@ -191,7 +191,7 @@ async def responses_socket(
                 reasoning_summarizer=reasoning_summarizer,
                 tool_policy_resolver=tool_policy_resolver,
                 tool_call_policy_resolver=tool_call_policy_resolver,
-                web_search_tool_provider=web_search_tool_provider,
+                mcp_tool_provider=mcp_tool_provider,
             )
             async for event in events:
                 await socket.send_json(

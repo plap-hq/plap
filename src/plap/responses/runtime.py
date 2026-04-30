@@ -28,6 +28,7 @@ from plap.responses.contracts import (
     ResponseCompactionItem,
     ResponseCreateRequest,
     ResponseFunctionCallItem,
+    ResponseFunctionCallOutputItem,
     ResponseMessageItem,
     ResponseStreamEvent,
     ResponseUsage,
@@ -65,6 +66,7 @@ from plap.responses.tools import (
     ToolCall,
     ToolPolicy,
     ToolPolicyError,
+    canonical_tool_arguments,
 )
 from plap.responses.tools.compress import (
     COMPRESS_DEVELOPER_PROMPT,
@@ -149,15 +151,22 @@ def _hard_compression_budget_crossed(
 async def prepare_tools(
     request: ResponseCreateRequest,
     resolver: IToolPolicyResolver,
-    web_search_tool_provider: IMCPToolProvider | None = None,
-) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy]]:
+    mcp_tool_provider: IMCPToolProvider | None = None,
+) -> tuple[
+    tuple[FunctionTool, ...],
+    dict[str, ToolPolicy],
+    dict[str, IMCPToolProvider],
+]:
     client_tools = _client_tools(request.tools or ())
 
     server_tools: list[FunctionTool] = []
+    server_executors: dict[str, IMCPToolProvider] = {}
+    mcp_server_provider: IMCPToolProvider | None = None
     if _has_web_search(request.tools or ()):
-        if web_search_tool_provider is None:
+        if mcp_tool_provider is None:
             raise ToolPolicyError("web_search requested but no MCP provider configured")
-        server_tools.extend(await web_search_tool_provider.tools())
+        mcp_server_provider = mcp_tool_provider
+        server_tools.extend(await mcp_server_provider.tools())
 
     _reject_server_name_collisions(client_tools, server_tools)
 
@@ -166,8 +175,11 @@ async def prepare_tools(
 
     for tool in server_tools:
         tool_policies[tool.name] = web_search_policy(tool.name)
+        if mcp_server_provider is None:
+            raise RuntimeError("server tool executor was not configured")
+        server_executors[tool.name] = mcp_server_provider
 
-    return tuple(tools), tool_policies
+    return tuple(tools), tool_policies, server_executors
 
 
 async def resolve_tool_calls(
@@ -380,16 +392,6 @@ def _response_usage(usage: ChatUsage | None) -> ResponseUsage | None:
     )
 
 
-def _reject_unsupported_tool_call_policies(
-    policies: Sequence[ToolPolicy],
-) -> None:
-    for policy in policies:
-        if policy.source == "server":
-            raise ToolPolicyError("server tool execution is not implemented")
-        if policy.effect_class not in {"safe", "visible"}:
-            raise ToolPolicyError("tool call requires unsupported policy path")
-
-
 def _chat_tool_calls(value: object) -> list[ChatToolCall] | None:
     if value is None:
         return None
@@ -479,7 +481,7 @@ async def _run_response(
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
-    web_search_tool_provider: IMCPToolProvider | None,
+    mcp_tool_provider: IMCPToolProvider | None,
 ) -> None:
     profile = _runtime_model_profile(settings, request)
     ingested = await ingest_response_request(
@@ -507,10 +509,10 @@ async def _run_response(
         in_temp_debate,
     )
 
-    base_tools, base_tool_policies = await prepare_tools(
+    base_tools, base_tool_policies, base_server_executors = await prepare_tools(
         request,
         tool_policy_resolver,
-        web_search_tool_provider,
+        mcp_tool_provider,
     )
 
     await out.created()
@@ -521,6 +523,7 @@ async def _run_response(
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
+        effective_server_executors = dict(base_server_executors)
 
         if in_temp_debate:
             effective_tools = [
@@ -532,6 +535,11 @@ async def _run_response(
                 name: policy
                 for name, policy in effective_tool_policies.items()
                 if policy.effect_class == "safe"
+            }
+            effective_server_executors = {
+                name: executor
+                for name, executor in effective_server_executors.items()
+                if name in effective_tool_policies
             }
         elif (
             compression_rounds < profile.compression_max_rounds
@@ -637,7 +645,24 @@ async def _run_response(
                     compression_reminder_disabled = True
                 compression_rounds += 1
                 continue
-            _reject_unsupported_tool_call_policies(resolved_policies)
+
+            server_outputs: dict[int, str] = {}
+            client_call_indexes: list[int] = []
+            for index, (call, policy) in enumerate(
+                zip(tool_calls, resolved_policies, strict=True)
+            ):
+                if policy.source == "server":
+                    executor = effective_server_executors.get(call.name)
+                    if executor is None:
+                        raise ToolPolicyError("server tool executor is not configured")
+                    server_outputs[index] = await executor.call_tool(
+                        call.name,
+                        canonical_tool_arguments(call.arguments),
+                    )
+                    continue
+                if policy.effect_class not in {"safe", "visible"}:
+                    raise ToolPolicyError("tool call requires unsupported policy path")
+                client_call_indexes.append(index)
 
         public_assistant_message: dict[str, Any] = {"role": "assistant"}
         if result.message.content is not None:
@@ -701,24 +726,61 @@ async def _run_response(
             )
 
         if result.message.tool_calls:
+            function_call_items: list[ResponseFunctionCallItem] = []
+            function_call_ids: dict[int, str] = {}
+            assistant_tool_calls: list[dict[str, Any]] = []
             for index, call in enumerate(result.message.tool_calls):
-                function_call_item = ResponseFunctionCallItem(
-                    arguments=call.arguments,
-                    call_id=seal_call_id(
-                        SealedCallID(
-                            side="main",
-                            content_hash_prefix=content_hash_prefix(assistant_hash),
-                            tool_call_index=index,
-                            upstream_tool_call_id=call.id,
-                        ),
-                        keyring=sealing_keyring,
+                sealed_call_id = seal_call_id(
+                    SealedCallID(
+                        side="main",
+                        content_hash_prefix=content_hash_prefix(assistant_hash),
+                        tool_call_index=index,
+                        upstream_tool_call_id=call.id,
                     ),
-                    id=f"fc_{secrets.token_urlsafe(18)}",
-                    name=call.name,
-                    status="completed",
-                    type="function_call",
+                    keyring=sealing_keyring,
                 )
+                function_call_ids[index] = sealed_call_id
+                assistant_tool_calls.append(
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        },
+                    }
+                )
+                function_call_items.append(
+                    ResponseFunctionCallItem(
+                        arguments=call.arguments,
+                        call_id=sealed_call_id,
+                        id=f"fc_{secrets.token_urlsafe(18)}",
+                        name=call.name,
+                        status="completed",
+                        type="function_call",
+                    )
+                )
+            for function_call_item in function_call_items:
                 await out.output(function_call_item)
+
+            function_output_items: list[ResponseFunctionCallOutputItem] = []
+            for index, output in server_outputs.items():
+                function_output_items.append(
+                    ResponseFunctionCallOutputItem(
+                        call_id=function_call_ids[index],
+                        created_by="server",
+                        id=f"fco_{secrets.token_urlsafe(18)}",
+                        output=output,
+                        status="completed",
+                        type="function_call_output",
+                    )
+                )
+            for function_output_item in function_output_items:
+                await out.output(function_output_item)
+        else:
+            assistant_tool_calls = []
+            server_outputs = {}
+            client_call_indexes = []
 
         if result.message.content is not None or (
             result.message.reasoning_content
@@ -727,14 +789,38 @@ async def _run_response(
         ):
             next_ordinal = cursors["m"]
             cursors["m"] += 1
+            assistant_context_message = dict(public_assistant_message)
+            if assistant_tool_calls:
+                assistant_context_message["tool_calls"] = assistant_tool_calls
             main_context.append(
                 ChatMessageSpan(
                     start=next_ordinal,
                     end=next_ordinal,
-                    message=public_assistant_message,
-                    token_count=estimate_message_tokens(public_assistant_message),
+                    message=assistant_context_message,
+                    content_hash=assistant_hash,
+                    token_count=estimate_message_tokens(assistant_context_message),
                 )
             )
+
+        for index, output in server_outputs.items():
+            next_ordinal = cursors["m"]
+            cursors["m"] += 1
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": tool_calls[index].id,
+                "content": output,
+            }
+            main_context.append(
+                ChatMessageSpan(
+                    start=next_ordinal,
+                    end=next_ordinal,
+                    message=tool_message,
+                    token_count=estimate_message_tokens(tool_message),
+                )
+            )
+
+        if server_outputs and not client_call_indexes:
+            continue
 
         await out.completed(
             service_tier=result.service_tier,
@@ -752,7 +838,7 @@ async def stream_response_events(
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     reasoning_summarizer: IReasoningSummarizer,
-    web_search_tool_provider: IMCPToolProvider | None = None,
+    mcp_tool_provider: IMCPToolProvider | None = None,
 ) -> AsyncIterator[ResponseStreamEvent]:
     send, receive = anyio.create_memory_object_stream[ResponseStreamEvent](16)
     producer_error: Exception | None = None
@@ -782,7 +868,7 @@ async def stream_response_events(
                             tool_policy_resolver=tool_policy_resolver,
                             tool_call_policy_resolver=tool_call_policy_resolver,
                             chat_completion_client=chat_completion_client,
-                            web_search_tool_provider=web_search_tool_provider,
+                            mcp_tool_provider=mcp_tool_provider,
                         )
                     finally:
                         await out.aclose()

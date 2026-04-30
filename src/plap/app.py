@@ -241,7 +241,7 @@ def _create_tool_call_classifier(
     )
 
 
-def _create_web_search_tool_provider(
+def _create_mcp_tool_provider(
     settings: Settings,
 ) -> IMCPToolProvider | None:
     if settings.web_search_mcp_url:
@@ -331,7 +331,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         resolved_settings,
         chat_completion_client,
     )
-    web_search_tool_provider = _create_web_search_tool_provider(resolved_settings)
+    mcp_tool_provider = _create_mcp_tool_provider(resolved_settings)
     _validate_runtime_model_profiles(resolved_settings)
     state = State(
         {
@@ -354,7 +354,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "tool_policy_l1_cache": LRUCache(
                 maxsize=resolved_settings.tool_policy_l1_maxsize
             ),
-            "web_search_tool_provider": web_search_tool_provider,
+            "mcp_tool_provider": mcp_tool_provider,
         }
     )
 

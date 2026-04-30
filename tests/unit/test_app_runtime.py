@@ -4,9 +4,9 @@ import pytest
 
 from plap.app import (
     _create_chat_completion_client,
+    _create_mcp_tool_provider,
     _create_tool_call_classifier,
     _create_tool_classifier,
-    _create_web_search_tool_provider,
     _resolve_runtime_model_profile,
     _validate_runtime_model_profiles,
 )
@@ -128,12 +128,12 @@ def test_app_runtime_rejects_unrouted_tool_call_classifier_model() -> None:
         )
 
 
-def test_app_runtime_omits_web_search_provider_without_config() -> None:
-    assert _create_web_search_tool_provider(_settings()) is None
+def test_app_runtime_omits_mcp_provider_without_config() -> None:
+    assert _create_mcp_tool_provider(_settings()) is None
 
 
-def test_app_runtime_builds_mcp_web_search_provider_from_config() -> None:
-    provider = _create_web_search_tool_provider(
+def test_app_runtime_builds_mcp_provider_from_config() -> None:
+    provider = _create_mcp_tool_provider(
         _settings(
             web_search_mcp_config={
                 "mcpServers": {
@@ -150,8 +150,8 @@ def test_app_runtime_builds_mcp_web_search_provider_from_config() -> None:
     assert isinstance(provider, MCPToolProvider)
 
 
-def test_app_runtime_builds_web_search_provider_from_mcp_url() -> None:
-    provider = _create_web_search_tool_provider(
+def test_app_runtime_builds_mcp_provider_from_url() -> None:
+    provider = _create_mcp_tool_provider(
         _settings(web_search_mcp_url="http://localhost:8765/mcp")
     )
 
