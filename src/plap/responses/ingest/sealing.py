@@ -55,9 +55,7 @@ def open_compaction_payload(
     *,
     keyring: SealingKeyring,
 ) -> CompactionPayload:
-    return _compaction_from_json(
-        _json_decode(_xchacha_open(value, purpose=COMPACTION_PURPOSE, keyring=keyring))
-    )
+    return _compaction_from_json(_json_decode(_xchacha_open(value, purpose=COMPACTION_PURPOSE, keyring=keyring)))
 
 
 def seal_reasoning_payload(
@@ -77,9 +75,7 @@ def open_reasoning_payload(
     *,
     keyring: SealingKeyring,
 ) -> ReasoningPayload:
-    return _reasoning_from_json(
-        _json_decode(_xchacha_open(value, purpose=REASONING_PURPOSE, keyring=keyring))
-    )
+    return _reasoning_from_json(_json_decode(_xchacha_open(value, purpose=REASONING_PURPOSE, keyring=keyring)))
 
 
 def seal_call_id(
@@ -147,9 +143,7 @@ def _xchacha_open(value: str, *, purpose: str, keyring: SealingKeyring) -> bytes
             return zstd.ZstdDecompressor().decompress(compressed)
         except (CryptoError, ValueError, zstd.ZstdError) as exc:
             last_error = exc
-    raise IngestionError(
-        f"sealed {purpose} payload could not be opened"
-    ) from last_error
+    raise IngestionError(f"sealed {purpose} payload could not be opened") from last_error
 
 
 def _aad(purpose: str) -> bytes:
@@ -179,10 +173,7 @@ def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
 def _compaction_from_json(value: object) -> CompactionPayload:
     if not isinstance(value, dict):
         raise IngestionError("compaction payload must be an object")
-    if (
-        value.get("version") != PAYLOAD_FORMAT_VERSION
-        or value.get("type") != COMPACTION_PAYLOAD_TYPE
-    ):
+    if value.get("version") != PAYLOAD_FORMAT_VERSION or value.get("type") != COMPACTION_PAYLOAD_TYPE:
         raise IngestionError("unsupported compaction payload")
     active = _rows_from_json(value.get("active"))
     cursors = value.get("cursors")
@@ -210,10 +201,7 @@ def _reasoning_to_json(value: ReasoningPayload) -> dict[str, Any]:
 def _reasoning_from_json(value: object) -> ReasoningPayload:
     if not isinstance(value, dict):
         raise IngestionError("reasoning payload must be an object")
-    if (
-        value.get("version") != PAYLOAD_FORMAT_VERSION
-        or value.get("type") != REASONING_PAYLOAD_TYPE
-    ):
+    if value.get("version") != PAYLOAD_FORMAT_VERSION or value.get("type") != REASONING_PAYLOAD_TYPE:
         raise IngestionError("unsupported reasoning payload")
     side = value.get("side")
     if side not in {"main", "reviewer", "arbitrator"}:
@@ -222,9 +210,7 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
     if not isinstance(temp, bool):
         raise IngestionError("reasoning temp flag is required")
     messages = value.get("messages")
-    if not isinstance(messages, list) or not all(
-        isinstance(message, dict) for message in messages
-    ):
+    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
         raise IngestionError("reasoning messages must be an array of objects")
     return ReasoningPayload(side=side, temp=temp, messages=tuple(messages))
 
@@ -238,9 +224,7 @@ def _pack_call_id(value: SealedCallID) -> bytes:
         raise IngestionError("tool_call_index must be non-negative")
     if not value.upstream_tool_call_id:
         raise IngestionError("upstream_tool_call_id is required")
-    header = (CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT) | _SIDE_CODES[
-        value.side
-    ]
+    header = (CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT) | _SIDE_CODES[value.side]
     return b"".join(
         (
             bytes([header]),
@@ -264,9 +248,7 @@ def _unpack_call_id(value: bytes) -> SealedCallID:
     except KeyError as exc:
         raise IngestionError("invalid function call id side") from exc
     content_hash_prefix_value = value[1 : 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES]
-    tool_call_index, offset = _unpack_uvarint(
-        value, 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES
-    )
+    tool_call_index, offset = _unpack_uvarint(value, 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
     return SealedCallID(
         side=side,
         content_hash_prefix=content_hash_prefix_value,
@@ -326,9 +308,7 @@ def _row_to_json(value: ChatMessageSpan) -> dict[str, Any]:
     }
 
 
-def _validate_active_rows(
-    rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]
-) -> None:
+def _validate_active_rows(rows: tuple[ChatMessageSpan, ...], cursors: dict[str, int]) -> None:
     _validate_span_rows(rows, cursors=cursors, parent=None)
 
 
@@ -356,17 +336,13 @@ def _validate_span_rows(
         raise IngestionError("compaction child spans do not cover parent")
 
 
-def _validate_span_node(
-    row: ChatMessageSpan, *, cursors: dict[str, int]
-) -> None:
+def _validate_span_node(row: ChatMessageSpan, *, cursors: dict[str, int]) -> None:
     if row.children:
         if row.children_pruned:
             raise IngestionError("compaction span cannot have children and be pruned")
         _validate_span_rows(row.children, cursors=cursors, parent=row)
         children_token_count = sum(child.token_count for child in row.children)
-        expanded_token_count = sum(
-            child.expanded_token_count for child in row.children
-        )
+        expanded_token_count = sum(child.expanded_token_count for child in row.children)
         if row.children_token_count != children_token_count:
             raise IngestionError("compaction children_token_count is invalid")
         if row.expanded_token_count != expanded_token_count:
@@ -405,12 +381,8 @@ def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:
                 end=end,
                 message=message,
                 token_count=_positive_int(row, "token_count"),
-                children_token_count=_non_negative_int(
-                    row, "children_token_count"
-                ),
-                expanded_token_count=_non_negative_int(
-                    row, "expanded_token_count"
-                ),
+                children_token_count=_non_negative_int(row, "children_token_count"),
+                expanded_token_count=_non_negative_int(row, "expanded_token_count"),
                 children=_rows_from_json(children),
                 children_pruned=bool(row.get("children_pruned", False)),
             )

@@ -12,9 +12,7 @@ ChatMessage = dict[str, Any]
 
 
 def chat_message_hash(message: ChatMessage) -> str:
-    return blake3.blake3(
-        msgspec.json.encode(message, order="deterministic")
-    ).hexdigest()
+    return blake3.blake3(msgspec.json.encode(message, order="deterministic")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

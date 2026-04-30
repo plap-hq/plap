@@ -109,11 +109,7 @@ def _summary_request_text(
     messages: Sequence[Mapping[str, Any]],
 ) -> str:
     payload = msgspec.json.encode(list(messages), order="deterministic").decode()
-    return (
-        f"Summary mode: {mode}\n"
-        f"Trace perspective hint: {_summary_perspective_hint(side)}\n\n"
-        f"Reasoning trace messages:\n{payload}"
-    )
+    return f"Summary mode: {mode}\nTrace perspective hint: {_summary_perspective_hint(side)}\n\nReasoning trace messages:\n{payload}"
 
 
 def _summary_perspective_hint(side: Side) -> str:

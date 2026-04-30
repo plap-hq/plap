@@ -113,9 +113,7 @@ def upgrade() -> None:
         sa.Column("client_id", sa.String(length=255), nullable=True),
         sa.Column("audience", sa.String(length=255), nullable=True),
         sa.Column("domain_hint", sa.String(length=255), nullable=True),
-        sa.Column(
-            "attribute_mapping", postgresql.JSONB(astext_type=sa.Text()), nullable=False
-        ),
+        sa.Column("attribute_mapping", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -150,9 +148,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_user_emails")),
-        sa.UniqueConstraint(
-            "normalized_email", name=op.f("uq_user_emails_normalized_email")
-        ),
+        sa.UniqueConstraint("normalized_email", name=op.f("uq_user_emails_normalized_email")),
         schema="identity",
     )
     op.create_table(

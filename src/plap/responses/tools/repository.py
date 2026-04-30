@@ -23,9 +23,7 @@ class ToolClassificationRepository:
         await self.get_or_create_signatures([signature])
         return signature
 
-    async def get_or_create_signatures(
-        self, signatures: list[ToolSignature]
-    ) -> list[ToolSignature]:
+    async def get_or_create_signatures(self, signatures: list[ToolSignature]) -> list[ToolSignature]:
         if not signatures:
             return []
         signatures_json = _json_string(
@@ -104,9 +102,7 @@ class ToolClassificationRepository:
     ) -> dict[bytes, ToolClassification]:
         if not signature_hashes:
             return {}
-        signature_hashes_json = _json_string(
-            [signature_hash.hex() for signature_hash in signature_hashes]
-        )
+        signature_hashes_json = _json_string([signature_hash.hex() for signature_hash in signature_hashes])
         result = await self._session.execute(
             text(
                 """
@@ -141,20 +137,13 @@ class ToolClassificationRepository:
             },
         )
         classifications = [_classification_from_row(row) for row in result]
-        return {
-            classification.signature_hash: classification
-            for classification in classifications
-        }
+        return {classification.signature_hash: classification for classification in classifications}
 
-    async def store_classification(
-        self, classification: ToolClassification
-    ) -> ToolClassification:
+    async def store_classification(self, classification: ToolClassification) -> ToolClassification:
         stored = await self.store_classifications([classification])
         return stored[classification.signature_hash]
 
-    async def store_classifications(
-        self, classifications: list[ToolClassification]
-    ) -> dict[bytes, ToolClassification]:
+    async def store_classifications(self, classifications: list[ToolClassification]) -> dict[bytes, ToolClassification]:
         if not classifications:
             return {}
         first = classifications[0]
@@ -303,9 +292,7 @@ class ToolClassificationRepository:
             for classification in classifications
         }
 
-    async def store_tool_call_classification(
-        self, classification: ToolCallClassification
-    ) -> ToolCallClassification:
+    async def store_tool_call_classification(self, classification: ToolCallClassification) -> ToolCallClassification:
         stored = await self.store_tool_call_classifications([classification])
         return stored[(classification.signature_hash, classification.arguments_hash)]
 
@@ -321,9 +308,7 @@ class ToolClassificationRepository:
             or classification.prompt_hash != first.prompt_hash
             for classification in classifications
         ):
-            raise ValueError(
-                "batched tool call classifications must share classifier identity"
-            )
+            raise ValueError("batched tool call classifications must share classifier identity")
         classifications_json = _json_string(
             [
                 {
@@ -377,17 +362,12 @@ class ToolClassificationRepository:
             {"classifications": classifications_json},
         )
         stored = await self.get_tool_call_classifications(
-            [
-                (classification.signature_hash, classification.arguments_hash)
-                for classification in classifications
-            ],
+            [(classification.signature_hash, classification.arguments_hash) for classification in classifications],
             classifier=first.classifier,
             classifier_model=first.classifier_model,
             prompt_hash=first.prompt_hash,
         )
-        if len(stored) != len(
-            {(item.signature_hash, item.arguments_hash) for item in classifications}
-        ):
+        if len(stored) != len({(item.signature_hash, item.arguments_hash) for item in classifications}):
             raise RuntimeError("tool call classification insert did not produce a row")
         return stored
 

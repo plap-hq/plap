@@ -96,20 +96,14 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         try:
-            response = await self._client.chat.completions.create(
-                **self._chat_params(request, stream=False)
-            )
+            response = await self._client.chat.completions.create(**self._chat_params(request, stream=False))
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
         return completion_result_from_provider(response)
 
-    async def stream(
-        self, request: ChatCompletionRequest
-    ) -> AsyncIterator[ChatCompletionDelta]:
+    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         try:
-            stream = await self._client.chat.completions.create(
-                **self._chat_params(request, stream=True)
-            )
+            stream = await self._client.chat.completions.create(**self._chat_params(request, stream=True))
             async for chunk in stream:
                 yield from_chat_completion_chunk(chunk)
         except Exception as exc:
@@ -164,15 +158,10 @@ def _chat_param_values(
 ) -> dict[str, Any]:
     values: dict[str, Any] = {
         "model": request.model,
-        "messages": [
-            _message_to_param(message, developer_role=developer_role)
-            for message in request.messages
-        ],
+        "messages": [_message_to_param(message, developer_role=developer_role) for message in request.messages],
         "stream": stream,
     }
-    values["tools"] = (
-        [_tool_to_param(tool) for tool in request.tools] if request.tools else None
-    )
+    values["tools"] = [_tool_to_param(tool) for tool in request.tools] if request.tools else None
     values["tool_choice"] = _tool_choice_to_param(request.tool_choice)
     values["parallel_tool_calls"] = request.parallel_tool_calls
     values["response_format"] = _response_format_to_param(request.response_format)
@@ -210,8 +199,7 @@ def _message_to_param(
     _set(
         value,
         "tool_calls",
-        [_tool_call_to_param(tool_call) for tool_call in message.tool_calls or []]
-        or None,
+        [_tool_call_to_param(tool_call) for tool_call in message.tool_calls or []] or None,
     )
     if message.role == "assistant":
         _set(value, "refusal", message.refusal)
@@ -357,8 +345,7 @@ def _usage_from_provider(usage: Any) -> ChatUsage | None:
         output_tokens=_get(usage, "completion_tokens") or 0,
         total_tokens=_get(usage, "total_tokens") or 0,
         cached_tokens=_get(prompt_details, "cached_tokens"),
-        reasoning_tokens=_get(completion_details, "reasoning_tokens")
-        or _get(usage, "reasoning_tokens"),
+        reasoning_tokens=_get(completion_details, "reasoning_tokens") or _get(usage, "reasoning_tokens"),
     )
 
 

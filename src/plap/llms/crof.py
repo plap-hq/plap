@@ -108,8 +108,7 @@ def _normalize_crof_response_format_result(
         or response_format is None
         or result.message.content
         or not reasoning_content
-        or _response_format_validation_error(reasoning_content, response_format)
-        is not None
+        or _response_format_validation_error(reasoning_content, response_format) is not None
     ):
         return result
 
@@ -145,9 +144,7 @@ def _json_schema_validation_error(
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
-        raise ChatCompletionInvalidRequestError(
-            f"Invalid JSON schema for response_format: {exc.message}"
-        ) from exc
+        raise ChatCompletionInvalidRequestError(f"Invalid JSON schema for response_format: {exc.message}") from exc
     validator = Draft202012Validator(schema)
     try:
         validator.validate(value)

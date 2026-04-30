@@ -36,29 +36,17 @@ async def test_responses_gc_and_fk_indexes_are_shaped_for_deletes(
     expected_indexes = {
         "ix_payloads_gc": "(created_at, scope_id, payload_id)",
         "ix_state_nodes_gc": "(created_at, scope_id, node_id)",
-        "ix_state_node_children_child_lookup": (
-            "(scope_id, child_node_id, parent_node_id, child_index)"
-        ),
-        "ix_state_leaf_entries_payload_lookup": (
-            "(scope_id, payload_id, node_id, item_index)"
-        ),
-        "ix_state_leaf_entries_namespace_ordinal": (
-            "(scope_id, namespace_id, ordinal, node_id, item_index)"
-        ),
+        "ix_state_node_children_child_lookup": ("(scope_id, child_node_id, parent_node_id, child_index)"),
+        "ix_state_leaf_entries_payload_lookup": ("(scope_id, payload_id, node_id, item_index)"),
+        "ix_state_leaf_entries_namespace_ordinal": ("(scope_id, namespace_id, ordinal, node_id, item_index)"),
         "ix_response_records_gc": "(created_at, scope_id, response_id)",
         "ix_response_records_state_root": "(scope_id, state_root_id, response_id)",
-        "ix_response_output_items_payload_lookup": (
-            "(scope_id, payload_id, response_id, output_index)"
-        ),
-        "ix_response_checkpoints_state_root": (
-            "(scope_id, state_root_id, response_id, checkpoint_id)"
-        ),
+        "ix_response_output_items_payload_lookup": ("(scope_id, payload_id, response_id, output_index)"),
+        "ix_response_checkpoints_state_root": ("(scope_id, state_root_id, response_id, checkpoint_id)"),
         "ix_response_leases_expiration": "(expires_at, scope_id, lease_id)",
         "ix_response_leases_response": "(scope_id, response_id, lease_id)",
         "ix_conversations_last_used_at": "(last_used_at, scope_id, conversation_id)",
-        "ix_conversations_current_response": (
-            "(scope_id, current_response_id, conversation_id)"
-        ),
+        "ix_conversations_current_response": ("(scope_id, current_response_id, conversation_id)"),
     }
     async with db_session_maker() as session:
         index_definitions = dict(

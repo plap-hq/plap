@@ -61,9 +61,7 @@ def test_rejects_unknown_reasoning_fields() -> None:
 
 def test_rejects_invalid_reasoning_effort() -> None:
     try:
-        ResponseCreateRequest.model_validate(
-            {"model": "gpt-4.1", "reasoning": {"effort": "maximum"}}
-        )
+        ResponseCreateRequest.model_validate({"model": "gpt-4.1", "reasoning": {"effort": "maximum"}})
     except ValidationError as exc:
         assert "effort" in str(exc)
     else:
@@ -72,9 +70,7 @@ def test_rejects_invalid_reasoning_effort() -> None:
 
 def test_accepts_full_reasoning_effort_vocabulary() -> None:
     for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
-        request = ResponseCreateRequest.model_validate(
-            {"model": "gpt-4.1", "reasoning": {"effort": effort}}
-        )
+        request = ResponseCreateRequest.model_validate({"model": "gpt-4.1", "reasoning": {"effort": effort}})
 
         assert request.reasoning is not None
         assert request.reasoning.effort == effort
@@ -89,9 +85,7 @@ def test_rejects_metadata_limits() -> None:
 
     for metadata in cases:
         try:
-            ResponseCreateRequest.model_validate(
-                {"metadata": metadata, "model": "gpt-4.1"}
-            )
+            ResponseCreateRequest.model_validate({"metadata": metadata, "model": "gpt-4.1"})
         except ValidationError:
             pass
         else:

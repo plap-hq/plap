@@ -40,7 +40,7 @@ def compress_tool() -> FunctionTool:
             "Replace one or more earlier visible citation ranges with focused "
             "summaries so you can continue with less context. Ranges are inclusive, "
             "must use citations exactly as shown, and must not overlap. Never call "
-            "this tool in parallel with any other tool. Use {\"ranges\": []} only "
+            'this tool in parallel with any other tool. Use {"ranges": []} only '
             "when context management is requested and no useful safe compression is "
             "possible right now."
         ),
@@ -63,25 +63,17 @@ def compress_tool() -> FunctionTool:
                             "start": {
                                 "type": "string",
                                 "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": (
-                                    "Citation of the first visible span, including "
-                                    "the square brackets, for example [~0]."
-                                ),
+                                "description": ("Citation of the first visible span, including the square brackets, for example [~0]."),
                             },
                             "end": {
                                 "type": "string",
                                 "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": (
-                                    "Citation of the last visible span, including "
-                                    "the square brackets, for example [~3]."
-                                ),
+                                "description": ("Citation of the last visible span, including the square brackets, for example [~3]."),
                             },
                             "summary": {
                                 "type": "string",
                                 "description": (
-                                    "Replacement summary for the selected range. "
-                                    "Do not include citation markers or "
-                                    "meta-commentary."
+                                    "Replacement summary for the selected range. Do not include citation markers or meta-commentary."
                                 ),
                             },
                         },

@@ -11,10 +11,7 @@ mcp = FastMCP("Money Runtime MCP")
 )
 def money_search(query: str) -> str:
     """Return a deterministic search result for runtime conformance tests."""
-    return (
-        "money_search_result marker=runtime-mcp-731 "
-        f"query={query!r} source=local-money-mcp"
-    )
+    return f"money_search_result marker=runtime-mcp-731 query={query!r} source=local-money-mcp"
 
 
 if __name__ == "__main__":

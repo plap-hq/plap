@@ -84,23 +84,15 @@ class ResponseCreateRequest(StrictModel):
     # )
     context_management: list[ContextManagementCompaction] | None = Field(
         default=None,
-        description=(
-            "Context-management entries; currently only compaction is supported."
-        ),
+        description=("Context-management entries; currently only compaction is supported."),
     )
     conversation: str | ConversationReference | None = Field(
         default=None,
-        description=(
-            "Conversation this response belongs to. Cannot be combined with "
-            "previous_response_id in OpenAI's contract."
-        ),
+        description=("Conversation this response belongs to. Cannot be combined with previous_response_id in OpenAI's contract."),
     )
     include: list[ResponseIncludable] | None = Field(
         default=None,
-        description=(
-            "Additional output data to include, such as "
-            "message.output_text.logprobs, or reasoning.encrypted_content."
-        ),
+        description=("Additional output data to include, such as message.output_text.logprobs, or reasoning.encrypted_content."),
     )
     input: str | list[RequestInputItem] | None = Field(
         default=None,
@@ -109,8 +101,7 @@ class ResponseCreateRequest(StrictModel):
     instructions: str | None = Field(
         default=None,
         description=(
-            "System/developer instructions inserted into model context; not carried "
-            "over automatically when previous_response_id is used."
+            "System/developer instructions inserted into model context; not carried over automatically when previous_response_id is used."
         ),
     )
     max_output_tokens: int | None = Field(
@@ -145,9 +136,7 @@ class ResponseCreateRequest(StrictModel):
     )
     prompt_cache_key: str | None = Field(
         default=None,
-        description=(
-            "Stable cache key for prompt caching; replaces the legacy user field."
-        ),
+        description=("Stable cache key for prompt caching; replaces the legacy user field."),
     )
     # prompt_cache_retention: Literal["in-memory", "24h"] | None = Field(
     #     default=None,
@@ -159,9 +148,7 @@ class ResponseCreateRequest(StrictModel):
     )
     safety_identifier: str | None = Field(
         default=None,
-        description=(
-            "Stable abuse-detection identifier; prefer hashed user identifiers."
-        ),
+        description=("Stable abuse-detection identifier; prefer hashed user identifiers."),
     )
     service_tier: ServiceTier | None = Field(
         default=None,
@@ -191,9 +178,7 @@ class ResponseCreateRequest(StrictModel):
     )
     tool_choice: ToolChoice | None = Field(
         default=None,
-        description=(
-            "How the model should choose tools: none, auto, required, or function."
-        ),
+        description=("How the model should choose tools: none, auto, required, or function."),
     )
     tools: list[SupportedTool] | None = Field(
         default=None,
@@ -203,17 +188,13 @@ class ResponseCreateRequest(StrictModel):
         default=None,
         ge=0,
         le=20,
-        description=(
-            "Number of likely tokens and log probabilities to return per token."
-        ),
+        description=("Number of likely tokens and log probabilities to return per token."),
     )
     top_p: float | None = Field(
         default=None,
         ge=0,
         le=1,
-        description=(
-            "Nucleus sampling parameter; generally tune instead of temperature."
-        ),
+        description=("Nucleus sampling parameter; generally tune instead of temperature."),
     )
     truncation: Literal["auto", "disabled"] | None = Field(
         default=None,
@@ -221,9 +202,7 @@ class ResponseCreateRequest(StrictModel):
     )
     user: str | None = Field(
         default=None,
-        description=(
-            "Legacy end-user identifier; prefer safety_identifier/prompt_cache_key."
-        ),
+        description=("Legacy end-user identifier; prefer safety_identifier/prompt_cache_key."),
     )
 
     @field_validator("input", mode="before")
@@ -339,9 +318,5 @@ class CompactRequest(StrictModel):
 
 
 class ResponseCreateClientEvent(StrictModel):
-    response: ResponseCreateRequest = Field(
-        description="Responses create request payload."
-    )
-    type: Literal["response.create"] = Field(
-        description="Websocket client event discriminator."
-    )
+    response: ResponseCreateRequest = Field(description="Responses create request payload.")
+    type: Literal["response.create"] = Field(description="Websocket client event discriminator.")

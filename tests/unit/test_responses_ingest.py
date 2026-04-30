@@ -70,10 +70,7 @@ async def test_ingestion_preserves_last_compaction_spans() -> None:
         keyring=_keyring(),
     )
 
-    assert [
-        (row.start, row.end, row.message["content"])
-        for row in result.main_context
-    ] == [
+    assert [(row.start, row.end, row.message["content"]) for row in result.main_context] == [
         (0, 0, "kept source"),
         (1, 1, "kept summarized source"),
         (2, 2, "after"),
@@ -110,10 +107,7 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
         keyring=_keyring(),
     )
 
-    assert [
-        (row.start, row.end, row.message["content"])
-        for row in result.main_context
-    ] == [
+    assert [(row.start, row.end, row.message["content"]) for row in result.main_context] == [
         (0, 0, "u0"),
         (1, 1, "a0"),
     ]
@@ -124,13 +118,7 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
 
 async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
     result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "reviewer", False, [{"role": "assistant", "content": "review"}]
-                )
-            ]
-        ),
+        _request(input=[_reasoning_item("reviewer", False, [{"role": "assistant", "content": "review"}])]),
         keyring=_keyring(),
     )
 
@@ -145,13 +133,7 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
 
 async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
     result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "arbitrator", False, [{"role": "assistant", "content": "decide"}]
-                )
-            ]
-        ),
+        _request(input=[_reasoning_item("arbitrator", False, [{"role": "assistant", "content": "decide"}])]),
         keyring=_keyring(),
     )
 
@@ -183,9 +165,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == [
-        "final debate result"
-    ]
+    assert [row.message["content"] for row in result.main_context] == ["final debate result"]
     assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
@@ -217,9 +197,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == [
-        "new mainline request"
-    ]
+    assert [row.message["content"] for row in result.main_context] == ["new mainline request"]
     assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
@@ -292,9 +270,7 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
     )
 
     assert result.main_context == ()
-    assert [row.message["content"] for row in result.main_context_temp] == [
-        "temp debate tail"
-    ]
+    assert [row.message["content"] for row in result.main_context_temp] == ["temp debate tail"]
     assert result.main_transcript == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is True
@@ -351,9 +327,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         keyring=_keyring(),
     )
 
-    assert [
-        (row.start, row.end, row.message) for row in result.main_context
-    ] == [
+    assert [(row.start, row.end, row.message) for row in result.main_context] == [
         (
             0,
             0,
@@ -391,9 +365,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
         keyring=_keyring(),
     )
 
-    assert [
-        (row.start, row.end, row.message) for row in result.main_context
-    ] == [
+    assert [(row.start, row.end, row.message) for row in result.main_context] == [
         (
             0,
             0,
@@ -965,11 +937,7 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
             end=ordinal,
             message={
                 "role": "user",
-                "content": (
-                    f"{label} source"
-                    if ordinal == 0
-                    else f"{label} summarized source"
-                ),
+                "content": (f"{label} source" if ordinal == 0 else f"{label} summarized source"),
             },
             token_count=1,
         )
@@ -1022,9 +990,7 @@ def _call_id(
 ) -> str:
     if content_hash_prefix_value is None:
         if content_hash_value is None:
-            raise ValueError(
-                "content_hash_value or content_hash_prefix_value is required"
-            )
+            raise ValueError("content_hash_value or content_hash_prefix_value is required")
         content_hash_prefix_value = content_hash_prefix(content_hash_value)
     return seal_call_id(
         SealedCallID(
@@ -1063,12 +1029,8 @@ def _tool_call(upstream_id: str) -> dict[str, object]:
 
 
 def _seal_raw_payload(purpose: str, value: object) -> str:
-    compressed = zstd.ZstdCompressor().compress(
-        msgspec.json.encode(value, order="deterministic")
-    )
-    encrypted = Aead(_keyring().active(purpose)).encrypt(
-        compressed, purpose_label(purpose)
-    )
+    compressed = zstd.ZstdCompressor().compress(msgspec.json.encode(value, order="deterministic"))
+    encrypted = Aead(_keyring().active(purpose)).encrypt(compressed, purpose_label(purpose))
     return base64.urlsafe_b64encode(bytes(encrypted)).rstrip(b"=").decode()
 
 

@@ -29,11 +29,7 @@ class MCPToolProvider(IMCPToolProvider):
     async def tools(self) -> tuple[FunctionTool, ...]:
         async with Client(self._transport) as client:
             tools = await client.list_tools()
-        return tuple(
-            _mcp_tool_to_function_tool(tool)
-            for tool in tools
-            if not self._tool_names or tool.name in self._tool_names
-        )
+        return tuple(_mcp_tool_to_function_tool(tool) for tool in tools if not self._tool_names or tool.name in self._tool_names)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if self._tool_names and name not in self._tool_names:

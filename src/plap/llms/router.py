@@ -54,9 +54,7 @@ class RoutingChatCompletionClient(IChatCompletionClient):
             _provider_model(model, best_route.prefix)
             return best_route
 
-        raise ChatCompletionUnsupportedRequestError(
-            f"No chat completion route configured for model {model!r}"
-        )
+        raise ChatCompletionUnsupportedRequestError(f"No chat completion route configured for model {model!r}")
 
 
 class UnavailableChatCompletionClient(IChatCompletionClient):
@@ -75,15 +73,11 @@ class UnavailableChatCompletionClient(IChatCompletionClient):
 
 
 def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
-    return ChatCompletionUnsupportedRequestError(
-        f"No chat completion provider configured for model {model!r}"
-    )
+    return ChatCompletionUnsupportedRequestError(f"No chat completion provider configured for model {model!r}")
 
 
 def _provider_model(model: str, prefix: str) -> str:
     provider_model = model.removeprefix(prefix)
     if not provider_model:
-        raise ChatCompletionUnsupportedRequestError(
-            f"No provider model configured for model {model!r}"
-        )
+        raise ChatCompletionUnsupportedRequestError(f"No provider model configured for model {model!r}")
     return provider_model

@@ -34,9 +34,7 @@ def _reject_unsupported_type_variants(
         if item_type is None:
             raise ValueError(f"Missing {label} type at index {index}")
         if item_type not in allowed:
-            raise ValueError(
-                f"Unsupported {label} variant '{item_type}' at index {index}"
-            )
+            raise ValueError(f"Unsupported {label} variant '{item_type}' at index {index}")
 
     return value
 

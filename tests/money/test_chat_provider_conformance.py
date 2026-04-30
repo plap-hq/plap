@@ -64,9 +64,7 @@ def _fireworks_client(api_key: str) -> IChatCompletionClient:
 
 
 def _crof_client(api_key: str) -> IChatCompletionClient:
-    return RoutingChatCompletionClient(
-        [ModelRoute(prefix="crof/", client=CrofChatCompletionClient(api_key=api_key))]
-    )
+    return RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=CrofChatCompletionClient(api_key=api_key))])
 
 
 LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
@@ -169,7 +167,7 @@ async def test_live_basic_chat_completion(provider: ProviderCase) -> None:
             reasoning_effort=DEFAULT_REASONING_EFFORT,
             max_completion_tokens=96,
             temperature=0,
-        )
+        ),
     )
 
     assert _message_has_output(result.message)
@@ -222,7 +220,7 @@ async def test_live_tool_call_with_parallel_tool_calls(provider: ProviderCase) -
             reasoning_effort=_reasoning_effort_for_tool_provider(provider),
             max_completion_tokens=192,
             temperature=0,
-        )
+        ),
     )
 
     tool_calls = result.message.tool_calls or []
@@ -245,7 +243,7 @@ async def test_live_json_object_response_format(provider: ProviderCase) -> None:
             reasoning_effort=DEFAULT_REASONING_EFFORT,
             max_completion_tokens=128,
             temperature=0,
-        )
+        ),
     )
 
     content = result.message.content or ""
@@ -319,7 +317,7 @@ async def test_live_gpt_oss_reasoning_request(provider: ProviderCase) -> None:
             reasoning_effort=DEFAULT_REASONING_EFFORT,
             max_completion_tokens=128,
             temperature=0,
-        )
+        ),
     )
 
     assert _message_has_output(result.message)
@@ -346,7 +344,7 @@ async def test_live_novita_deepseek_v4_flash_reasoning_content() -> None:
             reasoning_effort="high",
             max_completion_tokens=256,
             temperature=0.6,
-        )
+        ),
     )
 
     assert result.message.reasoning_content or result.message.reasoning_details
@@ -493,9 +491,7 @@ def _skip_if_provider_account_unavailable(
         "account suspended",
         "spending limit",
     )
-    if any(term in message for term in unavailable_terms) or (
-        provider.name == "fireworks" and "precondition failed" in message
-    ):
+    if any(term in message for term in unavailable_terms) or (provider.name == "fireworks" and "precondition failed" in message):
         reason = f"{provider.name} provider account is unavailable: {exc}"
         _UNAVAILABLE_PROVIDER_REASONS[provider.name] = reason
         pytest.skip(reason)
@@ -526,10 +522,7 @@ def _unquote(value: str) -> str:
 
 def _message_has_output(message: ChatMessage) -> bool:
     return bool(
-        (message.content or "").strip()
-        or (message.reasoning_content or "").strip()
-        or message.reasoning_details
-        or message.tool_calls
+        (message.content or "").strip() or (message.reasoning_content or "").strip() or message.reasoning_details or message.tool_calls
     )
 
 

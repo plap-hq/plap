@@ -68,9 +68,7 @@ class FireworksChatCompletionClient(IChatCompletionClient):
             raise _normalize_fireworks_error(exc) from exc
         return completion_result_from_provider(response)
 
-    async def stream(
-        self, request: ChatCompletionRequest
-    ) -> AsyncIterator[ChatCompletionDelta]:
+    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         params = to_fireworks_chat_params(request, stream=True)
         try:
             stream = self._client.chat.completions.acreate(**params)

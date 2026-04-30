@@ -16,12 +16,8 @@ class InputTextContent(StrictModel):
 
 
 class UrlCitationAnnotation(StrictModel):
-    end_index: int = Field(
-        description="Exclusive character offset where citation ends."
-    )
-    start_index: int = Field(
-        description="Inclusive character offset where citation starts."
-    )
+    end_index: int = Field(description="Exclusive character offset where citation ends.")
+    start_index: int = Field(description="Inclusive character offset where citation starts.")
     title: str | None = Field(default=None, description="Human-readable page title.")
     type: Literal["url_citation"] = Field(description="Annotation discriminator.")
     url: str = Field(description="Cited URL.")
@@ -37,9 +33,7 @@ class OutputTextLogprob(StrictModel):
     bytes: list[int] = Field(description="UTF-8 bytes for the emitted token.")
     logprob: float = Field(description="Log probability for the emitted token.")
     token: str = Field(description="Emitted token text.")
-    top_logprobs: list[OutputTextLogprobTopLogprob] = Field(
-        description="Most likely alternative tokens at this token position."
-    )
+    top_logprobs: list[OutputTextLogprobTopLogprob] = Field(description="Most likely alternative tokens at this token position.")
 
 
 class OutputTextContent(StrictModel):
@@ -49,9 +43,7 @@ class OutputTextContent(StrictModel):
     )
     logprobs: list[OutputTextLogprob] | None = Field(
         default=None,
-        description=(
-            "Token log probability data when requested via include/top_logprobs."
-        ),
+        description=("Token log probability data when requested via include/top_logprobs."),
     )
     text: str = Field(description="The assistant-visible text content.")
     type: Literal["output_text"] = Field(description="Content discriminator.")
@@ -86,17 +78,13 @@ type ItemStatus = Literal["in_progress", "completed", "incomplete"]
 
 
 class RequestMessageItem(StrictModel):
-    content: str | list[MessageContentPart] = Field(
-        description="Message text or supported content blocks."
-    )
+    content: str | list[MessageContentPart] = Field(description="Message text or supported content blocks.")
     id: str | None = Field(default=None, description="Optional ID for replayed items.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,
         description="Assistant phase label to preserve on follow-up requests.",
     )
-    role: Literal["user", "assistant", "system", "developer"] = Field(
-        description="Role that produced the message."
-    )
+    role: Literal["user", "assistant", "system", "developer"] = Field(description="Role that produced the message.")
     status: Literal["in_progress", "completed", "incomplete"] | None = Field(
         default=None,
         description="Item status when replaying persisted input/output items.",
@@ -117,9 +105,7 @@ class _FunctionCallItemBase(StrictModel):
     arguments: str = Field(description="JSON string of arguments emitted by the model.")
     call_id: str = Field(description="Stable call ID paired with function output.")
     name: str = Field(description="Function name chosen by the model.")
-    namespace: str | None = Field(
-        default=None, description="Optional function namespace."
-    )
+    namespace: str | None = Field(default=None, description="Optional function namespace.")
     status: ItemStatus | None = Field(
         default=None,
         description="Function call item status.",
@@ -133,9 +119,7 @@ class RequestFunctionCallItem(_FunctionCallItemBase):
 
 class _FunctionCallOutputItemBase(StrictModel):
     call_id: str = Field(description="Call ID this output satisfies.")
-    output: str | list[ToolOutputContentPart] = Field(
-        description="Function result as a string or supported content blocks."
-    )
+    output: str | list[ToolOutputContentPart] = Field(description="Function result as a string or supported content blocks.")
     type: Literal["function_call_output"] = Field(description="Item discriminator.")
 
     @field_validator("output", mode="before")
@@ -170,9 +154,7 @@ class ReasoningItem(StrictModel):
         default=None,
         description="Reasoning item status.",
     )
-    summary: list[SummaryTextContent] = Field(
-        description="Summaries of the reasoning content."
-    )
+    summary: list[SummaryTextContent] = Field(description="Summaries of the reasoning content.")
     type: Literal["reasoning"] = Field(description="Item discriminator.")
 
 
@@ -186,28 +168,20 @@ class RequestCompactionItem(_CompactionItemBase):
 
 
 type RequestInputItem = Annotated[
-    RequestMessageItem
-    | RequestFunctionCallItem
-    | RequestFunctionCallOutputItem
-    | ReasoningItem
-    | RequestCompactionItem,
+    RequestMessageItem | RequestFunctionCallItem | RequestFunctionCallOutputItem | ReasoningItem | RequestCompactionItem,
     Field(discriminator="type"),
 ]
 
 
 class ResponseMessageItem(StrictModel):
-    content: list[OutputTextContent] = Field(
-        description="Output message content blocks."
-    )
+    content: list[OutputTextContent] = Field(description="Output message content blocks.")
     id: str = Field(description="Unique output message item ID.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,
         description="Assistant phase label for commentary or final answer.",
     )
     role: Literal["assistant"] = Field(description="Output role; always assistant.")
-    status: Literal["in_progress", "completed", "incomplete"] = Field(
-        description="Message generation status."
-    )
+    status: Literal["in_progress", "completed", "incomplete"] = Field(description="Message generation status.")
     type: Literal["message"] = Field(description="Output item discriminator.")
 
 
@@ -216,17 +190,13 @@ class ResponseFunctionCallItem(_FunctionCallItemBase):
 
 
 class ResponseFunctionCallOutputItem(_FunctionCallOutputItemBase):
-    created_by: str | None = Field(
-        default=None, description="Originator of the output."
-    )
+    created_by: str | None = Field(default=None, description="Originator of the output.")
     id: str = Field(description="Unique function output item ID.")
     status: ItemStatus = Field(description="Function output item status.")
 
 
 class ResponseCompactionItem(_CompactionItemBase):
-    created_by: str | None = Field(
-        default=None, description="Originator of compaction."
-    )
+    created_by: str | None = Field(default=None, description="Originator of compaction.")
     id: str = Field(description="Unique compaction item ID.")
 
 
@@ -241,28 +211,20 @@ class ResponseCompactionItem(_CompactionItemBase):
 
 
 type ResponseOutputItem = Annotated[
-    ResponseMessageItem
-    | ResponseFunctionCallItem
-    | ResponseFunctionCallOutputItem
-    | ReasoningItem
-    | ResponseCompactionItem,
+    ResponseMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ReasoningItem | ResponseCompactionItem,
     # | ResponseWebSearchCallItem,
     Field(discriminator="type"),
 ]
 
 
 class InputItemsMessageItem(StrictModel):
-    content: str | list[MessageContentPart] = Field(
-        description="Message text or supported content blocks."
-    )
+    content: str | list[MessageContentPart] = Field(description="Message text or supported content blocks.")
     id: str = Field(description="Input item ID.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,
         description="Assistant phase label, when present.",
     )
-    role: Literal["user", "assistant", "system", "developer"] = Field(
-        description="Role that produced this input item."
-    )
+    role: Literal["user", "assistant", "system", "developer"] = Field(description="Role that produced this input item.")
     status: Literal["in_progress", "completed", "incomplete"] | None = Field(
         default=None,
         description="Input item status.",
@@ -271,10 +233,6 @@ class InputItemsMessageItem(StrictModel):
 
 
 type InputItemsPageItem = Annotated[
-    InputItemsMessageItem
-    | ResponseFunctionCallItem
-    | ResponseFunctionCallOutputItem
-    | ReasoningItem
-    | ResponseCompactionItem,
+    InputItemsMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ReasoningItem | ResponseCompactionItem,
     Field(discriminator="type"),
 ]

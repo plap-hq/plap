@@ -194,9 +194,7 @@ async def responses_socket(
                 mcp_tool_provider=mcp_tool_provider,
             )
             async for event in events:
-                await socket.send_json(
-                    event.model_dump(mode="json", exclude_none=True)
-                )
+                await socket.send_json(event.model_dump(mode="json", exclude_none=True))
         except Exception:
             await socket.send_json(
                 build_error_event("Invalid request.").model_dump(

@@ -286,9 +286,7 @@ class _CountingClassifier:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
         self.calls += 1
         return {
             signature.signature_hash: ToolClassification(

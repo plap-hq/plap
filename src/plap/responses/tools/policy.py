@@ -23,9 +23,7 @@ class ToolSignature:
 
     @property
     def signature_hash(self) -> bytes:
-        return blake3.blake3(
-            msgspec.json.encode(self.signature, order="deterministic")
-        ).digest()
+        return blake3.blake3(msgspec.json.encode(self.signature, order="deterministic")).digest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,9 +95,7 @@ class ToolPolicy:
 
 @runtime_checkable
 class IToolPolicyResolver(Protocol):
-    async def resolve(
-        self, tools: Sequence[FunctionTool]
-    ) -> dict[str, ToolPolicy]: ...
+    async def resolve(self, tools: Sequence[FunctionTool]) -> dict[str, ToolPolicy]: ...
 
 
 @runtime_checkable
@@ -108,9 +104,7 @@ class IToolClassifier(Protocol):
     classifier_model: str
     prompt_hash: bytes
 
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]: ...
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]: ...
 
 
 @runtime_checkable
@@ -119,16 +113,12 @@ class IToolCallClassifier(Protocol):
     classifier_model: str
     prompt_hash: bytes
 
-    async def classify_many(
-        self, calls: list[ToolCallSignature]
-    ) -> dict[tuple[bytes, bytes], ToolCallClassification]: ...
+    async def classify_many(self, calls: list[ToolCallSignature]) -> dict[tuple[bytes, bytes], ToolCallClassification]: ...
 
 
 @runtime_checkable
 class IToolCallPolicyResolver(Protocol):
-    async def resolve(
-        self, calls: Sequence[ToolCall]
-    ) -> tuple[ToolPolicy, ...]: ...
+    async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]: ...
 
 
 class ToolPolicyError(ValueError):
@@ -175,9 +165,7 @@ def function_tool_call_signature(
 
 
 def tool_arguments_hash(arguments: Any) -> bytes:
-    return blake3.blake3(
-        msgspec.json.encode(arguments, order="deterministic")
-    ).digest()
+    return blake3.blake3(msgspec.json.encode(arguments, order="deterministic")).digest()
 
 
 class CachedToolPolicyResolver(IToolPolicyResolver):
@@ -191,11 +179,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
     ) -> None:
         self._repository = repository
         self._classifier = classifier
-        self._classifications_l1 = (
-            classification_l1
-            if classification_l1 is not None
-            else LRUCache(maxsize=l1_maxsize)
-        )
+        self._classifications_l1 = classification_l1 if classification_l1 is not None else LRUCache(maxsize=l1_maxsize)
 
     async def resolve(self, tools: Sequence[FunctionTool]) -> dict[str, ToolPolicy]:
         policies: dict[str, ToolPolicy] = {}
@@ -204,23 +188,15 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
         for tool in tools:
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
-            if (
-                previous_hash is not None
-                and previous_hash != signature.signature_hash
-            ):
-                raise ToolPolicyError(
-                    "duplicate function tool name with different signature: "
-                    f"{tool.name}"
-                )
+            if previous_hash is not None and previous_hash != signature.signature_hash:
+                raise ToolPolicyError(f"duplicate function tool name with different signature: {tool.name}")
             signatures_by_name[tool.name] = signature.signature_hash
             if tool.name not in client_signatures_by_name:
                 client_signatures_by_name[tool.name] = signature
         classifications: dict[bytes, ToolClassification] = {}
         l2_signatures: list[ToolSignature] = []
         for signature in client_signatures_by_name.values():
-            cached = self._classifications_l1.get(
-                self._classification_l1_key(signature.signature_hash)
-            )
+            cached = self._classifications_l1.get(self._classification_l1_key(signature.signature_hash))
             if cached is None:
                 l2_signatures.append(signature)
                 continue
@@ -234,24 +210,14 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 prompt_hash=self._classifier.prompt_hash,
             )
             for classification in l2_cached.values():
-                self._classifications_l1[
-                    self._classification_l1_key(classification.signature_hash)
-                ] = classification
+                self._classifications_l1[self._classification_l1_key(classification.signature_hash)] = classification
             classifications.update(l2_cached)
-            missing = [
-                signature
-                for signature in l2_signatures
-                if signature.signature_hash not in l2_cached
-            ]
+            missing = [signature for signature in l2_signatures if signature.signature_hash not in l2_cached]
             if missing:
                 new_classifications = await self._classifier.classify_many(missing)
-                stored = await self._repository.store_classifications(
-                    list(new_classifications.values())
-                )
+                stored = await self._repository.store_classifications(list(new_classifications.values()))
                 for classification in stored.values():
-                    self._classifications_l1[
-                        self._classification_l1_key(classification.signature_hash)
-                    ] = classification
+                    self._classifications_l1[self._classification_l1_key(classification.signature_hash)] = classification
                 classifications.update(stored)
         for tool_name, signature in client_signatures_by_name.items():
             classification = classifications[signature.signature_hash]
@@ -263,9 +229,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             )
         return policies
 
-    def _classification_l1_key(
-        self, signature_hash: bytes
-    ) -> _ClassificationL1Key:
+    def _classification_l1_key(self, signature_hash: bytes) -> _ClassificationL1Key:
         return (
             signature_hash,
             self._classifier.classifier,
@@ -285,15 +249,9 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
     ) -> None:
         self._repository = repository
         self._classifier = classifier
-        self._classifications_l1 = (
-            classification_l1
-            if classification_l1 is not None
-            else LRUCache(maxsize=l1_maxsize)
-        )
+        self._classifications_l1 = classification_l1 if classification_l1 is not None else LRUCache(maxsize=l1_maxsize)
 
-    async def resolve(
-        self, calls: Sequence[ToolCall]
-    ) -> tuple[ToolPolicy, ...]:
+    async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]:
         resolved: list[ToolPolicy | None] = []
         contextual_by_index: dict[int, ToolCallSignature] = {}
         contextual_by_key: dict[tuple[bytes, bytes], ToolCallSignature] = {}
@@ -327,13 +285,8 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             )
 
         if contextual_by_key:
-            signatures_by_hash = {
-                call_signature.signature_hash: call_signature.signature
-                for call_signature in contextual_by_key.values()
-            }
-            await self._repository.get_or_create_signatures(
-                list(signatures_by_hash.values())
-            )
+            signatures_by_hash = {call_signature.signature_hash: call_signature.signature for call_signature in contextual_by_key.values()}
+            await self._repository.get_or_create_signatures(list(signatures_by_hash.values()))
             l2_cached = await self._repository.get_tool_call_classifications(
                 list(contextual_by_key),
                 classifier=self._classifier.classifier,
@@ -349,16 +302,10 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                 ] = classification
             classifications.update(l2_cached)
 
-            missing = [
-                call_signature
-                for key, call_signature in contextual_by_key.items()
-                if key not in l2_cached
-            ]
+            missing = [call_signature for key, call_signature in contextual_by_key.items() if key not in l2_cached]
             if missing:
                 new_classifications = await self._classifier.classify_many(missing)
-                stored = await self._repository.store_tool_call_classifications(
-                    list(new_classifications.values())
-                )
+                stored = await self._repository.store_tool_call_classifications(list(new_classifications.values()))
                 for classification in stored.values():
                     self._classifications_l1[
                         self._classification_l1_key(
@@ -379,9 +326,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             )
 
         if any(policy is None for policy in resolved):
-            raise RuntimeError(
-                "tool call policy resolution did not produce all outputs"
-            )
+            raise RuntimeError("tool call policy resolution did not produce all outputs")
         return tuple(policy for policy in resolved if policy is not None)
 
     def _classification_l1_key(
@@ -405,14 +350,8 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
         for tool in tools:
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
-            if (
-                previous_hash is not None
-                and previous_hash != signature.signature_hash
-            ):
-                raise ToolPolicyError(
-                    "duplicate function tool name with different signature: "
-                    f"{tool.name}"
-                )
+            if previous_hash is not None and previous_hash != signature.signature_hash:
+                raise ToolPolicyError(f"duplicate function tool name with different signature: {tool.name}")
             signatures_by_name[tool.name] = signature.signature_hash
             policies.setdefault(
                 tool.name,
@@ -426,9 +365,7 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
 
 
 class StaticToolCallPolicyResolver(IToolCallPolicyResolver):
-    async def resolve(
-        self, calls: Sequence[ToolCall]
-    ) -> tuple[ToolPolicy, ...]:
+    async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]:
         policies: list[ToolPolicy] = []
         for call in calls:
             if call.policy.effect_class != "contextual":

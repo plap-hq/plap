@@ -62,9 +62,7 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.main_debate_model == "crof/qwen3.5-9b"
     assert profile.reviewer_model == "crof/qwen3.5-9b"
     assert profile.arbitrator_model == "crof/qwen3.5-9b"
-    assert profile.reasoning_summarizer_model == (
-        "lightning/lightning-ai/gpt-oss-120b"
-    )
+    assert profile.reasoning_summarizer_model == ("lightning/lightning-ai/gpt-oss-120b")
     assert profile.transcript_token_budget == 200_000
     assert profile.compression_soft_token_budget == 100_000
     assert profile.compression_hard_token_budget == 150_000
@@ -150,9 +148,7 @@ def test_app_runtime_builds_mcp_provider_from_config() -> None:
 
 
 def test_app_runtime_builds_mcp_provider_from_url() -> None:
-    provider = _create_mcp_tool_provider(
-        _settings(web_search_mcp_url="http://localhost:8765/mcp")
-    )
+    provider = _create_mcp_tool_provider(_settings(web_search_mcp_url="http://localhost:8765/mcp"))
 
     assert isinstance(provider, MCPToolProvider)
 
@@ -177,10 +173,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
     assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert (
-        profile.reasoning_summarizer_model
-        == "lightning/lightning-ai/llama-3.3-70b"
-    )
+    assert profile.reasoning_summarizer_model == "lightning/lightning-ai/llama-3.3-70b"
 
 
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
@@ -239,11 +232,7 @@ def test_app_runtime_rejects_unrouted_service_tier_override() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                service_tier_overrides={
-                    "priority": RuntimeModelProfileOverrideConfig(
-                        main_model="lightning/lightning-ai/gpt-oss-120b"
-                    )
-                },
+                service_tier_overrides={"priority": RuntimeModelProfileOverrideConfig(main_model="lightning/lightning-ai/gpt-oss-120b")},
             )
         },
     )
@@ -272,10 +261,7 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.transcript_token_budget == 1024
-    assert (
-        _resolve_runtime_model_profile(settings, "plap/standard", "default")
-        is profile
-    )
+    assert _resolve_runtime_model_profile(settings, "plap/standard", "default") is profile
     assert _resolve_runtime_model_profile(settings, "plap/standard", "auto") is profile
     with pytest.raises(ValueError, match="model is required"):
         _resolve_runtime_model_profile(settings, None)

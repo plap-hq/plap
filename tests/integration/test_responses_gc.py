@@ -153,10 +153,7 @@ def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0)
 async def _table_count(session, table_name: str, scope_id) -> int:
     return (
         await session.execute(
-            text(
-                f"select count(*) from responses.{table_name} "
-                "where scope_id = :scope_id"
-            ),
+            text(f"select count(*) from responses.{table_name} where scope_id = :scope_id"),
             {"scope_id": scope_id},
         )
     ).scalar_one()
@@ -285,9 +282,7 @@ async def test_responses_gc_prunes_unreferenced_responses(
         await _create_response(session, scope_id, "resp_unreferenced", root_id)
         await session.commit()
 
-        await session.execute(
-            text("call responses.gc_prune_unreferenced_responses(10)")
-        )
+        await session.execute(text("call responses.gc_prune_unreferenced_responses(10)"))
         await session.commit()
 
         assert await _table_count(session, "response_records", scope_id) == 0
@@ -343,9 +338,7 @@ async def test_responses_created_via_tree_functions_get_response_owned_retention
             True,
         )
 
-        await session.execute(
-            text("call responses.gc_prune_unreferenced_responses(10)")
-        )
+        await session.execute(text("call responses.gc_prune_unreferenced_responses(10)"))
         await session.commit()
         assert await _table_count(session, "response_records", scope_id) == 1
 
@@ -551,9 +544,7 @@ async def test_responses_response_owned_head_lease_retains_previous_chain(
         )
         await session.commit()
 
-        await session.execute(
-            text("call responses.gc_prune_unreferenced_responses(10)")
-        )
+        await session.execute(text("call responses.gc_prune_unreferenced_responses(10)"))
         await session.commit()
         assert await _table_count(session, "response_records", scope_id) == 2
 

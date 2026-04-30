@@ -23,35 +23,27 @@ class ResponseCreatedEvent(StrictModel):
 class ResponseInProgressEvent(StrictModel):
     response: ResponseObject = Field(description="Response snapshot for this event.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.in_progress"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.in_progress"] = Field(description="Stream event discriminator.")
 
 
 class ResponseCompletedEvent(StrictModel):
     response: ResponseObject = Field(description="Final response snapshot.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.completed"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.completed"] = Field(description="Stream event discriminator.")
 
 
 class ResponseOutputItemAddedEvent(StrictModel):
     item: ResponseOutputItem = Field(description="Output item snapshot at add time.")
     output_index: int = Field(description="Index of this item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.output_item.added"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.output_item.added"] = Field(description="Stream event discriminator.")
 
 
 class ResponseOutputItemDoneEvent(StrictModel):
     item: ResponseOutputItem = Field(description="Completed output item.")
     output_index: int = Field(description="Index of this item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.output_item.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.output_item.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseContentPartAddedEvent(StrictModel):
@@ -60,9 +52,7 @@ class ResponseContentPartAddedEvent(StrictModel):
     output_index: int = Field(description="Index of the owning output item.")
     part: ResponseContentPart = Field(description="Content part snapshot.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.content_part.added"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.content_part.added"] = Field(description="Stream event discriminator.")
 
 
 class ResponseContentPartDoneEvent(StrictModel):
@@ -71,15 +61,11 @@ class ResponseContentPartDoneEvent(StrictModel):
     output_index: int = Field(description="Index of the owning output item.")
     part: ResponseContentPart = Field(description="Completed content part.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.content_part.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.content_part.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseTextEventLogprobTopLogprob(StrictModel):
-    logprob: float | None = Field(
-        default=None, description="Log probability for this possible token."
-    )
+    logprob: float | None = Field(default=None, description="Log probability for this possible token.")
     token: str | None = Field(default=None, description="Possible token text.")
 
 
@@ -102,9 +88,7 @@ class ResponseTextDeltaEvent(StrictModel):
     )
     output_index: int = Field(description="Index of the message in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.output_text.delta"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.output_text.delta"] = Field(description="Stream event discriminator.")
 
 
 class ResponseTextDoneEvent(StrictModel):
@@ -117,9 +101,7 @@ class ResponseTextDoneEvent(StrictModel):
     output_index: int = Field(description="Index of the message in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     text: str = Field(description="Completed output text.")
-    type: Literal["response.output_text.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.output_text.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseOutputTextAnnotationAddedEvent(StrictModel):
@@ -129,112 +111,78 @@ class ResponseOutputTextAnnotationAddedEvent(StrictModel):
     item_id: str = Field(description="Message item ID that owns the annotation.")
     output_index: int = Field(description="Index of the message in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.output_text.annotation.added"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.output_text.annotation.added"] = Field(description="Stream event discriminator.")
 
 
 class ResponseFunctionCallArgumentsDeltaEvent(StrictModel):
     delta: str = Field(description="Incremental JSON argument string chunk.")
     item_id: str = Field(description="Function call item ID receiving this delta.")
-    output_index: int = Field(
-        description="Index of the function call in response.output."
-    )
+    output_index: int = Field(description="Index of the function call in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.function_call_arguments.delta"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.function_call_arguments.delta"] = Field(description="Stream event discriminator.")
 
 
 class ResponseFunctionCallArgumentsDoneEvent(StrictModel):
     arguments: str = Field(description="Completed JSON argument string.")
     item_id: str = Field(description="Function call item ID.")
     name: str = Field(description="Function name selected by the model.")
-    output_index: int = Field(
-        description="Index of the function call in response.output."
-    )
+    output_index: int = Field(description="Index of the function call in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.function_call_arguments.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.function_call_arguments.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningSummaryPartAddedEvent(StrictModel):
     item_id: str = Field(description="Reasoning item ID that owns this summary.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     part: SummaryTextContent = Field(description="Reasoning summary part snapshot.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     summary_index: int = Field(description="Index within the reasoning summaries.")
-    type: Literal["response.reasoning_summary_part.added"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_summary_part.added"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningSummaryPartDoneEvent(StrictModel):
     item_id: str = Field(description="Reasoning item ID that owns this summary.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     part: SummaryTextContent = Field(description="Completed reasoning summary part.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     summary_index: int = Field(description="Index within the reasoning summaries.")
-    type: Literal["response.reasoning_summary_part.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_summary_part.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningSummaryTextDeltaEvent(StrictModel):
     delta: str = Field(description="Incremental reasoning summary text chunk.")
     item_id: str = Field(description="Reasoning item ID receiving this delta.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     summary_index: int = Field(description="Index within the reasoning summaries.")
-    type: Literal["response.reasoning_summary_text.delta"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_summary_text.delta"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningSummaryTextDoneEvent(StrictModel):
     item_id: str = Field(description="Reasoning item ID.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     summary_index: int = Field(description="Index within the reasoning summaries.")
     text: str = Field(description="Completed reasoning summary text.")
-    type: Literal["response.reasoning_summary_text.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_summary_text.done"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningTextDeltaEvent(StrictModel):
     content_index: int = Field(description="Index within the reasoning content array.")
     delta: str = Field(description="Incremental reasoning text chunk.")
     item_id: str = Field(description="Reasoning item ID receiving this delta.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
-    type: Literal["response.reasoning_text.delta"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_text.delta"] = Field(description="Stream event discriminator.")
 
 
 class ResponseReasoningTextDoneEvent(StrictModel):
     content_index: int = Field(description="Index within the reasoning content array.")
     item_id: str = Field(description="Reasoning item ID.")
-    output_index: int = Field(
-        description="Index of the reasoning item in response.output."
-    )
+    output_index: int = Field(description="Index of the reasoning item in response.output.")
     sequence_number: int = Field(description="Monotonic stream event sequence number.")
     text: str = Field(description="Completed reasoning text.")
-    type: Literal["response.reasoning_text.done"] = Field(
-        description="Stream event discriminator."
-    )
+    type: Literal["response.reasoning_text.done"] = Field(description="Stream event discriminator.")
 
 
 # OpenAI exposes response.web_search_call.* stream events. plap emits web search

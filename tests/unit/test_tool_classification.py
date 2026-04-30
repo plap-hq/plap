@@ -55,10 +55,7 @@ def test_function_tool_signature_is_canonical_for_schema_key_order() -> None:
         type="function",
     )
 
-    assert (
-        function_tool_signature(first).signature_hash
-        == function_tool_signature(second).signature_hash
-    )
+    assert function_tool_signature(first).signature_hash == function_tool_signature(second).signature_hash
 
 
 def test_function_tool_signature_changes_for_effectful_fields() -> None:
@@ -77,17 +74,12 @@ def test_function_tool_signature_changes_for_effectful_fields() -> None:
         type="function",
     )
 
-    assert (
-        function_tool_signature(read_file).signature_hash
-        != function_tool_signature(write_file).signature_hash
-    )
+    assert function_tool_signature(read_file).signature_hash != function_tool_signature(write_file).signature_hash
 
 
 async def test_llm_tool_classifier_parses_valid_json() -> None:
     signature = function_tool_signature(_read_file_tool())
-    client = _FakeChatClient(
-        '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'
-    )
+    client = _FakeChatClient('{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}')
     classifier = LLMToolClassifier(
         client=client,
         classifier="fake",
@@ -110,9 +102,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         "confidence",
         "rationale",
     ]
-    assert client.requests[0].response_format.schema["properties"]["effect_class"][
-        "enum"
-    ] == [
+    assert client.requests[0].response_format.schema["properties"]["effect_class"]["enum"] == [
         "safe",
         "visible",
         "mutation",
@@ -120,10 +110,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         "unknown",
     ]
     assert "contextual" in (client.requests[0].messages[0].content or "")
-    assert (
-        "minLength"
-        not in client.requests[0].response_format.schema["properties"]["rationale"]
-    )
+    assert "minLength" not in client.requests[0].response_format.schema["properties"]["rationale"]
     assert client.requests[0].max_completion_tokens == TOOL_EFFECT_CLASSIFIER_MAX_TOKENS
     assert client.requests[0].temperature == 0
     assert (
@@ -157,8 +144,7 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
         client=_SequenceChatClient(
             [
                 '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
-                '{"effect_class":"safe","confidence":0.8,'
-                '"rationale":"Read-only list."}',
+                '{"effect_class":"safe","confidence":0.8,"rationale":"Read-only list."}',
             ]
         ),
         classifier="fake",
@@ -176,23 +162,16 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
     first_request, second_request = classifier._client.requests
     assert "read_file" in (first_request.messages[1].content or "")
     assert "signature_hash" not in (first_request.messages[1].content or "")
-    assert read_signature.signature_hash.hex() not in (
-        first_request.messages[1].content or ""
-    )
+    assert read_signature.signature_hash.hex() not in (first_request.messages[1].content or "")
     assert "list_files" in (second_request.messages[1].content or "")
     assert "signature_hash" not in (second_request.messages[1].content or "")
-    assert list_signature.signature_hash.hex() not in (
-        second_request.messages[1].content or ""
-    )
+    assert list_signature.signature_hash.hex() not in (second_request.messages[1].content or "")
 
 
 async def test_llm_tool_classifier_parses_contextual_json() -> None:
     signature = function_tool_signature(_bash_tool())
     classifier = LLMToolClassifier(
-        client=_FakeChatClient(
-            '{"effect_class":"contextual","confidence":0.8,'
-            '"rationale":"Shell commands depend on arguments."}'
-        ),
+        client=_FakeChatClient('{"effect_class":"contextual","confidence":0.8,"rationale":"Shell commands depend on arguments."}'),
         classifier="fake",
         classifier_model="fake/model",
     )
@@ -214,10 +193,7 @@ async def test_llm_tool_classifier_parses_visible_json() -> None:
         )
     )
     classifier = LLMToolClassifier(
-        client=_FakeChatClient(
-            '{"effect_class":"visible","confidence":0.85,'
-            '"rationale":"Updates user-visible agent plan only."}'
-        ),
+        client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates user-visible agent plan only."}'),
         classifier="fake",
         classifier_model="fake/model",
     )
@@ -251,9 +227,7 @@ async def test_llm_tool_call_classifier_parses_valid_json() -> None:
     arguments = {"command": "ls"}
     arguments_hash = tool_arguments_hash(arguments)
     classifier = LLMToolCallClassifier(
-        client=_FakeChatClient(
-            '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'
-        ),
+        client=_FakeChatClient('{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'),
         classifier="fake",
         classifier_model="fake/model",
     )
@@ -313,9 +287,7 @@ async def test_static_policy_resolver_returns_unknown_client_tools() -> None:
     assert policies["read_file"].effect_class == "unknown"
 
 
-async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> (
-    None
-):
+async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> None:
     resolver = StaticToolPolicyResolver()
 
     with pytest.raises(ToolPolicyError, match="duplicate function tool name"):
@@ -401,9 +373,7 @@ async def test_static_tool_call_policy_resolver_maps_contextual_to_unknown() -> 
         [
             ToolCall(
                 tool=_bash_tool(),
-                policy=ToolPolicy(
-                    name="bash", source="client", effect_class="contextual"
-                ),
+                policy=ToolPolicy(name="bash", source="client", effect_class="contextual"),
                 arguments='{"command":"ls"}',
             )
         ]
@@ -449,9 +419,7 @@ async def test_cached_tool_call_policy_resolver_classifies_contextual_calls() ->
     calls = [
         ToolCall(
             tool=_bash_tool(),
-            policy=ToolPolicy(
-                name="bash", source="client", effect_class="contextual"
-            ),
+            policy=ToolPolicy(name="bash", source="client", effect_class="contextual"),
             arguments='{"command":"ls"}',
         )
     ]
@@ -485,9 +453,7 @@ async def test_cached_tool_call_policy_resolver_preserves_order() -> None:
             ),
             ToolCall(
                 tool=_bash_tool(),
-                policy=ToolPolicy(
-                    name="bash", source="client", effect_class="contextual"
-                ),
+                policy=ToolPolicy(name="bash", source="client", effect_class="contextual"),
                 arguments='{"command":"ls"}',
             ),
             ToolCall(
@@ -584,9 +550,7 @@ class _FakeChatClient(IChatCompletionClient):
             finish_reason="stop",
         )
 
-    def stream(
-        self, _request: ChatCompletionRequest
-    ) -> AsyncIterator[ChatCompletionDelta]:
+    def stream(self, _request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         raise NotImplementedError
 
 
@@ -601,15 +565,11 @@ class _SequenceChatClient(IChatCompletionClient):
             id=f"chat_{len(self.requests)}",
             model=request.model,
             created_at=1.0,
-            message=ChatMessage(
-                role="assistant", content=self.contents[len(self.requests) - 1]
-            ),
+            message=ChatMessage(role="assistant", content=self.contents[len(self.requests) - 1]),
             finish_reason="stop",
         )
 
-    def stream(
-        self, _request: ChatCompletionRequest
-    ) -> AsyncIterator[ChatCompletionDelta]:
+    def stream(self, _request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         raise NotImplementedError
 
 
@@ -620,9 +580,7 @@ class _RecordingClassifier(IToolClassifier):
     classifier_model: str = "fake/model"
     prompt_hash: bytes = b"p" * 32
 
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
         self.calls += 1
         return {
             signature.signature_hash: ToolClassification(
@@ -640,9 +598,7 @@ class _RecordingClassifier(IToolClassifier):
 
 
 class _ContextualClassifier(_RecordingClassifier):
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
         self.calls += 1
         return {
             signature.signature_hash: ToolClassification(
@@ -666,9 +622,7 @@ class _RecordingToolCallClassifier(IToolCallClassifier):
     classifier_model: str = "fake/model"
     prompt_hash: bytes = b"c" * 32
 
-    async def classify_many(
-        self, calls: list[ToolCallSignature]
-    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+    async def classify_many(self, calls: list[ToolCallSignature]) -> dict[tuple[bytes, bytes], ToolCallClassification]:
         self.calls += 1
         return {
             call.classification_key: ToolCallClassification(
@@ -700,9 +654,7 @@ class _MemoryClassificationRepository:
         self.get_or_create_signatures_calls += 1
         return signature
 
-    async def get_or_create_signatures(
-        self, signatures: list[ToolSignature]
-    ) -> list[ToolSignature]:
+    async def get_or_create_signatures(self, signatures: list[ToolSignature]) -> list[ToolSignature]:
         self.get_or_create_signatures_calls += 1
         return signatures
 
@@ -724,16 +676,11 @@ class _MemoryClassificationRepository:
             and cached.prompt_hash == prompt_hash
         }
 
-    async def store_classifications(
-        self, classifications: list[ToolClassification]
-    ) -> dict[bytes, ToolClassification]:
+    async def store_classifications(self, classifications: list[ToolClassification]) -> dict[bytes, ToolClassification]:
         self.store_classifications_calls += 1
         for classification in classifications:
             self._cache[classification.signature_hash] = classification
-        return {
-            classification.signature_hash: classification
-            for classification in classifications
-        }
+        return {classification.signature_hash: classification for classification in classifications}
 
     async def get_tool_call_classification(
         self,
@@ -770,9 +717,7 @@ class _MemoryClassificationRepository:
             and cached.prompt_hash == prompt_hash
         }
 
-    async def store_tool_call_classification(
-        self, classification: ToolCallClassification
-    ) -> ToolCallClassification:
+    async def store_tool_call_classification(self, classification: ToolCallClassification) -> ToolCallClassification:
         stored = await self.store_tool_call_classifications([classification])
         return stored[(classification.signature_hash, classification.arguments_hash)]
 
@@ -781,9 +726,7 @@ class _MemoryClassificationRepository:
     ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
         self.store_tool_call_classifications_calls += 1
         for classification in classifications:
-            self._call_cache[
-                (classification.signature_hash, classification.arguments_hash)
-            ] = classification
+            self._call_cache[(classification.signature_hash, classification.arguments_hash)] = classification
         return {
             (
                 classification.signature_hash,

@@ -21,10 +21,7 @@ async def test_live_fireworks_non_streaming_exceeds_4096_output_tokens() -> None
             messages=[
                 ChatMessage(
                     role="user",
-                    content=(
-                        "Repeat the exact word ping 4300 times separated by "
-                        "single spaces. Output nothing else."
-                    ),
+                    content=("Repeat the exact word ping 4300 times separated by single spaces. Output nothing else."),
                 )
             ],
             max_completion_tokens=5200,
@@ -46,9 +43,7 @@ async def test_live_fireworks_non_streaming_exceeds_4096_input_tokens() -> None:
                     role="user",
                     content=(
                         "Read the following repeated marker text and reply exactly: "
-                        "input-ok\n\n"
-                        + "marker " * 5200
-                        + "\n\nRemember: reply exactly input-ok."
+                        "input-ok\n\n" + "marker " * 5200 + "\n\nRemember: reply exactly input-ok."
                     ),
                 )
             ],

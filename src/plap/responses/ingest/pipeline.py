@@ -152,9 +152,7 @@ class _QueueBase:
                 raise IngestionError("target tool call is malformed")
             if existing.get("id") != call_id.upstream_tool_call_id:
                 raise IngestionError("sealed function_call upstream id mismatch")
-            self._mark_reasoning_tool_call_replayed(
-                call_id.upstream_tool_call_id
-            )
+            self._mark_reasoning_tool_call_replayed(call_id.upstream_tool_call_id)
             self._mark_pending_tool_call(call_id.upstream_tool_call_id)
             return
         if call_id.tool_call_index != len(tool_calls):
@@ -177,9 +175,7 @@ class _QueueBase:
             }
         )
 
-    def _append_message(
-        self, message: ChatMessage, *, temp: bool = False
-    ) -> ChatMessage:
+    def _append_message(self, message: ChatMessage, *, temp: bool = False) -> ChatMessage:
         raise NotImplementedError
 
     def _append_tool_output(self, message: ChatMessage) -> None:
@@ -194,10 +190,7 @@ class _QueueBase:
     def _message_for_call(self, call_id: SealedCallID) -> ChatMessage:
         prefix = call_id.content_hash_prefix.hex()
         for entry in reversed(self._entries):
-            if (
-                entry.content_hash.startswith(prefix)
-                and entry.message.get("role") == "assistant"
-            ):
+            if entry.content_hash.startswith(prefix) and entry.message.get("role") == "assistant":
                 return entry.message
         raise IngestionError("sealed function call content_hash target is missing")
 
@@ -216,9 +209,7 @@ class _QueueBase:
 
     def _ensure_no_pending_tool_calls(self) -> None:
         if self._pending_tool_call_ids:
-            raise IngestionError(
-                "same-side message cannot appear before pending tool outputs"
-            )
+            raise IngestionError("same-side message cannot appear before pending tool outputs")
 
     def _mark_pending_tool_call(self, call_id: str) -> None:
         if call_id in self._pending_tool_call_ids:
@@ -251,9 +242,7 @@ class _QueueBase:
 
     def assert_no_pending_tool_calls(self) -> None:
         if self._unreplayed_reasoning_tool_call_ids:
-            raise IngestionError(
-                "reasoning tool call is missing function_call item"
-            )
+            raise IngestionError("reasoning tool call is missing function_call item")
         if self._pending_tool_call_ids:
             raise IngestionError("function_call is missing function_call_output")
 
@@ -313,9 +302,7 @@ class _MainQueue(_QueueBase):
             }
         )
 
-    def _append_message(
-        self, message: ChatMessage, *, temp: bool = False
-    ) -> ChatMessage:
+    def _append_message(self, message: ChatMessage, *, temp: bool = False) -> ChatMessage:
         return self._append_main_row(message, temp=temp).message
 
     def _append_tool_output(self, message: ChatMessage) -> None:
@@ -349,9 +336,7 @@ class _MainQueue(_QueueBase):
         for entry in reversed(self._entries):
             if entry.message.get("role") == "assistant":
                 return entry.message
-        raise IngestionError(
-            "fabricated function_call has no previous assistant message"
-        )
+        raise IngestionError("fabricated function_call has no previous assistant message")
 
 
 class _PrivateSideQueue(_QueueBase):
@@ -364,9 +349,7 @@ class _PrivateSideQueue(_QueueBase):
     def rows(self) -> list[SideMessage]:
         return [entry for entry in self._entries if isinstance(entry, SideMessage)]
 
-    def _append_message(
-        self, message: ChatMessage, *, temp: bool = False
-    ) -> ChatMessage:
+    def _append_message(self, message: ChatMessage, *, temp: bool = False) -> ChatMessage:
         self._ensure_no_pending_tool_calls()
         row = SideMessage(message=message)
         self._entries.append(row)
@@ -410,16 +393,12 @@ def _last_compaction_index(input_items: list[object]) -> int | None:
     return last_index
 
 
-def _decode_sealed_items(
-    input_items: list[object], *, keyring: SealingKeyring
-) -> tuple[list[_DecodedItem], bool]:
+def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) -> tuple[list[_DecodedItem], bool]:
     decoded: list[_DecodedItem] = []
     in_temp_debate = False
     for item in input_items:
         if isinstance(item, RequestMessageItem):
-            decoded.append(
-                _DecodedItem(item=item, resets_temp_debate=in_temp_debate)
-            )
+            decoded.append(_DecodedItem(item=item, resets_temp_debate=in_temp_debate))
             if in_temp_debate:
                 in_temp_debate = False
             continue
@@ -450,9 +429,7 @@ def _decode_sealed_items(
     return decoded, in_temp_debate
 
 
-def _open_reasoning_item(
-    item: ReasoningItem, *, keyring: SealingKeyring
-) -> ReasoningPayload:
+def _open_reasoning_item(item: ReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
     if item.encrypted_content is None:
         raise IngestionError("unsealed reasoning input is not trusted")
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)
@@ -461,12 +438,8 @@ def _open_reasoning_item(
 def _prune_temp_debate_globally(items: list[_DecodedItem]) -> list[_DecodedItem]:
     retained: list[_DecodedItem] = []
     for item in items:
-        if item.resets_temp_debate or (
-            item.reasoning is not None and not item.reasoning.temp
-        ):
-            retained = [
-                candidate for candidate in retained if not candidate.temp_related
-            ]
+        if item.resets_temp_debate or (item.reasoning is not None and not item.reasoning.temp):
+            retained = [candidate for candidate in retained if not candidate.temp_related]
         retained.append(item)
     return retained
 
@@ -481,9 +454,7 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
             continue
         if item.reasoning is not None:
             routed.continuation_side = item.reasoning.side
-            routed.side(item.reasoning.side).append(
-                _SideEvent(kind="reasoning", reasoning=item.reasoning)
-            )
+            routed.side(item.reasoning.side).append(_SideEvent(kind="reasoning", reasoning=item.reasoning))
             continue
         if isinstance(item.item, RequestFunctionCallItem):
             if item.call_id is None:
@@ -491,9 +462,7 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
                     raise IngestionError("duplicate pending unsealed function_call")
                 pending_unsealed[item.item.call_id] = item.item
                 routed.continuation_side = "main"
-                routed.main.append(
-                    _SideEvent(kind="fabricated_function_call", call=item.item)
-                )
+                routed.main.append(_SideEvent(kind="fabricated_function_call", call=item.item))
             else:
                 routed.continuation_side = item.call_id.side
                 routed.side(item.call_id.side).append(
@@ -508,13 +477,9 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
             if item.call_id is None:
                 call = pending_unsealed.pop(item.item.call_id, None)
                 if call is None:
-                    raise IngestionError(
-                        "unsealed function_call_output has no matching function_call"
-                    )
+                    raise IngestionError("unsealed function_call_output has no matching function_call")
                 routed.continuation_side = "main"
-                routed.main.append(
-                    _SideEvent(kind="fabricated_function_call_output", output=item.item)
-                )
+                routed.main.append(_SideEvent(kind="fabricated_function_call_output", output=item.item))
             else:
                 routed.continuation_side = item.call_id.side
                 routed.side(item.call_id.side).append(
@@ -630,18 +595,12 @@ def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:
             queue.add_reasoning(event.reasoning)
             continue
         if event.kind == "function_call":
-            if (
-                not isinstance(event.item, RequestFunctionCallItem)
-                or event.call_id is None
-            ):
+            if not isinstance(event.item, RequestFunctionCallItem) or event.call_id is None:
                 raise TypeError("function_call event is malformed")
             queue.associate_function_call(event.item, event.call_id)
             continue
         if event.kind == "function_call_output":
-            if (
-                not isinstance(event.item, RequestFunctionCallOutputItem)
-                or event.call_id is None
-            ):
+            if not isinstance(event.item, RequestFunctionCallOutputItem) or event.call_id is None:
                 raise TypeError("function_call_output event is malformed")
             queue.associate_function_call_output(event.item, event.call_id)
             continue
@@ -675,9 +634,7 @@ def _initial_cursors(compaction: CompactionPayload | None) -> dict[str, int]:
     return cursors
 
 
-def _open_call_id_or_none(
-    value: str, *, keyring: SealingKeyring
-) -> SealedCallID | None:
+def _open_call_id_or_none(value: str, *, keyring: SealingKeyring) -> SealedCallID | None:
     if not value.startswith(CALL_ID_PREFIX):
         return None
     return open_call_id(value, keyring=keyring)
@@ -699,9 +656,7 @@ def _function_output_text(item: RequestFunctionCallOutputItem) -> str:
     return " ".join(part.text for part in item.output)
 
 
-def _chat_tool_call(
-    item: RequestFunctionCallItem, call_id: SealedCallID
-) -> dict[str, Any]:
+def _chat_tool_call(item: RequestFunctionCallItem, call_id: SealedCallID) -> dict[str, Any]:
     return {
         "id": call_id.upstream_tool_call_id,
         "type": "function",

@@ -72,10 +72,7 @@ def to_novita_chat_params(
 def _deepseek_v4_thinking_extra_body(
     request: ChatCompletionRequest,
 ) -> dict[str, Any] | None:
-    if (
-        request.model not in NOVITA_THINKING_CONTROL_MODELS
-        or request.reasoning_effort is None
-    ):
+    if request.model not in NOVITA_THINKING_CONTROL_MODELS or request.reasoning_effort is None:
         return None
     thinking_type = "disabled" if request.reasoning_effort == "none" else "enabled"
     return {"thinking": {"type": thinking_type}}
@@ -89,13 +86,9 @@ def _apply_novita_tool_choice_quirks(
         return
     if not isinstance(request.tool_choice, ChatToolChoiceFunction):
         return
-    if (
-        len(request.tools) == 1
-        and request.tools[0].function.name == request.tool_choice.name
-    ):
+    if len(request.tools) == 1 and request.tools[0].function.name == request.tool_choice.name:
         params["tool_choice"] = "required"
         return
     raise ChatCompletionUnsupportedRequestError(
-        "Novita model rejects forced function tool_choice objects; "
-        "use tool_choice='required' or provide exactly one matching tool"
+        "Novita model rejects forced function tool_choice objects; use tool_choice='required' or provide exactly one matching tool"
     )

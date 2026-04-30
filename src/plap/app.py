@@ -210,10 +210,7 @@ def _create_tool_classifier(
         settings,
         TOOL_EFFECT_CLASSIFIER_MODEL,
     ):
-        raise ValueError(
-            "tool effect classifier model does not match any configured LLM route: "
-            f"{TOOL_EFFECT_CLASSIFIER_MODEL!r}"
-        )
+        raise ValueError(f"tool effect classifier model does not match any configured LLM route: {TOOL_EFFECT_CLASSIFIER_MODEL!r}")
     return LLMToolClassifier(
         client=chat_completion_client,
         classifier_model=TOOL_EFFECT_CLASSIFIER_MODEL,
@@ -229,10 +226,7 @@ def _create_tool_call_classifier(
         settings,
         TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     ):
-        raise ValueError(
-            "tool call classifier model does not match any configured LLM route: "
-            f"{TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}"
-        )
+        raise ValueError(f"tool call classifier model does not match any configured LLM route: {TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}")
     return LLMToolCallClassifier(
         client=chat_completion_client,
         classifier_model=TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
@@ -260,10 +254,7 @@ def _validate_runtime_model_profiles(settings: Settings) -> None:
     for name, profile in settings.runtime_model_profiles.items():
         for model in _runtime_profile_models(profile):
             if not _has_configured_chat_completion_route(settings, model):
-                raise ValueError(
-                    "runtime model profile references an unconfigured LLM route: "
-                    f"{name!r} -> {model!r}"
-                )
+                raise ValueError(f"runtime model profile references an unconfigured LLM route: {name!r} -> {model!r}")
 
 
 def _resolve_runtime_model_profile(
@@ -299,10 +290,7 @@ def _runtime_profile_models(profile: RuntimeModelProfileConfig) -> Iterable[str]
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
-    return any(
-        model.startswith(prefix)
-        for prefix in _configured_chat_completion_prefixes(settings)
-    )
+    return any(model.startswith(prefix) for prefix in _configured_chat_completion_prefixes(settings))
 
 
 def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
@@ -341,18 +329,12 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "runtime_model_profiles": resolved_settings.runtime_model_profiles,
             "reasoning_summarizer": reasoning_summarizer,
             "session_maker": session_maker,
-            "sealing_keyring": SealingKeyring.from_encoded(
-                resolved_settings.sealing_keys
-            ),
+            "sealing_keyring": SealingKeyring.from_encoded(resolved_settings.sealing_keys),
             "settings": resolved_settings,
             "tool_call_classifier": tool_call_classifier,
-            "tool_call_policy_l1_cache": LRUCache(
-                maxsize=resolved_settings.tool_call_policy_l1_maxsize
-            ),
+            "tool_call_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_call_policy_l1_maxsize),
             "tool_classifier": tool_classifier,
-            "tool_policy_l1_cache": LRUCache(
-                maxsize=resolved_settings.tool_policy_l1_maxsize
-            ),
+            "tool_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_policy_l1_maxsize),
             "mcp_tool_provider": mcp_tool_provider,
         }
     )

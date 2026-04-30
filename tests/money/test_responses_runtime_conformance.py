@@ -286,10 +286,7 @@ async def test_money_responses_wisp_nano_client_tool_continuation_loop(
 ) -> None:
     responses = await _run_client_tool_loop(
         money_openai_client,
-        input=(
-            "Call get_constant_value first. After the tool result arrives, answer "
-            "with the exact constant value from the tool."
-        ),
+        input=("Call get_constant_value first. After the tool result arrives, answer with the exact constant value from the tool."),
         tools=[_constant_tool_definition()],
         handlers={"get_constant_value": lambda _arguments: "constant value: 42"},
         tool_choice={"type": "function", "name": "get_constant_value"},
@@ -312,26 +309,19 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
                 "content": (
                     "Project note alpha. Preserve marker RETAIN-MONEY-314. "
                     "This is repetitive context about a harmless runtime money "
-                    "context replay test. "
-                    * 4
+                    "context replay test. " * 4
                 ),
             },
             {
                 "type": "message",
                 "role": "assistant",
-                "content": (
-                    "Acknowledged the marker RETAIN-MONEY-314 and the repetitive "
-                    "runtime replay notes. "
-                    * 4
-                ),
+                "content": ("Acknowledged the marker RETAIN-MONEY-314 and the repetitive runtime replay notes. " * 4),
             },
             {
                 "type": "message",
                 "role": "user",
                 "content": (
-                    "Use these project notes to answer with the preserved marker "
-                    "RETAIN-MONEY-314 and keep the replay state useful. "
-                    * 4
+                    "Use these project notes to answer with the preserved marker RETAIN-MONEY-314 and keep the replay state useful. " * 4
                 ),
             },
         ],
@@ -367,10 +357,7 @@ async def test_money_responses_wisp_nano_server_mcp_loopback(
 ) -> None:
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
-        input=(
-            "Use the search tool to find the runtime MCP marker, then answer with "
-            "the exact marker string from the tool result."
-        ),
+        input=("Use the search tool to find the runtime MCP marker, then answer with the exact marker string from the tool result."),
         max_output_tokens=512,
         temperature=0,
         tool_choice={"type": "function", "name": MONEY_MCP_TOOL_NAME},
@@ -381,9 +368,7 @@ async def test_money_responses_wisp_nano_server_mcp_loopback(
     output_types = [item.type for item in response.output]
     assert "function_call" in output_types
     assert "function_call_output" in output_types
-    server_outputs = [
-        item for item in response.output if item.type == "function_call_output"
-    ]
+    server_outputs = [item for item in response.output if item.type == "function_call_output"]
     assert server_outputs[0].created_by == "server"
     assert "runtime-mcp-731" in server_outputs[0].output
     assert "runtime-mcp-731" in _response_text(response)
@@ -413,13 +398,7 @@ def _find_free_port() -> int:
 
 
 def _response_text(response: object) -> str:
-    return "".join(
-        part.text
-        for item in response.output
-        if item.type == "message"
-        for part in item.content
-        if part.type == "output_text"
-    )
+    return "".join(part.text for item in response.output if item.type == "message" for part in item.content if part.type == "output_text")
 
 
 async def _run_client_tool_loop(
@@ -445,9 +424,7 @@ async def _run_client_tool_loop(
             tools=next_tools,
         )
         responses.append(response)
-        function_calls = [
-            item for item in response.output if item.type == "function_call"
-        ]
+        function_calls = [item for item in response.output if item.type == "function_call"]
         if not function_calls:
             return responses
         replay_input = [_item_to_input(item) for item in response.output]
@@ -468,10 +445,7 @@ async def _run_client_tool_loop(
 
 
 def _item_to_input(item: object) -> dict[str, object]:
-    if hasattr(item, "model_dump"):
-        value = item.model_dump(mode="json", exclude_none=True)
-    else:
-        value = item.to_dict()
+    value = item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else item.to_dict()
     if value.get("type") in {"compaction", "function_call_output"}:
         value.pop("created_by", None)
     return value
@@ -481,10 +455,7 @@ def _constant_tool_definition() -> dict[str, object]:
     return {
         "type": "function",
         "name": "get_constant_value",
-        "description": (
-            "Return a harmless constant string. This tool does not write data, "
-            "change state, or contact external services."
-        ),
+        "description": ("Return a harmless constant string. This tool does not write data, change state, or contact external services."),
         "parameters": {
             "type": "object",
             "properties": {

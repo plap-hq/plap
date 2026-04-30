@@ -30,14 +30,8 @@ def _validate_compression_budgets(
     soft_budget: int | None,
     hard_budget: int | None,
 ) -> None:
-    if (
-        soft_budget is not None
-        and hard_budget is not None
-        and hard_budget <= soft_budget
-    ):
-        raise ValueError(
-            "compression hard token budget must exceed the soft token budget"
-        )
+    if soft_budget is not None and hard_budget is not None and hard_budget <= soft_budget:
+        raise ValueError("compression hard token budget must exceed the soft token budget")
 
 
 class RuntimeModelProfileOverrideConfig(BaseModel):
@@ -130,9 +124,7 @@ class Settings(BaseSettings):
     tool_classifier_max_concurrency: int = 4
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096
-    runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(
-        default_factory=_default_runtime_model_profiles
-    )
+    runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(default_factory=_default_runtime_model_profiles)
     web_search_mcp_url: str | None = None
     web_search_mcp_config: dict[str, Any] | None = None
     web_search_mcp_tool_names: list[str] | None = None

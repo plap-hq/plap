@@ -63,6 +63,9 @@ markers = [
   "expensive: live provider tests with unusually high token or API cost",
 ]
 
+[tool.ruff]
+line-length = 140
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 extend-select = ["RUF", "C4", "SIM", "RET", "PIE", "PERF", "TRY", "PTH", "PLW", "PLR1714", "N"]

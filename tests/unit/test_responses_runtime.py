@@ -74,9 +74,7 @@ async def test_prepare_tools_classifies_client_tools_without_compress() -> None:
 
 async def test_prepare_tools_adds_web_search_only_when_requested() -> None:
     tools, policies, executors = await prepare_tools(
-        ResponseCreateRequest(
-            tools=[_read_file_tool(), WebSearchTool(type="web_search")]
-        ),
+        ResponseCreateRequest(tools=[_read_file_tool(), WebSearchTool(type="web_search")]),
         _RecordingResolver(),
         _FakeMCPToolProvider(),
     )
@@ -122,9 +120,7 @@ async def test_prepare_tools_rejects_client_server_name_collision() -> None:
 async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> None:
     tool = _read_file_tool()
     tools, policies, _ = await prepare_tools(
-        ResponseCreateRequest(
-            tools=[tool, WebSearchTool(type="web_search")]
-        ),
+        ResponseCreateRequest(tools=[tool, WebSearchTool(type="web_search")]),
         _RecordingResolver(),
         _FakeMCPToolProvider(),
     )
@@ -151,9 +147,7 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
         "read_file",
     ]
     assert [policy.source for policy in resolved] == ["server", "client", "client"]
-    assert call_resolver.calls == [
-        [("read_file", '{"path":"a"}'), ("read_file", '{"path":"b"}')]
-    ]
+    assert call_resolver.calls == [[("read_file", '{"path":"a"}'), ("read_file", '{"path":"b"}')]]
 
 
 async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> None:
@@ -213,9 +207,7 @@ async def test_stream_response_events_emits_model_message_output() -> None:
     completed = events[-1].response
     assert completed.output[0].type == "message"
     assert completed.output[0].content[0].text == "hello back"
-    assert [tool.function.name for tool in client.requests[0].tools] == [
-        COMPRESS_TOOL_NAME
-    ]
+    assert [tool.function.name for tool in client.requests[0].tools] == [COMPRESS_TOOL_NAME]
     developer_prompt = client.requests[0].messages[0]
     assert developer_prompt.role == "developer"
     assert "You are Test Model" in (developer_prompt.content or "")
@@ -294,9 +286,7 @@ async def test_stream_response_events_sends_stable_and_temp_context() -> None:
     assert "compress" not in developer_prompt
     assert "compression" not in developer_prompt
     assert "compaction" not in developer_prompt
-    assert [message.content for message in client.requests[0].messages[1:]] == [
-        "temp candidate"
-    ]
+    assert [message.content for message in client.requests[0].messages[1:]] == ["temp candidate"]
     assert client.requests[0].tools == []
 
 
@@ -538,10 +528,7 @@ async def test_stream_response_events_soft_reminder_one_shot_after_tool() -> Non
     ]
 
     assert "Context is getting long" in (client.requests[0].messages[-1].content or "")
-    assert all(
-        "Context is getting long" not in (message.content or "")
-        for message in client.requests[1].messages
-    )
+    assert all("Context is getting long" not in (message.content or "") for message in client.requests[1].messages)
 
 
 async def test_stream_response_events_mixed_server_client_tools_do_not_loop() -> None:
@@ -618,11 +605,11 @@ async def test_stream_response_events_server_tool_failure_raises_early() -> None
                 ResponseCreateRequest(
                     model="plap/test",
                     tools=[WebSearchTool(type="web_search")],
-            ),
-            settings=_settings(),
-            sealing_keyring=_keyring(),
-            tool_policy_resolver=_RecordingResolver(),
-            tool_call_policy_resolver=_RecordingCallResolver(),
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
                 chat_completion_client=client,
                 reasoning_summarizer=_FakeReasoningSummarizer(),
                 mcp_tool_provider=provider,
@@ -968,9 +955,7 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
                             _span(
                                 0,
                                 "alpha",
-                                token_count=estimate_message_tokens(
-                                    {"role": "assistant", "content": summary}
-                                ),
+                                token_count=estimate_message_tokens({"role": "assistant", "content": summary}),
                             )
                         )
                     ],
@@ -1018,16 +1003,9 @@ async def test_stream_response_events_accepts_empty_compression_bailout() -> Non
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["message"]
     assert len(client.requests) == 2
-    assert [tool.function.name for tool in client.requests[0].tools] == [
-        COMPRESS_TOOL_NAME
-    ]
-    assert [tool.function.name for tool in client.requests[1].tools] == [
-        COMPRESS_TOOL_NAME
-    ]
-    assert all(
-        "Context is getting long" not in (message.content or "")
-        for message in client.requests[1].messages
-    )
+    assert [tool.function.name for tool in client.requests[0].tools] == [COMPRESS_TOOL_NAME]
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
+    assert all("Context is getting long" not in (message.content or "") for message in client.requests[1].messages)
 
 
 async def test_stream_response_events_adds_soft_compression_reminder() -> None:
@@ -1102,14 +1080,9 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
     assert isinstance(request.tool_choice, ChatToolChoiceFunction)
     assert request.tool_choice.name == COMPRESS_TOOL_NAME
     assert "compression limit" in (request.messages[-1].content or "")
-    assert [tool.function.name for tool in client.requests[1].tools] == [
-        COMPRESS_TOOL_NAME
-    ]
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
     assert client.requests[1].tool_choice is None
-    assert all(
-        "compression limit" not in (message.content or "")
-        for message in client.requests[1].messages
-    )
+    assert all("compression limit" not in (message.content or "") for message in client.requests[1].messages)
 
 
 async def test_stream_response_events_rejects_hard_budget_without_compress() -> None:
@@ -1197,9 +1170,7 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
         )
     ]
 
-    assert [
-        event.type for event in events if "reasoning_summary" in event.type
-    ] == [
+    assert [event.type for event in events if "reasoning_summary" in event.type] == [
         "response.reasoning_summary_part.added",
         "response.reasoning_summary_text.delta",
         "response.reasoning_summary_text.delta",
@@ -1213,9 +1184,7 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
     assert summarizer.calls[0][2] == "main"
     assert summarizer.calls[0][3] == (
         {
-            "content_hash": content_hash(
-                {"role": "assistant", "content": "answer"}
-            ),
+            "content_hash": content_hash({"role": "assistant", "content": "answer"}),
             "reasoning_content": "thinking",
         },
     )
@@ -1272,9 +1241,7 @@ class _RecordingResolver(IToolPolicyResolver):
         self.effects = effects or {}
         self.tool_names: list[list[str]] = []
 
-    async def resolve(
-        self, tools: Sequence[FunctionTool]
-    ) -> dict[str, ToolPolicy]:
+    async def resolve(self, tools: Sequence[FunctionTool]) -> dict[str, ToolPolicy]:
         self.tool_names.append([tool.name for tool in tools])
         return {
             tool.name: ToolPolicy(
@@ -1290,9 +1257,7 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
     def __init__(self) -> None:
         self.calls: list[list[tuple[str, str]]] = []
 
-    async def resolve(
-        self, calls: Sequence[ToolCall]
-    ) -> tuple[ToolPolicy, ...]:
+    async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]:
         self.calls.append([(call.tool.name, call.arguments) for call in calls])
         return tuple(
             ToolPolicy(

@@ -146,10 +146,7 @@ async def complete_with_response_format_fallback(
     if retry_validation_error is None:
         return retry_result
 
-    raise ChatCompletionProviderError(
-        f"{provider_name} response_format fallback returned invalid JSON: "
-        f"{retry_validation_error}"
-    )
+    raise ChatCompletionProviderError(f"{provider_name} response_format fallback returned invalid JSON: {retry_validation_error}")
 
 
 def response_format_fallback_stream_deltas(
@@ -203,8 +200,7 @@ def response_format_fallback_request(
             ChatMessage(
                 role="user",
                 content=(
-                    "The previous response did not satisfy the requested JSON "
-                    f"format: {validation_error}. Return only corrected JSON."
+                    f"The previous response did not satisfy the requested JSON format: {validation_error}. Return only corrected JSON."
                 ),
             )
         )
@@ -259,9 +255,7 @@ def _json_schema_validation_error(
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
-        raise ChatCompletionInvalidRequestError(
-            f"Invalid JSON schema for response_format: {exc.message}"
-        ) from exc
+        raise ChatCompletionInvalidRequestError(f"Invalid JSON schema for response_format: {exc.message}") from exc
     validator = Draft202012Validator(schema)
     try:
         validator.validate(value)

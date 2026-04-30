@@ -86,18 +86,19 @@ type _CompressionReminderLevel = Literal["none", "soft", "hard"]
 SOFT_COMPRESSION_REMINDER = (
     "Context is getting long. If earlier cited conversation ranges can be safely "
     "replaced with focused summaries, call `compress` now. If no useful safe "
-    "compression is possible, call `compress` with {\"ranges\": []}."
+    'compression is possible, call `compress` with {"ranges": []}.'
 )
 HARD_COMPRESSION_REMINDER = (
     "Context is at the compression limit. Before continuing, call `compress` if "
     "any earlier cited ranges can be safely summarized. If no useful safe "
-    "compression is possible, call `compress` with {\"ranges\": []}."
+    'compression is possible, call `compress` with {"ranges": []}.'
 )
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
 Be accurate, direct, and helpful. Follow the user's instructions. Ask clarifying
 questions when needed. Use tools when they help you answer better. Do not invent
 facts, tool results, or citations. When you make a mistake, correct it plainly."""
+
 
 def _runtime_model_profile(
     settings: Settings,
@@ -117,14 +118,10 @@ def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary 
     return request.reasoning.summary or request.reasoning.generate_summary
 
 
-def _context_token_count(
-    spans: Sequence[ChatMessageSpan], *, include_citations: bool
-) -> int:
+def _context_token_count(spans: Sequence[ChatMessageSpan], *, include_citations: bool) -> int:
     if not include_citations:
         return sum(span.token_count for span in spans)
-    return sum(
-        span.token_count + estimate_citation_tokens(span.citation) for span in spans
-    )
+    return sum(span.token_count + estimate_citation_tokens(span.citation) for span in spans)
 
 
 def _compression_reminder(
@@ -136,11 +133,7 @@ def _compression_reminder(
         if bailout != "hard":
             return "hard", HARD_COMPRESSION_REMINDER
         return "none", None
-    if (
-        profile.compression_soft_token_budget is not None
-        and token_count >= profile.compression_soft_token_budget
-        and bailout == "none"
-    ):
+    if profile.compression_soft_token_budget is not None and token_count >= profile.compression_soft_token_budget and bailout == "none":
         return "soft", SOFT_COMPRESSION_REMINDER
     return "none", None
 
@@ -149,10 +142,7 @@ def _hard_compression_budget_crossed(
     profile: RuntimeModelProfileConfig,
     token_count: int,
 ) -> bool:
-    return (
-        profile.compression_hard_token_budget is not None
-        and token_count >= profile.compression_hard_token_budget
-    )
+    return profile.compression_hard_token_budget is not None and token_count >= profile.compression_hard_token_budget
 
 
 async def prepare_tools(
@@ -253,9 +243,7 @@ def _apply_compression(
     if not ranges:
         return main_context, False
 
-    index_by_citation = {
-        span.citation: index for index, span in enumerate(main_context)
-    }
+    index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
     parsed_ranges: list[tuple[int, int, str]] = []
     for item in ranges:
         if not isinstance(item, dict):
@@ -325,9 +313,7 @@ def _normalize_citation(value: str) -> str:
     return f"[~{start}{suffix}]"
 
 
-def _chat_message_from_span(
-    row: ChatMessageSpan, *, include_citation: bool
-) -> ChatMessage:
+def _chat_message_from_span(row: ChatMessageSpan, *, include_citation: bool) -> ChatMessage:
     message = _chat_message_from_dict(row.message)
     content = message.content or ""
     if include_citation:
@@ -399,13 +385,9 @@ def _response_usage(usage: ChatUsage | None) -> ResponseUsage | None:
         return None
     return ResponseUsage(
         input_tokens=usage.input_tokens,
-        input_tokens_details=ResponseUsageInputTokensDetails(
-            cached_tokens=usage.cached_tokens or 0
-        ),
+        input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=usage.cached_tokens or 0),
         output_tokens=usage.output_tokens,
-        output_tokens_details=ResponseUsageOutputTokensDetails(
-            reasoning_tokens=usage.reasoning_tokens or 0
-        ),
+        output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=usage.reasoning_tokens or 0),
         total_tokens=usage.total_tokens,
     )
 
@@ -439,11 +421,7 @@ def _message_content_text(value: object) -> str | None:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        parts = [
-            item["text"]
-            for item in value
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        ]
+        parts = [item["text"] for item in value if isinstance(item, dict) and isinstance(item.get("text"), str)]
         return "\n".join(parts) if parts else None
     return str(value)
 
@@ -544,30 +522,16 @@ async def _run_response(
         effective_server_executors = dict(base_server_executors)
 
         if in_temp_debate:
-            effective_tools = [
-                tool
-                for tool in effective_tools
-                if effective_tool_policies[tool.name].effect_class == "safe"
-            ]
-            effective_tool_policies = {
-                name: policy
-                for name, policy in effective_tool_policies.items()
-                if policy.effect_class == "safe"
-            }
+            effective_tools = [tool for tool in effective_tools if effective_tool_policies[tool.name].effect_class == "safe"]
+            effective_tool_policies = {name: policy for name, policy in effective_tool_policies.items() if policy.effect_class == "safe"}
             effective_server_executors = {
-                name: executor
-                for name, executor in effective_server_executors.items()
-                if name in effective_tool_policies
+                name: executor for name, executor in effective_server_executors.items() if name in effective_tool_policies
             }
-        elif (
-            compression_rounds < profile.compression_max_rounds
-        ):
+        elif compression_rounds < profile.compression_max_rounds:
             effective_tools.append(compress_tool())
             effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
 
-        developer_prompt_parts = [
-            MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
-        ]
+        developer_prompt_parts = [MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)]
         if COMPRESS_TOOL_NAME in effective_tool_policies:
             developer_prompt_parts.append(COMPRESS_DEVELOPER_PROMPT)
         if request.instructions:
@@ -581,10 +545,7 @@ async def _run_response(
         ]
         effective_main_context = [*main_context, *main_context_temp]
         include_citations = COMPRESS_TOOL_NAME in effective_tool_policies
-        messages.extend(
-            _chat_message_from_span(row, include_citation=include_citations)
-            for row in effective_main_context
-        )
+        messages.extend(_chat_message_from_span(row, include_citation=include_citations) for row in effective_main_context)
         token_count = _context_token_count(
             effective_main_context,
             include_citations=include_citations,
@@ -624,9 +585,7 @@ async def _run_response(
 
         result = await chat_completion_client.complete(model_request)
         tool_calls = result.message.tool_calls or []
-        if forced_compression and not any(
-            call.name == COMPRESS_TOOL_NAME for call in tool_calls
-        ):
+        if forced_compression and not any(call.name == COMPRESS_TOOL_NAME for call in tool_calls):
             raise ToolPolicyError("hard compression budget requires compress")
 
         if tool_calls:
@@ -670,9 +629,7 @@ async def _run_response(
 
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
-            for index, (call, policy) in enumerate(
-                zip(tool_calls, resolved_policies, strict=True)
-            ):
+            for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
                 if policy.source == "server":
                     executor = effective_server_executors.get(call.name)
                     if executor is None:
@@ -689,18 +646,12 @@ async def _run_response(
         public_assistant_message: dict[str, Any] = {"role": "assistant"}
         if result.message.content is not None:
             public_assistant_message["content"] = result.message.content
-        elif (
-            result.message.reasoning_content
-            or result.message.reasoning_details
-            or result.message.tool_calls
-        ):
+        elif result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls:
             public_assistant_message["content"] = ""
         assistant_hash = content_hash(public_assistant_message)
 
         if result.message.content is not None or (
-            result.message.reasoning_content
-            or result.message.reasoning_details
-            or result.message.tool_calls
+            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
         ):
             message_item = ResponseMessageItem(
                 content=[
@@ -719,13 +670,9 @@ async def _run_response(
         if result.message.reasoning_content or result.message.reasoning_details:
             reasoning_message: dict[str, Any] = {"content_hash": assistant_hash}
             if result.message.reasoning_content is not None:
-                reasoning_message["reasoning_content"] = (
-                    result.message.reasoning_content
-                )
+                reasoning_message["reasoning_content"] = result.message.reasoning_content
             if result.message.reasoning_details is not None:
-                reasoning_message["reasoning_details"] = (
-                    result.message.reasoning_details
-                )
+                reasoning_message["reasoning_details"] = result.message.reasoning_details
             reasoning_payload = ReasoningPayload(
                 side="main",
                 temp=False,
@@ -805,9 +752,7 @@ async def _run_response(
             client_call_indexes = []
 
         if result.message.content is not None or (
-            result.message.reasoning_content
-            or result.message.reasoning_details
-            or result.message.tool_calls
+            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
         ):
             next_ordinal = cursors["m"]
             cursors["m"] += 1
@@ -895,10 +840,7 @@ async def stream_response_events(
                     finally:
                         await out.aclose()
             except Exception as exc:
-                if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
-                    producer_error = exc.exceptions[0]
-                else:
-                    producer_error = exc
+                producer_error = exc.exceptions[0] if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1 else exc
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(produce)

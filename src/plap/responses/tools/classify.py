@@ -130,12 +130,8 @@ class LLMToolClassifier(IToolClassifier):
     async def classify(self, signature: ToolSignature) -> ToolClassification:
         return (await self.classify_many([signature]))[signature.signature_hash]
 
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
-        signatures_by_hash = {
-            signature.signature_hash: signature for signature in signatures
-        }
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
+        signatures_by_hash = {signature.signature_hash: signature for signature in signatures}
         if not signatures_by_hash:
             return {}
 

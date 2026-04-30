@@ -17,9 +17,7 @@ type ChatFinishReason = Literal[
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 type ServiceTier = str
 
-REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(
-    ("none", "minimal", "low", "medium", "high", "xhigh")
-)
+REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(("none", "minimal", "low", "medium", "high", "xhigh"))
 
 
 @dataclass(frozen=True)
@@ -112,10 +110,7 @@ class ChatCompletionRequest:
     prediction: ChatPrediction | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.reasoning_effort is not None
-            and self.reasoning_effort not in REASONING_EFFORT_VALUES
-        ):
+        if self.reasoning_effort is not None and self.reasoning_effort not in REASONING_EFFORT_VALUES:
             allowed = ", ".join(sorted(REASONING_EFFORT_VALUES))
             raise ValueError(f"reasoning_effort must be one of: {allowed}")
 
@@ -168,10 +163,6 @@ class ChatCompletionDelta:
 
 @runtime_checkable
 class IChatCompletionClient(Protocol):
-    async def complete(
-        self, request: ChatCompletionRequest
-    ) -> ChatCompletionResult: ...
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult: ...
 
-    def stream(
-        self, request: ChatCompletionRequest
-    ) -> AsyncIterator[ChatCompletionDelta]: ...
+    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]: ...

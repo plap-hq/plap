@@ -65,9 +65,7 @@ class ResponseEventIO:
         self._reasoning_summarizer = reasoning_summarizer
         self._reasoning_summarizer_model = reasoning_summarizer_model
         self._reasoning_summary_mode = reasoning_summary_mode
-        self._commit_send, self._commit_receive = anyio.create_memory_object_stream[
-            _Commit
-        ](16)
+        self._commit_send, self._commit_receive = anyio.create_memory_object_stream[_Commit](16)
         self._output_items: list[ResponseOutputItem] = []
         self._sequence_number = 0
 
@@ -90,9 +88,7 @@ class ResponseEventIO:
         metadata: _OutputMetadata = None
         if reasoning_messages is not None:
             if not isinstance(item, ReasoningItem):
-                raise TypeError(
-                    "reasoning_messages can only be attached to reasoning items"
-                )
+                raise TypeError("reasoning_messages can only be attached to reasoning items")
             if self._reasoning_summary_mode is not None:
                 if reasoning_side is None:
                     raise TypeError("reasoning_side is required for reasoning messages")
@@ -140,9 +136,7 @@ class ResponseEventIO:
                 elif kind == "output":
                     await self._emit_output(cast(ResponseOutputItem, value), metadata)
                 else:
-                    response = cast(ResponseObject, value).model_copy(
-                        update={"output": self._output_items}
-                    )
+                    response = cast(ResponseObject, value).model_copy(update={"output": self._output_items})
                     await self._send_event(
                         ResponseCompletedEvent(
                             response=response,

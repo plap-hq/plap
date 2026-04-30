@@ -139,9 +139,7 @@ def test_chat_completion_request_rejects_boolean_reasoning_effort() -> None:
 
 async def test_routing_client_strips_route_prefix_for_completion() -> None:
     client = _RecordingChatCompletionClient("crof")
-    router = RoutingChatCompletionClient(
-        [ModelRoute(prefix="crof/", client=client)]
-    )
+    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=client)])
 
     result = await router.complete(
         ChatCompletionRequest(
@@ -157,9 +155,7 @@ async def test_routing_client_strips_route_prefix_for_completion() -> None:
 
 async def test_routing_client_strips_route_prefix_for_stream() -> None:
     client = _RecordingChatCompletionClient("fireworks")
-    router = RoutingChatCompletionClient(
-        [ModelRoute(prefix="fireworks/", client=client)]
-    )
+    router = RoutingChatCompletionClient([ModelRoute(prefix="fireworks/", client=client)])
 
     deltas = [
         delta
@@ -177,9 +173,7 @@ async def test_routing_client_strips_route_prefix_for_stream() -> None:
 
 
 async def test_routing_client_rejects_unmatched_model() -> None:
-    router = RoutingChatCompletionClient(
-        [ModelRoute(prefix="openai/", client=_RecordingChatCompletionClient("openai"))]
-    )
+    router = RoutingChatCompletionClient([ModelRoute(prefix="openai/", client=_RecordingChatCompletionClient("openai"))])
 
     with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
         await router.complete(
@@ -191,9 +185,7 @@ async def test_routing_client_rejects_unmatched_model() -> None:
 
 
 async def test_routing_client_rejects_empty_provider_model() -> None:
-    router = RoutingChatCompletionClient(
-        [ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))]
-    )
+    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))])
 
     with pytest.raises(ChatCompletionUnsupportedRequestError, match="No provider"):
         await router.complete(
@@ -275,9 +267,7 @@ def test_fireworks_params_omit_stream_options_without_stream() -> None:
 
 
 def test_novita_params_map_supported_provider_fields() -> None:
-    params = to_novita_chat_params(
-        _request_for_model("openai/gpt-oss-20b"), stream=True
-    )
+    params = to_novita_chat_params(_request_for_model("openai/gpt-oss-20b"), stream=True)
 
     assert params["messages"][0] == {"role": "system", "content": "be precise"}
     assert params["stream"] is True
@@ -376,9 +366,7 @@ def test_novita_deepseek_v4_params_disable_thinking_for_none() -> None:
 
 
 def test_novita_deepseek_v4_maps_single_forced_tool_choice_to_required() -> None:
-    params = to_novita_chat_params(
-        _request_for_model("deepseek/deepseek-v4-flash"), stream=False
-    )
+    params = to_novita_chat_params(_request_for_model("deepseek/deepseek-v4-flash"), stream=False)
 
     assert params["tool_choice"] == "required"
 
@@ -496,9 +484,7 @@ async def test_openai_client_normalizes_completion_result() -> None:
                         tool_calls=[
                             SimpleNamespace(
                                 id="call_1",
-                                function=SimpleNamespace(
-                                    name="lookup", arguments={"q": "x"}
-                                ),
+                                function=SimpleNamespace(name="lookup", arguments={"q": "x"}),
                             )
                         ],
                     ),
@@ -513,9 +499,7 @@ async def test_openai_client_normalizes_completion_result() -> None:
             ),
         )
     )
-    client = OpenAICompatibleChatCompletionClient(
-        client=_FakeOpenAIClient(fake_completion)
-    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
 
     result = await client.complete(_request())
 
@@ -524,9 +508,7 @@ async def test_openai_client_normalizes_completion_result() -> None:
     assert result.message.content == "answer"
     assert result.message.reasoning_content == "because"
     assert result.message.reasoning_details == reasoning_details
-    assert result.message.tool_calls == [
-        ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}')
-    ]
+    assert result.message.tool_calls == [ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}')]
     assert result.finish_reason == "tool_calls"
     assert result.usage is not None
     assert result.usage.cached_tokens == 2
@@ -558,9 +540,7 @@ async def test_openai_client_reads_top_level_reasoning_tokens() -> None:
             ),
         )
     )
-    client = OpenAICompatibleChatCompletionClient(
-        client=_FakeOpenAIClient(fake_completion)
-    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
 
     result = await client.complete(_request())
 
@@ -619,24 +599,18 @@ async def test_openai_client_normalizes_stream_chunks() -> None:
                                     SimpleNamespace(
                                         index=0,
                                         id="call_1",
-                                        function=SimpleNamespace(
-                                            name="lookup", arguments='{"q"'
-                                        ),
+                                        function=SimpleNamespace(name="lookup", arguments='{"q"'),
                                     )
                                 ],
                             ),
                         )
                     ],
-                    usage=SimpleNamespace(
-                        prompt_tokens=1, completion_tokens=2, total_tokens=3
-                    ),
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
                 ),
             ]
         )
     )
-    client = OpenAICompatibleChatCompletionClient(
-        client=_FakeOpenAIClient(fake_completion)
-    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
 
     deltas = [delta async for delta in client.stream(_request())]
 
@@ -718,9 +692,7 @@ def test_lightning_client_defaults_to_lightning_openai_base_url() -> None:
 
 
 async def test_lightning_120b_response_format_fallback_omits_native_field() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(model="lightning-ai/gpt-oss-120b", content='{"ok":true}')
-    )
+    fake_completion = _FakeOpenAICompletion(_completion_response(model="lightning-ai/gpt-oss-120b", content='{"ok":true}'))
     client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
 
     result = await client.complete(
@@ -901,9 +873,7 @@ async def test_lightning_120b_fallback_stream_raises_before_yield() -> None:
             client.stream(
                 ChatCompletionRequest(
                     model="lightning-ai/gpt-oss-120b",
-                    messages=[
-                        ChatMessage(role="user", content='Return {"ok": true}.')
-                    ],
+                    messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
                     response_format=ChatResponseFormat(type="json_object"),
                 )
             )
@@ -956,9 +926,7 @@ async def test_lightning_non_fallback_response_format_streams_from_provider() ->
 
 
 async def test_crof_client_uses_openai_create_with_crof_params() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(model="glm-4.7-flash", content="ok")
-    )
+    fake_completion = _FakeOpenAICompletion(_completion_response(model="glm-4.7-flash", content="ok"))
     fake_client = _FakeOpenAIClient(fake_completion)
     client = CrofChatCompletionClient(client=fake_client)
 
@@ -976,9 +944,7 @@ async def test_crof_client_uses_openai_create_with_crof_params() -> None:
         "role": "system",
         "content": "be precise",
     }
-    assert fake_completion.calls[0]["extra_body"] == {
-        "thinking": {"type": "disabled"}
-    }
+    assert fake_completion.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "max_completion_tokens" not in fake_completion.calls[0]
     assert result.message.content == "ok"
 

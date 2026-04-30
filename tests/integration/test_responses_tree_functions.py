@@ -39,10 +39,7 @@ def _namespace_cursors(message_next_ordinal: int, summary_next_ordinal: int = 0)
 
 
 def _numbered_items(count: int, *, start_ord: int = 0) -> str:
-    payloads = [
-        {"type": "message", "text": f"message {start_ord + index}"}
-        for index in range(count)
-    ]
+    payloads = [{"type": "message", "text": f"message {start_ord + index}"} for index in range(count)]
     return _items(*payloads, start_ord=start_ord)
 
 
@@ -469,10 +466,7 @@ async def test_responses_create_leaf_and_internal_node_update_refcounts(
             )
         ).all()
 
-    assert [
-        (row.kind, row.height, row.item_count, row.child_count, row.refcount)
-        for row in rows
-    ] == [
+    assert [(row.kind, row.height, row.item_count, row.child_count, row.refcount) for row in rows] == [
         ("leaf", 0, 1, 0, 1),
         ("leaf", 0, 1, 0, 1),
         ("internal", 1, 2, 2, 0),
@@ -1077,9 +1071,7 @@ async def test_responses_list_and_splice_support_compaction_shape(
                             {
                                 "namespace": "s",
                                 "ordinal": 0,
-                                "payload_hash": _canonical_payload_hash(
-                                    summary_payload
-                                ),
+                                "payload_hash": _canonical_payload_hash(summary_payload),
                                 "payload": summary_payload,
                             }
                         ]
@@ -1192,9 +1184,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             },
         )
         await session.execute(
-            text(
-                "select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_b')"
-            ),
+            text("select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_b')"),
             {"scope_id": scope_id},
         )
 
@@ -1216,9 +1206,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
                             {
                                 "namespace": "s",
                                 "ordinal": 0,
-                                "payload_hash": _canonical_payload_hash(
-                                    summary_payload
-                                ),
+                                "payload_hash": _canonical_payload_hash(summary_payload),
                                 "payload": summary_payload,
                             }
                         ]
@@ -1266,9 +1254,7 @@ async def test_responses_summary_compaction_workflow_persists_new_head(
             },
         )
         await session.execute(
-            text(
-                "select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_c')"
-            ),
+            text("select responses.move_conversation_head(:scope_id, 'conv_1', 'resp_c')"),
             {"scope_id": scope_id},
         )
         await session.commit()
@@ -1355,9 +1341,7 @@ async def test_responses_gc_preserves_shared_nodes_after_splice(
                             {
                                 "namespace": "s",
                                 "ordinal": 0,
-                                "payload_hash": _canonical_payload_hash(
-                                    summary_payload
-                                ),
+                                "payload_hash": _canonical_payload_hash(summary_payload),
                                 "payload": summary_payload,
                             }
                         ]
@@ -1529,9 +1513,7 @@ async def test_responses_append_response_requires_complete_namespace_cursors(
                 {
                     "scope_id": scope_id,
                     "items": _items({"type": "message", "text": "partial"}),
-                    "namespace_cursors": json.dumps(
-                        [{"namespace": "m", "next_ordinal": 1}]
-                    ),
+                    "namespace_cursors": json.dumps([{"namespace": "m", "next_ordinal": 1}]),
                 },
             )
 

@@ -21,9 +21,7 @@ class SealingKeyring:
 
     @classmethod
     def from_encoded(cls, encoded_keys: list[str]) -> SealingKeyring:
-        roots = tuple(
-            _decode_root_key(value) for value in encoded_keys if value.strip()
-        )
+        roots = tuple(_decode_root_key(value) for value in encoded_keys if value.strip())
         if not roots:
             raise SealingKeyError("at least one sealing key is required")
         return cls(roots=roots)

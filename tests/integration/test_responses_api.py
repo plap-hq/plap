@@ -48,9 +48,7 @@ async def test_authenticated_create_routes_return_model_output(
     headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
 
     async with AsyncTestClient(app=test_app) as client:
-        response = await client.post(
-            "/v1/responses", json=_request_payload(), headers=headers
-        )
+        response = await client.post("/v1/responses", json=_request_payload(), headers=headers)
         streamed = await client.post(
             "/v1/responses",
             json=_request_payload(stream=True),
@@ -88,9 +86,7 @@ async def test_unimplemented_response_routes_return_honest_errors(
             json={"input": "compact me", "model": "plap/test"},
             headers=headers,
         )
-        input_items = await client.get(
-            "/v1/responses/resp_test/input_items", headers=headers
-        )
+        input_items = await client.get("/v1/responses/resp_test/input_items", headers=headers)
         input_tokens = await client.post(
             "/v1/responses/input_tokens",
             json={"input": "count these tokens", "model": "plap/test"},
@@ -114,9 +110,7 @@ async def test_create_response_prepares_runtime_tools_without_changing_behavior(
     headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
 
     async with AsyncTestClient(app=test_app) as client:
-        response = await client.post(
-            "/v1/responses", json=_request_payload(), headers=headers
-        )
+        response = await client.post("/v1/responses", json=_request_payload(), headers=headers)
 
     assert response.status_code == 200, response.text
     assert response.json()["object"] == "response"
@@ -209,9 +203,7 @@ async def test_websocket_streams_response_events_with_auth(
 
     async with AsyncTestClient(app=test_app) as client:
         with await client.websocket_connect("/v1/responses", headers=headers) as socket:
-            socket.send_json(
-                {"type": "response.create", "response": _request_payload()}
-            )
+            socket.send_json({"type": "response.create", "response": _request_payload()})
             event_types: list[str] = []
 
             while True:
@@ -254,12 +246,8 @@ class _RecordingToolClassifier(IToolClassifier):
     def __init__(self) -> None:
         self.tool_names: list[list[str]] = []
 
-    async def classify_many(
-        self, signatures: list[ToolSignature]
-    ) -> dict[bytes, ToolClassification]:
-        self.tool_names.append(
-            [str(signature.signature["name"]) for signature in signatures]
-        )
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
+        self.tool_names.append([str(signature.signature["name"]) for signature in signatures])
         return {
             signature.signature_hash: ToolClassification(
                 signature_hash=signature.signature_hash,

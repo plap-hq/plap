@@ -15,8 +15,6 @@ def test_estimates_never_return_zero() -> None:
 
 
 def test_message_estimate_is_deterministic_for_key_order() -> None:
-    assert estimate_message_tokens(
-        {"role": "user", "content": "hello", "name": "alice"}
-    ) == estimate_message_tokens(
+    assert estimate_message_tokens({"role": "user", "content": "hello", "name": "alice"}) == estimate_message_tokens(
         {"name": "alice", "content": "hello", "role": "user"}
     )
