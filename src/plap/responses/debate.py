@@ -798,19 +798,28 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
     state.clear_debate()
 
 
-async def resume_main_with_note(
+async def resume_main_with_revise_bundle(
     *,
     state: MutableQueues,
     out: ResponseEventIO,
     keyring: SealingKeyring,
     note: str,
 ) -> None:
+    parts = state.temp_main_parts()
+    if parts.held_candidate is None:
+        raise ResponseError.internal(private_message="revise requires held candidate state")
+
     note_message = StateMessage(role="assistant", content=note)
+    bundled_messages = (
+        parts.held_candidate.message,
+        *[row.message for row in parts.held_hidden_tool_rows],
+        note_message,
+    )
     reasoning_payload = ReasoningPayload(
         side=Side.MAIN,
         temp=False,
         continuation_side=Side.MAIN,
-        messages=(note_message,),
+        messages=bundled_messages,
     )
     await out.output(
         ReasoningItem(
@@ -823,6 +832,9 @@ async def resume_main_with_note(
         reasoning_side=reasoning_payload.side,
         reasoning_messages=reasoning_payload.messages,
     )
+    state.append_main_stable(parts.held_candidate.message, content_hash=parts.held_candidate.content_hash)
+    for row in parts.held_hidden_tool_rows:
+        state.append_main_stable(row.message, content_hash=row.content_hash)
     state.append_main_stable(note_message)
     state.clear_debate()
 
@@ -1034,7 +1046,7 @@ async def continue_debate(
             if decision.action == ArbitratorActionType.REVISE:
                 if held_anchor_usage is not None:
                     usage_accumulator.add_hidden(profile.main.public_usage, held_anchor_usage)
-                await resume_main_with_note(state=state, out=out, keyring=keyring, note=decision.note or "")
+                await resume_main_with_revise_bundle(state=state, out=out, keyring=keyring, note=decision.note or "")
                 return DebateResult.CONTINUE_MAIN
 
             parts = state.temp_main_parts()

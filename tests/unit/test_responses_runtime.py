@@ -633,7 +633,19 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert "after review" in (arbitrator_payload.messages[0].content or "")
     stable_guidance = open_reasoning_payload(completed.output[-2].encrypted_content, keyring=_keyring())
     assert stable_guidance.temp is False
-    assert stable_guidance.messages[0].content == "Use the safer path."
+    assert stable_guidance.messages[0].role == "assistant"
+    assert stable_guidance.messages[0].content == "draft answer"
+    assert stable_guidance.messages[0].tool_calls[0].name == "mutate_record"
+    assert stable_guidance.messages[1].role == "tool"
+    assert stable_guidance.messages[1].content == "This tool call was not executed."
+    assert stable_guidance.messages[2].role == "assistant"
+    assert stable_guidance.messages[2].content == "Use the safer path."
+    final_main_request = client.requests[4]
+    final_main_contents = [message.content or "" for message in final_main_request.messages[1:]]
+    assert any("original question" in content for content in final_main_contents)
+    assert any("draft answer" in content for content in final_main_contents)
+    assert any("This tool call was not executed." in content for content in final_main_contents)
+    assert any("Use the safer path." in content for content in final_main_contents)
     assert completed.output[-1].content[0].text == "final public answer"
     assert len(client.requests) == 5
 
