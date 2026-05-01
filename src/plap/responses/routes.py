@@ -13,12 +13,16 @@ from plap.llms.chat import IChatCompletionClient
 from plap.responses.contracts import (
     CompactRequest,
     InputTokensCountRequest,
+    ModelInfoListObject,
+    ModelListObject,
+    ReasoningEffort,
     ResponseCompletedEvent,
     ResponseCreateClientEvent,
     ResponseCreateRequest,
     ResponseErrorEvent,
     ResponseObject,
     ResponseStreamEvent,
+    ServiceTier,
 )
 from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
@@ -29,7 +33,7 @@ from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import stream_response_events
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.mcp import IMCPToolProvider
-from plap.settings import Settings
+from plap.settings import RuntimeSelector, Settings
 
 
 async def _sse_payload(
@@ -64,6 +68,7 @@ async def create_response(
     _ = auth_context
     events = stream_response_events(
         data,
+        auth_context=auth_context,
         settings=settings,
         sealing_keyring=sealing_keyring,
         chat_completion_client=chat_completion_client,
@@ -78,6 +83,42 @@ async def create_response(
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
     return _completed_response_from_events([event async for event in events])
+
+
+@get("/v1/models", dependencies=HTTP_ROUTE_DEPENDENCIES)
+async def list_models(
+    auth_context: AuthContext,
+    settings: Settings,
+) -> ModelListObject:
+    _ = auth_context
+    return ModelListObject(
+        data=[
+            profile.to_model_object(model=model)
+            for model, profile in sorted(settings.runtime_model_profiles.items())
+        ]
+    )
+
+
+@get("/v1/model/info", dependencies=HTTP_ROUTE_DEPENDENCIES)
+async def model_info(
+    model: str,
+    auth_context: AuthContext,
+    settings: Settings,
+    service_tier: ServiceTier | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> ModelInfoListObject:
+    _ = auth_context
+    try:
+        profile = settings.resolve_runtime_model_profile(
+            model,
+            selector=RuntimeSelector(
+                service_tier=service_tier,
+                reasoning_effort=reasoning_effort,
+            ),
+        )
+    except ValueError as exc:
+        raise ResponseError.invalid_request(private_message=str(exc), cause=exc) from exc
+    return ModelInfoListObject(data=[profile.model_info.to_contract(model=model)])
 
 
 @get("/v1/responses/{response_id:str}", dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -194,6 +235,7 @@ async def responses_socket(
         try:
             events = stream_response_events(
                 client_event.response,
+                auth_context=auth_context,
                 settings=settings,
                 sealing_keyring=sealing_keyring,
                 chat_completion_client=chat_completion_client,
@@ -230,6 +272,8 @@ def build_error_event(message: str) -> ResponseErrorEvent:
 
 
 RESPONSE_ROUTE_HANDLERS = [
+    list_models,
+    model_info,
     create_response,
     retrieve_response,
     delete_response,

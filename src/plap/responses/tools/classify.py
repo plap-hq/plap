@@ -67,17 +67,17 @@ TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 TOOL_CALL_EFFECT_CLASSIFIER_PROMPT = """Classify a concrete client tool call.
 
 Return only JSON matching this schema:
-{"effect_class":"safe|mutation|unknown","confidence":0.0,"rationale":"short"}
+{"effect_class":"safe|visible|mutation|unknown","confidence":0.0,"rationale":"short"}
 
 Definitions:
 - safe: this specific call is read-only or exploratory and should not mutate files,
   client state, repositories, shells, databases, services, or external systems.
+- visible: this specific call changes visible user-facing state or agent control flow,
+  but does not mutate files, repositories, clients, services, or external systems.
 - mutation: this specific call writes, deletes, runs mutating commands, sends data,
   changes external state, or has irreversible side effects.
 - unknown: the concrete arguments are ambiguous, incomplete, malformed, or not enough
   to decide safely.
-
-Do not return contextual. You are classifying this concrete call, not the tool family.
 """
 TOOL_CALL_EFFECT_CLASSIFIER_NAME = "llm_tool_call_effect_classifier"
 TOOL_CALL_EFFECT_CLASSIFIER_MODEL = TOOL_EFFECT_CLASSIFIER_MODEL
@@ -87,7 +87,7 @@ TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "properties": {
         "effect_class": {
             "type": "string",
-            "enum": ["safe", "mutation", "unknown"],
+            "enum": ["safe", "visible", "mutation", "unknown"],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string"},
@@ -101,7 +101,7 @@ TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
     name="tool_call_effect_classification",
     schema=TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA,
     strict=True,
-    description="Effect classification for one concrete client tool call.",
+    description="Effect classification for a concrete client-provided function tool call.",
 )
 TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 

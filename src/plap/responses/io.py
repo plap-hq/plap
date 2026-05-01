@@ -9,6 +9,7 @@ from typing import cast
 import anyio
 from anyio.abc import ObjectSendStream, TaskGroup
 
+from plap.llms.chat import ReasoningEffort, ServiceTier
 from plap.responses.contracts import (
     ConversationReference,
     ReasoningItem,
@@ -66,12 +67,18 @@ class ResponseEventIO:
         send: ObjectSendStream[ResponseStreamEvent],
         reasoning_summarizer: IReasoningSummarizer,
         reasoning_summarizer_model: str,
+        reasoning_summarizer_prompt_cache_key_base: str | None,
+        reasoning_summarizer_reasoning_effort: ReasoningEffort | None,
+        reasoning_summarizer_service_tier: ServiceTier | None,
         reasoning_summary_mode: ReasoningSummary | None,
     ) -> None:
         self._response = _response_object(request, status="in_progress")
         self._send = send
         self._reasoning_summarizer = reasoning_summarizer
         self._reasoning_summarizer_model = reasoning_summarizer_model
+        self._reasoning_summarizer_prompt_cache_key_base = reasoning_summarizer_prompt_cache_key_base
+        self._reasoning_summarizer_reasoning_effort = reasoning_summarizer_reasoning_effort
+        self._reasoning_summarizer_service_tier = reasoning_summarizer_service_tier
         self._reasoning_summary_mode = reasoning_summary_mode
         self._commit_send, self._commit_receive = anyio.create_memory_object_stream[_Commit](16)
         self._output_items: list[ResponseOutputItem] = []
@@ -256,6 +263,9 @@ class ResponseEventIO:
         try:
             async for delta in self._reasoning_summarizer.stream(
                 model=self._reasoning_summarizer_model,
+                prompt_cache_key=self._reasoning_summarizer_prompt_cache_key(),
+                reasoning_effort=self._reasoning_summarizer_reasoning_effort,
+                service_tier=self._reasoning_summarizer_service_tier,
                 mode=cast(ReasoningSummary, self._reasoning_summary_mode),
                 side=side,
                 messages=messages,
@@ -306,6 +316,11 @@ class ResponseEventIO:
             )
         )
         return completed_item
+
+    def _reasoning_summarizer_prompt_cache_key(self) -> str | None:
+        if self._reasoning_summarizer_prompt_cache_key_base is None:
+            return None
+        return f"{self._reasoning_summarizer_prompt_cache_key_base}|reasoning_summarizer"
 
     async def _emit_reasoning_events(
         self,

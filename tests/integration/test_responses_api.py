@@ -72,6 +72,45 @@ async def test_authenticated_create_routes_return_model_output(
     assert "test response" in streamed.text
 
 
+async def test_model_routes_return_public_synthetic_metadata(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        models = await client.get("/v1/models", headers=headers)
+        model_info = await client.get(
+            "/v1/model/info",
+            params={"model": "plap/test"},
+            headers=headers,
+        )
+
+    assert models.status_code == 200
+    assert models.json() == {
+        "object": "list",
+        "data": [
+            {
+                "id": "plap/test",
+                "object": "model",
+                "created": 0,
+                "owned_by": "plap",
+            }
+        ],
+    }
+
+    info = model_info.json()
+    assert model_info.status_code == 200
+    assert info["object"] == "list"
+    assert info["data"][0]["id"] == "plap/test"
+    assert info["data"][0]["object"] == "model_info"
+    assert info["data"][0]["display_name"] == "Test Model"
+    assert info["data"][0]["provider"] == "plap"
+    assert info["data"][0]["max_input_tokens"] == 8192
+    assert "main" not in info["data"][0]
+    assert "reviewer" not in info["data"][0]
+
+
 async def test_unimplemented_response_routes_return_honest_errors(
     test_app,
     seeded_auth_data,

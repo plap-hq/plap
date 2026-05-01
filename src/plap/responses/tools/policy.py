@@ -23,6 +23,7 @@ class EffectClass(StrEnum):
 
 class ToolCallEffectClass(StrEnum):
     SAFE = "safe"
+    VISIBLE = "visible"
     MUTATION = "mutation"
     UNKNOWN = "unknown"
 

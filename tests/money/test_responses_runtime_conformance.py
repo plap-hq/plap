@@ -27,7 +27,14 @@ from plap.persistence.models import (
     UserEmail,
     UserIdentity,
 )
-from plap.settings import MCPServerConfig, RuntimeModelProfileConfig, Settings
+from plap.settings import (
+    MCPServerConfig,
+    RuntimeActorConfig,
+    RuntimeModelInfoConfig,
+    RuntimeModelPricingConfig,
+    RuntimeModelProfileConfig,
+    Settings,
+)
 from tests.pytest_plugins.database import (
     _reset_database_schema,
     _run_migrations,
@@ -484,11 +491,24 @@ def _runtime_profile(
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Wisp Nano",
-        main_model="crof/qwen3.5-9b",
-        main_debate_model="crof/qwen3.5-9b",
-        reviewer_model="crof/qwen3.5-9b",
-        arbitrator_model="crof/qwen3.5-9b",
-        reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
+        model_info=RuntimeModelInfoConfig(
+            display_name="Wisp Nano",
+            description="plap responses model for money tests.",
+            mode="responses",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            max_input_tokens=transcript_token_budget,
+            max_output_tokens=32_768,
+            supported_parameters=["tools", "response_format", "stream", "reasoning_effort", "service_tier"],
+            pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
+            provider="plap",
+            deprecated=False,
+        ),
+        main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
         transcript_token_budget=transcript_token_budget,
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,

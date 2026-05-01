@@ -90,7 +90,7 @@ create table tool_call_classifications (
   check (octet_length(prompt_hash) = 32),
   check (classifier <> ''),
   check (classifier_model <> ''),
-  check (effect_class in ('safe', 'mutation', 'unknown')),
+  check (effect_class in ('safe', 'visible', 'mutation', 'unknown')),
   check (confidence >= 0 and confidence <= 1),
   check (rationale <> ''),
   check (jsonb_typeof(raw_output) = 'object')

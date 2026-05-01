@@ -247,6 +247,7 @@ async def test_llm_tool_call_classifier_parses_valid_json() -> None:
     assert request.response_format.schema is not None
     assert request.response_format.schema["properties"]["effect_class"]["enum"] == [
         "safe",
+        "visible",
         "mutation",
         "unknown",
     ]
@@ -278,6 +279,33 @@ async def test_llm_tool_call_classifier_malformed_json_returns_unknown() -> None
 
     assert result.effect_class == "unknown"
     assert result.confidence == 0.0
+
+
+async def test_llm_tool_call_classifier_parses_visible_json() -> None:
+    signature = function_tool_signature(
+        FunctionTool(
+            description="Update the visible plan.",
+            name="update_plan",
+            parameters={"type": "object"},
+            strict=True,
+            type="function",
+        )
+    )
+    classifier = LLMToolCallClassifier(
+        client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates visible plan state only."}'),
+        classifier="fake",
+        classifier_model="fake/model",
+    )
+
+    result = await classifier.classify(
+        ToolCallSignature(
+            signature=signature,
+            arguments={"step": "Check config"},
+        )
+    )
+
+    assert result.effect_class == "visible"
+    assert result.confidence == 0.85
 
 
 async def test_static_policy_resolver_returns_unknown_client_tools() -> None:

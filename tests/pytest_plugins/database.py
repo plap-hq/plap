@@ -23,7 +23,7 @@ from plap.persistence.models import (
     UserEmail,
     UserIdentity,
 )
-from plap.settings import RuntimeModelProfileConfig, Settings
+from plap.settings import RuntimeActorConfig, RuntimeModelInfoConfig, RuntimeModelPricingConfig, RuntimeModelProfileConfig, Settings
 
 POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
 
@@ -91,11 +91,24 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
         runtime_model_profiles={
             "plap/test": RuntimeModelProfileConfig(
                 display_name="Test Model",
-                main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
-                reviewer_model="crof/qwen3.5-9b",
-                arbitrator_model="crof/qwen3.5-9b",
-                reasoning_summarizer_model="crof/qwen3.5-9b",
+                model_info=RuntimeModelInfoConfig(
+                    display_name="Test Model",
+                    description="Test synthetic profile.",
+                    mode="responses",
+                    input_modalities=["text"],
+                    output_modalities=["text"],
+                    max_input_tokens=8192,
+                    max_output_tokens=2048,
+                    supported_parameters=["tools", "response_format"],
+                    pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
+                    provider="plap",
+                    deprecated=False,
+                ),
+                main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 transcript_token_budget=0,
             )
         },

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Sequence
+from uuid import UUID
 
 import pytest
 
+from plap.auth import AuthContext
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatCompletionDelta,
@@ -13,6 +15,7 @@ from plap.llms.chat import (
     ChatMessage,
     ChatToolCall,
     ChatToolChoiceFunction,
+    ChatUsage,
     IChatCompletionClient,
 )
 from plap.responses.contracts import (
@@ -20,6 +23,7 @@ from plap.responses.contracts import (
     ReasoningConfig,
     RequestCompactionItem,
     RequestMessageItem,
+    ResponseCompletedEvent,
     ResponseCreateRequest,
     WebSearchTool,
 )
@@ -50,7 +54,13 @@ from plap.responses.tools import (
     ToolPolicy,
 )
 from plap.responses.tools.mcp import IMCPToolProvider
-from plap.settings import RuntimeModelProfileConfig, Settings
+from plap.settings import (
+    RuntimeActorConfig,
+    RuntimeModelInfoConfig,
+    RuntimeModelPricingConfig,
+    RuntimeModelProfileConfig,
+    Settings,
+)
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
@@ -1191,6 +1201,98 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
     ]
 
 
+async def test_stream_response_events_hidden_compression_retry_usage_is_normalized() -> None:
+    client = _StaticChatClient(
+        (
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_1",
+                        name=COMPRESS_TOOL_NAME,
+                        arguments='{"ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary","summary_fidelity":5}]}',
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ),
+        usages=(
+            ChatUsage(input_tokens=80, output_tokens=15, total_tokens=95, cached_tokens=0, reasoning_tokens=0),
+            ChatUsage(input_tokens=10, output_tokens=5, total_tokens=15, cached_tokens=2, reasoning_tokens=1),
+        ),
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_message("user", "first long note"), _message("user", "second long note")],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert completed.usage is not None
+    assert completed.usage.input_tokens == 10
+    assert completed.usage.input_tokens_details.cached_tokens == 2
+    assert completed.usage.output_tokens == 40
+    assert completed.usage.output_tokens_details.reasoning_tokens == 36
+    assert completed.usage.total_tokens == 50
+
+
+async def test_stream_response_events_hidden_server_loopback_usage_is_normalized() -> None:
+    client = _StaticChatClient(
+        (
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ChatToolCall(
+                        id="search_1",
+                        name=MCP_SEARCH_TOOL_NAME,
+                        arguments='{"query":"cats"}',
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="cats found"),
+        ),
+        usages=(
+            ChatUsage(input_tokens=100, output_tokens=10, total_tokens=110, cached_tokens=20, reasoning_tokens=3),
+            ChatUsage(input_tokens=20, output_tokens=8, total_tokens=28, cached_tokens=5, reasoning_tokens=1),
+        ),
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="search", tools=[WebSearchTool(type="web_search")]),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_providers=(_FakeMCPToolProvider(tool_names=(MCP_SEARCH_TOOL_NAME,)),),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert completed.usage is not None
+    assert completed.usage.input_tokens == 20
+    assert completed.usage.input_tokens_details.cached_tokens == 5
+    assert completed.usage.output_tokens == 39
+    assert completed.usage.output_tokens_details.reasoning_tokens == 32
+    assert completed.usage.total_tokens == 59
+
+
 async def test_stream_response_events_streams_requested_reasoning_summary() -> None:
     summarizer = _FakeReasoningSummarizer(("checked ", "the answer"))
     events = [
@@ -1201,6 +1303,7 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
                 model="plap/test",
                 reasoning=ReasoningConfig(summary="concise"),
             ),
+            auth_context=_auth_context(),
             settings=_settings(),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver(),
@@ -1226,14 +1329,125 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
     completed_reasoning = events[-1].response.output[1]
     assert completed_reasoning.summary[0].text == "checked the answer"
     assert summarizer.calls[0][0] == "crof/qwen3.5-9b"
-    assert summarizer.calls[0][1] == "concise"
-    assert summarizer.calls[0][2] == "main"
-    assert [message.to_primitive() for message in summarizer.calls[0][3]] == [
+    assert summarizer.calls[0][1] is not None
+    assert summarizer.calls[0][1].endswith("|reasoning_summarizer")
+    assert summarizer.calls[0][2] is None
+    assert summarizer.calls[0][3] is None
+    assert summarizer.calls[0][4] == "concise"
+    assert summarizer.calls[0][5] == "main"
+    assert [message.to_primitive() for message in summarizer.calls[0][6]] == [
         {
             "content_hash": content_hash(StateMessage(role="assistant", content="answer")),
             "reasoning_content": "thinking",
         }
     ]
+
+
+async def test_stream_response_events_synthesizes_main_prompt_cache_key_by_actor() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="ok"))
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].prompt_cache_key is not None
+    assert client.requests[0].prompt_cache_key.endswith("|main")
+
+
+async def test_stream_response_events_appends_actor_to_caller_prompt_cache_key() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="ok"))
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello", prompt_cache_key="cache-a", user="user-a"),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].prompt_cache_key == "cache-a|main"
+    assert client.requests[0].user is None
+
+
+async def test_stream_response_events_uses_user_as_prompt_cache_key_base_when_no_explicit_key() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="ok"))
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello", user="user-a"),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].prompt_cache_key == "user-a|main"
+    assert client.requests[0].user is None
+
+
+async def test_stream_response_events_synthesizes_same_base_for_same_org_and_user() -> None:
+    first = _StaticChatClient(ChatMessage(role="assistant", content="ok"))
+    second = _StaticChatClient(ChatMessage(role="assistant", content="ok"))
+    shared_org = UUID("22222222-2222-2222-2222-222222222222")
+    shared_user = UUID("33333333-3333-3333-3333-333333333333")
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            auth_context=AuthContext(
+                api_key_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                organization_id=shared_org,
+                user_id=shared_user,
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=first,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            auth_context=AuthContext(
+                api_key_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                organization_id=shared_org,
+                user_id=shared_user,
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=second,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert first.requests[0].prompt_cache_key == second.requests[0].prompt_cache_key
 
 
 async def test_stream_response_events_patches_reasoning_and_emits_tool_call() -> None:
@@ -1335,27 +1549,41 @@ class _FakeMCPToolProvider(IMCPToolProvider):
 class _FakeReasoningSummarizer(IReasoningSummarizer):
     def __init__(self, deltas: Sequence[str] = ()) -> None:
         self.deltas = tuple(deltas)
-        self.calls: list[tuple[str, str, str, tuple[object, ...]]] = []
+        self.calls: list[tuple[str, object, object, str, str, tuple[object, ...]]] = []
 
     async def stream(
         self,
         *,
         model: str,
+        prompt_cache_key: str | None,
+        reasoning_effort: object,
+        service_tier: object,
         mode: str,
         side: str,
         messages: Sequence[object],
     ) -> AsyncIterator[str]:
-        self.calls.append((model, mode, side, tuple(messages)))
+        self.calls.append((model, prompt_cache_key, reasoning_effort, service_tier, mode, side, tuple(messages)))
         for delta in self.deltas:
             yield delta
 
 
 class _StaticChatClient(IChatCompletionClient):
-    def __init__(self, message: ChatMessage | Sequence[ChatMessage]) -> None:
+    def __init__(
+        self,
+        message: ChatMessage | Sequence[ChatMessage],
+        *,
+        usages: ChatUsage | Sequence[ChatUsage] | None = None,
+    ) -> None:
         if isinstance(message, ChatMessage):
             self.messages = (message,)
         else:
             self.messages = tuple(message)
+        if isinstance(usages, ChatUsage):
+            self.usages = (usages,)
+        elif usages is None:
+            self.usages = ()
+        else:
+            self.usages = tuple(usages)
         self.requests: list[ChatCompletionRequest] = []
         self._index = 0
 
@@ -1364,7 +1592,9 @@ class _StaticChatClient(IChatCompletionClient):
         request: ChatCompletionRequest,
     ) -> ChatCompletionResult:
         self.requests.append(request)
-        message = self.messages[min(self._index, len(self.messages) - 1)]
+        index = min(self._index, len(self.messages) - 1)
+        message = self.messages[index]
+        usage = self.usages[min(self._index, len(self.usages) - 1)] if self.usages else None
         self._index += 1
         return ChatCompletionResult(
             id="chatcmpl_test",
@@ -1372,6 +1602,7 @@ class _StaticChatClient(IChatCompletionClient):
             created_at=None,
             message=message,
             finish_reason="stop",
+            usage=usage,
         )
 
     async def stream(
@@ -1412,6 +1643,14 @@ def _settings(*, profile: RuntimeModelProfileConfig | None = None) -> Settings:
     )
 
 
+def _auth_context() -> AuthContext:
+    return AuthContext(
+        api_key_id=UUID("11111111-1111-1111-1111-111111111111"),
+        organization_id=UUID("22222222-2222-2222-2222-222222222222"),
+        user_id=UUID("33333333-3333-3333-3333-333333333333"),
+    )
+
+
 def _profile_config(
     *,
     compression_soft_token_budget: int | None = None,
@@ -1421,11 +1660,24 @@ def _profile_config(
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Test Model",
-        main_model="crof/qwen3.5-9b",
-        main_debate_model="crof/qwen3.5-9b",
-        reviewer_model="crof/qwen3.5-9b",
-        arbitrator_model="crof/qwen3.5-9b",
-        reasoning_summarizer_model="crof/qwen3.5-9b",
+        model_info=RuntimeModelInfoConfig(
+            display_name="Test Model",
+            description="Test runtime profile.",
+            mode="responses",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            max_input_tokens=8192,
+            max_output_tokens=2048,
+            supported_parameters=["tools", "response_format"],
+            pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
+            provider="plap",
+            deprecated=False,
+        ),
+        main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
@@ -1435,6 +1687,12 @@ def _profile_config(
 
 def _keyring() -> SealingKeyring:
     return SealingKeyring.from_encoded(["a" * 43])
+
+
+def _completed_response(events: Sequence[object]):
+    completed = events[-1]
+    assert isinstance(completed, ResponseCompletedEvent)
+    return completed.response
 
 
 def _read_file_tool() -> FunctionTool:

@@ -49,6 +49,13 @@ from plap.responses.contracts.items import (
     ToolOutputContentPart,
     UrlCitationAnnotation,
 )
+from plap.responses.contracts.models import (
+    ModelInfoListObject,
+    ModelInfoObject,
+    ModelInfoPricingObject,
+    ModelListObject,
+    ModelObject,
+)
 from plap.responses.contracts.requests import (
     CompactRequest,
     ContextManagementCompaction,
@@ -108,6 +115,11 @@ __all__ = [
     "ItemStatus",
     "MessageContentPart",
     "Metadata",
+    "ModelInfoListObject",
+    "ModelInfoObject",
+    "ModelInfoPricingObject",
+    "ModelListObject",
+    "ModelObject",
     "OutputTextContent",
     "OutputTextLogprob",
     "OutputTextLogprobTopLogprob",

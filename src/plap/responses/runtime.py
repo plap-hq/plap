@@ -3,11 +3,15 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import StrEnum
+from math import ceil
 
 import anyio
+import blake3
 import msgspec
 
+from plap.auth import AuthContext
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatCompletionRequest,
@@ -71,7 +75,7 @@ from plap.responses.tools.compress import (
 )
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.responses.tools.web_search import web_search_policy
-from plap.settings import RuntimeModelProfileConfig, Settings
+from plap.settings import PublicUsageConfig, RuntimeModelProfileConfig, RuntimeSelector, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
 _CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
@@ -87,6 +91,42 @@ class _CompressionReminderLevel(StrEnum):
     NONE = "none"
     SOFT = "soft"
     HARD = "hard"
+
+
+@dataclass(slots=True)
+class UsageAccumulator:
+    hidden: list[tuple[PublicUsageConfig, ChatUsage]] = field(default_factory=list)
+
+    def add_hidden(self, config: PublicUsageConfig, usage: ChatUsage | None) -> None:
+        if usage is None:
+            return
+        self.hidden.append((config, usage))
+
+    def to_response_usage(self, anchor: ChatUsage | None) -> ResponseUsage | None:
+        if anchor is None:
+            return None
+
+        hidden_equivalent_output = sum(self._equivalent_output_tokens(config, usage) for config, usage in self.hidden)
+        cached_tokens = anchor.cached_tokens or 0
+        reasoning_tokens = (anchor.reasoning_tokens or 0) + hidden_equivalent_output
+        output_tokens = anchor.output_tokens + hidden_equivalent_output
+        return ResponseUsage(
+            input_tokens=anchor.input_tokens,
+            input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
+            output_tokens=output_tokens,
+            output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+            total_tokens=anchor.input_tokens + output_tokens,
+        )
+
+    def _equivalent_output_tokens(self, config: PublicUsageConfig, usage: ChatUsage) -> int:
+        cached_input = min(usage.cached_tokens or 0, usage.input_tokens)
+        uncached_input = usage.input_tokens - cached_input
+        equivalent_output = (
+            uncached_input * config.uncached_input_to_output
+            + cached_input * config.cached_input_to_output
+            + usage.output_tokens * config.output_to_output
+        )
+        return ceil(equivalent_output)
 
 
 SOFT_COMPRESSION_REMINDER = (
@@ -128,17 +168,51 @@ def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary 
     return request.reasoning.summary or request.reasoning.generate_summary
 
 
-def _runtime_profile_parameters(request: ResponseCreateRequest) -> dict[str, object]:
-    response_format = None
-    if request.text is not None and request.text.format is not None:
-        response_format = request.text.format.type
-    return {
-        "parallel_tool_calls": request.parallel_tool_calls,
-        "reasoning_effort": request.reasoning.effort if request.reasoning else None,
-        "response_format": response_format,
-        "service_tier": request.service_tier,
-        "stream": request.stream,
-    }
+def _runtime_selector(request: ResponseCreateRequest) -> RuntimeSelector:
+    return RuntimeSelector(
+        service_tier=request.service_tier,
+        reasoning_effort=request.reasoning.effort if request.reasoning else None,
+    )
+
+
+def _prompt_cache_key_pepper(settings: Settings) -> bytes:
+    hasher = blake3.blake3()
+    hasher.update(settings.api_key_pepper.encode())
+    hasher.update(b"\0prompt_cache_key")
+    return hasher.digest()
+
+
+def _synthesized_prompt_cache_key_base(settings: Settings, auth_context: AuthContext) -> str:
+    hasher = blake3.blake3()
+    hasher.update(_prompt_cache_key_pepper(settings))
+    hasher.update(b"\0")
+    if auth_context.organization_id is not None:
+        hasher.update(str(auth_context.organization_id).encode())
+    hasher.update(b"\0")
+    hasher.update(str(auth_context.user_id).encode())
+    return hasher.hexdigest()
+
+
+def _base_prompt_cache_key(
+    *,
+    settings: Settings,
+    auth_context: AuthContext | None,
+    prompt_cache_key: str | None,
+    user: str | None,
+) -> str | None:
+    if prompt_cache_key:
+        return prompt_cache_key
+    if user:
+        return user
+    if auth_context is None:
+        return None
+    return _synthesized_prompt_cache_key_base(settings, auth_context)
+
+
+def _actor_prompt_cache_key(base_prompt_cache_key: str | None, actor: str) -> str | None:
+    if base_prompt_cache_key is None:
+        return None
+    return f"{base_prompt_cache_key}|{actor}"
 
 
 def _response_error(exc: Exception) -> ResponseError:
@@ -390,18 +464,6 @@ def _chat_response_format(request: ResponseCreateRequest) -> ChatResponseFormat 
     return ChatResponseFormat(type="text")
 
 
-def _response_usage(usage: ChatUsage | None) -> ResponseUsage | None:
-    if usage is None:
-        return None
-    return ResponseUsage(
-        input_tokens=usage.input_tokens,
-        input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=usage.cached_tokens or 0),
-        output_tokens=usage.output_tokens,
-        output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=usage.reasoning_tokens or 0),
-        total_tokens=usage.total_tokens,
-    )
-
-
 def _client_tools(tools: Sequence[object]) -> list[FunctionTool]:
     return [tool for tool in tools if isinstance(tool, FunctionTool)]
 
@@ -444,6 +506,7 @@ async def run_response(
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     mcp_tool_providers: Sequence[IMCPToolProvider],
+    prompt_cache_key_base: str | None,
 ) -> None:
     ingested = await ingest_response_request(
         request,
@@ -472,6 +535,7 @@ async def run_response(
 
     compression_rounds = 0
     compression_bailout = _CompressionBailout.NONE
+    usage_accumulator = UsageAccumulator()
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
@@ -520,7 +584,7 @@ async def run_response(
             forced_compression = True
 
         model_request = ChatCompletionRequest(
-            model=profile.main_model,
+            model=profile.main.model,
             messages=messages,
             tools=[_chat_tool(tool) for tool in effective_tools],
             tool_choice=tool_choice,
@@ -530,9 +594,10 @@ async def run_response(
             temperature=request.temperature,
             top_p=request.top_p,
             top_logprobs=request.top_logprobs,
-            reasoning_effort=request.reasoning.effort if request.reasoning else None,
-            prompt_cache_key=request.prompt_cache_key,
-            user=request.user,
+            reasoning_effort=profile.main.reasoning_effort,
+            prompt_cache_key=_actor_prompt_cache_key(prompt_cache_key_base, "main"),
+            service_tier=profile.main.service_tier,
+            user=None,
         )
 
         result = await chat_completion_client.complete(model_request)
@@ -574,6 +639,7 @@ async def run_response(
                 elif compression_reminder_level == _CompressionReminderLevel.SOFT:
                     compression_bailout = _CompressionBailout.SOFT
                 compression_rounds += 1
+                usage_accumulator.add_hidden(profile.main.public_usage, result.usage)
                 continue
 
             if compression_reminder_level == _CompressionReminderLevel.SOFT:
@@ -747,11 +813,12 @@ async def run_response(
             )
 
         if server_outputs and not client_call_indexes:
+            usage_accumulator.add_hidden(profile.main.public_usage, result.usage)
             continue
 
         await out.completed(
             service_tier=result.service_tier,
-            usage=_response_usage(result.usage),
+            usage=usage_accumulator.to_response_usage(result.usage),
         )
         return
 
@@ -759,6 +826,7 @@ async def run_response(
 async def stream_response_events(
     request: ResponseCreateRequest,
     *,
+    auth_context: AuthContext | None = None,
     settings: Settings,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
@@ -775,17 +843,23 @@ async def stream_response_events(
         async with send:
             try:
                 try:
-                    profile = settings.resolve_runtime_model_profile(
-                        request.model,
-                        parameters=_runtime_profile_parameters(request),
-                    )
+                    profile = settings.resolve_runtime_model_profile(request.model, selector=_runtime_selector(request))
                 except ValueError as exc:
                     raise ResponseError.invalid_request(private_message=str(exc), cause=exc) from exc
+                prompt_cache_key_base = _base_prompt_cache_key(
+                    settings=settings,
+                    auth_context=auth_context,
+                    prompt_cache_key=request.prompt_cache_key,
+                    user=request.user,
+                )
                 async with anyio.create_task_group() as task_group:
                     out = ResponseEventIO(
                         request=request,
                         reasoning_summarizer=reasoning_summarizer,
-                        reasoning_summarizer_model=profile.reasoning_summarizer_model,
+                        reasoning_summarizer_model=profile.reasoning_summarizer.model,
+                        reasoning_summarizer_prompt_cache_key_base=prompt_cache_key_base,
+                        reasoning_summarizer_reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
+                        reasoning_summarizer_service_tier=profile.reasoning_summarizer.service_tier,
                         reasoning_summary_mode=_reasoning_summary_mode(request),
                         send=send,
                     )
@@ -800,6 +874,7 @@ async def stream_response_events(
                             tool_call_policy_resolver=tool_call_policy_resolver,
                             chat_completion_client=chat_completion_client,
                             mcp_tool_providers=mcp_tool_providers,
+                            prompt_cache_key_base=prompt_cache_key_base,
                         )
                     finally:
                         await out.aclose()

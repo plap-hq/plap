@@ -35,6 +35,16 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert created.output[0].content[0].text == "test response"
 
 
+async def test_async_openai_client_models_list(openai_client: AsyncOpenAI) -> None:
+    models = await openai_client.models.list()
+
+    assert models.object == "list"
+    assert len(models.data) == 1
+    assert models.data[0].id == "plap/test"
+    assert models.data[0].object == "model"
+    assert models.data[0].owned_by == "plap"
+
+
 async def test_async_openai_client_unsupported_methods(
     openai_client: AsyncOpenAI,
 ) -> None:

@@ -5,7 +5,7 @@ from typing import Protocol, runtime_checkable
 
 import msgspec
 
-from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient
+from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient, ReasoningEffort, ServiceTier
 from plap.responses.contracts import ReasoningSummary
 from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
 
@@ -50,6 +50,9 @@ class IReasoningSummarizer(Protocol):
         self,
         *,
         model: str,
+        prompt_cache_key: str | None,
+        reasoning_effort: ReasoningEffort | None,
+        service_tier: ServiceTier | None,
         mode: ReasoningSummary,
         side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
@@ -64,6 +67,9 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
         self,
         *,
         model: str,
+        prompt_cache_key: str | None,
+        reasoning_effort: ReasoningEffort | None,
+        service_tier: ServiceTier | None,
         mode: ReasoningSummary,
         side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
@@ -82,6 +88,9 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
                     ),
                 ],
                 model=model,
+                prompt_cache_key=prompt_cache_key,
+                reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
                 temperature=0,
             )
         ):
@@ -94,11 +103,14 @@ class NullReasoningSummarizer(IReasoningSummarizer):
         self,
         *,
         model: str,
+        prompt_cache_key: str | None,
+        reasoning_effort: ReasoningEffort | None,
+        service_tier: ServiceTier | None,
         mode: ReasoningSummary,
         side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
-        _ = model, mode, side, messages
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, side, messages
         if False:
             yield ""
 

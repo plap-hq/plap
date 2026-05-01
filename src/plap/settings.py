@@ -1,68 +1,263 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-type RuntimeParameterValue = str | int | float | bool | None
+from plap.llms.chat import ReasoningEffort, ServiceTier
+from plap.responses.contracts import ModelInfoObject, ModelInfoPricingObject, ModelObject
 
 
 def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
     return {
         "plap-ai/wisp-nano": RuntimeModelProfileConfig(
             display_name="Wisp Nano",
-            main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
-            reviewer_model="crof/qwen3.5-9b",
-            arbitrator_model="crof/qwen3.5-9b",
-            reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
+            model_info=RuntimeModelInfoConfig(
+                display_name="Wisp Nano",
+                description="General-purpose plap responses model for text and tool use.",
+                mode="responses",
+                input_modalities=["text"],
+                output_modalities=["text"],
+                max_input_tokens=200_000,
+                max_output_tokens=32_768,
+                supported_parameters=[
+                    "temperature",
+                    "top_p",
+                    "tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "response_format",
+                    "max_output_tokens",
+                    "reasoning_effort",
+                    "service_tier",
+                    "stream",
+                ],
+                pricing=RuntimeModelPricingConfig(
+                    input_per_token=0.0,
+                    output_per_token=0.0,
+                ),
+                provider="plap",
+                deprecated=False,
+            ),
+            main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+            main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+            reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+            arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             transcript_token_budget=200_000,
             compression_soft_token_budget=100_000,
             compression_hard_token_budget=150_000,
             compression_max_rounds=3,
             debate_max_rounds=2,
+            by_service_tier=_default_service_tier_overrides(),
+            by_reasoning_effort=_default_reasoning_effort_overrides(),
         )
     }
 
 
-def _validate_compression_budgets(
-    soft_budget: int | None,
-    hard_budget: int | None,
-) -> None:
+def _validate_compression_budgets(soft_budget: int | None, hard_budget: int | None) -> None:
     if soft_budget is not None and hard_budget is not None and hard_budget <= soft_budget:
         raise ValueError("compression hard token budget must exceed the soft token budget")
 
 
-def _validate_runtime_profile_parameters(parameters: Mapping[str, RuntimeParameterValue]) -> None:
-    for key, value in parameters.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError("runtime profile variant parameter keys must be non-empty strings")
-        if value is None or isinstance(value, str | bool | int | float):
-            continue
-        raise ValueError(f"runtime profile variant parameter {key!r} must be a scalar value")
+def _default_service_tier_overrides() -> dict[ServiceTier, RuntimeProfileOverride]:
+    return {
+        "priority": RuntimeProfileOverride(
+            main=RuntimeActorOverride(service_tier="priority"),
+            main_debate=RuntimeActorOverride(service_tier="priority"),
+            reviewer=RuntimeActorOverride(service_tier="priority"),
+            arbitrator=RuntimeActorOverride(service_tier="priority"),
+            reasoning_summarizer=RuntimeActorOverride(service_tier="priority"),
+        ),
+        "flex": RuntimeProfileOverride(
+            main=RuntimeActorOverride(service_tier="flex"),
+            main_debate=RuntimeActorOverride(service_tier="flex"),
+            reviewer=RuntimeActorOverride(service_tier="flex"),
+            arbitrator=RuntimeActorOverride(service_tier="flex"),
+            reasoning_summarizer=RuntimeActorOverride(service_tier="flex"),
+        ),
+    }
 
 
-class RuntimeParameterBag:
-    def __init__(self, values: Mapping[str, RuntimeParameterValue] | None = None) -> None:
-        self.values = dict(values or {})
-        _validate_runtime_profile_parameters(self.values)
+def _default_reasoning_effort_overrides() -> dict[ReasoningEffort, RuntimeProfileOverride]:
+    return {
+        effort: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=effort),
+            main_debate=RuntimeActorOverride(reasoning_effort=effort),
+            reviewer=RuntimeActorOverride(reasoning_effort=effort),
+            arbitrator=RuntimeActorOverride(reasoning_effort=effort),
+        )
+        for effort in ReasoningEffort
+    }
 
-    def get(self, key: str) -> RuntimeParameterValue:
-        return self.values.get(key)
+
+class RuntimeSelector(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    service_tier: ServiceTier | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
-class RuntimeModelProfilePatch(BaseModel):
+class RuntimeModelPricingConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    input_per_token: float = Field(ge=0)
+    output_per_token: float = Field(ge=0)
+
+    def to_contract(self) -> ModelInfoPricingObject:
+        return ModelInfoPricingObject(
+            input_per_token=self.input_per_token,
+            output_per_token=self.output_per_token,
+        )
+
+
+class RuntimeModelPricingOverride(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    input_per_token: float | None = Field(default=None, ge=0)
+    output_per_token: float | None = Field(default=None, ge=0)
+
+    def apply_override(self, pricing: RuntimeModelPricingConfig) -> RuntimeModelPricingConfig:
+        return pricing.model_copy(update=self.model_dump(exclude_none=True))
+
+    def overridden_fields(self, prefix: str) -> set[str]:
+        fields: set[str] = set()
+        if self.input_per_token is not None:
+            fields.add(f"{prefix}.input_per_token")
+        if self.output_per_token is not None:
+            fields.add(f"{prefix}.output_per_token")
+        return fields
+
+
+class RuntimeModelInfoConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    display_name: str
+    description: str
+    mode: str
+    input_modalities: list[str]
+    output_modalities: list[str]
+    max_input_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=1)
+    supported_parameters: list[str]
+    pricing: RuntimeModelPricingConfig
+    provider: str
+    deprecated: bool = False
+
+    def apply_override(self, override: RuntimeModelInfoOverride | None) -> RuntimeModelInfoConfig:
+        if override is None:
+            return self
+        updates = override.model_dump(exclude_none=True)
+        pricing_override = override.pricing
+        if pricing_override is not None:
+            updates["pricing"] = pricing_override.apply_override(self.pricing)
+        return self.model_copy(update=updates)
+
+    def to_contract(self, *, model: str) -> ModelInfoObject:
+        return ModelInfoObject(
+            id=model,
+            display_name=self.display_name,
+            description=self.description,
+            mode=self.mode,
+            input_modalities=list(self.input_modalities),
+            output_modalities=list(self.output_modalities),
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens=self.max_output_tokens,
+            supported_parameters=list(self.supported_parameters),
+            pricing=self.pricing.to_contract(),
+            provider=self.provider,
+            deprecated=self.deprecated,
+        )
+
+
+class RuntimeModelInfoOverride(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     display_name: str | None = None
-    main_model: str | None = None
-    main_debate_model: str | None = None
-    reviewer_model: str | None = None
-    arbitrator_model: str | None = None
-    reasoning_summarizer_model: str | None = None
+    description: str | None = None
+    mode: str | None = None
+    input_modalities: list[str] | None = None
+    output_modalities: list[str] | None = None
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    supported_parameters: list[str] | None = None
+    pricing: RuntimeModelPricingOverride | None = None
+    provider: str | None = None
+    deprecated: bool | None = None
+
+    def overridden_fields(self, prefix: str) -> set[str]:
+        fields: set[str] = set()
+        for name in (
+            "display_name",
+            "description",
+            "mode",
+            "input_modalities",
+            "output_modalities",
+            "max_input_tokens",
+            "max_output_tokens",
+            "supported_parameters",
+            "provider",
+            "deprecated",
+        ):
+            if getattr(self, name) is not None:
+                fields.add(f"{prefix}.{name}")
+        if self.pricing is not None:
+            fields.update(self.pricing.overridden_fields(f"{prefix}.pricing"))
+        return fields
+
+
+class PublicUsageConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    uncached_input_to_output: float = Field(default=0.25, ge=0)
+    cached_input_to_output: float = Field(default=0.05, ge=0)
+    output_to_output: float = Field(default=1.0, ge=0)
+
+
+class RuntimeActorConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    model: str
+    reasoning_effort: ReasoningEffort | None = None
+    service_tier: ServiceTier | None = None
+    public_usage: PublicUsageConfig = Field(default_factory=PublicUsageConfig)
+
+    def apply_override(self, override: RuntimeActorOverride | None) -> RuntimeActorConfig:
+        if override is None:
+            return self
+        return self.model_copy(update=override.model_dump(exclude_none=True))
+
+
+class RuntimeActorOverride(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    model: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    service_tier: ServiceTier | None = None
+
+    def overridden_fields(self, prefix: str) -> set[str]:
+        fields: set[str] = set()
+        if self.model is not None:
+            fields.add(f"{prefix}.model")
+        if self.reasoning_effort is not None:
+            fields.add(f"{prefix}.reasoning_effort")
+        if self.service_tier is not None:
+            fields.add(f"{prefix}.service_tier")
+        return fields
+
+
+class RuntimeProfileOverride(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    model_info: RuntimeModelInfoOverride | None = None
+    main: RuntimeActorOverride | None = None
+    main_debate: RuntimeActorOverride | None = None
+    reviewer: RuntimeActorOverride | None = None
+    arbitrator: RuntimeActorOverride | None = None
+    reasoning_summarizer: RuntimeActorOverride | None = None
     transcript_token_budget: int | None = Field(default=None, ge=0)
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
@@ -70,99 +265,163 @@ class RuntimeModelProfilePatch(BaseModel):
     debate_max_rounds: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def validate_compression_config(self) -> RuntimeModelProfilePatch:
-        _validate_compression_budgets(
-            self.compression_soft_token_budget,
-            self.compression_hard_token_budget,
+    def validate_compression_config(self) -> RuntimeProfileOverride:
+        _validate_compression_budgets(self.compression_soft_token_budget, self.compression_hard_token_budget)
+        return self
+
+    def apply_to(self, profile: RuntimeModelProfileConfig) -> RuntimeModelProfileConfig:
+        updates: dict[str, object] = {}
+        if self.display_name is not None:
+            updates["display_name"] = self.display_name
+        if self.model_info is not None:
+            updates["model_info"] = profile.model_info.apply_override(self.model_info)
+        if self.main is not None:
+            updates["main"] = profile.main.apply_override(self.main)
+        if self.main_debate is not None:
+            updates["main_debate"] = profile.main_debate.apply_override(self.main_debate)
+        if self.reviewer is not None:
+            updates["reviewer"] = profile.reviewer.apply_override(self.reviewer)
+        if self.arbitrator is not None:
+            updates["arbitrator"] = profile.arbitrator.apply_override(self.arbitrator)
+        if self.reasoning_summarizer is not None:
+            updates["reasoning_summarizer"] = profile.reasoning_summarizer.apply_override(self.reasoning_summarizer)
+        if self.transcript_token_budget is not None:
+            updates["transcript_token_budget"] = self.transcript_token_budget
+        if self.compression_soft_token_budget is not None:
+            updates["compression_soft_token_budget"] = self.compression_soft_token_budget
+        if self.compression_hard_token_budget is not None:
+            updates["compression_hard_token_budget"] = self.compression_hard_token_budget
+        if self.compression_max_rounds is not None:
+            updates["compression_max_rounds"] = self.compression_max_rounds
+        if self.debate_max_rounds is not None:
+            updates["debate_max_rounds"] = self.debate_max_rounds
+        return profile.model_copy(update=updates)
+
+    def overridden_fields(self) -> set[str]:
+        fields: set[str] = set()
+        if self.display_name is not None:
+            fields.add("display_name")
+        if self.model_info is not None:
+            fields.update(self.model_info.overridden_fields("model_info"))
+        if self.main is not None:
+            fields.update(self.main.overridden_fields("main"))
+        if self.main_debate is not None:
+            fields.update(self.main_debate.overridden_fields("main_debate"))
+        if self.reviewer is not None:
+            fields.update(self.reviewer.overridden_fields("reviewer"))
+        if self.arbitrator is not None:
+            fields.update(self.arbitrator.overridden_fields("arbitrator"))
+        if self.reasoning_summarizer is not None:
+            fields.update(self.reasoning_summarizer.overridden_fields("reasoning_summarizer"))
+        if self.transcript_token_budget is not None:
+            fields.add("transcript_token_budget")
+        if self.compression_soft_token_budget is not None:
+            fields.add("compression_soft_token_budget")
+        if self.compression_hard_token_budget is not None:
+            fields.add("compression_hard_token_budget")
+        if self.compression_max_rounds is not None:
+            fields.add("compression_max_rounds")
+        if self.debate_max_rounds is not None:
+            fields.add("debate_max_rounds")
+        return fields
+
+    def conflicts_with(self, other: RuntimeProfileOverride) -> set[str]:
+        return self.overridden_fields() & other.overridden_fields()
+
+    def all_models(self) -> tuple[str, ...]:
+        return tuple(
+            actor.model
+            for actor in (self.main, self.main_debate, self.reviewer, self.arbitrator, self.reasoning_summarizer)
+            if actor is not None and actor.model is not None
         )
-        return self
-
-
-class RuntimeModelProfileVariant(BaseModel):
-    model_config = SettingsConfigDict(extra="forbid")
-
-    when: dict[str, RuntimeParameterValue] = Field(default_factory=dict)
-    patch: RuntimeModelProfilePatch
-
-    @model_validator(mode="after")
-    def validate_variant(self) -> RuntimeModelProfileVariant:
-        _validate_runtime_profile_parameters(self.when)
-        return self
 
 
 class RuntimeModelProfileConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     display_name: str
-    main_model: str
-    main_debate_model: str
-    reviewer_model: str
-    arbitrator_model: str
-    reasoning_summarizer_model: str
+    model_info: RuntimeModelInfoConfig
+    main: RuntimeActorConfig
+    main_debate: RuntimeActorConfig
+    reviewer: RuntimeActorConfig
+    arbitrator: RuntimeActorConfig
+    reasoning_summarizer: RuntimeActorConfig
     transcript_token_budget: int = Field(default=0, ge=0)
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
-    variants: list[RuntimeModelProfileVariant] = Field(default_factory=list)
+    by_service_tier: dict[ServiceTier, RuntimeProfileOverride] = Field(default_factory=dict)
+    by_reasoning_effort: dict[ReasoningEffort, RuntimeProfileOverride] = Field(default_factory=dict)
+
+    @field_validator("by_service_tier")
+    @classmethod
+    def validate_service_tier_overrides(cls, value: dict[ServiceTier, RuntimeProfileOverride]) -> dict[ServiceTier, RuntimeProfileOverride]:
+        for key in value:
+            if not isinstance(key, str) or not key:
+                raise ValueError("service tier override keys must be non-empty strings")
+        return value
 
     @model_validator(mode="after")
-    def validate_compression_config(self) -> RuntimeModelProfileConfig:
-        _validate_compression_budgets(
-            self.compression_soft_token_budget,
-            self.compression_hard_token_budget,
-        )
-        for variant in self.variants:
-            patch = variant.patch
-            soft_budget = (
-                patch.compression_soft_token_budget
-                if patch.compression_soft_token_budget is not None
-                else self.compression_soft_token_budget
-            )
-            hard_budget = (
-                patch.compression_hard_token_budget
-                if patch.compression_hard_token_budget is not None
-                else self.compression_hard_token_budget
-            )
-            _validate_compression_budgets(soft_budget, hard_budget)
+    def validate_profile(self) -> RuntimeModelProfileConfig:
+        _validate_compression_budgets(self.compression_soft_token_budget, self.compression_hard_token_budget)
+
+        for override in self.by_service_tier.values():
+            resolved = override.apply_to(self)
+            _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+
+        for override in self.by_reasoning_effort.values():
+            resolved = override.apply_to(self)
+            _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+
+        for service_override in self.by_service_tier.values():
+            for reasoning_override in self.by_reasoning_effort.values():
+                conflicts = service_override.conflicts_with(reasoning_override)
+                if conflicts:
+                    fields = ", ".join(sorted(conflicts))
+                    raise ValueError(f"service_tier and reasoning_effort overrides both set: {fields}")
+                resolved = reasoning_override.apply_to(service_override.apply_to(self))
+                _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+
         return self
 
-    def resolve(
-        self,
-        parameters: Mapping[str, RuntimeParameterValue] | None = None,
-    ) -> RuntimeModelProfileConfig:
+    def resolve(self, selector: RuntimeSelector | None = None) -> RuntimeModelProfileConfig:
         resolved = self
-        normalized_parameters = RuntimeParameterBag(values=dict(parameters or {}))
-        for variant in self.variants:
-            if all(normalized_parameters.get(key) == value for key, value in variant.when.items()):
-                resolved = resolved.model_copy(update=variant.patch.model_dump(exclude_none=True))
-        _validate_compression_budgets(
-            resolved.compression_soft_token_budget,
-            resolved.compression_hard_token_budget,
-        )
+        selector = selector or RuntimeSelector()
+
+        if selector.service_tier not in {None, "default", "auto"}:
+            override = self.by_service_tier.get(selector.service_tier)
+            if override is not None:
+                resolved = override.apply_to(resolved)
+
+        if selector.reasoning_effort is not None:
+            override = self.by_reasoning_effort.get(selector.reasoning_effort)
+            if override is not None:
+                resolved = override.apply_to(resolved)
+
+        _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
         return resolved
 
     def all_models(self) -> tuple[str, ...]:
         models = [
-            self.main_model,
-            self.main_debate_model,
-            self.reviewer_model,
-            self.arbitrator_model,
-            self.reasoning_summarizer_model,
+            self.main.model,
+            self.main_debate.model,
+            self.reviewer.model,
+            self.arbitrator.model,
+            self.reasoning_summarizer.model,
         ]
-        for variant in self.variants:
-            patch = variant.patch
-            if patch.main_model is not None:
-                models.append(patch.main_model)
-            if patch.main_debate_model is not None:
-                models.append(patch.main_debate_model)
-            if patch.reviewer_model is not None:
-                models.append(patch.reviewer_model)
-            if patch.arbitrator_model is not None:
-                models.append(patch.arbitrator_model)
-            if patch.reasoning_summarizer_model is not None:
-                models.append(patch.reasoning_summarizer_model)
+        for override in self.by_service_tier.values():
+            models.extend(override.all_models())
+        for override in self.by_reasoning_effort.values():
+            models.extend(override.all_models())
         return tuple(model for model in models if "/" in model)
+
+    def to_model_object(self, *, model: str) -> ModelObject:
+        return ModelObject(
+            id=model,
+            created=0,
+            owned_by="plap",
+        )
 
 
 class MCPServerConfig(BaseModel):
@@ -207,14 +466,14 @@ class Settings(BaseSettings):
         self,
         model: str | None,
         *,
-        parameters: Mapping[str, RuntimeParameterValue] | None = None,
+        selector: RuntimeSelector | None = None,
     ) -> RuntimeModelProfileConfig:
         if model is None:
             raise ValueError("model is required")
         profile = self.runtime_model_profiles.get(model)
         if profile is None:
             raise ValueError(f"unknown runtime model: {model!r}")
-        return profile.resolve(parameters)
+        return profile.resolve(selector)
 
 
 @lru_cache(maxsize=1)

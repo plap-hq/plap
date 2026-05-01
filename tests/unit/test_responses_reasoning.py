@@ -22,6 +22,9 @@ async def test_reasoning_summarizer_sends_strict_prompt_and_trace_payload() -> N
         delta
         async for delta in summarizer.stream(
             model="model-a",
+            prompt_cache_key="cache-a|reasoning_summarizer",
+            reasoning_effort=None,
+            service_tier=None,
             mode="concise",
             side="reviewer",
             messages=[
@@ -36,6 +39,7 @@ async def test_reasoning_summarizer_sends_strict_prompt_and_trace_payload() -> N
     assert deltas == ["summary"]
     request = client.requests[0]
     assert request.model == "model-a"
+    assert request.prompt_cache_key == "cache-a|reasoning_summarizer"
     assert request.temperature == 0
     assert request.messages[0].role == "developer"
     assert request.messages[0].content == REASONING_SUMMARY_PROMPT

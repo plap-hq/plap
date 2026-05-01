@@ -24,9 +24,16 @@ from plap.responses.tools import (
 from plap.responses.tools.mcp import MCPToolProvider
 from plap.settings import (
     MCPServerConfig,
+    PublicUsageConfig,
+    RuntimeActorConfig,
+    RuntimeActorOverride,
+    RuntimeModelInfoConfig,
+    RuntimeModelInfoOverride,
+    RuntimeModelPricingConfig,
+    RuntimeModelPricingOverride,
     RuntimeModelProfileConfig,
-    RuntimeModelProfilePatch,
-    RuntimeModelProfileVariant,
+    RuntimeProfileOverride,
+    RuntimeSelector,
     Settings,
 )
 
@@ -59,16 +66,24 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
 
     profile = settings.runtime_model_profiles["plap-ai/wisp-nano"]
     assert profile.display_name == "Wisp Nano"
-    assert profile.main_model == "crof/qwen3.5-9b"
-    assert profile.main_debate_model == "crof/qwen3.5-9b"
-    assert profile.reviewer_model == "crof/qwen3.5-9b"
-    assert profile.arbitrator_model == "crof/qwen3.5-9b"
-    assert profile.reasoning_summarizer_model == ("lightning/lightning-ai/gpt-oss-120b")
+    assert profile.main.model == "crof/qwen3.5-9b"
+    assert profile.main_debate.model == "crof/qwen3.5-9b"
+    assert profile.reviewer.model == "crof/qwen3.5-9b"
+    assert profile.arbitrator.model == "crof/qwen3.5-9b"
+    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
     assert profile.transcript_token_budget == 200_000
     assert profile.compression_soft_token_budget == 100_000
     assert profile.compression_hard_token_budget == 150_000
     assert profile.compression_max_rounds == 3
     assert profile.debate_max_rounds == 2
+    assert profile.model_info.provider == "plap"
+    assert profile.model_info.max_input_tokens == 200_000
+    assert profile.model_info.description == "General-purpose plap responses model for text and tool use."
+    assert profile.main.public_usage == PublicUsageConfig()
+    assert profile.by_service_tier["priority"].main is not None
+    assert profile.by_service_tier["priority"].main.service_tier == "priority"
+    assert profile.by_reasoning_effort["high"].main is not None
+    assert profile.by_reasoning_effort["high"].main.reasoning_effort == "high"
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -182,9 +197,9 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
 
     profile = settings.runtime_model_profiles["plap/standard"]
     assert profile.display_name == "Test Model"
-    assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
-    assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.reasoning_summarizer_model == "lightning/lightning-ai/llama-3.3-70b"
+    assert profile.main.model == "lightning/lightning-ai/gpt-oss-20b"
+    assert profile.main_debate.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/llama-3.3-70b"
 
 
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
@@ -216,20 +231,17 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                variants=[
-                    RuntimeModelProfileVariant(
-                        when={"service_tier": "priority"},
-                        patch=RuntimeModelProfilePatch(
-                            main_model="lightning/lightning-ai/gpt-oss-120b",
-                            reviewer_model="lightning/lightning-ai/gpt-oss-120b",
-                            transcript_token_budget=4096,
-                            compression_soft_token_budget=4096,
-                            compression_hard_token_budget=8192,
-                            compression_max_rounds=1,
-                            debate_max_rounds=1,
-                        ),
+                by_service_tier={
+                    "priority": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        transcript_token_budget=4096,
+                        compression_soft_token_budget=4096,
+                        compression_hard_token_budget=8192,
+                        compression_max_rounds=1,
+                        debate_max_rounds=1,
                     )
-                ],
+                },
             )
         },
     )
@@ -247,12 +259,11 @@ def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                variants=[
-                    RuntimeModelProfileVariant(
-                        when={"service_tier": "priority"},
-                        patch=RuntimeModelProfilePatch(main_model="lightning/lightning-ai/gpt-oss-120b"),
+                by_service_tier={
+                    "priority": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
                     )
-                ],
+                },
             )
         },
     )
@@ -279,10 +290,10 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
     assert profile.display_name == "Test Model"
-    assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
+    assert profile.main.model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.transcript_token_budget == 1024
-    assert settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "default"}) is profile
-    assert settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "auto"}) is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="default")) is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="auto")) is profile
     with pytest.raises(ValueError, match="model is required"):
         settings.resolve_runtime_model_profile(None)
     with pytest.raises(ValueError, match="unknown runtime model"):
@@ -302,34 +313,31 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
                 compression_hard_token_budget=3000,
                 compression_max_rounds=2,
                 debate_max_rounds=2,
-                variants=[
-                    RuntimeModelProfileVariant(
-                        when={"service_tier": "priority"},
-                        patch=RuntimeModelProfilePatch(
-                            main_model="lightning/lightning-ai/gpt-oss-120b",
-                            reviewer_model="lightning/lightning-ai/gpt-oss-120b",
-                            transcript_token_budget=8192,
-                            compression_soft_token_budget=5000,
-                            compression_hard_token_budget=6000,
-                            compression_max_rounds=1,
-                            debate_max_rounds=1,
-                        ),
+                by_service_tier={
+                    "priority": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        transcript_token_budget=8192,
+                        compression_soft_token_budget=5000,
+                        compression_hard_token_budget=6000,
+                        compression_max_rounds=1,
+                        debate_max_rounds=1,
                     )
-                ],
+                },
             )
         },
     )
 
     base = settings.resolve_runtime_model_profile("plap/standard")
-    priority = settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "priority"})
-    flex = settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "flex"})
+    priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
+    flex = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="flex"))
 
     assert priority is not base
     assert priority.display_name == "Test Model"
-    assert priority.main_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert priority.reviewer_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert priority.main_debate_model == "crof/qwen3.5-9b"
-    assert priority.arbitrator_model == "crof/qwen3.5-9b"
+    assert priority.main.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert priority.reviewer.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert priority.main_debate.model == "crof/qwen3.5-9b"
+    assert priority.arbitrator.model == "crof/qwen3.5-9b"
     assert priority.transcript_token_budget == 8192
     assert priority.compression_soft_token_budget == 5000
     assert priority.compression_hard_token_budget == 6000
@@ -351,27 +359,77 @@ def test_app_runtime_resolves_reasoning_effort_variant() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                variants=[
-                    RuntimeModelProfileVariant(
-                        when={"reasoning_effort": "high", "response_format": "json_schema"},
-                        patch=RuntimeModelProfilePatch(
-                            main_model="lightning/lightning-ai/gpt-oss-120b",
-                            main_debate_model="lightning/lightning-ai/gpt-oss-120b",
-                        ),
+                by_reasoning_effort={
+                    "high": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        main_debate=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                     )
-                ],
+                },
             )
         },
     )
 
-    profile = settings.resolve_runtime_model_profile(
-        "plap/standard",
-        parameters={"reasoning_effort": "high", "response_format": "json_schema"},
+    profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
+
+    assert profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.main_debate.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.reviewer.model == "crof/qwen3.5-9b"
+
+
+def test_app_runtime_resolves_model_info_overrides() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                by_service_tier={
+                    "priority": RuntimeProfileOverride(
+                        model_info=RuntimeModelInfoOverride(
+                            display_name="Priority Model",
+                            description="Priority profile",
+                            mode="responses",
+                            input_modalities=["text"],
+                            output_modalities=["text"],
+                            max_input_tokens=4096,
+                            max_output_tokens=1024,
+                            supported_parameters=["tools"],
+                            pricing=RuntimeModelPricingOverride(input_per_token=0.0, output_per_token=0.0),
+                            provider="plap",
+                            deprecated=False,
+                        )
+                    )
+                },
+            )
+        }
     )
 
-    assert profile.main_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.reviewer_model == "crof/qwen3.5-9b"
+    base = settings.resolve_runtime_model_profile("plap/standard")
+    priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
+
+    assert base.model_info.description == "Test profile"
+    assert priority.model_info.display_name == "Priority Model"
+    assert priority.model_info.description == "Priority profile"
+    assert priority.model_info.max_input_tokens == 4096
+
+
+def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -> None:
+    with pytest.raises(ValueError, match="both set"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            by_service_tier={
+                "priority": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))
+            },
+            by_reasoning_effort={
+                "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="crof/glm-4.7-flash"))
+            },
+        )
 
 
 def test_runtime_profile_rejects_invalid_compression_budgets() -> None:
@@ -410,19 +468,34 @@ def _profile_config(
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
     debate_max_rounds: int = 2,
-    variants: list[RuntimeModelProfileVariant] | None = None,
+    by_service_tier: dict[str, RuntimeProfileOverride] | None = None,
+    by_reasoning_effort: dict[str, RuntimeProfileOverride] | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name=display_name,
-        main_model=main_model,
-        main_debate_model=main_debate_model,
-        reviewer_model=reviewer_model,
-        arbitrator_model=arbitrator_model,
-        reasoning_summarizer_model=reasoning_summarizer_model,
+        model_info=RuntimeModelInfoConfig(
+            display_name=display_name,
+            description="Test profile",
+            mode="responses",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            max_input_tokens=8192,
+            max_output_tokens=2048,
+            supported_parameters=["tools", "response_format"],
+            pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
+            provider="plap",
+            deprecated=False,
+        ),
+        main=RuntimeActorConfig(model=main_model),
+        main_debate=RuntimeActorConfig(model=main_debate_model),
+        reviewer=RuntimeActorConfig(model=reviewer_model),
+        arbitrator=RuntimeActorConfig(model=arbitrator_model),
+        reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
         transcript_token_budget=transcript_token_budget,
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
         debate_max_rounds=debate_max_rounds,
-        variants=variants or [],
+        by_service_tier=by_service_tier or {},
+        by_reasoning_effort=by_reasoning_effort or {},
     )
