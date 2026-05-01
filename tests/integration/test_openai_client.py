@@ -18,7 +18,7 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     created = await openai_client.responses.create(
         model="plap/test",
         input="hello world",
-        context_management=[{"type": "compaction", "compact_threshold": 128}],
+        context_management=[{"type": "compaction", "soft_token_budget": 128}],
         tool_choice="auto",
         tools=[
             {

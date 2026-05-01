@@ -13,7 +13,6 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
 )
 from plap.responses.errors import ResponseError
-from plap.responses.ingest.render import render_main_transcript
 from plap.responses.ingest.sealing import (
     CALL_ID_PREFIX,
     open_call_id,
@@ -47,7 +46,6 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
-    transcript_token_budget: int,
 ) -> IngestedQueues:
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
@@ -58,11 +56,6 @@ async def ingest_response_request(
     return IngestedQueues(
         main_context=tuple(queues.main.context_rows),
         main_context_temp=tuple(queues.main.context_temp_rows),
-        main_transcript=render_main_transcript(
-            compaction,
-            tuple(queues.main.stable_rows),
-            transcript_token_budget=transcript_token_budget,
-        ),
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
         continuation_side=routed.continuation_side,

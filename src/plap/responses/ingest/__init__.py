@@ -1,5 +1,5 @@
 from plap.responses.ingest.pipeline import ingest_response_request
-from plap.responses.ingest.render import render_budgeted_spans, render_main_transcript
+from plap.responses.ingest.render import compact_transcript, render_budgeted_spans, render_main_transcript
 from plap.responses.ingest.sealing import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
     content_hash,
@@ -42,6 +42,7 @@ __all__ = [
     "StateToolCall",
     "TranscriptMessage",
     "TranscriptToolCall",
+    "compact_transcript",
     "content_hash",
     "content_hash_prefix",
     "ingest_response_request",

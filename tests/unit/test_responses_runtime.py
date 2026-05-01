@@ -1095,6 +1095,60 @@ async def test_stream_response_events_adds_soft_compression_reminder() -> None:
     assert events[-1].response.output[0].content[0].text == "done"
 
 
+async def test_stream_response_events_context_management_overrides_compression_budgets() -> None:
+    profile = _profile_config(
+        compression_soft_token_budget=None,
+        compression_hard_token_budget=None,
+    )
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(_span(0, "alpha", token_count=75))],
+                context_management=[{"type": "compaction", "soft_token_budget": 50, "hard_token_budget": 100}],
+            ),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    request = client.requests[0]
+    assert request.messages[-1].role == "user"
+    assert "Context is getting long" in (request.messages[-1].content or "")
+    assert events[-1].response.output[0].content[0].text == "done"
+
+
+async def test_stream_response_events_context_management_max_rounds_can_disable_compress() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="hello",
+                context_management=[{"type": "compaction", "max_rounds": 0}],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].tools == []
+    assert events[-1].response.output[0].content[0].text == "done"
+
+
 async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
     profile = _profile_config(
         compression_soft_token_budget=50,
@@ -1139,6 +1193,56 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
     assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
     assert client.requests[1].tool_choice is None
     assert all("compression limit" not in (message.content or "") for message in client.requests[1].messages)
+
+
+async def test_stream_response_events_rejects_multiple_context_management_entries() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="unused"))
+
+    with pytest.raises(ResponseError, match="at most one compaction context_management entry"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    context_management=[
+                        {"type": "compaction", "soft_token_budget": 50},
+                        {"type": "compaction", "hard_token_budget": 100},
+                    ],
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
+async def test_stream_response_events_rejects_unsupported_requested_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ingest_response_request(*_args, **_kwargs) -> IngestedQueues:
+        return _ingested()
+
+    monkeypatch.setattr("plap.responses.runtime.ingest_response_request", fake_ingest_response_request)
+    client = _StaticChatClient(ChatMessage(role="assistant", content="unused"))
+
+    with pytest.raises(ResponseError, match="unsupported request parameters: temperature"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello", temperature=0.5),
+                auth_context=_auth_context(),
+                settings=_settings(
+                    profile=_profile_config(supported_parameters=["tools", "response_format"]),
+                ),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
 
 
 async def test_stream_response_events_rejects_hard_budget_without_compress() -> None:
@@ -1623,7 +1727,6 @@ def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:
     return IngestedQueues(
         main_context=(),
         main_context_temp=(),
-        main_transcript=(),
         reviewer=(),
         arbitrator=(),
         continuation_side="main",
@@ -1657,6 +1760,7 @@ def _profile_config(
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
     debate_max_rounds: int = 2,
+    supported_parameters: list[str] | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Test Model",
@@ -1668,7 +1772,21 @@ def _profile_config(
             output_modalities=["text"],
             max_input_tokens=8192,
             max_output_tokens=2048,
-            supported_parameters=["tools", "response_format"],
+            supported_parameters=supported_parameters
+            or [
+                "context_management",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+                "response_format",
+                "max_output_tokens",
+                "reasoning_effort",
+                "service_tier",
+                "stream",
+                "temperature",
+                "top_p",
+                "top_logprobs",
+            ],
             pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
             provider="plap",
             deprecated=False,

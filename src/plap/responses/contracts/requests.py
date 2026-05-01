@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from plap.responses.contracts.base import (
     Metadata,
@@ -70,11 +70,34 @@ class StreamOptions(StrictModel):
 
 
 class ContextManagementCompaction(StrictModel):
-    compact_threshold: int | None = Field(
+    soft_token_budget: int | None = Field(
         default=None,
-        description="Token threshold at which compaction should be triggered.",
+        ge=0,
+        description="Soft token budget at which context compaction should be nudged.",
+    )
+    hard_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        description="Hard token budget at which context compaction must run before continuing.",
+    )
+    max_rounds: int | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum compaction rounds allowed for this request.",
     )
     type: Literal["compaction"] = Field(description="Context-management discriminator.")
+
+    @model_validator(mode="after")
+    def validate_override(self) -> ContextManagementCompaction:
+        if self.soft_token_budget is None and self.hard_token_budget is None and self.max_rounds is None:
+            raise ValueError("compaction context_management requires at least one budget override")
+        if (
+            self.soft_token_budget is not None
+            and self.hard_token_budget is not None
+            and self.hard_token_budget <= self.soft_token_budget
+        ):
+            raise ValueError("compaction hard_token_budget must exceed soft_token_budget")
+        return self
 
 
 class ResponseCreateRequest(StrictModel):

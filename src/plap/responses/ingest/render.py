@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from plap.responses.models import (
-    ChatMessageSpan,
-    CompactionPayload,
-    TranscriptMessage,
-    TranscriptToolCall,
-)
+from plap.responses.models import ChatMessageSpan, TranscriptMessage, TranscriptToolCall
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,20 +15,11 @@ class _ExpansionCandidate:
 
 
 def render_main_transcript(
-    compaction: CompactionPayload | None,
-    stable_rows: tuple[ChatMessageSpan, ...],
+    spans: tuple[ChatMessageSpan, ...],
     *,
-    transcript_token_budget: int,
+    token_budget: int,
 ) -> tuple[ChatMessageSpan, ...]:
-    root_rows = (
-        ()
-        if compaction is None
-        else render_budgeted_spans(
-            compaction.active,
-            token_budget=transcript_token_budget,
-        )
-    )
-    return (*root_rows, *stable_rows)
+    return render_budgeted_spans(spans, token_budget=token_budget)
 
 
 def render_budgeted_spans(
@@ -50,6 +36,34 @@ def render_budgeted_spans(
         rendered[candidate.index : candidate.index + 1] = span.children
         current_tokens += candidate.token_delta
     return tuple(rendered)
+
+
+def compact_transcript(spans: tuple[ChatMessageSpan, ...]) -> tuple[TranscriptMessage, ...]:
+    compact: list[TranscriptMessage] = []
+    pending_tool_calls: dict[str, TranscriptToolCall] = {}
+    for span in spans:
+        message = span.message
+        if message.role == "tool":
+            if message.tool_call_id is not None and message.tool_call_id in pending_tool_calls:
+                current = pending_tool_calls[message.tool_call_id]
+                pending_tool_calls[message.tool_call_id] = TranscriptToolCall(
+                    _id=current._id,
+                    name=current.name,
+                    arguments=current.arguments,
+                    output=message.content_text() or "",
+                )
+                if compact:
+                    compact[-1] = TranscriptMessage(
+                        role=compact[-1].role,
+                        content=compact[-1].content,
+                        tool_calls=tuple(pending_tool_calls.get(call._id or "", call) for call in compact[-1].tool_calls),
+                    )
+            continue
+
+        item = message.to_transcript_message()
+        compact.append(item)
+        pending_tool_calls = {call._id or "": call for call in item.tool_calls if call._id is not None}
+    return tuple(item.without_ids() for item in compact)
 
 
 def _best_expansion_candidate(
@@ -86,33 +100,10 @@ def _best_expansion_candidate(
         default=None,
     )
 
-
-def compact_transcript(spans: tuple[ChatMessageSpan, ...]) -> tuple[TranscriptMessage, ...]:
-    compact: list[TranscriptMessage] = []
-    pending_tool_calls: dict[str, TranscriptToolCall] = {}
-    for span in spans:
-        message = span.message
-        if message.role == "tool":
-            if message.tool_call_id is not None and message.tool_call_id in pending_tool_calls:
-                current = pending_tool_calls[message.tool_call_id]
-                pending_tool_calls[message.tool_call_id] = TranscriptToolCall(
-                    _id=current._id,
-                    name=current.name,
-                    arguments=current.arguments,
-                    output=message.content_text() or "",
-                )
-                if compact:
-                    compact[-1] = TranscriptMessage(
-                        role=compact[-1].role,
-                        content=compact[-1].content,
-                        tool_calls=tuple(
-                            pending_tool_calls.get(call._id or "", call)
-                            for call in compact[-1].tool_calls
-                        ),
-                    )
-            continue
-
-        item = message.to_transcript_message()
-        compact.append(item)
-        pending_tool_calls = {call._id or "": call for call in item.tool_calls if call._id is not None}
-    return tuple(item.without_ids() for item in compact)
+__all__ = [
+    "ChatMessageSpan",
+    "TranscriptMessage",
+    "compact_transcript",
+    "render_budgeted_spans",
+    "render_main_transcript",
+]

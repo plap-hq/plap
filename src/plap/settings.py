@@ -23,6 +23,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 max_input_tokens=200_000,
                 max_output_tokens=32_768,
                 supported_parameters=[
+                    "context_management",
                     "temperature",
                     "top_p",
                     "tools",
@@ -31,7 +32,6 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                     "response_format",
                     "max_output_tokens",
                     "reasoning_effort",
-                    "service_tier",
                     "stream",
                 ],
                 pricing=RuntimeModelPricingConfig(
@@ -51,7 +51,6 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             compression_hard_token_budget=150_000,
             compression_max_rounds=3,
             debate_max_rounds=2,
-            by_service_tier=_default_service_tier_overrides(),
             by_reasoning_effort=_default_reasoning_effort_overrides(),
         )
     }
@@ -60,25 +59,6 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
 def _validate_compression_budgets(soft_budget: int | None, hard_budget: int | None) -> None:
     if soft_budget is not None and hard_budget is not None and hard_budget <= soft_budget:
         raise ValueError("compression hard token budget must exceed the soft token budget")
-
-
-def _default_service_tier_overrides() -> dict[ServiceTier, RuntimeProfileOverride]:
-    return {
-        "priority": RuntimeProfileOverride(
-            main=RuntimeActorOverride(service_tier="priority"),
-            main_debate=RuntimeActorOverride(service_tier="priority"),
-            reviewer=RuntimeActorOverride(service_tier="priority"),
-            arbitrator=RuntimeActorOverride(service_tier="priority"),
-            reasoning_summarizer=RuntimeActorOverride(service_tier="priority"),
-        ),
-        "flex": RuntimeProfileOverride(
-            main=RuntimeActorOverride(service_tier="flex"),
-            main_debate=RuntimeActorOverride(service_tier="flex"),
-            reviewer=RuntimeActorOverride(service_tier="flex"),
-            arbitrator=RuntimeActorOverride(service_tier="flex"),
-            reasoning_summarizer=RuntimeActorOverride(service_tier="flex"),
-        ),
-    }
 
 
 def _default_reasoning_effort_overrides() -> dict[ReasoningEffort, RuntimeProfileOverride]:
@@ -145,6 +125,9 @@ class RuntimeModelInfoConfig(BaseModel):
     pricing: RuntimeModelPricingConfig
     provider: str
     deprecated: bool = False
+
+    def supports_parameter(self, name: str) -> bool:
+        return name in self.supported_parameters
 
     def apply_override(self, override: RuntimeModelInfoOverride | None) -> RuntimeModelInfoConfig:
         if override is None:
@@ -366,6 +349,13 @@ class RuntimeModelProfileConfig(BaseModel):
     def validate_profile(self) -> RuntimeModelProfileConfig:
         _validate_compression_budgets(self.compression_soft_token_budget, self.compression_hard_token_budget)
 
+        if self.by_service_tier and not self.supports_parameter("service_tier"):
+            raise ValueError("service_tier overrides require model_info.supported_parameters to include service_tier")
+        if self.by_reasoning_effort and not self.supports_parameter("reasoning_effort"):
+            raise ValueError(
+                "reasoning_effort overrides require model_info.supported_parameters to include reasoning_effort"
+            )
+
         for override in self.by_service_tier.values():
             resolved = override.apply_to(self)
             _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
@@ -385,16 +375,29 @@ class RuntimeModelProfileConfig(BaseModel):
 
         return self
 
+    def supports_parameter(self, name: str) -> bool:
+        return self.model_info.supports_parameter(name)
+
+    def validate_requested_parameters(self, parameters: set[str]) -> None:
+        unsupported = sorted(parameter for parameter in parameters if not self.supports_parameter(parameter))
+        if unsupported:
+            joined = ", ".join(unsupported)
+            raise ValueError(f"unsupported request parameters: {joined}")
+
     def resolve(self, selector: RuntimeSelector | None = None) -> RuntimeModelProfileConfig:
         resolved = self
         selector = selector or RuntimeSelector()
 
         if selector.service_tier not in {None, "default", "auto"}:
+            if not self.supports_parameter("service_tier"):
+                raise ValueError("unsupported request parameters: service_tier")
             override = self.by_service_tier.get(selector.service_tier)
             if override is not None:
                 resolved = override.apply_to(resolved)
 
         if selector.reasoning_effort is not None:
+            if not self.supports_parameter("reasoning_effort"):
+                raise ValueError("unsupported request parameters: reasoning_effort")
             override = self.by_reasoning_effort.get(selector.reasoning_effort)
             if override is not None:
                 resolved = override.apply_to(resolved)

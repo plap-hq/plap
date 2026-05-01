@@ -80,10 +80,20 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.model_info.max_input_tokens == 200_000
     assert profile.model_info.description == "General-purpose plap responses model for text and tool use."
     assert profile.main.public_usage == PublicUsageConfig()
-    assert profile.by_service_tier["priority"].main is not None
-    assert profile.by_service_tier["priority"].main.service_tier == "priority"
+    assert "service_tier" not in profile.model_info.supported_parameters
+    assert profile.by_service_tier == {}
     assert profile.by_reasoning_effort["high"].main is not None
     assert profile.by_reasoning_effort["high"].main.reasoning_effort == "high"
+
+
+def test_app_runtime_wisp_nano_rejects_service_tier() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        llm_lightning_api_key="lightning-key",
+    )
+
+    with pytest.raises(ValueError, match="unsupported request parameters: service_tier"):
+        settings.resolve_runtime_model_profile("plap-ai/wisp-nano", selector=RuntimeSelector(service_tier="priority"))
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -300,6 +310,72 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
         settings.resolve_runtime_model_profile("lightning/lightning-ai/gpt-oss-20b")
 
 
+def test_app_runtime_rejects_unsupported_service_tier() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                supported_parameters=["tools", "response_format"],
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported request parameters: service_tier"):
+        settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
+
+
+def test_app_runtime_rejects_unsupported_reasoning_effort() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                supported_parameters=["tools", "response_format"],
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported request parameters: reasoning_effort"):
+        settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
+
+
+def test_runtime_profile_rejects_service_tier_overrides_without_supported_parameter() -> None:
+    with pytest.raises(ValueError, match="service_tier overrides require"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            supported_parameters=["tools", "response_format"],
+            by_service_tier={
+                "priority": RuntimeProfileOverride(main=RuntimeActorOverride(service_tier="priority")),
+            },
+        )
+
+
+def test_runtime_profile_rejects_reasoning_effort_overrides_without_supported_parameter() -> None:
+    with pytest.raises(ValueError, match="reasoning_effort overrides require"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            supported_parameters=["tools", "response_format"],
+            by_reasoning_effort={
+                "high": RuntimeProfileOverride(main=RuntimeActorOverride(reasoning_effort="high")),
+            },
+        )
+
+
 def test_app_runtime_resolves_runtime_profile_variants() -> None:
     settings = _settings(
         runtime_model_profiles={
@@ -470,6 +546,7 @@ def _profile_config(
     debate_max_rounds: int = 2,
     by_service_tier: dict[str, RuntimeProfileOverride] | None = None,
     by_reasoning_effort: dict[str, RuntimeProfileOverride] | None = None,
+    supported_parameters: list[str] | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name=display_name,
@@ -481,7 +558,21 @@ def _profile_config(
             output_modalities=["text"],
             max_input_tokens=8192,
             max_output_tokens=2048,
-            supported_parameters=["tools", "response_format"],
+            supported_parameters=supported_parameters
+            or [
+                "context_management",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+                "response_format",
+                "max_output_tokens",
+                "reasoning_effort",
+                "service_tier",
+                "stream",
+                "temperature",
+                "top_p",
+                "top_logprobs",
+            ],
             pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
             provider="plap",
             deprecated=False,

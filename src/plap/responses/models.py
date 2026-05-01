@@ -33,6 +33,13 @@ class Side(StrEnum):
     ARBITRATOR = "arbitrator"
 
 
+class Actor(StrEnum):
+    MAIN = "main"
+    MAIN_DEBATE = "main_debate"
+    REVIEWER = "reviewer"
+    ARBITRATOR = "arbitrator"
+
+
 @dataclass(frozen=True, slots=True)
 class StateToolCall:
     id: str
@@ -548,7 +555,6 @@ class SealedCallID:
 class IngestedQueues:
     main_context: tuple[ChatMessageSpan, ...]
     main_context_temp: tuple[ChatMessageSpan, ...]
-    main_transcript: tuple[ChatMessageSpan, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
     continuation_side: Side
@@ -556,6 +562,13 @@ class IngestedQueues:
     compaction: CompactionPayload | None
     cursors: dict[str, int]
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class TempMainParts:
+    held_candidate: ChatMessageSpan | None
+    held_hidden_tool_rows: tuple[ChatMessageSpan, ...]
+    remaining_temp_rows: tuple[ChatMessageSpan, ...]
 
 
 @dataclass(slots=True)
@@ -567,6 +580,107 @@ class MutableQueues:
     cursors: dict[str, int]
     continuation_side: Side
     in_temp_debate: bool
+
+    @classmethod
+    def from_ingested(cls, queues: IngestedQueues) -> MutableQueues:
+        return cls(
+            main_context=list(queues.main_context),
+            main_context_temp=list(queues.main_context_temp),
+            reviewer=list(queues.reviewer),
+            arbitrator=list(queues.arbitrator),
+            cursors=dict(queues.cursors),
+            continuation_side=queues.continuation_side,
+            in_temp_debate=queues.in_temp_debate,
+        )
+
+    def current_actor(self) -> Actor:
+        if self.continuation_side == Side.REVIEWER:
+            return Actor.REVIEWER
+        if self.continuation_side == Side.ARBITRATOR:
+            return Actor.ARBITRATOR
+        if self.in_temp_debate:
+            return Actor.MAIN_DEBATE
+        return Actor.MAIN
+
+    def effective_main_context(self) -> tuple[ChatMessageSpan, ...]:
+        return (*self.main_context, *self.main_context_temp)
+
+    def append_main_stable(self, message: StateMessage, *, content_hash: str = "") -> ChatMessageSpan:
+        next_ordinal = self.cursors["m"]
+        self.cursors["m"] += 1
+        row = ChatMessageSpan(
+            start=next_ordinal,
+            end=next_ordinal,
+            message=message,
+            content_hash=content_hash,
+            token_count=message.estimated_token_count(),
+        )
+        self.main_context.append(row)
+        return row
+
+    def append_main_temp(self, message: StateMessage, *, content_hash: str = "") -> ChatMessageSpan:
+        next_ordinal = self.cursors["m"]
+        self.cursors["m"] += 1
+        row = ChatMessageSpan(
+            start=next_ordinal,
+            end=next_ordinal,
+            message=message,
+            content_hash=content_hash,
+            token_count=message.estimated_token_count(),
+        )
+        self.main_context_temp.append(row)
+        return row
+
+    def append_side(self, side: Side, message: StateMessage, *, content_hash: str = "") -> SideMessage:
+        side = Side(side)
+        if side == Side.MAIN:
+            raise ValueError("append_side does not accept main; use append_main_stable or append_main_temp")
+        row = SideMessage(message=message, content_hash=content_hash)
+        if side == Side.REVIEWER:
+            self.reviewer.append(row)
+        else:
+            self.arbitrator.append(row)
+        return row
+
+    def main_transcript(self, *, token_budget: int) -> tuple[ChatMessageSpan, ...]:
+        from plap.responses.ingest.render import render_main_transcript  # noqa: PLC0415
+
+        return render_main_transcript(tuple(self.main_context), token_budget=token_budget)
+
+    def compact_transcript(self, *, token_budget: int) -> tuple[TranscriptMessage, ...]:
+        from plap.responses.ingest.render import compact_transcript  # noqa: PLC0415
+
+        return compact_transcript(self.main_transcript(token_budget=token_budget))
+
+    def temp_main_parts(self) -> TempMainParts:
+        if not self.main_context_temp:
+            return TempMainParts(held_candidate=None, held_hidden_tool_rows=(), remaining_temp_rows=())
+        held_candidate = self.main_context_temp[0]
+        if not held_candidate.message.is_assistant():
+            return TempMainParts(
+                held_candidate=None,
+                held_hidden_tool_rows=(),
+                remaining_temp_rows=tuple(self.main_context_temp),
+            )
+        hidden_end = 1
+        while hidden_end < len(self.main_context_temp) and self.main_context_temp[hidden_end].message.is_tool():
+            hidden_end += 1
+        return TempMainParts(
+            held_candidate=held_candidate,
+            held_hidden_tool_rows=tuple(self.main_context_temp[1:hidden_end]),
+            remaining_temp_rows=tuple(self.main_context_temp[hidden_end:]),
+        )
+
+    def set_continuation(self, side: Side, *, in_temp_debate: bool) -> None:
+        self.continuation_side = side
+        self.in_temp_debate = in_temp_debate
+
+    def clear_debate(self) -> None:
+        self.main_context_temp.clear()
+        self.reviewer.clear()
+        self.arbitrator.clear()
+        self.continuation_side = Side.MAIN
+        self.in_temp_debate = False
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:

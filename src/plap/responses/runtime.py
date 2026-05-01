@@ -25,6 +25,7 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.responses.contracts import (
+    ContextManagementCompaction,
     FunctionTool,
     OutputTextContent,
     ReasoningItem,
@@ -175,6 +176,35 @@ def _runtime_selector(request: ResponseCreateRequest) -> RuntimeSelector:
     )
 
 
+def _requested_parameters(request: ResponseCreateRequest) -> set[str]:
+    requested: set[str] = set()
+    if request.context_management:
+        requested.add("context_management")
+    if request.max_output_tokens is not None:
+        requested.add("max_output_tokens")
+    if request.parallel_tool_calls is not None:
+        requested.add("parallel_tool_calls")
+    if request.reasoning is not None and request.reasoning.effort is not None:
+        requested.add("reasoning_effort")
+    if request.service_tier not in {None, "default", "auto"}:
+        requested.add("service_tier")
+    if request.stream:
+        requested.add("stream")
+    if request.temperature is not None:
+        requested.add("temperature")
+    if request.text is not None and request.text.format is not None:
+        requested.add("response_format")
+    if request.tool_choice is not None:
+        requested.add("tool_choice")
+    if request.tools:
+        requested.add("tools")
+    if request.top_logprobs is not None:
+        requested.add("top_logprobs")
+    if request.top_p is not None:
+        requested.add("top_p")
+    return requested
+
+
 def _prompt_cache_key_pepper(settings: Settings) -> bytes:
     hasher = blake3.blake3()
     hasher.update(settings.api_key_pepper.encode())
@@ -226,28 +256,54 @@ def _context_token_count(spans: Sequence[ChatMessageSpan], *, include_citations:
 
 
 def _compression_reminder(
-    profile: RuntimeModelProfileConfig,
+    soft_token_budget: int | None,
+    hard_token_budget: int | None,
     token_count: int,
     bailout: _CompressionBailout,
 ) -> tuple[_CompressionReminderLevel, str | None]:
-    if _hard_compression_budget_crossed(profile, token_count):
+    if _hard_compression_budget_crossed(hard_token_budget, token_count):
         if bailout != _CompressionBailout.HARD:
             return _CompressionReminderLevel.HARD, HARD_COMPRESSION_REMINDER
         return _CompressionReminderLevel.NONE, None
-    if (
-        profile.compression_soft_token_budget is not None
-        and token_count >= profile.compression_soft_token_budget
-        and bailout == _CompressionBailout.NONE
-    ):
+    if soft_token_budget is not None and token_count >= soft_token_budget and bailout == _CompressionBailout.NONE:
         return _CompressionReminderLevel.SOFT, SOFT_COMPRESSION_REMINDER
     return _CompressionReminderLevel.NONE, None
 
 
-def _hard_compression_budget_crossed(
+def _hard_compression_budget_crossed(hard_token_budget: int | None, token_count: int) -> bool:
+    return hard_token_budget is not None and token_count >= hard_token_budget
+
+
+def _context_management_compaction(request: ResponseCreateRequest) -> ContextManagementCompaction | None:
+    if not request.context_management:
+        return None
+    if len(request.context_management) > 1:
+        raise ResponseError.invalid_request(
+            private_message="at most one compaction context_management entry is supported"
+        )
+    return request.context_management[0]
+
+
+def _effective_compression_settings(
     profile: RuntimeModelProfileConfig,
-    token_count: int,
-) -> bool:
-    return profile.compression_hard_token_budget is not None and token_count >= profile.compression_hard_token_budget
+    request: ResponseCreateRequest,
+) -> tuple[int | None, int | None, int]:
+    soft_token_budget = profile.compression_soft_token_budget
+    hard_token_budget = profile.compression_hard_token_budget
+    max_rounds = profile.compression_max_rounds
+    override = _context_management_compaction(request)
+    if override is not None:
+        if override.soft_token_budget is not None:
+            soft_token_budget = override.soft_token_budget
+        if override.hard_token_budget is not None:
+            hard_token_budget = override.hard_token_budget
+        if override.max_rounds is not None:
+            max_rounds = override.max_rounds
+    if soft_token_budget is not None and hard_token_budget is not None and hard_token_budget <= soft_token_budget:
+        raise ResponseError.invalid_request(
+            private_message="compaction hard_token_budget must exceed soft_token_budget"
+        )
+    return soft_token_budget, hard_token_budget, max_rounds
 
 
 async def prepare_tools(
@@ -511,18 +567,13 @@ async def run_response(
     ingested = await ingest_response_request(
         request,
         keyring=sealing_keyring,
-        transcript_token_budget=profile.transcript_token_budget,
+    )
+    compression_soft_token_budget, compression_hard_token_budget, compression_max_rounds = _effective_compression_settings(
+        profile,
+        request,
     )
 
-    state = MutableQueues(
-        main_context=list(ingested.main_context),
-        main_context_temp=list(ingested.main_context_temp),
-        reviewer=list(ingested.reviewer),
-        arbitrator=list(ingested.arbitrator),
-        cursors=dict(ingested.cursors),
-        continuation_side=ingested.continuation_side,
-        in_temp_debate=ingested.in_temp_debate,
-    )
+    state = MutableQueues.from_ingested(ingested)
 
     base_tools, base_tool_policies, base_server_executors = await prepare_tools(
         request,
@@ -543,7 +594,7 @@ async def run_response(
 
         if state.in_temp_debate:
             raise ResponseError.unavailable(private_message="debate continuation is disabled during cleanup")
-        if compression_rounds < profile.compression_max_rounds:
+        if compression_rounds < compression_max_rounds:
             effective_tools.append(compress_tool())
             effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
 
@@ -559,7 +610,7 @@ async def run_response(
                 content="\n\n".join(developer_prompt_parts),
             )
         ]
-        effective_main_context = [*state.main_context, *state.main_context_temp]
+        effective_main_context = state.effective_main_context()
         include_citations = COMPRESS_TOOL_NAME in effective_tool_policies
         messages.extend(_chat_message_from_span(row, include_citation=include_citations) for row in effective_main_context)
         token_count = _context_token_count(
@@ -570,7 +621,8 @@ async def run_response(
         compression_reminder = None
         if COMPRESS_TOOL_NAME in effective_tool_policies:
             compression_reminder_level, compression_reminder = _compression_reminder(
-                profile,
+                compression_soft_token_budget,
+                compression_hard_token_budget,
                 token_count,
                 compression_bailout,
             )
@@ -778,39 +830,20 @@ async def run_response(
         if result.message.content is not None or (
             result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
         ):
-            next_ordinal = state.cursors["m"]
-            state.cursors["m"] += 1
             assistant_context_message = StateMessage(
                 role="assistant",
                 content=public_assistant_message.content,
                 tool_calls=list(assistant_tool_calls),
             )
-            state.main_context.append(
-                ChatMessageSpan(
-                    start=next_ordinal,
-                    end=next_ordinal,
-                    message=assistant_context_message,
-                    content_hash=assistant_hash,
-                    token_count=assistant_context_message.estimated_token_count(),
-                )
-            )
+            state.append_main_stable(assistant_context_message, content_hash=assistant_hash)
 
         for index, output in server_outputs.items():
-            next_ordinal = state.cursors["m"]
-            state.cursors["m"] += 1
             tool_message = StateMessage(
                 role="tool",
                 tool_call_id=tool_calls[index].id,
                 content=output,
             )
-            state.main_context.append(
-                ChatMessageSpan(
-                    start=next_ordinal,
-                    end=next_ordinal,
-                    message=tool_message,
-                    token_count=tool_message.estimated_token_count(),
-                )
-            )
+            state.append_main_stable(tool_message)
 
         if server_outputs and not client_call_indexes:
             usage_accumulator.add_hidden(profile.main.public_usage, result.usage)
@@ -844,6 +877,7 @@ async def stream_response_events(
             try:
                 try:
                     profile = settings.resolve_runtime_model_profile(request.model, selector=_runtime_selector(request))
+                    profile.validate_requested_parameters(_requested_parameters(request))
                 except ValueError as exc:
                     raise ResponseError.invalid_request(private_message=str(exc), cause=exc) from exc
                 prompt_cache_key_base = _base_prompt_cache_key(

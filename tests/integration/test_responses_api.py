@@ -9,7 +9,7 @@ from plap.responses.tools import (
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
     return {
-        "context_management": [{"compact_threshold": 128, "type": "compaction"}],
+        "context_management": [{"soft_token_budget": 128, "type": "compaction"}],
         "input": [
             {
                 "content": "hello from the client",

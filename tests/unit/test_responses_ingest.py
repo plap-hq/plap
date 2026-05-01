@@ -24,6 +24,7 @@ from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
     IngestedQueues,
+    MutableQueues,
     ReasoningPayload,
     SealedCallID,
     content_hash,
@@ -48,13 +49,19 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
-    transcript_token_budget: int = 0,
 ) -> IngestedQueues:
     return await _ingest_response_request(
         request,
         keyring=keyring,
-        transcript_token_budget=transcript_token_budget,
     )
+
+
+def _main_transcript(
+    queues: IngestedQueues,
+    *,
+    token_budget: int = 0,
+) -> tuple[ChatMessageSpan, ...]:
+    return MutableQueues.from_ingested(queues).main_transcript(token_budget=token_budget)
 
 
 async def test_ingestion_preserves_last_compaction_spans() -> None:
@@ -76,13 +83,40 @@ async def test_ingestion_preserves_last_compaction_spans() -> None:
         (1, 1, "kept summarized source"),
         (2, 2, "after"),
     ]
-    assert [row.message.content for row in result.main_transcript] == [
+    assert [row.message.content for row in _main_transcript(result)] == [
         "kept source",
         "kept summarized source",
         "after",
     ]
     assert result.cursors == {"m": 3}
     assert result.continuation_side == "main"
+
+
+def test_mutable_queues_append_helpers() -> None:
+    queues = MutableQueues(
+        main_context=[],
+        main_context_temp=[],
+        reviewer=[],
+        arbitrator=[],
+        cursors={"m": 0},
+        continuation_side="main",
+        in_temp_debate=False,
+    )
+
+    stable = queues.append_main_stable(StateMessage(role="user", content="stable"), content_hash="stable-hash")
+    temp = queues.append_main_temp(StateMessage(role="assistant", content="temp"))
+    reviewer = queues.append_side("reviewer", StateMessage(role="assistant", content="review"), content_hash="review-hash")
+    arbitrator = queues.append_side("arbitrator", StateMessage(role="assistant", content="decide"))
+
+    assert (stable.start, stable.end, stable.content_hash) == (0, 0, "stable-hash")
+    assert (temp.start, temp.end, temp.message.content) == (1, 1, "temp")
+    assert reviewer.content_hash == "review-hash"
+    assert reviewer.message.content == "review"
+    assert arbitrator.message.content == "decide"
+    assert queues.cursors == {"m": 2}
+
+    with pytest.raises(ValueError, match="append_side does not accept main"):
+        queues.append_side("main", StateMessage(role="assistant", content="bad"))
 
 
 async def test_ingestion_compaction_only_continues_main() -> None:
@@ -95,7 +129,7 @@ async def test_ingestion_compaction_only_continues_main() -> None:
         (0, 0),
         (1, 1),
     ]
-    assert [(row.start, row.end) for row in result.main_transcript] == [
+    assert [(row.start, row.end) for row in _main_transcript(result)] == [
         (0, 0),
         (1, 1),
     ]
@@ -113,7 +147,7 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
         (1, 1, "a0"),
     ]
     assert result.cursors == {"m": 2}
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.continuation_side == "main"
 
 
@@ -124,7 +158,7 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
     )
 
     assert result.main_context == ()
-    assert result.main_transcript == ()
+    assert _main_transcript(result) == ()
     assert [(row.message.content, row.content_hash) for row in result.reviewer] == [
         ("review", _message_hash({"role": "assistant", "content": "review"}))
     ]
@@ -207,7 +241,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
 
     assert [row.message.content for row in result.main_context] == ["final debate result"]
     assert result.main_context_temp == ()
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is False
@@ -239,7 +273,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
 
     assert [row.message.content for row in result.main_context] == ["new mainline request"]
     assert result.main_context_temp == ()
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is False
@@ -286,7 +320,7 @@ async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None
         },
     ]
     assert result.main_context_temp == ()
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is False
@@ -308,7 +342,7 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
 
     assert result.main_context == ()
     assert [row.message.content for row in result.main_context_temp] == ["temp debate tail"]
-    assert result.main_transcript == ()
+    assert _main_transcript(result) == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is True
 
@@ -337,7 +371,7 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
     )
 
     assert result.main_context == ()
-    assert result.main_transcript == ()
+    assert _main_transcript(result) == ()
     assert [row.message.to_primitive() for row in result.reviewer] == [
         assistant,
         {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "review file"},
@@ -381,7 +415,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         ),
     ]
     assert result.cursors == {"m": 2}
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.continuation_side == "main"
 
 
@@ -422,7 +456,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
             },
         ),
     ]
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.arbitrator == ()
     assert result.continuation_side == "main"
@@ -688,7 +722,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         ),
     ]
     assert result.cursors == {"m": 2}
-    assert result.main_context == result.main_transcript
+    assert result.main_context == _main_transcript(result)
 
 
 async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
@@ -966,12 +1000,11 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
     result = await ingest_response_request(
         _request(input=[compaction]),
         keyring=_keyring(),
-        transcript_token_budget=6,
     )
 
     assert [row.citation for row in result.main_context] == ["[~0_1]", "[~2_3]"]
     assert [row.summary_fidelity for row in result.main_context] == [4, 2]
-    assert [row.citation for row in result.main_transcript] == [
+    assert [row.citation for row in _main_transcript(result, token_budget=6)] == [
         "[~0_1]",
         "[~2]",
         "[~3]",
@@ -1012,10 +1045,9 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
     result = await ingest_response_request(
         _request(input=[compaction]),
         keyring=_keyring(),
-        transcript_token_budget=6,
     )
 
-    assert [row.citation for row in result.main_transcript] == [
+    assert [row.citation for row in _main_transcript(result, token_budget=6)] == [
         "[~0_1]",
         "[~2]",
         "[~3]",
