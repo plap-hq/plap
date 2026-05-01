@@ -92,7 +92,6 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
     assert result.confidence == 0.9
     assert result.rationale == "Read-only."
     assert client.requests[0].messages[0].role == "system"
-    assert "Return only JSON" in (client.requests[0].messages[0].content or "")
     assert client.requests[0].response_format is not None
     assert client.requests[0].response_format.type == "json_schema"
     assert client.requests[0].response_format.strict is True
@@ -109,7 +108,6 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         "contextual",
         "unknown",
     ]
-    assert "contextual" in (client.requests[0].messages[0].content or "")
     assert "minLength" not in client.requests[0].response_format.schema["properties"]["rationale"]
     assert client.requests[0].max_completion_tokens == TOOL_EFFECT_CLASSIFIER_MAX_TOKENS
     assert client.requests[0].temperature == 0

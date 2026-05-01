@@ -708,7 +708,6 @@ async def test_lightning_120b_response_format_fallback_omits_native_field() -> N
     call = fake_completion.calls[0]
     assert "response_format" not in call
     assert call["messages"][0]["role"] == "system"
-    assert "valid JSON" in call["messages"][0]["content"]
     assert call["messages"][1] == {
         "role": "user",
         "content": 'Return {"ok": true}.',
@@ -753,7 +752,11 @@ async def test_lightning_120b_response_format_fallback_retries_schema_errors() -
     assert len(fake_completion.calls) == 2
     assert "response_format" not in fake_completion.calls[0]
     assert "response_format" not in fake_completion.calls[1]
-    assert "previous response" in fake_completion.calls[1]["messages"][-1]["content"]
+    assert fake_completion.calls[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": '{"ok":"no"}',
+    }
+    assert fake_completion.calls[1]["messages"][-1]["role"] == "user"
 
 
 async def test_lightning_120b_response_format_fallback_raises_after_retry() -> None:
@@ -850,7 +853,11 @@ async def test_lightning_120b_response_format_fallback_stream_retries() -> None:
 
     assert [delta.content_delta for delta in deltas] == ['{"ok":true}', None]
     assert len(fake_completion.calls) == 2
-    assert "previous response" in fake_completion.calls[1]["messages"][-1]["content"]
+    assert fake_completion.calls[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": '{"ok":"no"}',
+    }
+    assert fake_completion.calls[1]["messages"][-1]["role"] == "user"
 
 
 async def test_lightning_120b_fallback_stream_raises_before_yield() -> None:

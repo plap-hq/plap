@@ -3,9 +3,7 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, field
 from enum import StrEnum
-from math import ceil
 
 import anyio
 import blake3
@@ -14,14 +12,12 @@ import msgspec
 from plap.auth import AuthContext
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
-    ChatCompletionRequest,
     ChatFunctionTool,
     ChatMessage,
     ChatResponseFormat,
     ChatTool,
     ChatToolCall,
     ChatToolChoiceFunction,
-    ChatUsage,
     IChatCompletionClient,
 )
 from plap.responses.contracts import (
@@ -36,13 +32,16 @@ from plap.responses.contracts import (
     ResponseFunctionCallOutputItem,
     ResponseMessageItem,
     ResponseStreamEvent,
-    ResponseUsage,
-    ResponseUsageInputTokensDetails,
-    ResponseUsageOutputTokensDetails,
     TextFormatJSONObject,
     TextFormatJSONSchema,
     ToolChoiceFunction,
     WebSearchTool,
+)
+from plap.responses.debate import (
+    DebateResult,
+    build_completion_request,
+    continue_debate,
+    start_debate_from_candidate,
 )
 from plap.responses.errors import ResponseError
 from plap.responses.ingest import (
@@ -59,7 +58,7 @@ from plap.responses.ingest.sealing import (
     seal_reasoning_payload,
 )
 from plap.responses.io import ResponseEventIO
-from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall
+from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall, UsageAccumulator
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.tools import (
     IToolCallPolicyResolver,
@@ -76,7 +75,7 @@ from plap.responses.tools.compress import (
 )
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.responses.tools.web_search import web_search_policy
-from plap.settings import PublicUsageConfig, RuntimeModelProfileConfig, RuntimeSelector, Settings
+from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
 _CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
@@ -92,42 +91,6 @@ class _CompressionReminderLevel(StrEnum):
     NONE = "none"
     SOFT = "soft"
     HARD = "hard"
-
-
-@dataclass(slots=True)
-class UsageAccumulator:
-    hidden: list[tuple[PublicUsageConfig, ChatUsage]] = field(default_factory=list)
-
-    def add_hidden(self, config: PublicUsageConfig, usage: ChatUsage | None) -> None:
-        if usage is None:
-            return
-        self.hidden.append((config, usage))
-
-    def to_response_usage(self, anchor: ChatUsage | None) -> ResponseUsage | None:
-        if anchor is None:
-            return None
-
-        hidden_equivalent_output = sum(self._equivalent_output_tokens(config, usage) for config, usage in self.hidden)
-        cached_tokens = anchor.cached_tokens or 0
-        reasoning_tokens = (anchor.reasoning_tokens or 0) + hidden_equivalent_output
-        output_tokens = anchor.output_tokens + hidden_equivalent_output
-        return ResponseUsage(
-            input_tokens=anchor.input_tokens,
-            input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
-            output_tokens=output_tokens,
-            output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-            total_tokens=anchor.input_tokens + output_tokens,
-        )
-
-    def _equivalent_output_tokens(self, config: PublicUsageConfig, usage: ChatUsage) -> int:
-        cached_input = min(usage.cached_tokens or 0, usage.input_tokens)
-        uncached_input = usage.input_tokens - cached_input
-        equivalent_output = (
-            uncached_input * config.uncached_input_to_output
-            + cached_input * config.cached_input_to_output
-            + usage.output_tokens * config.output_to_output
-        )
-        return ceil(equivalent_output)
 
 
 SOFT_COMPRESSION_REMINDER = (
@@ -593,7 +556,22 @@ async def run_response(
         effective_server_executors = dict(base_server_executors)
 
         if state.in_temp_debate:
-            raise ResponseError.unavailable(private_message="debate continuation is disabled during cleanup")
+            debate_result = await continue_debate(
+                state=state,
+                out=out,
+                request=request,
+                profile=profile,
+                keyring=sealing_keyring,
+                tools=base_tools,
+                tool_policies=base_tool_policies,
+                server_executors=base_server_executors,
+                chat_completion_client=chat_completion_client,
+                prompt_cache_key_base=prompt_cache_key_base,
+                usage_accumulator=usage_accumulator,
+            )
+            if debate_result == DebateResult.COMPLETED:
+                return
+            continue
         if compression_rounds < compression_max_rounds:
             effective_tools.append(compress_tool())
             effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
@@ -635,21 +613,15 @@ async def run_response(
             tool_choice = ChatToolChoiceFunction(name=COMPRESS_TOOL_NAME)
             forced_compression = True
 
-        model_request = ChatCompletionRequest(
-            model=profile.main.model,
+        model_request = build_completion_request(
+            actor="main",
+            actor_config=profile.main,
+            request=request,
             messages=messages,
-            tools=[_chat_tool(tool) for tool in effective_tools],
+            tools=effective_tools,
             tool_choice=tool_choice,
-            parallel_tool_calls=request.parallel_tool_calls,
             response_format=_chat_response_format(request),
-            max_completion_tokens=request.max_output_tokens,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            top_logprobs=request.top_logprobs,
-            reasoning_effort=profile.main.reasoning_effort,
-            prompt_cache_key=_actor_prompt_cache_key(prompt_cache_key_base, "main"),
-            service_tier=profile.main.service_tier,
-            user=None,
+            prompt_cache_key_base=prompt_cache_key_base,
         )
 
         result = await chat_completion_client.complete(model_request)
@@ -697,11 +669,9 @@ async def run_response(
             if compression_reminder_level == _CompressionReminderLevel.SOFT:
                 compression_bailout = _CompressionBailout.SOFT
 
-            if any(policy.source == "client" and policy.effect_class not in {"safe", "visible"} for policy in resolved_policies):
-                raise ResponseError.unavailable(private_message="debate path is disabled during cleanup")
-
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
+            risky_client_indexes: list[int] = []
             for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
                 if policy.source == "server":
                     executor = effective_server_executors.get(call.name)
@@ -712,9 +682,55 @@ async def run_response(
                         canonical_tool_arguments(call.arguments),
                     )
                     continue
-                if policy.effect_class not in {"safe", "visible"}:
-                    raise ResponseError.tool_policy(private_message="tool call requires unsupported policy path")
-                client_call_indexes.append(index)
+                if policy.effect_class in {"safe", "visible"}:
+                    client_call_indexes.append(index)
+                else:
+                    risky_client_indexes.append(index)
+
+            if risky_client_indexes:
+                if profile.debate_max_rounds == 0:
+                    risky_client_indexes.clear()
+                else:
+                    await start_debate_from_candidate(
+                        state=state,
+                        out=out,
+                        keyring=sealing_keyring,
+                        assistant=StateMessage(
+                            role=result.message.role,
+                            content=result.message.content,
+                            name=result.message.name,
+                            tool_call_id=result.message.tool_call_id,
+                            tool_calls=[
+                                StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
+                                for call in result.message.tool_calls or ()
+                            ],
+                            reasoning_content=result.message.reasoning_content,
+                            reasoning_details=list(result.message.reasoning_details or ()),
+                        ),
+                        tool_calls=tool_calls,
+                        server_outputs=server_outputs,
+                    )
+                    debate_result = await continue_debate(
+                        state=state,
+                        out=out,
+                        request=request,
+                        profile=profile,
+                        keyring=sealing_keyring,
+                        tools=base_tools,
+                        tool_policies=base_tool_policies,
+                        server_executors=base_server_executors,
+                        chat_completion_client=chat_completion_client,
+                        prompt_cache_key_base=prompt_cache_key_base,
+                        usage_accumulator=usage_accumulator,
+                        held_anchor_usage=result.usage,
+                        held_anchor_service_tier=result.service_tier,
+                    )
+                    if debate_result == DebateResult.COMPLETED:
+                        return
+                    continue
+
+            if risky_client_indexes:
+                raise ResponseError.tool_policy(private_message="tool call requires unsupported policy path")
 
         public_assistant_message = StateMessage(
             role="assistant",

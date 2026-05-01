@@ -4,14 +4,21 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
+from math import ceil
 
 import blake3
 import msgspec
 import tiktoken
 
 from plap.llms.chat import ChatMessage as LLMChatMessage
-from plap.llms.chat import ChatRole
+from plap.llms.chat import ChatRole, ChatUsage
 from plap.llms.chat import ChatToolCall as LLMChatToolCall
+from plap.responses.contracts import (
+    ResponseUsage,
+    ResponseUsageInputTokensDetails,
+    ResponseUsageOutputTokensDetails,
+)
+from plap.settings import PublicUsageConfig
 
 _DEFAULT_ENCODING = "o200k_base"
 
@@ -681,6 +688,42 @@ class MutableQueues:
         self.arbitrator.clear()
         self.continuation_side = Side.MAIN
         self.in_temp_debate = False
+
+
+@dataclass(slots=True)
+class UsageAccumulator:
+    hidden: list[tuple[PublicUsageConfig, ChatUsage]] = field(default_factory=list)
+
+    def add_hidden(self, config: PublicUsageConfig, usage: ChatUsage | None) -> None:
+        if usage is None:
+            return
+        self.hidden.append((config, usage))
+
+    def to_response_usage(self, anchor: ChatUsage | None) -> ResponseUsage | None:
+        if anchor is None:
+            return None
+
+        hidden_equivalent_output = sum(self._equivalent_output_tokens(config, usage) for config, usage in self.hidden)
+        cached_tokens = anchor.cached_tokens or 0
+        reasoning_tokens = (anchor.reasoning_tokens or 0) + hidden_equivalent_output
+        output_tokens = anchor.output_tokens + hidden_equivalent_output
+        return ResponseUsage(
+            input_tokens=anchor.input_tokens,
+            input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
+            output_tokens=output_tokens,
+            output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+            total_tokens=anchor.input_tokens + output_tokens,
+        )
+
+    def _equivalent_output_tokens(self, config: PublicUsageConfig, usage: ChatUsage) -> int:
+        cached_input = min(usage.cached_tokens or 0, usage.input_tokens)
+        uncached_input = usage.input_tokens - cached_input
+        equivalent_output = (
+            uncached_input * config.uncached_input_to_output
+            + cached_input * config.cached_input_to_output
+            + usage.output_tokens * config.output_to_output
+        )
+        return ceil(equivalent_output)
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:

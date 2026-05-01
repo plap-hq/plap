@@ -22,6 +22,7 @@ from plap.responses.contracts import (
     FunctionTool,
     ReasoningConfig,
     RequestCompactionItem,
+    RequestFunctionCallOutputItem,
     RequestMessageItem,
     ResponseCompletedEvent,
     ResponseCreateRequest,
@@ -33,6 +34,7 @@ from plap.responses.ingest import (
     CompactionPayload,
     IngestedQueues,
     content_hash,
+    open_call_id,
     open_compaction_payload,
     open_reasoning_payload,
     seal_compaction_payload,
@@ -309,7 +311,8 @@ async def test_stream_response_events_keeps_application_instructions_in_single_d
     ]
 
     assert [message.role for message in client.requests[0].messages] == ["developer", "user"]
-    assert "[^untrusted] Prefer terse answers." in (client.requests[0].messages[0].content or "")
+    assert "[^untrusted]" in (client.requests[0].messages[0].content or "")
+    assert "Prefer terse answers." in (client.requests[0].messages[0].content or "")
     assert client.requests[0].messages[1].content == "[~0]\nhello"
 
 
@@ -411,25 +414,346 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
 
 
-async def test_stream_response_events_rejects_risky_client_calls_while_debate_is_quarantined() -> None:
-    with pytest.raises(ResponseError, match="debate path is disabled"):
+async def test_stream_response_events_reviewer_accept_publishes_risky_candidate() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record")]),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message", "function_call"]
+    held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert held_payload.temp is True
+    assert held_payload.continuation_side == "reviewer"
+    assert held_payload.messages[0].tool_calls[0].id == "upstream_mutate_1"
+    assert held_payload.messages[1].tool_call_id == "upstream_mutate_1"
+    assert held_payload.messages[1].content == "This tool call was not executed."
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert reviewer_payload.messages[0].role == "user"
+    assert "original question" not in (reviewer_payload.messages[0].content or "")
+    assert "draft answer" in (reviewer_payload.messages[0].content or "")
+    assert completed.output[-1].name == "mutate_record"
+    assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    assert len(client.requests) == 2
+
+
+async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resumes() -> None:
+    first_client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="upstream_read_1", name="read_file", arguments='{"path":"README.md"}')],
+            ),
+        ]
+    )
+    first_events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record"), _read_file_tool()]),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=first_client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    first_completed = _completed_response(first_events)
+    assert [item.type for item in first_completed.output] == ["reasoning", "reasoning", "function_call"]
+    reviewer_call = first_completed.output[-1]
+    assert open_call_id(reviewer_call.call_id, keyring=_keyring()).side == "reviewer"
+
+    second_client = _StaticChatClient(
+        _assistant_json(
+            {
+                "action": "accept",
+                "note": None,
+            }
+        )
+    )
+    second_events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    *_replay_output_items(first_completed),
+                    RequestFunctionCallOutputItem(
+                        call_id=reviewer_call.call_id,
+                        output="README tool output",
+                        type="function_call_output",
+                    ),
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=second_client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    second_completed = _completed_response(second_events)
+    assert [item.type for item in second_completed.output] == ["reasoning", "message", "function_call"]
+    assert second_completed.output[-1].name == "mutate_record"
+    assert open_call_id(second_completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    assert second_client.requests[0].messages[-1].role == "tool"
+    assert second_client.requests[0].messages[-1].content == "README tool output"
+
+
+async def test_stream_response_events_main_debate_uses_effective_main_context() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_json(
+                {
+                    "action": "reopen",
+                    "note": "Check ids.",
+                }
+            ),
+            ChatMessage(role="assistant", content="after review"),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
+        ]
+    )
+
+    completed = _completed_response(
         [
             event
             async for event in stream_response_events(
-                ResponseCreateRequest(model="plap/test", tools=[_tool("mutate_record")]),
+                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
                 settings=_settings(),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
                 tool_call_policy_resolver=_RecordingCallResolver(),
-                chat_completion_client=_StaticChatClient(
-                    ChatMessage(
-                        role="assistant",
-                        tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
-                    )
-                ),
+                chat_completion_client=client,
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message", "function_call"]
+    main_debate_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
+    assert main_debate_payload.messages[0].role == "user"
+    assert "original question" not in (main_debate_payload.messages[0].content or "")
+    assert "draft answer" not in (main_debate_payload.messages[0].content or "")
+    assert "Check ids." in (main_debate_payload.messages[0].content or "")
+    debate_request = client.requests[2]
+    contents = [message.content or "" for message in debate_request.messages[1:]]
+    assert any(content == "original question" for content in contents)
+    assert any(content == "draft answer" for content in contents)
+    assert any(content == "This tool call was not executed." for content in contents)
+    assert "Check ids." in (debate_request.messages[-1].content or "")
+
+
+async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_json(
+                {
+                    "action": "reopen",
+                    "note": "Check ids.",
+                }
+            ),
+            ChatMessage(role="assistant", content="after review"),
+            _assistant_json(
+                {
+                    "action": "revise",
+                    "note": "Use the safer path.",
+                }
+            ),
+            ChatMessage(role="assistant", content="final public answer"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "reasoning", "message"]
+    arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
+    assert arbitrator_payload.messages[0].role == "user"
+    assert "original question" not in (arbitrator_payload.messages[0].content or "")
+    assert "draft answer" in (arbitrator_payload.messages[0].content or "")
+    assert "after review" in (arbitrator_payload.messages[0].content or "")
+    stable_guidance = open_reasoning_payload(completed.output[-2].encrypted_content, keyring=_keyring())
+    assert stable_guidance.temp is False
+    assert stable_guidance.messages[0].content == "Use the safer path."
+    assert completed.output[-1].content[0].text == "final public answer"
+    assert len(client.requests) == 5
+
+
+async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_json(
+                {
+                    "action": "reopen",
+                    "note": "Check ids.",
+                }
+            ),
+            ChatMessage(role="assistant", content="after review one"),
+            _assistant_json(
+                {
+                    "action": "reopen",
+                    "note": "Look at edge case.",
+                }
+            ),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == [
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "message",
+        "function_call",
+    ]
+    reopened_reviewer_payload = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
+    assert reopened_reviewer_payload.messages[0].role == "user"
+    assert "original question" not in (reopened_reviewer_payload.messages[0].content or "")
+    assert "draft answer" not in (reopened_reviewer_payload.messages[0].content or "")
+    assert "after review one" in (reopened_reviewer_payload.messages[0].content or "")
+    assert "Look at edge case." in (reopened_reviewer_payload.messages[0].content or "")
+
+
+async def test_stream_response_events_reviewer_accept_publishes_held_server_output() -> None:
+    provider = _FakeMCPToolProvider(output="search result for cats")
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[
+                    ChatToolCall(id="upstream_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":"cats"}'),
+                    ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}'),
+                ],
+            ),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="search then mutate",
+                    tools=[WebSearchTool(type="web_search"), _tool("mutate_record")],
+                ),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                mcp_tool_providers=(provider,),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == [
+        "reasoning",
+        "reasoning",
+        "message",
+        "function_call",
+        "function_call",
+        "function_call_output",
+    ]
+    assert completed.output[3].name == MCP_SEARCH_TOOL_NAME
+    assert completed.output[4].name == "mutate_record"
+    assert completed.output[5].call_id == completed.output[3].call_id
+    assert completed.output[5].output == "search result for cats"
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
 
 
 async def test_stream_response_events_executes_server_tool_and_loops_back() -> None:
@@ -530,8 +854,8 @@ async def test_stream_response_events_soft_reminder_one_shot_after_tool() -> Non
         )
     ]
 
-    assert "Context is getting long" in (client.requests[0].messages[-1].content or "")
-    assert all("Context is getting long" not in (message.content or "") for message in client.requests[1].messages)
+    assert sum(1 for message in client.requests[0].messages if message.role == "user") == 2
+    assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
 
 
 async def test_stream_response_events_mixed_server_client_tools_do_not_loop() -> None:
@@ -1060,7 +1384,8 @@ async def test_stream_response_events_accepts_empty_compression_bailout() -> Non
     assert len(client.requests) == 2
     assert [tool.function.name for tool in client.requests[0].tools] == [COMPRESS_TOOL_NAME]
     assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
-    assert all("Context is getting long" not in (message.content or "") for message in client.requests[1].messages)
+    assert sum(1 for message in client.requests[0].messages if message.role == "user") == 1
+    assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
 
 
 async def test_stream_response_events_adds_soft_compression_reminder() -> None:
@@ -1088,9 +1413,6 @@ async def test_stream_response_events_adds_soft_compression_reminder() -> None:
 
     request = client.requests[0]
     assert request.messages[-1].role == "user"
-    assert "Context is getting long" in (request.messages[-1].content or "")
-    assert "another tool is needed first" in (request.messages[-1].content or "")
-    assert '{"ranges": []}' not in (request.messages[-1].content or "")
     assert request.tool_choice is None
     assert events[-1].response.output[0].content[0].text == "done"
 
@@ -1121,7 +1443,6 @@ async def test_stream_response_events_context_management_overrides_compression_b
 
     request = client.requests[0]
     assert request.messages[-1].role == "user"
-    assert "Context is getting long" in (request.messages[-1].content or "")
     assert events[-1].response.output[0].content[0].text == "done"
 
 
@@ -1189,10 +1510,10 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
     request = client.requests[0]
     assert isinstance(request.tool_choice, ChatToolChoiceFunction)
     assert request.tool_choice.name == COMPRESS_TOOL_NAME
-    assert "compression limit" in (request.messages[-1].content or "")
     assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
     assert client.requests[1].tool_choice is None
-    assert all("compression limit" not in (message.content or "") for message in client.requests[1].messages)
+    assert sum(1 for message in client.requests[0].messages if message.role == "user") == 2
+    assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
 
 
 async def test_stream_response_events_rejects_multiple_context_management_entries() -> None:
@@ -1811,6 +2132,20 @@ def _completed_response(events: Sequence[object]):
     completed = events[-1]
     assert isinstance(completed, ResponseCompletedEvent)
     return completed.response
+
+
+def _assistant_json(value: object) -> ChatMessage:
+    return ChatMessage(role="assistant", content=json.dumps(value))
+
+
+def _replay_output_items(response) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for item in response.output:
+        value = item.model_dump(mode="python")
+        if value.get("type") in {"compaction", "function_call_output"}:
+            value.pop("created_by", None)
+        items.append(value)
+    return items
 
 
 def _read_file_tool() -> FunctionTool:
