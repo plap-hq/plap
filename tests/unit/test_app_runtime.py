@@ -4,7 +4,7 @@ import pytest
 
 from plap.app import (
     _create_chat_completion_client,
-    _create_mcp_tool_provider,
+    _create_mcp_tool_providers,
     _create_tool_call_classifier,
     _create_tool_classifier,
     _validate_runtime_model_profiles,
@@ -23,8 +23,10 @@ from plap.responses.tools import (
 )
 from plap.responses.tools.mcp import MCPToolProvider
 from plap.settings import (
+    MCPServerConfig,
     RuntimeModelProfileConfig,
-    RuntimeModelProfileOverrideConfig,
+    RuntimeModelProfilePatch,
+    RuntimeModelProfileVariant,
     Settings,
 )
 
@@ -126,31 +128,40 @@ def test_app_runtime_rejects_unrouted_tool_call_classifier_route() -> None:
 
 
 def test_app_runtime_omits_mcp_provider_without_config() -> None:
-    assert _create_mcp_tool_provider(_settings()) is None
+    assert _create_mcp_tool_providers(_settings()) == ()
 
 
-def test_app_runtime_builds_mcp_provider_from_config() -> None:
-    provider = _create_mcp_tool_provider(
+def test_app_runtime_builds_mcp_providers_from_config_list() -> None:
+    providers = _create_mcp_tool_providers(
         _settings(
-            web_search_mcp_config={
-                "mcpServers": {
-                    "search": {
-                        "command": "search-server",
-                        "args": ["--stdio"],
-                    }
-                }
-            },
-            web_search_mcp_tool_names=["search_web"],
+            mcp_servers=[
+                MCPServerConfig(
+                    name="search",
+                    config={
+                        "mcpServers": {
+                            "search": {
+                                "command": "search-server",
+                                "args": ["--stdio"],
+                            }
+                        }
+                    },
+                    tool_names=["search_web"],
+                )
+            ],
         )
     )
 
-    assert isinstance(provider, MCPToolProvider)
+    assert len(providers) == 1
+    assert isinstance(providers[0], MCPToolProvider)
 
 
 def test_app_runtime_builds_mcp_provider_from_url() -> None:
-    provider = _create_mcp_tool_provider(_settings(web_search_mcp_url="http://localhost:8765/mcp"))
+    providers = _create_mcp_tool_providers(
+        _settings(mcp_servers=[MCPServerConfig(name="remote", url="http://localhost:8765/mcp")])
+    )
 
-    assert isinstance(provider, MCPToolProvider)
+    assert len(providers) == 1
+    assert isinstance(providers[0], MCPToolProvider)
 
 
 def test_app_runtime_validates_synthetic_model_profiles() -> None:
@@ -194,7 +205,7 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
         _validate_runtime_model_profiles(settings)
 
 
-def test_app_runtime_validates_service_tier_profile_overrides() -> None:
+def test_app_runtime_validates_runtime_profile_variants() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
@@ -205,17 +216,20 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                service_tier_overrides={
-                    "priority": RuntimeModelProfileOverrideConfig(
-                        main_model="lightning/lightning-ai/gpt-oss-120b",
-                        reviewer_model="lightning/lightning-ai/gpt-oss-120b",
-                        transcript_token_budget=4096,
-                        compression_soft_token_budget=4096,
-                        compression_hard_token_budget=8192,
-                        compression_max_rounds=1,
-                        debate_max_rounds=1,
+                variants=[
+                    RuntimeModelProfileVariant(
+                        when={"service_tier": "priority"},
+                        patch=RuntimeModelProfilePatch(
+                            main_model="lightning/lightning-ai/gpt-oss-120b",
+                            reviewer_model="lightning/lightning-ai/gpt-oss-120b",
+                            transcript_token_budget=4096,
+                            compression_soft_token_budget=4096,
+                            compression_hard_token_budget=8192,
+                            compression_max_rounds=1,
+                            debate_max_rounds=1,
+                        ),
                     )
-                },
+                ],
             )
         },
     )
@@ -223,7 +237,7 @@ def test_app_runtime_validates_service_tier_profile_overrides() -> None:
     _validate_runtime_model_profiles(settings)
 
 
-def test_app_runtime_rejects_unrouted_service_tier_override() -> None:
+def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
         runtime_model_profiles={
@@ -233,7 +247,12 @@ def test_app_runtime_rejects_unrouted_service_tier_override() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                service_tier_overrides={"priority": RuntimeModelProfileOverrideConfig(main_model="lightning/lightning-ai/gpt-oss-120b")},
+                variants=[
+                    RuntimeModelProfileVariant(
+                        when={"service_tier": "priority"},
+                        patch=RuntimeModelProfilePatch(main_model="lightning/lightning-ai/gpt-oss-120b"),
+                    )
+                ],
             )
         },
     )
@@ -262,15 +281,15 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     assert profile.display_name == "Test Model"
     assert profile.main_model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.transcript_token_budget == 1024
-    assert settings.resolve_runtime_model_profile("plap/standard", "default") is profile
-    assert settings.resolve_runtime_model_profile("plap/standard", "auto") is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "default"}) is profile
+    assert settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "auto"}) is profile
     with pytest.raises(ValueError, match="model is required"):
         settings.resolve_runtime_model_profile(None)
     with pytest.raises(ValueError, match="unknown runtime model"):
         settings.resolve_runtime_model_profile("lightning/lightning-ai/gpt-oss-20b")
 
 
-def test_app_runtime_resolves_service_tier_overrides() -> None:
+def test_app_runtime_resolves_runtime_profile_variants() -> None:
     settings = _settings(
         runtime_model_profiles={
             "plap/standard": _profile_config(
@@ -283,27 +302,27 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
                 compression_hard_token_budget=3000,
                 compression_max_rounds=2,
                 debate_max_rounds=2,
-                service_tier_overrides={
-                    "priority": RuntimeModelProfileOverrideConfig(
-                        main_model="lightning/lightning-ai/gpt-oss-120b",
-                        reviewer_model="lightning/lightning-ai/gpt-oss-120b",
-                        transcript_token_budget=8192,
-                        compression_soft_token_budget=5000,
-                        compression_hard_token_budget=6000,
-                        compression_max_rounds=1,
-                        debate_max_rounds=1,
+                variants=[
+                    RuntimeModelProfileVariant(
+                        when={"service_tier": "priority"},
+                        patch=RuntimeModelProfilePatch(
+                            main_model="lightning/lightning-ai/gpt-oss-120b",
+                            reviewer_model="lightning/lightning-ai/gpt-oss-120b",
+                            transcript_token_budget=8192,
+                            compression_soft_token_budget=5000,
+                            compression_hard_token_budget=6000,
+                            compression_max_rounds=1,
+                            debate_max_rounds=1,
+                        ),
                     )
-                },
+                ],
             )
         },
     )
 
     base = settings.resolve_runtime_model_profile("plap/standard")
-    priority = settings.resolve_runtime_model_profile(
-        "plap/standard",
-        "priority",
-    )
-    flex = settings.resolve_runtime_model_profile("plap/standard", "flex")
+    priority = settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "priority"})
+    flex = settings.resolve_runtime_model_profile("plap/standard", parameters={"service_tier": "flex"})
 
     assert priority is not base
     assert priority.display_name == "Test Model"
@@ -321,6 +340,38 @@ def test_app_runtime_resolves_service_tier_overrides() -> None:
     assert base.compression_max_rounds == 2
     assert base.debate_max_rounds == 2
     assert flex is base
+
+
+def test_app_runtime_resolves_reasoning_effort_variant() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                variants=[
+                    RuntimeModelProfileVariant(
+                        when={"reasoning_effort": "high", "response_format": "json_schema"},
+                        patch=RuntimeModelProfilePatch(
+                            main_model="lightning/lightning-ai/gpt-oss-120b",
+                            main_debate_model="lightning/lightning-ai/gpt-oss-120b",
+                        ),
+                    )
+                ],
+            )
+        },
+    )
+
+    profile = settings.resolve_runtime_model_profile(
+        "plap/standard",
+        parameters={"reasoning_effort": "high", "response_format": "json_schema"},
+    )
+
+    assert profile.main_model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.main_debate_model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.reviewer_model == "crof/qwen3.5-9b"
 
 
 def test_runtime_profile_rejects_invalid_compression_budgets() -> None:
@@ -359,11 +410,7 @@ def _profile_config(
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
     debate_max_rounds: int = 2,
-    service_tier_overrides: dict[
-        str,
-        RuntimeModelProfileOverrideConfig,
-    ]
-    | None = None,
+    variants: list[RuntimeModelProfileVariant] | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name=display_name,
@@ -377,5 +424,5 @@ def _profile_config(
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
         debate_max_rounds=debate_max_rounds,
-        service_tier_overrides=service_tier_overrides or {},
+        variants=variants or [],
     )

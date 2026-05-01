@@ -24,17 +24,12 @@ from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
+from plap.responses.errors import ResponseError
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import stream_response_events
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import Settings
-
-
-class ResponseOperationUnsupportedError(Exception):
-    def __init__(self, *, status_code: int = 501) -> None:
-        super().__init__("response operation is not supported")
-        self.status_code = status_code
 
 
 async def _sse_payload(
@@ -64,7 +59,7 @@ async def create_response(
     reasoning_summarizer: IReasoningSummarizer,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_provider: IMCPToolProvider | None,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> object:
     _ = auth_context
     events = stream_response_events(
@@ -75,7 +70,7 @@ async def create_response(
         reasoning_summarizer=reasoning_summarizer,
         tool_policy_resolver=tool_policy_resolver,
         tool_call_policy_resolver=tool_call_policy_resolver,
-        mcp_tool_provider=mcp_tool_provider,
+        mcp_tool_providers=mcp_tool_providers,
     )
     if data.stream:
         return ServerSentEvent(
@@ -96,7 +91,10 @@ async def retrieve_response(
 ) -> object:
     _ = auth_context
     _ = response_id, include, include_obfuscation, starting_after, stream
-    raise ResponseOperationUnsupportedError(status_code=404)
+    raise ResponseError.unsupported_operation(
+        private_message="response retrieval is not supported",
+        status_code=404,
+    )
 
 
 @delete(
@@ -110,7 +108,10 @@ async def delete_response(
 ) -> object:
     _ = auth_context
     _ = response_id
-    raise ResponseOperationUnsupportedError(status_code=404)
+    raise ResponseError.unsupported_operation(
+        private_message="response deletion is not supported",
+        status_code=404,
+    )
 
 
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -120,7 +121,7 @@ async def compact_response(
 ) -> object:
     _ = auth_context
     _ = data
-    raise ResponseOperationUnsupportedError()
+    raise ResponseError.unsupported_operation(private_message="response compaction route is not supported")
 
 
 @get(
@@ -137,7 +138,10 @@ async def list_input_items(
 ) -> object:
     _ = auth_context
     _ = response_id, after, include, limit, order
-    raise ResponseOperationUnsupportedError(status_code=404)
+    raise ResponseError.unsupported_operation(
+        private_message="response input item listing is not supported",
+        status_code=404,
+    )
 
 
 @post(
@@ -151,7 +155,7 @@ async def count_input_tokens(
 ) -> object:
     _ = auth_context
     _ = data
-    raise ResponseOperationUnsupportedError()
+    raise ResponseError.unsupported_operation(private_message="response input token counting route is not supported")
 
 
 @websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
@@ -164,7 +168,7 @@ async def responses_socket(
     reasoning_summarizer: IReasoningSummarizer,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_provider: IMCPToolProvider | None,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> None:
     _ = auth_context
 
@@ -196,10 +200,17 @@ async def responses_socket(
                 reasoning_summarizer=reasoning_summarizer,
                 tool_policy_resolver=tool_policy_resolver,
                 tool_call_policy_resolver=tool_call_policy_resolver,
-                mcp_tool_provider=mcp_tool_provider,
+                mcp_tool_providers=mcp_tool_providers,
             )
             async for event in events:
                 await socket.send_json(event.model_dump(mode="json", exclude_none=True))
+        except ResponseError as exc:
+            await socket.send_json(
+                build_error_event(exc.public.message).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
         except Exception:
             await socket.send_json(
                 build_error_event("Invalid request.").model_dump(

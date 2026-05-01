@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Sequence
+from typing import Protocol, runtime_checkable
 
 import msgspec
 
 from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient
 from plap.responses.contracts import ReasoningSummary
-from plap.responses.ingest.types import Side
+from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
 
 REASONING_SUMMARY_PROMPT = """Rewrite private mixed-perspective reasoning messages
 into a user-facing reasoning summary.
@@ -52,7 +52,7 @@ class IReasoningSummarizer(Protocol):
         model: str,
         mode: ReasoningSummary,
         side: Side,
-        messages: Sequence[Mapping[str, Any]],
+        messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]: ...
 
 
@@ -66,7 +66,7 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
         model: str,
         mode: ReasoningSummary,
         side: Side,
-        messages: Sequence[Mapping[str, Any]],
+        messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
         async for delta in self._client.stream(
             ChatCompletionRequest(
@@ -96,7 +96,7 @@ class NullReasoningSummarizer(IReasoningSummarizer):
         model: str,
         mode: ReasoningSummary,
         side: Side,
-        messages: Sequence[Mapping[str, Any]],
+        messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
         _ = model, mode, side, messages
         if False:
@@ -106,9 +106,12 @@ class NullReasoningSummarizer(IReasoningSummarizer):
 def _summary_request_text(
     mode: ReasoningSummary,
     side: Side,
-    messages: Sequence[Mapping[str, Any]],
+    messages: Sequence[StateMessage | ReasoningMessagePatch],
 ) -> str:
-    payload = msgspec.json.encode(list(messages), order="deterministic").decode()
+    payload = msgspec.json.encode(
+        [message.to_primitive() for message in messages],
+        order="deterministic",
+    ).decode()
     return f"Summary mode: {mode}\nTrace perspective hint: {_summary_perspective_hint(side)}\n\nReasoning trace messages:\n{payload}"
 
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
+import msgspec
 from fastmcp import Client
 
 from plap.responses.contracts import FunctionTool
@@ -82,4 +82,4 @@ def _content_block_text(block: Any) -> str:
 
 
 def _json_text(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return msgspec.json.encode(value).decode()

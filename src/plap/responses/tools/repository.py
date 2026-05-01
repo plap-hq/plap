@@ -400,15 +400,17 @@ def _tool_call_classification_from_row(row: Any) -> ToolCallClassification:
 
 
 def _effect_class(value: str) -> EffectClass:
-    if value in {"safe", "visible", "mutation", "contextual", "unknown"}:
-        return value
-    raise ValueError(f"unsupported effect class: {value}")
+    try:
+        return EffectClass(value)
+    except ValueError as exc:
+        raise ValueError(f"unsupported effect class: {value}") from exc
 
 
 def _tool_call_effect_class(value: str) -> ToolCallEffectClass:
-    if value in {"safe", "mutation", "unknown"}:
-        return value
-    raise ValueError(f"unsupported tool call effect class: {value}")
+    try:
+        return ToolCallEffectClass(value)
+    except ValueError as exc:
+        raise ValueError(f"unsupported tool call effect class: {value}") from exc
 
 
 def _json_string(value: object) -> str:

@@ -2,17 +2,36 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Any, Protocol, runtime_checkable
 
 import blake3
 import msgspec
 from cachetools import LRUCache
 
 from plap.responses.contracts import FunctionTool
+from plap.responses.errors import ResponseError
 
-type EffectClass = Literal["safe", "visible", "mutation", "contextual", "unknown"]
-type ToolCallEffectClass = Literal["safe", "mutation", "unknown"]
-type ToolSource = Literal["client", "server"]
+
+class EffectClass(StrEnum):
+    SAFE = "safe"
+    VISIBLE = "visible"
+    MUTATION = "mutation"
+    CONTEXTUAL = "contextual"
+    UNKNOWN = "unknown"
+
+
+class ToolCallEffectClass(StrEnum):
+    SAFE = "safe"
+    MUTATION = "mutation"
+    UNKNOWN = "unknown"
+
+
+class ToolSource(StrEnum):
+    CLIENT = "client"
+    SERVER = "server"
+
+
 type _ClassificationL1Key = tuple[bytes, str, str, bytes]
 type _ToolCallClassificationL1Key = tuple[bytes, bytes, str, str, bytes]
 
@@ -37,6 +56,9 @@ class ToolClassification:
     rationale: str
     raw_output: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "effect_class", EffectClass(self.effect_class))
+
 
 type ClassificationL1Cache = MutableMapping[_ClassificationL1Key, ToolClassification]
 
@@ -52,6 +74,9 @@ class ToolCallClassification:
     confidence: float
     rationale: str
     raw_output: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "effect_class", ToolCallEffectClass(self.effect_class))
 
 
 type ToolCallClassificationL1Cache = MutableMapping[
@@ -92,6 +117,10 @@ class ToolPolicy:
     effect_class: EffectClass
     classification: ToolClassification | ToolCallClassification | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", ToolSource(self.source))
+        object.__setattr__(self, "effect_class", EffectClass(self.effect_class))
+
 
 @runtime_checkable
 class IToolPolicyResolver(Protocol):
@@ -121,10 +150,6 @@ class IToolCallPolicyResolver(Protocol):
     async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]: ...
 
 
-class ToolPolicyError(ValueError):
-    pass
-
-
 def normalize_function_tool(tool: FunctionTool) -> dict[str, object]:
     return {
         "description": tool.description,
@@ -147,9 +172,9 @@ def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
     try:
         value = msgspec.json.decode(arguments.encode())
     except msgspec.DecodeError as exc:
-        raise ToolPolicyError("function call arguments must be valid JSON") from exc
+        raise ResponseError.tool_policy(private_message="function call arguments must be valid JSON", cause=exc) from exc
     if not isinstance(value, dict):
-        raise ToolPolicyError("function call arguments must be a JSON object")
+        raise ResponseError.tool_policy(private_message="function call arguments must be a JSON object")
     return value
 
 
@@ -189,7 +214,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
             if previous_hash is not None and previous_hash != signature.signature_hash:
-                raise ToolPolicyError(f"duplicate function tool name with different signature: {tool.name}")
+                raise ResponseError.tool_policy(private_message=f"duplicate function tool name with different signature: {tool.name}")
             signatures_by_name[tool.name] = signature.signature_hash
             if tool.name not in client_signatures_by_name:
                 client_signatures_by_name[tool.name] = signature
@@ -351,7 +376,7 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
             if previous_hash is not None and previous_hash != signature.signature_hash:
-                raise ToolPolicyError(f"duplicate function tool name with different signature: {tool.name}")
+                raise ResponseError.tool_policy(private_message=f"duplicate function tool name with different signature: {tool.name}")
             signatures_by_name[tool.name] = signature.signature_hash
             policies.setdefault(
                 tool.name,

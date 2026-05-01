@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import secrets
 import time
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from collections.abc import Sequence
+from enum import StrEnum
+from typing import cast
 
 import anyio
 from anyio.abc import ObjectSendStream, TaskGroup
@@ -40,11 +41,18 @@ from plap.responses.contracts import (
     ResponseUsage,
     SummaryTextContent,
 )
-from plap.responses.ingest.types import Side
+from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
 from plap.responses.reasoning import IReasoningSummarizer
 
-type _CommitKind = Literal["created", "in_progress", "output", "completed"]
-type _ReasoningMessages = tuple[Mapping[str, Any], ...]
+
+class _CommitKind(StrEnum):
+    CREATED = "created"
+    IN_PROGRESS = "in_progress"
+    OUTPUT = "output"
+    COMPLETED = "completed"
+
+
+type _ReasoningMessages = tuple[StateMessage | ReasoningMessagePatch, ...]
 type _ReasoningMetadata = tuple[Side, _ReasoningMessages]
 type _OutputMetadata = _ReasoningMetadata | None
 type _Commit = tuple[_CommitKind, ResponseObject | ResponseOutputItem, _OutputMetadata]
@@ -73,17 +81,17 @@ class ResponseEventIO:
         task_group.start_soon(self._emit_commits)
 
     async def created(self) -> None:
-        await self._commit_send.send(("created", self._response, None))
+        await self._commit_send.send((_CommitKind.CREATED, self._response, None))
 
     async def in_progress(self) -> None:
-        await self._commit_send.send(("in_progress", self._response, None))
+        await self._commit_send.send((_CommitKind.IN_PROGRESS, self._response, None))
 
     async def output(
         self,
         item: ResponseOutputItem,
         *,
         reasoning_side: Side | None = None,
-        reasoning_messages: Sequence[Mapping[str, Any]] | None = None,
+        reasoning_messages: Sequence[StateMessage | ReasoningMessagePatch] | None = None,
     ) -> None:
         metadata: _OutputMetadata = None
         if reasoning_messages is not None:
@@ -93,7 +101,7 @@ class ResponseEventIO:
                 if reasoning_side is None:
                     raise TypeError("reasoning_side is required for reasoning messages")
                 metadata = (reasoning_side, tuple(reasoning_messages))
-        await self._commit_send.send(("output", item, metadata))
+        await self._commit_send.send((_CommitKind.OUTPUT, item, metadata))
 
     async def completed(
         self,
@@ -109,7 +117,7 @@ class ResponseEventIO:
                 "usage": usage,
             }
         )
-        await self._commit_send.send(("completed", response, None))
+        await self._commit_send.send((_CommitKind.COMPLETED, response, None))
 
     async def aclose(self) -> None:
         await self._commit_send.aclose()
@@ -117,7 +125,7 @@ class ResponseEventIO:
     async def _emit_commits(self) -> None:
         async with self._commit_receive:
             async for kind, value, metadata in self._commit_receive:
-                if kind == "created":
+                if kind == _CommitKind.CREATED:
                     await self._send_event(
                         ResponseCreatedEvent(
                             response=cast(ResponseObject, value),
@@ -125,7 +133,7 @@ class ResponseEventIO:
                             type="response.created",
                         )
                     )
-                elif kind == "in_progress":
+                elif kind == _CommitKind.IN_PROGRESS:
                     await self._send_event(
                         ResponseInProgressEvent(
                             response=cast(ResponseObject, value),
@@ -133,7 +141,7 @@ class ResponseEventIO:
                             type="response.in_progress",
                         )
                     )
-                elif kind == "output":
+                elif kind == _CommitKind.OUTPUT:
                     await self._emit_output(cast(ResponseOutputItem, value), metadata)
                 else:
                     response = cast(ResponseObject, value).model_copy(update={"output": self._output_items})

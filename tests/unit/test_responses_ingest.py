@@ -18,12 +18,12 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
+from plap.responses.errors import ResponseError
 from plap.responses.ingest import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
     ChatMessageSpan,
     CompactionPayload,
     IngestedQueues,
-    IngestionError,
     ReasoningPayload,
     SealedCallID,
     content_hash,
@@ -41,6 +41,7 @@ from plap.responses.ingest.sealing import (
     COMPACTION_PURPOSE,
     PAYLOAD_FORMAT_VERSION,
 )
+from plap.responses.models import ReasoningMessagePatch, StateMessage
 
 
 async def ingest_response_request(
@@ -70,12 +71,12 @@ async def test_ingestion_preserves_last_compaction_spans() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.start, row.end, row.message["content"]) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message.content) for row in result.main_context] == [
         (0, 0, "kept source"),
         (1, 1, "kept summarized source"),
         (2, 2, "after"),
     ]
-    assert [row.message["content"] for row in result.main_transcript] == [
+    assert [row.message.content for row in result.main_transcript] == [
         "kept source",
         "kept summarized source",
         "after",
@@ -107,7 +108,7 @@ async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.start, row.end, row.message["content"]) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message.content) for row in result.main_context] == [
         (0, 0, "u0"),
         (1, 1, "a0"),
     ]
@@ -124,8 +125,8 @@ async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
 
     assert result.main_context == ()
     assert result.main_transcript == ()
-    assert [(row.message["content"], row.content_hash) for row in result.reviewer] == [
-        ("review", content_hash({"role": "assistant", "content": "review"}))
+    assert [(row.message.content, row.content_hash) for row in result.reviewer] == [
+        ("review", _message_hash({"role": "assistant", "content": "review"}))
     ]
     assert result.arbitrator == ()
     assert result.continuation_side == "reviewer"
@@ -137,7 +138,7 @@ async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
         keyring=_keyring(),
     )
 
-    assert result.arbitrator[0].message["content"] == "decide"
+    assert result.arbitrator[0].message.content == "decide"
     assert result.continuation_side == "arbitrator"
 
 
@@ -156,7 +157,7 @@ async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_wh
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context_temp] == ["candidate mutation"]
+    assert [row.message.content for row in result.main_context_temp] == ["candidate mutation"]
     assert result.reviewer == ()
     assert result.continuation_side == "reviewer"
     assert result.in_temp_debate is True
@@ -176,7 +177,7 @@ async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_wh
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == ["main reasoning", "follow-up"]
+    assert [row.message.content for row in result.main_context] == ["main reasoning", "follow-up"]
     assert result.continuation_side == "main"
 
 
@@ -184,7 +185,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     temp_message = {"role": "assistant", "content": "temp reviewer"}
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(temp_message),
+        content_hash_value=_message_hash(temp_message),
         upstream_tool_call_id="up_temp_0",
     )
 
@@ -204,7 +205,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == ["final debate result"]
+    assert [row.message.content for row in result.main_context] == ["final debate result"]
     assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
@@ -220,7 +221,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     }
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(temp_message),
+        content_hash_value=_message_hash(temp_message),
         upstream_tool_call_id="up_temp_0",
     )
 
@@ -236,7 +237,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message["content"] for row in result.main_context] == ["new mainline request"]
+    assert [row.message.content for row in result.main_context] == ["new mainline request"]
     assert result.main_context_temp == ()
     assert result.main_context == result.main_transcript
     assert result.reviewer == ()
@@ -266,18 +267,15 @@ async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None
         keyring=_keyring(),
     )
 
-    assert [row.message for row in result.main_context] == [
+    assert [row.message.to_primitive() for row in result.main_context] == [
         {
             "role": "assistant",
             "content": "stable assistant",
             "tool_calls": [
                 {
                     "id": "client_call_0",
-                    "type": "function",
-                    "function": {
-                        "name": "read_file",
-                        "arguments": '{"path":"README.md"}',
-                    },
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
                 }
             ],
         },
@@ -309,7 +307,7 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
     )
 
     assert result.main_context == ()
-    assert [row.message["content"] for row in result.main_context_temp] == ["temp debate tail"]
+    assert [row.message.content for row in result.main_context_temp] == ["temp debate tail"]
     assert result.main_transcript == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is True
@@ -323,7 +321,7 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
     }
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(assistant),
+        content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_reviewer_0",
     )
 
@@ -340,7 +338,7 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
 
     assert result.main_context == ()
     assert result.main_transcript == ()
-    assert [row.message for row in result.reviewer] == [
+    assert [row.message.to_primitive() for row in result.reviewer] == [
         assistant,
         {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "review file"},
     ]
@@ -351,7 +349,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
     assistant = {"role": "assistant", "content": "public assistant"}
     call_id = _call_id(
         side="main",
-        content_hash_value=content_hash(assistant),
+        content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_main_0",
     )
 
@@ -366,7 +364,7 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
         keyring=_keyring(),
     )
 
-    assert [(row.start, row.end, row.message) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
         (
             0,
             0,
@@ -404,23 +402,14 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
         keyring=_keyring(),
     )
 
-    assert [(row.start, row.end, row.message) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
         (
             0,
             0,
             {
                 "role": "assistant",
                 "content": "client fabricated assistant",
-                "tool_calls": [
-                    {
-                        "id": "client_call_0",
-                        "type": "function",
-                        "function": {
-                            "name": "read_file",
-                            "arguments": '{"path":"README.md"}',
-                        },
-                    }
-                ],
+                "tool_calls": [{"id": "client_call_0", "name": "read_file", "arguments": '{"path":"README.md"}'}],
             },
         ),
         (
@@ -440,7 +429,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
 
 
 async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> None:
-    with pytest.raises(IngestionError, match="pending tool outputs"):
+    with pytest.raises(ResponseError, match="pending tool outputs"):
         await ingest_response_request(
             _request(
                 input=[
@@ -473,7 +462,7 @@ async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
         type="function_call",
     )
 
-    with pytest.raises(IngestionError, match="duplicate pending unsealed"):
+    with pytest.raises(ResponseError, match="duplicate pending unsealed"):
         await ingest_response_request(
             _request(input=[_message("assistant", "anchor"), first_call, second_call]),
             keyring=_keyring(),
@@ -484,11 +473,11 @@ async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> Non
     assistant = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(assistant),
+        content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_reviewer_0",
     )
 
-    with pytest.raises(IngestionError, match="pending tool outputs"):
+    with pytest.raises(ResponseError, match="pending tool outputs"):
         await ingest_response_request(
             _request(
                 input=[
@@ -510,7 +499,7 @@ async def test_ingestion_allows_stripped_tool_call_association() -> None:
     stripped = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(stripped),
+        content_hash_value=_message_hash(stripped),
         upstream_tool_call_id="up_stripped_0",
     )
 
@@ -525,7 +514,7 @@ async def test_ingestion_allows_stripped_tool_call_association() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message for row in result.reviewer] == [
+    assert [row.message.to_primitive() for row in result.reviewer] == [
         {
             "role": "assistant",
             "content": "need file",
@@ -542,7 +531,7 @@ async def test_ingestion_requires_reasoning_tool_call_public_replay() -> None:
         "tool_calls": [_tool_call("up_reasoning_0")],
     }
 
-    with pytest.raises(IngestionError, match="missing function_call item"):
+    with pytest.raises(ResponseError, match="missing function_call item"):
         await ingest_response_request(
             _request(input=[_reasoning_item("reviewer", False, [assistant])]),
             keyring=_keyring(),
@@ -566,7 +555,7 @@ async def test_ingestion_accepts_reasoning_tool_call_satisfied_by_hidden_output(
         keyring=_keyring(),
     )
 
-    assert [row.message for row in result.reviewer] == [assistant, hidden_output]
+    assert [row.message.to_primitive() for row in result.reviewer] == [assistant, hidden_output]
     assert result.continuation_side == "reviewer"
 
 
@@ -578,7 +567,7 @@ async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
     }
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(assistant),
+        content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_reasoning_0",
     )
 
@@ -593,7 +582,7 @@ async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.message for row in result.reviewer] == [
+    assert [row.message.to_primitive() for row in result.reviewer] == [
         assistant,
         {
             "role": "tool",
@@ -611,11 +600,11 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
     }
     call_id = _call_id(
         side="reviewer",
-        content_hash_value=content_hash(assistant),
+        content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_reasoning_0",
     )
 
-    with pytest.raises(IngestionError, match="missing function_call_output"):
+    with pytest.raises(ResponseError, match="missing function_call_output"):
         await ingest_response_request(
             _request(
                 input=[
@@ -630,7 +619,7 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
 async def test_ingestion_rejects_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 
-    with pytest.raises(IngestionError, match="content_hash target is missing"):
+    with pytest.raises(ResponseError, match="content_hash target is missing"):
         await ingest_response_request(
             _request(
                 input=[
@@ -639,7 +628,7 @@ async def test_ingestion_rejects_reasoning_forward_refs() -> None:
                         False,
                         [
                             {
-                                "content_hash": content_hash(target),
+                                "content_hash": _message_hash(target),
                                 "reasoning_content": "hidden",
                             },
                             target,
@@ -663,7 +652,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
                     False,
                     [
                         {
-                            "content_hash": content_hash(anchor),
+                            "content_hash": _message_hash(anchor),
                             "reasoning_content": "anchor reasoning",
                         },
                         {
@@ -678,7 +667,7 @@ async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None
         keyring=_keyring(),
     )
 
-    assert [(row.start, row.end, row.message) for row in result.main_context] == [
+    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
         (
             0,
             0,
@@ -709,7 +698,7 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
         upstream_tool_call_id="up_missing_0",
     )
 
-    with pytest.raises(IngestionError, match="content_hash target is missing"):
+    with pytest.raises(ResponseError, match="content_hash target is missing"):
         await ingest_response_request(
             _request(input=[_function_call(call_id)]),
             keyring=_keyring(),
@@ -719,11 +708,11 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
 async def test_ingestion_uses_nearest_backward_hash_prefix_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_hash(message: dict[str, object]) -> str:
-        content = str(message.get("content", ""))
+    def fake_hash(message: StateMessage) -> str:
+        content = str(message.content or "")
         return "0102030405060708" + ("a" if content.endswith("a") else "b") * 48
 
-    monkeypatch.setattr("plap.responses.ingest.types.chat_message_hash", fake_hash)
+    monkeypatch.setattr(StateMessage, "content_hash", fake_hash)
     call_id = _call_id(
         side="reviewer",
         content_hash_prefix_value=bytes.fromhex("0102030405060708"),
@@ -748,7 +737,7 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
         keyring=_keyring(),
     )
 
-    assert [row.message for row in result.reviewer] == [
+    assert [row.message.to_primitive() for row in result.reviewer] == [
         {"role": "assistant", "content": "a"},
         {
             "role": "assistant",
@@ -764,7 +753,7 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
 
 
 async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
-    with pytest.raises(IngestionError):
+    with pytest.raises(ResponseError):
         await ingest_response_request(
             _request(
                 input=[
@@ -791,13 +780,13 @@ def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
     leaf = ChatMessageSpan(
         start=0,
         end=0,
-        message={"role": "user"},
+        message=_state_message({"role": "user"}),
         token_count=1,
     )
     range_span = ChatMessageSpan(
         start=0,
         end=7,
-        message={"role": "assistant"},
+        message=_state_message({"role": "assistant"}),
         token_count=1,
         children_pruned=True,
         summary_fidelity=3,
@@ -819,7 +808,7 @@ def test_sealed_compaction_rejects_wrong_payload_type() -> None:
         },
     )
 
-    with pytest.raises(IngestionError, match="unsupported compaction payload"):
+    with pytest.raises(ResponseError, match="unsupported compaction payload"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -830,7 +819,7 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
                 ChatMessageSpan(
                     start=5,
                     end=5,
-                    message={"role": "user", "content": "bad"},
+                    message=_state_message({"role": "user", "content": "bad"}),
                     token_count=1,
                 ),
             ),
@@ -839,7 +828,7 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
         keyring=_keyring(),
     )
 
-    with pytest.raises(IngestionError, match="outside cursor"):
+    with pytest.raises(ResponseError, match="outside cursor"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -860,7 +849,7 @@ def test_sealed_compaction_requires_token_count() -> None:
         },
     )
 
-    with pytest.raises(IngestionError, match="token_count"):
+    with pytest.raises(ResponseError, match="token_count"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -888,7 +877,7 @@ def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None
         },
     )
 
-    with pytest.raises(IngestionError, match="summary_fidelity"):
+    with pytest.raises(ResponseError, match="summary_fidelity"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -899,7 +888,7 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                 ChatMessageSpan(
                     start=0,
                     end=1,
-                    message={"role": "user", "content": "first"},
+                    message=_state_message({"role": "user", "content": "first"}),
                     token_count=1,
                     children_pruned=True,
                     summary_fidelity=3,
@@ -907,7 +896,7 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                 ChatMessageSpan(
                     start=1,
                     end=1,
-                    message={"role": "user", "content": "second"},
+                    message=_state_message({"role": "user", "content": "second"}),
                     token_count=1,
                 ),
             ),
@@ -916,7 +905,7 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
         keyring=_keyring(),
     )
 
-    with pytest.raises(IngestionError, match="overlap"):
+    with pytest.raises(ResponseError, match="overlap"):
         open_compaction_payload(token, keyring=_keyring())
 
 
@@ -924,20 +913,20 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
     first_summary = ChatMessageSpan(
         start=0,
         end=1,
-        message={"role": "assistant", "content": "summary 0-1"},
+        message=_state_message({"role": "assistant", "content": "summary 0-1"}),
         token_count=1,
         summary_fidelity=4,
         children=(
             ChatMessageSpan(
                 start=0,
                 end=0,
-                message={"role": "user", "content": "m0"},
+                message=_state_message({"role": "user", "content": "m0"}),
                 token_count=2,
             ),
             ChatMessageSpan(
                 start=1,
                 end=1,
-                message={"role": "assistant", "content": "m1"},
+                message=_state_message({"role": "assistant", "content": "m1"}),
                 token_count=3,
             ),
         ),
@@ -945,20 +934,20 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
     second_summary = ChatMessageSpan(
         start=2,
         end=3,
-        message={"role": "assistant", "content": "summary 2-3"},
+        message=_state_message({"role": "assistant", "content": "summary 2-3"}),
         token_count=1,
         summary_fidelity=2,
         children=(
             ChatMessageSpan(
                 start=2,
                 end=2,
-                message={"role": "user", "content": "m2"},
+                message=_state_message({"role": "user", "content": "m2"}),
                 token_count=2,
             ),
             ChatMessageSpan(
                 start=3,
                 end=3,
-                message={"role": "assistant", "content": "m3"},
+                message=_state_message({"role": "assistant", "content": "m3"}),
                 token_count=3,
             ),
         ),
@@ -993,23 +982,23 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
     first_summary = ChatMessageSpan(
         start=0,
         end=1,
-        message={"role": "assistant", "content": "summary 0-1"},
+        message=_state_message({"role": "assistant", "content": "summary 0-1"}),
         token_count=1,
         summary_fidelity=3,
         children=(
-            ChatMessageSpan(start=0, end=0, message={"role": "user", "content": "m0"}, token_count=2),
-            ChatMessageSpan(start=1, end=1, message={"role": "assistant", "content": "m1"}, token_count=3),
+            ChatMessageSpan(start=0, end=0, message=_state_message({"role": "user", "content": "m0"}), token_count=2),
+            ChatMessageSpan(start=1, end=1, message=_state_message({"role": "assistant", "content": "m1"}), token_count=3),
         ),
     )
     second_summary = ChatMessageSpan(
         start=2,
         end=3,
-        message={"role": "assistant", "content": "summary 2-3"},
+        message=_state_message({"role": "assistant", "content": "summary 2-3"}),
         token_count=1,
         summary_fidelity=3,
         children=(
-            ChatMessageSpan(start=2, end=2, message={"role": "user", "content": "m2"}, token_count=2),
-            ChatMessageSpan(start=3, end=3, message={"role": "assistant", "content": "m3"}, token_count=3),
+            ChatMessageSpan(start=2, end=2, message=_state_message({"role": "user", "content": "m2"}), token_count=2),
+            ChatMessageSpan(start=3, end=3, message=_state_message({"role": "assistant", "content": "m3"}), token_count=3),
         ),
     )
     compaction = RequestCompactionItem(
@@ -1072,10 +1061,12 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
         ChatMessageSpan(
             start=ordinal,
             end=ordinal,
-            message={
-                "role": "user",
-                "content": (f"{label} source" if ordinal == 0 else f"{label} summarized source"),
-            },
+            message=_state_message(
+                {
+                    "role": "user",
+                    "content": (f"{label} source" if ordinal == 0 else f"{label} summarized source"),
+                }
+            ),
             token_count=1,
         )
         for ordinal in range(cursor)
@@ -1088,7 +1079,7 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
             ChatMessageSpan(
                 start=1,
                 end=cursor - 1,
-                message={"role": "assistant", "content": f"{label} summary"},
+                message=_state_message({"role": "assistant", "content": f"{label} summary"}),
                 token_count=1,
                 summary_fidelity=3,
                 children=source[1:],
@@ -1111,7 +1102,12 @@ def _reasoning_item(
     *,
     continuation_side: str | None = None,
 ) -> ReasoningItem:
-    payload = ReasoningPayload(side=side, temp=temp, messages=tuple(messages), continuation_side=continuation_side)
+    payload = ReasoningPayload(
+        side=side,
+        temp=temp,
+        messages=tuple(_reasoning_message(message) for message in messages),
+        continuation_side=continuation_side,
+    )
     return ReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
         id="rs_test",
@@ -1163,9 +1159,23 @@ def _function_output(call_id: str, output: str) -> RequestFunctionCallOutputItem
 def _tool_call(upstream_id: str) -> dict[str, object]:
     return {
         "id": upstream_id,
-        "type": "function",
-        "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+        "name": "read_file",
+        "arguments": '{"path":"README.md"}',
     }
+
+
+def _state_message(value: dict[str, object]) -> StateMessage:
+    return StateMessage.from_primitive(value)
+
+
+def _reasoning_message(value: dict[str, object]) -> StateMessage | ReasoningMessagePatch:
+    if isinstance(value.get("content_hash"), str):
+        return ReasoningMessagePatch.from_primitive(value)
+    return StateMessage.from_primitive(value)
+
+
+def _message_hash(value: dict[str, object]) -> str:
+    return content_hash(_state_message(value))
 
 
 def _seal_raw_payload(purpose: str, value: object) -> str:

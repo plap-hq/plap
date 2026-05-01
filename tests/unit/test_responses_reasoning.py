@@ -7,6 +7,7 @@ from plap.llms.chat import (
     ChatCompletionRequest,
     IChatCompletionClient,
 )
+from plap.responses.models import ReasoningMessagePatch
 from plap.responses.reasoning import (
     REASONING_SUMMARY_PROMPT,
     LLMReasoningSummarizer,
@@ -24,10 +25,10 @@ async def test_reasoning_summarizer_sends_strict_prompt_and_trace_payload() -> N
             mode="concise",
             side="reviewer",
             messages=[
-                {
-                    "content_hash": "abc123",
-                    "reasoning_content": "critic says side B is better",
-                }
+                ReasoningMessagePatch(
+                    content_hash="abc123",
+                    reasoning_content="critic says side B is better",
+                )
             ],
         )
     ]

@@ -27,7 +27,7 @@ from plap.persistence.models import (
     UserEmail,
     UserIdentity,
 )
-from plap.settings import RuntimeModelProfileConfig, Settings
+from plap.settings import MCPServerConfig, RuntimeModelProfileConfig, Settings
 from tests.pytest_plugins.database import (
     _reset_database_schema,
     _run_migrations,
@@ -91,15 +91,20 @@ def money_settings(
             ),
         },
         sealing_keys=["a" * 43],
-        web_search_mcp_config={
-            "mcpServers": {
-                "money": {
-                    "command": sys.executable,
-                    "args": [str(Path(__file__).with_name("_money_mcp_server.py"))],
-                }
-            }
-        },
-        web_search_mcp_tool_names=[MONEY_MCP_TOOL_NAME],
+        mcp_servers=[
+            MCPServerConfig(
+                name="money",
+                config={
+                    "mcpServers": {
+                        "money": {
+                            "command": sys.executable,
+                            "args": [str(Path(__file__).with_name("_money_mcp_server.py"))],
+                        }
+                    }
+                },
+                tool_names=[MONEY_MCP_TOOL_NAME],
+            )
+        ],
     )
 
 

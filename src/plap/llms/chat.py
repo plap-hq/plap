@@ -2,22 +2,50 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-type ChatRole = Literal["system", "developer", "user", "assistant", "tool"]
-type ChatToolChoiceMode = Literal["none", "auto", "required"]
-type ChatResponseFormatType = Literal["text", "json_object", "json_schema"]
-type ChatFinishReason = Literal[
-    "stop",
-    "length",
-    "tool_calls",
-    "content_filter",
-    "function_call",
-]
-type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+class ChatRole(StrEnum):
+    SYSTEM = "system"
+    DEVELOPER = "developer"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+class ChatToolChoiceMode(StrEnum):
+    NONE = "none"
+    AUTO = "auto"
+    REQUIRED = "required"
+
+
+class ChatResponseFormatType(StrEnum):
+    TEXT = "text"
+    JSON_OBJECT = "json_object"
+    JSON_SCHEMA = "json_schema"
+
+
+class ChatFinishReason(StrEnum):
+    STOP = "stop"
+    LENGTH = "length"
+    TOOL_CALLS = "tool_calls"
+    CONTENT_FILTER = "content_filter"
+    FUNCTION_CALL = "function_call"
+
+
+class ReasoningEffort(StrEnum):
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+
 type ServiceTier = str
 
-REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(("none", "minimal", "low", "medium", "high", "xhigh"))
+REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(ReasoningEffort)
 
 
 @dataclass(frozen=True)
@@ -61,6 +89,9 @@ class ChatMessage:
     reasoning_content: str | None = None
     reasoning_details: list[dict[str, Any]] | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "role", ChatRole(self.role))
+
 
 @dataclass(frozen=True)
 class ChatResponseFormat:
@@ -69,6 +100,9 @@ class ChatResponseFormat:
     schema: dict[str, Any] | None = None
     strict: bool | None = None
     description: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "type", ChatResponseFormatType(self.type))
 
 
 @dataclass(frozen=True)
@@ -110,9 +144,14 @@ class ChatCompletionRequest:
     prediction: ChatPrediction | None = None
 
     def __post_init__(self) -> None:
-        if self.reasoning_effort is not None and self.reasoning_effort not in REASONING_EFFORT_VALUES:
-            allowed = ", ".join(sorted(REASONING_EFFORT_VALUES))
-            raise ValueError(f"reasoning_effort must be one of: {allowed}")
+        if self.reasoning_effort is not None:
+            try:
+                object.__setattr__(self, "reasoning_effort", ReasoningEffort(self.reasoning_effort))
+            except ValueError as exc:
+                allowed = ", ".join(value.value for value in ReasoningEffort)
+                raise ValueError(f"reasoning_effort must be one of: {allowed}") from exc
+        if isinstance(self.tool_choice, str):
+            object.__setattr__(self, "tool_choice", ChatToolChoiceMode(self.tool_choice))
 
 
 @dataclass(frozen=True)
@@ -134,6 +173,10 @@ class ChatCompletionResult:
     usage: ChatUsage | None = None
     system_fingerprint: str | None = None
     service_tier: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.finish_reason is not None:
+            object.__setattr__(self, "finish_reason", ChatFinishReason(self.finish_reason))
 
 
 @dataclass(frozen=True)
@@ -159,6 +202,10 @@ class ChatCompletionDelta:
     usage: ChatUsage | None = None
     system_fingerprint: str | None = None
     service_tier: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.finish_reason is not None:
+            object.__setattr__(self, "finish_reason", ChatFinishReason(self.finish_reason))
 
 
 @runtime_checkable

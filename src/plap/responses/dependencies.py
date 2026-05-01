@@ -54,16 +54,16 @@ def provide_socket_sealing_keyring(socket: WebSocket) -> SealingKeyring:
     return socket.app.state.sealing_keyring
 
 
-def provide_mcp_tool_provider(
+def provide_mcp_tool_providers(
     request: Request[Any, Any, Any],
-) -> IMCPToolProvider | None:
-    return request.app.state.mcp_tool_provider
+) -> tuple[IMCPToolProvider, ...]:
+    return request.app.state.mcp_tool_providers
 
 
-def provide_socket_mcp_tool_provider(
+def provide_socket_mcp_tool_providers(
     socket: WebSocket,
-) -> IMCPToolProvider | None:
-    return socket.app.state.mcp_tool_provider
+) -> tuple[IMCPToolProvider, ...]:
+    return socket.app.state.mcp_tool_providers
 
 
 def provide_reasoning_summarizer(
@@ -165,8 +165,8 @@ HTTP_ROUTE_DEPENDENCIES = {
     "tool_call_policy_resolver": Provide(
         provide_tool_call_policy_resolver,
     ),
-    "mcp_tool_provider": Provide(
-        provide_mcp_tool_provider,
+    "mcp_tool_providers": Provide(
+        provide_mcp_tool_providers,
         use_cache=True,
         sync_to_thread=False,
     ),
@@ -203,8 +203,8 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
     "tool_call_policy_resolver": Provide(
         provide_socket_tool_call_policy_resolver,
     ),
-    "mcp_tool_provider": Provide(
-        provide_socket_mcp_tool_provider,
+    "mcp_tool_providers": Provide(
+        provide_socket_mcp_tool_providers,
         use_cache=True,
         sync_to_thread=False,
     ),

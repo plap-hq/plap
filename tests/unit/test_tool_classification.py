@@ -13,6 +13,7 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool
+from plap.responses.errors import ResponseError
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -27,7 +28,6 @@ from plap.responses.tools import (
     ToolCallSignature,
     ToolClassification,
     ToolPolicy,
-    ToolPolicyError,
     ToolSignature,
     canonical_tool_arguments,
     function_tool_signature,
@@ -213,12 +213,12 @@ def test_tool_arguments_hash_is_canonical_for_key_order() -> None:
 
 
 def test_tool_arguments_reject_non_object_json() -> None:
-    with pytest.raises(ToolPolicyError, match="JSON object"):
+    with pytest.raises(ResponseError, match="JSON object"):
         canonical_tool_arguments('["not", "object"]')
 
 
 def test_tool_arguments_reject_malformed_json() -> None:
-    with pytest.raises(ToolPolicyError, match="valid JSON"):
+    with pytest.raises(ResponseError, match="valid JSON"):
         canonical_tool_arguments("not json")
 
 
@@ -290,7 +290,7 @@ async def test_static_policy_resolver_returns_unknown_client_tools() -> None:
 async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> None:
     resolver = StaticToolPolicyResolver()
 
-    with pytest.raises(ToolPolicyError, match="duplicate function tool name"):
+    with pytest.raises(ResponseError, match="duplicate function tool name"):
         await resolver.resolve(
             [
                 _read_file_tool(),

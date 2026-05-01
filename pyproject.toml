@@ -68,7 +68,7 @@ line-length = 140
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-extend-select = ["RUF", "C4", "SIM", "RET", "PIE", "PERF", "TRY", "PTH", "PLW", "PLR1714", "N"]
+extend-select = ["RUF", "C4", "SIM", "RET", "PIE", "PERF", "TRY", "PTH", "PLW", "PLC", "PLR1714", "N"]
 ignore = ["E731", "PLW0108", "TRY003"]
 
 [tool.pixi.workspace]

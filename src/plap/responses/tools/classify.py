@@ -414,15 +414,17 @@ def _unknown_tool_call_classification(
 
 
 def _effect_class(value: object) -> EffectClass:
-    if value in {"safe", "visible", "mutation", "contextual", "unknown"}:
-        return value
-    raise ValueError("classifier effect_class is invalid")
+    try:
+        return EffectClass(value)
+    except ValueError as exc:
+        raise ValueError("classifier effect_class is invalid") from exc
 
 
 def _tool_call_effect_class(value: object) -> ToolCallEffectClass:
-    if value in {"safe", "mutation", "unknown"}:
-        return value
-    raise ValueError("classifier effect_class is invalid")
+    try:
+        return ToolCallEffectClass(value)
+    except ValueError as exc:
+        raise ValueError("classifier effect_class is invalid") from exc
 
 
 def _confidence(value: object) -> float:

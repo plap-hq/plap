@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Any
 
 import structlog
 from cachetools import LRUCache
 from litestar import Litestar, Request, Response
 from litestar.datastructures import State
-from litestar.exceptions import (
-    HTTPException,
-    NotAuthorizedException,
-    ValidationException,
-)
+from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
 
 from plap.auth import APIKeyManager
 from plap.keyring import SealingKeyring
@@ -27,9 +22,9 @@ from plap.llms.router import (
     UnavailableChatCompletionClient,
 )
 from plap.persistence import create_database_engine, create_session_maker
-from plap.responses.ingest import IngestionError
+from plap.responses.errors import ResponseError
 from plap.responses.reasoning import LLMReasoningSummarizer
-from plap.responses.routes import RESPONSE_ROUTE_HANDLERS, ResponseOperationUnsupportedError
+from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tools import (
     TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_MODEL,
@@ -37,25 +32,14 @@ from plap.responses.tools import (
     IToolClassifier,
     LLMToolCallClassifier,
     LLMToolClassifier,
-    ToolPolicyError,
 )
 from plap.responses.tools.mcp import (
     IMCPToolProvider,
     MCPToolProvider,
 )
-from plap.settings import Settings, get_settings
+from plap.settings import MCPServerConfig, Settings, get_settings
 
 logger = structlog.get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class PublicError:
-    status_code: int
-    message: str
-    error_type: str
-    code: str
-    headers: dict[str, str] | None = None
-    log_event: str = "request.failed"
 
 
 def _error_body(
@@ -97,77 +81,102 @@ def _error_response(
     )
 
 
-def public_error_for(exc: Exception) -> PublicError:
-    if isinstance(exc, NotAuthorizedException):
-        return PublicError(
-            message="Not authorized.",
-            status_code=401,
-            error_type="authentication_error",
-            code="invalid_api_key",
-            headers={"WWW-Authenticate": "Bearer"},
-            log_event="request.auth_failed",
-        )
-    if isinstance(exc, ValidationException | IngestionError):
-        return PublicError(
-            message="Invalid request.",
-            status_code=400,
-            error_type="invalid_request_error",
-            code="invalid_request",
-            log_event="request.validation_failed",
-        )
-    if isinstance(exc, ToolPolicyError):
-        return PublicError(
-            message="Invalid request.",
-            status_code=400,
-            error_type="invalid_request_error",
-            code="invalid_tool",
-            log_event="request.tool_validation_failed",
-        )
-    if isinstance(exc, ResponseOperationUnsupportedError):
-        return PublicError(
-            message="Operation is not supported.",
-            status_code=exc.status_code,
-            error_type="invalid_request_error",
-            code="unsupported_operation",
-            log_event="request.unsupported_operation",
-        )
-    if isinstance(exc, HTTPException):
-        return PublicError(
-            message="Request failed.",
-            status_code=exc.status_code,
-            error_type="invalid_request_error",
-            code="request_error",
-            log_event="request.http_failed",
-        )
-    return PublicError(
+def handle_response_error(
+    request: Request[Any, Any, Any],
+    exc: ResponseError,
+) -> Response[dict[str, Any]]:
+    exc.log(
+        logger,
+        failure_code=exc.public.code,
+        failure_type=exc.public.type,
+        method=request.method,
+        path=request.url.path,
+        status_code=exc.public.status_code,
+    )
+    return _error_response(
+        message=exc.public.message,
+        status_code=exc.public.status_code,
+        error_type=exc.public.type,
+        code=exc.public.code,
+        param=exc.public.param,
+        headers=exc.public.headers,
+    )
+
+
+def handle_validation_exception(
+    request: Request[Any, Any, Any],
+    exc: ValidationException,
+) -> Response[dict[str, Any]]:
+    logger.warning(
+        "response.validation_failed",
+        exc_info=exc,
+        method=request.method,
+        path=request.url.path,
+        status_code=400,
+    )
+    return _error_response(
+        message="Invalid request.",
+        status_code=400,
+        error_type="invalid_request_error",
+        code="invalid_request",
+    )
+
+
+def handle_auth_exception(
+    request: Request[Any, Any, Any],
+    exc: NotAuthorizedException,
+) -> Response[dict[str, Any]]:
+    logger.warning(
+        "response.auth_failed",
+        exc_info=exc,
+        method=request.method,
+        path=request.url.path,
+        status_code=401,
+    )
+    return _error_response(
+        message="Not authorized.",
+        status_code=401,
+        error_type="authentication_error",
+        code="invalid_api_key",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def handle_http_exception(
+    request: Request[Any, Any, Any],
+    exc: HTTPException,
+) -> Response[dict[str, Any]]:
+    logger.warning(
+        "response.http_failed",
+        exc_info=exc,
+        method=request.method,
+        path=request.url.path,
+        status_code=exc.status_code,
+    )
+    return _error_response(
+        message="Request failed.",
+        status_code=exc.status_code,
+        error_type="invalid_request_error",
+        code="request_error",
+    )
+
+
+def handle_unexpected_exception(
+    request: Request[Any, Any, Any],
+    exc: Exception,
+) -> Response[dict[str, Any]]:
+    logger.error(
+        "response.unhandled_failed",
+        exc_info=exc,
+        method=request.method,
+        path=request.url.path,
+        status_code=500,
+    )
+    return _error_response(
         message="Response generation failed.",
         status_code=500,
         error_type="server_error",
         code="server_error",
-        log_event="request.unhandled_failed",
-    )
-
-
-def handle_public_exception(
-    request: Request[Any, Any, Any],
-    exc: Exception,
-) -> Response[dict[str, Any]]:
-    public_error = public_error_for(exc)
-    log = logger.error if public_error.status_code >= 500 else logger.warning
-    log(
-        public_error.log_event,
-        exc_info=True,
-        exception_type=type(exc).__name__,
-        method=request.method,
-        path=request.url.path,
-        status_code=public_error.status_code,
-    )
-    return _error_response(
-        message=public_error.message,
-        status_code=public_error.status_code,
-        error_type=public_error.error_type,
-        code=public_error.code,
-        headers=public_error.headers,
     )
 
 
@@ -233,20 +242,15 @@ def _create_tool_call_classifier(
     )
 
 
-def _create_mcp_tool_provider(
-    settings: Settings,
-) -> IMCPToolProvider | None:
-    if settings.web_search_mcp_url:
-        return MCPToolProvider(
-            settings.web_search_mcp_url,
-            tool_names=settings.web_search_mcp_tool_names,
-        )
-    if settings.web_search_mcp_config:
-        return MCPToolProvider(
-            settings.web_search_mcp_config,
-            tool_names=settings.web_search_mcp_tool_names,
-        )
-    return None
+def _create_mcp_tool_providers(settings: Settings) -> tuple[IMCPToolProvider, ...]:
+    return tuple(_create_mcp_tool_provider(server) for server in settings.mcp_servers)
+
+
+def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
+    transport = server.url if server.url is not None else server.config
+    if transport is None:
+        raise ValueError("mcp server config requires a transport")
+    return MCPToolProvider(transport, tool_names=server.tool_names)
 
 
 def _validate_runtime_model_profiles(settings: Settings) -> None:
@@ -285,7 +289,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         resolved_settings,
         chat_completion_client,
     )
-    mcp_tool_provider = _create_mcp_tool_provider(resolved_settings)
+    mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
     _validate_runtime_model_profiles(resolved_settings)
     state = State(
         {
@@ -302,20 +306,18 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "tool_call_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_call_policy_l1_maxsize),
             "tool_classifier": tool_classifier,
             "tool_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_policy_l1_maxsize),
-            "mcp_tool_provider": mcp_tool_provider,
+            "mcp_tool_providers": mcp_tool_providers,
         }
     )
 
     return Litestar(
         route_handlers=RESPONSE_ROUTE_HANDLERS,
         exception_handlers={
-            HTTPException: handle_public_exception,
-            IngestionError: handle_public_exception,
-            NotAuthorizedException: handle_public_exception,
-            ResponseOperationUnsupportedError: handle_public_exception,
-            ToolPolicyError: handle_public_exception,
-            ValidationException: handle_public_exception,
-            Exception: handle_public_exception,
+            HTTPException: handle_http_exception,
+            NotAuthorizedException: handle_auth_exception,
+            ResponseError: handle_response_error,
+            ValidationException: handle_validation_exception,
+            Exception: handle_unexpected_exception,
         },
         on_shutdown=[_shutdown_database],
         state=state,

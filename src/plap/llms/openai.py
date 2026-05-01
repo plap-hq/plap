@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import msgspec
 from openai import (
@@ -21,6 +21,7 @@ from plap.llms.chat import (
     ChatMessage,
     ChatPrediction,
     ChatResponseFormat,
+    ChatRole,
     ChatStreamOptions,
     ChatTool,
     ChatToolCall,
@@ -66,8 +67,13 @@ OPENAI_CHAT_FIELDS = (
 
 @dataclass(frozen=True)
 class ChatProviderProfile:
-    developer_role: Literal["developer", "system"]
+    developer_role: ChatRole
     passthrough_fields: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "developer_role", ChatRole(self.developer_role))
+        if self.developer_role not in {ChatRole.DEVELOPER, ChatRole.SYSTEM}:
+            raise ValueError("developer_role must be developer or system")
 
 
 class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
@@ -77,10 +83,12 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
         api_key: str | None = None,
         base_url: str | None = None,
         client: Any | None = None,
-        developer_role: Literal["developer", "system"] = "developer",
+        developer_role: ChatRole = ChatRole.DEVELOPER,
     ) -> None:
         self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self._developer_role = developer_role
+        self._developer_role = ChatRole(developer_role)
+        if self._developer_role not in {ChatRole.DEVELOPER, ChatRole.SYSTEM}:
+            raise ValueError("developer_role must be developer or system")
 
     def _chat_params(
         self,
@@ -114,7 +122,7 @@ def to_openai_chat_params(
     request: ChatCompletionRequest,
     *,
     stream: bool,
-    developer_role: Literal["developer", "system"] = "developer",
+    developer_role: ChatRole = ChatRole.DEVELOPER,
 ) -> dict[str, Any]:
     return build_chat_params(
         request,
@@ -154,7 +162,7 @@ def _chat_param_values(
     request: ChatCompletionRequest,
     *,
     stream: bool,
-    developer_role: Literal["developer", "system"],
+    developer_role: ChatRole,
 ) -> dict[str, Any]:
     values: dict[str, Any] = {
         "model": request.model,
@@ -189,9 +197,9 @@ def _chat_param_values(
 def _message_to_param(
     message: ChatMessage,
     *,
-    developer_role: Literal["developer", "system"],
+    developer_role: ChatRole,
 ) -> dict[str, Any]:
-    role = developer_role if message.role == "developer" else message.role
+    role = developer_role if message.role == ChatRole.DEVELOPER else message.role
     value: dict[str, Any] = {"role": role}
     _set(value, "content", message.content)
     _set(value, "name", message.name)
@@ -201,7 +209,7 @@ def _message_to_param(
         "tool_calls",
         [_tool_call_to_param(tool_call) for tool_call in message.tool_calls or []] or None,
     )
-    if message.role == "assistant":
+    if message.role == ChatRole.ASSISTANT:
         _set(value, "refusal", message.refusal)
         _set(value, "reasoning_content", message.reasoning_content)
         _set(value, "reasoning_details", message.reasoning_details)
