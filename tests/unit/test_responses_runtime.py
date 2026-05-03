@@ -12,6 +12,7 @@ from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatFinishReason,
     ChatMessage,
     ChatToolCall,
     ChatToolChoiceFunction,
@@ -414,6 +415,110 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
 
 
+async def test_stream_response_events_stop_answer_triggers_debate() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="hello back"),
+            _assistant_json({"action": "accept", "note": None}),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
+    assert completed.output[-1].content[0].text == "hello back"
+    assert len(client.requests) == 2
+
+
+async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -> None:
+    client = _StaticChatClient(
+        message=(
+            ChatMessage(role="assistant", content="hello back"),
+            _assistant_json({"action": "accept", "note": None}),
+        ),
+        usages=(
+            ChatUsage(input_tokens=100, output_tokens=10, total_tokens=110, cached_tokens=20, reasoning_tokens=3),
+        ),
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            request=ResponseCreateRequest(model="plap/test", input="hello", max_output_tokens=1),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            auth_context=_auth_context(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_providers=(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert completed.status == "incomplete"
+    assert completed.incomplete_details is not None
+    assert completed.incomplete_details.reason == "max_output_tokens"
+    assert completed.usage is not None
+    assert completed.usage.input_tokens == 100
+    assert completed.usage.input_tokens_details.cached_tokens == 20
+    assert len(client.requests) == 1
+
+
+async def test_stream_response_events_rejects_finish_reason_mismatch_with_tool_calls() -> None:
+    with pytest.raises(ResponseError, match="tool calls without tool handoff"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", tools=[_read_file_tool()]),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=_StaticChatClient(
+                    ChatMessage(
+                        role="assistant",
+                        tool_calls=[ChatToolCall(id="upstream_call_1", name="read_file", arguments='{"path":"README.md"}')],
+                    ),
+                    finish_reasons=ChatFinishReason.STOP,
+                ),
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
+async def test_stream_response_events_rejects_finish_reason_tool_handoff_without_calls() -> None:
+    with pytest.raises(ResponseError, match="tool handoff finish_reason without tool calls"):
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello"),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=_StaticChatClient(
+                    ChatMessage(role="assistant", content="hello back"),
+                    finish_reasons=ChatFinishReason.TOOL_CALLS,
+                ),
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+
 async def test_stream_response_events_reviewer_accept_publishes_risky_candidate() -> None:
     client = _StaticChatClient(
         [
@@ -435,7 +540,7 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
         event
         async for event in stream_response_events(
             ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record")]),
-            settings=_settings(),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
             tool_call_policy_resolver=_RecordingCallResolver(),
@@ -479,7 +584,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
         event
         async for event in stream_response_events(
             ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record"), _read_file_tool()]),
-            settings=_settings(),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
             tool_call_policy_resolver=_RecordingCallResolver(),
@@ -515,7 +620,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
                     ),
                 ],
             ),
-            settings=_settings(),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
             tool_call_policy_resolver=_RecordingCallResolver(),
@@ -561,7 +666,7 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
             event
             async for event in stream_response_events(
                 ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
-                settings=_settings(),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
                 tool_call_policy_resolver=_RecordingCallResolver(),
@@ -607,6 +712,12 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
                 }
             ),
             ChatMessage(role="assistant", content="final public answer"),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
         ]
     )
 
@@ -615,7 +726,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
             event
             async for event in stream_response_events(
                 ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
-                settings=_settings(),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
                 tool_call_policy_resolver=_RecordingCallResolver(),
@@ -625,13 +736,22 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
         ]
     )
 
-    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "reasoning", "message"]
+    assert [item.type for item in completed.output] == [
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "message",
+    ]
     arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
     assert arbitrator_payload.messages[0].role == "user"
     assert "original question" not in (arbitrator_payload.messages[0].content or "")
     assert "draft answer" in (arbitrator_payload.messages[0].content or "")
     assert "after review" in (arbitrator_payload.messages[0].content or "")
-    stable_guidance = open_reasoning_payload(completed.output[-2].encrypted_content, keyring=_keyring())
+    stable_guidance = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert stable_guidance.temp is False
     assert stable_guidance.messages[0].role == "assistant"
     assert stable_guidance.messages[0].content == "draft answer"
@@ -646,8 +766,11 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert any("draft answer" in content for content in final_main_contents)
     assert any("This tool call was not executed." in content for content in final_main_contents)
     assert any("Use the safer path." in content for content in final_main_contents)
+    final_reviewer_payload = open_reasoning_payload(completed.output[6].encrypted_content, keyring=_keyring())
+    assert final_reviewer_payload.messages[0].role == "user"
+    assert "final public answer" in (final_reviewer_payload.messages[0].content or "")
     assert completed.output[-1].content[0].text == "final public answer"
-    assert len(client.requests) == 5
+    assert len(client.requests) == 6
 
 
 async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> None:
@@ -685,7 +808,7 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
             event
             async for event in stream_response_events(
                 ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
-                settings=_settings(),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
                 tool_call_policy_resolver=_RecordingCallResolver(),
@@ -742,7 +865,7 @@ async def test_stream_response_events_reviewer_accept_publishes_held_server_outp
                     input="search then mutate",
                     tools=[WebSearchTool(type="web_search"), _tool("mutate_record")],
                 ),
-                settings=_settings(),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
                 tool_call_policy_resolver=_RecordingCallResolver(),
@@ -2009,6 +2132,7 @@ class _StaticChatClient(IChatCompletionClient):
         self,
         message: ChatMessage | Sequence[ChatMessage],
         *,
+        finish_reasons: ChatFinishReason | str | Sequence[ChatFinishReason | str] | None = None,
         usages: ChatUsage | Sequence[ChatUsage] | None = None,
     ) -> None:
         if isinstance(message, ChatMessage):
@@ -2021,6 +2145,14 @@ class _StaticChatClient(IChatCompletionClient):
             self.usages = ()
         else:
             self.usages = tuple(usages)
+        if isinstance(finish_reasons, (str, ChatFinishReason)):
+            self.finish_reasons = (finish_reasons,)
+        elif finish_reasons is None:
+            self.finish_reasons = tuple(
+                ChatFinishReason.TOOL_CALLS if message.tool_calls else ChatFinishReason.STOP for message in self.messages
+            )
+        else:
+            self.finish_reasons = tuple(finish_reasons)
         self.requests: list[ChatCompletionRequest] = []
         self._index = 0
 
@@ -2032,13 +2164,14 @@ class _StaticChatClient(IChatCompletionClient):
         index = min(self._index, len(self.messages) - 1)
         message = self.messages[index]
         usage = self.usages[min(self._index, len(self.usages) - 1)] if self.usages else None
+        finish_reason = self.finish_reasons[min(self._index, len(self.finish_reasons) - 1)]
         self._index += 1
         return ChatCompletionResult(
             id="chatcmpl_test",
             model=request.model,
             created_at=None,
             message=message,
-            finish_reason="stop",
+            finish_reason=finish_reason,
             usage=usage,
         )
 
@@ -2092,7 +2225,7 @@ def _profile_config(
     compression_soft_token_budget: int | None = None,
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
-    debate_max_rounds: int = 2,
+    debate_max_rounds: int = 0,
     supported_parameters: list[str] | None = None,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(

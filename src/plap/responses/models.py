@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
-from math import ceil
 
 import blake3
 import msgspec
@@ -691,39 +690,53 @@ class MutableQueues:
 
 
 @dataclass(slots=True)
-class UsageAccumulator:
+class UsageLedger:
+    budget: int | None
     hidden: list[tuple[PublicUsageConfig, ChatUsage]] = field(default_factory=list)
+    anchor: ChatUsage | None = None
 
-    def add_hidden(self, config: PublicUsageConfig, usage: ChatUsage | None) -> None:
+    def remaining(self) -> int | None:
+        return self.budget
+
+    def cap_for(self, config: PublicUsageConfig) -> int | None:
+        return config.cap_from_budget(self.budget)
+
+    def record_hidden(self, config: PublicUsageConfig, usage: ChatUsage | None) -> int | None:
+        if usage is None:
+            return None
+        if self.budget is not None:
+            self.budget -= config.hidden_debit(usage)
+        self.hidden.append((config, usage))
+        return len(self.hidden) - 1
+
+    def use_hidden_as_anchor(self, index: int) -> None:
+        if self.anchor is not None:
+            raise ValueError("usage anchor is already set")
+        _, usage = self.hidden.pop(index)
+        self.anchor = usage
+
+    def set_anchor(self, usage: ChatUsage | None) -> None:
         if usage is None:
             return
-        self.hidden.append((config, usage))
+        if self.anchor is not None:
+            raise ValueError("usage anchor is already set")
+        self.anchor = usage
 
-    def to_response_usage(self, anchor: ChatUsage | None) -> ResponseUsage | None:
-        if anchor is None:
+    def to_response_usage(self) -> ResponseUsage | None:
+        if self.anchor is None:
             return None
 
-        hidden_equivalent_output = sum(self._equivalent_output_tokens(config, usage) for config, usage in self.hidden)
-        cached_tokens = anchor.cached_tokens or 0
-        reasoning_tokens = (anchor.reasoning_tokens or 0) + hidden_equivalent_output
-        output_tokens = anchor.output_tokens + hidden_equivalent_output
+        hidden_equivalent_output = sum(config.hidden_debit(usage) for config, usage in self.hidden)
+        cached_tokens = self.anchor.cached_tokens or 0
+        reasoning_tokens = (self.anchor.reasoning_tokens or 0) + hidden_equivalent_output
+        output_tokens = self.anchor.output_tokens + hidden_equivalent_output
         return ResponseUsage(
-            input_tokens=anchor.input_tokens,
+            input_tokens=self.anchor.input_tokens,
             input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
             output_tokens=output_tokens,
             output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-            total_tokens=anchor.input_tokens + output_tokens,
+            total_tokens=self.anchor.input_tokens + output_tokens,
         )
-
-    def _equivalent_output_tokens(self, config: PublicUsageConfig, usage: ChatUsage) -> int:
-        cached_input = min(usage.cached_tokens or 0, usage.input_tokens)
-        uncached_input = usage.input_tokens - cached_input
-        equivalent_output = (
-            uncached_input * config.uncached_input_to_output
-            + cached_input * config.cached_input_to_output
-            + usage.output_tokens * config.output_to_output
-        )
-        return ceil(equivalent_output)
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:

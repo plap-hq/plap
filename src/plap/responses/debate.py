@@ -40,7 +40,7 @@ from plap.responses.models import (
     StateToolCall,
     TempMainParts,
     TranscriptMessage,
-    UsageAccumulator,
+    UsageLedger,
 )
 from plap.responses.tools import ToolPolicy
 from plap.responses.tools.mcp import IMCPToolProvider
@@ -56,7 +56,8 @@ You will see:
 - on later rounds, the latest response note and possibly a previous next-step note
 
 Definitions:
-- current proposed answer: the answer that would be sent to the user if it were accepted now
+- current proposed answer: the next thing that would be returned now if it were accepted,
+  which may be a direct answer, a tool call, or a combination of both
 - response note: another model's reply to the latest review note; it may agree or disagree
 - next-step note: a short note about what the next round should focus on
 
@@ -65,7 +66,7 @@ Return JSON only.
 Use available tools when they help.
 
 Use:
-- `accept` if the current proposed answer should be sent exactly as-is
+- `accept` if the current proposed answer is the correct next thing to return exactly as-is
 - `reopen` if another round is needed
 
 If you use `reopen`, set `note` to one short review note saying what seems wrong,
@@ -80,13 +81,14 @@ You will see:
 - the latest review note
 
 Definitions:
-- current proposed answer: the answer that would be sent to the user if accepted now
+- current proposed answer: the next thing that would be returned now if accepted,
+  which may be a direct answer, a tool call, or a combination of both
 - review note: another model's critique of that answer; it may be correct or incorrect
 
 Write one short response note. The response note should explain, from your own judgment:
 - what the review note got right
 - what it got wrong
-- what matters most for deciding whether the current proposed answer should be sent
+- what matters most for deciding whether the current proposed answer is the correct next thing to return
 
 Do not write a replacement answer for the user.
 Do not decide whether the current proposed answer should be sent.
@@ -103,7 +105,8 @@ You will see:
 - the latest response note
 
 Definitions:
-- current proposed answer: the answer that would be sent to the user if accepted now
+- current proposed answer: the next thing that would be returned now if accepted,
+  which may be a direct answer, a tool call, or a combination of both
 - review note: a short note explaining what seems wrong, missing, unsupported, or risky about that answer
 - response note: a short note replying to the review note from independent judgment
 - next-step note: a short note telling the next round what to focus on
@@ -113,7 +116,7 @@ Return JSON only.
 Use available tools when they help.
 
 Use:
-- `accept` if the current proposed answer should be sent exactly as-is
+- `accept` if the current proposed answer is the correct next thing to return exactly as-is
 - `revise` if the current proposed answer should not be sent and the normal answer-writing step should try again from scratch
 - `reopen` if another review/response round is needed
 
@@ -240,6 +243,7 @@ def build_completion_request(
     tool_choice: ChatToolChoiceFunction | str | None,
     response_format: ChatResponseFormat | None,
     prompt_cache_key_base: str | None,
+    max_completion_tokens: int | None,
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=actor_config.model,
@@ -258,7 +262,7 @@ def build_completion_request(
         tool_choice=tool_choice,
         parallel_tool_calls=request.parallel_tool_calls,
         response_format=response_format,
-        max_completion_tokens=request.max_output_tokens,
+        max_completion_tokens=max_completion_tokens,
         temperature=request.temperature,
         top_p=request.top_p,
         top_logprobs=request.top_logprobs,
@@ -305,20 +309,23 @@ def _compact_candidate(parts: TempMainParts) -> dict[str, object]:
     outputs = {
         row.message.tool_call_id: row.message.content_text() or ""
         for row in parts.held_hidden_tool_rows
-        if row.message.tool_call_id is not None
+        if row.message.tool_call_id is not None and (row.message.content_text() or "") != HELD_CLIENT_TOOL_PLACEHOLDER
     }
     value: dict[str, object] = {"role": "assistant"}
     if candidate.content_text() is not None:
         value["content"] = candidate.content_text()
     if candidate.tool_calls:
-        value["tool_calls"] = [
-            {
+        compact_tool_calls: list[dict[str, object]] = []
+        for call in candidate.tool_calls:
+            compact_call: dict[str, object] = {
                 "name": call.name,
                 "arguments": call.arguments_value(),
-                "output": outputs.get(call.id),
             }
-            for call in candidate.tool_calls
-        ]
+            output = outputs.get(call.id)
+            if output is not None:
+                compact_call["output"] = output
+            compact_tool_calls.append(compact_call)
+        value["tool_calls"] = compact_tool_calls
     return value
 
 
@@ -461,10 +468,13 @@ async def _execute_actor_turn(
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
-    usage_accumulator: UsageAccumulator,
+    usage_ledger: UsageLedger,
     response_format: ChatResponseFormat | None,
-) -> ActorFinished | ActorAwaitingClientTool:
+) -> ActorFinished | ActorAwaitingClientTool | None:
     while True:
+        cap = usage_ledger.cap_for(actor_config.public_usage)
+        if cap == 0:
+            return None
         request_messages = [*header_messages, *(message.to_chat_message() for message in turn_messages)]
         result = await chat_completion_client.complete(
             build_completion_request(
@@ -476,6 +486,7 @@ async def _execute_actor_turn(
                 tool_choice=None,
                 response_format=response_format,
                 prompt_cache_key_base=prompt_cache_key_base,
+                max_completion_tokens=cap,
             )
         )
         assistant = _state_message_from_result(result.message)
@@ -510,7 +521,7 @@ async def _execute_actor_turn(
             )
 
         if server_output_seen:
-            usage_accumulator.add_hidden(actor_config.public_usage, result.usage)
+            usage_ledger.record_hidden(actor_config.public_usage, result.usage)
 
 
 async def run_reviewer_turn(
@@ -524,8 +535,8 @@ async def run_reviewer_turn(
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
-    usage_accumulator: UsageAccumulator,
-) -> ActorFinished | ActorAwaitingClientTool:
+    usage_ledger: UsageLedger,
+) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = _thread_messages(state.reviewer)
     header_messages = [
         ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
@@ -558,7 +569,7 @@ async def run_reviewer_turn(
         server_executors=server_executors,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
-        usage_accumulator=usage_accumulator,
+        usage_ledger=usage_ledger,
         response_format=REVIEWER_RESPONSE_FORMAT,
     )
 
@@ -574,8 +585,8 @@ async def run_main_debate_turn(
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
-    usage_accumulator: UsageAccumulator,
-) -> ActorFinished | ActorAwaitingClientTool:
+    usage_ledger: UsageLedger,
+) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = [row.message for row in parts.remaining_temp_rows]
     header_messages = [
         ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
@@ -599,7 +610,7 @@ async def run_main_debate_turn(
         server_executors=server_executors,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
-        usage_accumulator=usage_accumulator,
+        usage_ledger=usage_ledger,
         response_format=None,
     )
 
@@ -615,8 +626,8 @@ async def run_arbitrator_turn(
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
-    usage_accumulator: UsageAccumulator,
-) -> ActorFinished | ActorAwaitingClientTool:
+    usage_ledger: UsageLedger,
+) -> ActorFinished | ActorAwaitingClientTool | None:
     reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
     latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
     if reviewer_decision is None or latest_response_note is None:
@@ -655,7 +666,7 @@ async def run_arbitrator_turn(
         server_executors=server_executors,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
-        usage_accumulator=usage_accumulator,
+        usage_ledger=usage_ledger,
         response_format=ARBITRATOR_RESPONSE_FORMAT,
     )
 
@@ -851,9 +862,8 @@ async def continue_debate(
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
-    usage_accumulator: UsageAccumulator,
-    held_anchor_usage=None,
-    held_anchor_service_tier: str | None = None,
+    usage_ledger: UsageLedger,
+    held_anchor_index: int | None = None,
 ) -> DebateResult:
     safe_tools, safe_tool_policies, safe_server_executors = debate_safe_surface(tools, tool_policies, server_executors)
     parts = state.temp_main_parts()
@@ -861,8 +871,10 @@ async def continue_debate(
         raise ResponseError.internal(private_message="debate temp state is missing held candidate")
 
     if profile.debate_max_rounds == 0:
+        if held_anchor_index is not None:
+            usage_ledger.use_hidden_as_anchor(held_anchor_index)
         await publish_accepted_candidate(state=state, out=out, keyring=keyring)
-        await out.completed(service_tier=held_anchor_service_tier, usage=usage_accumulator.to_response_usage(held_anchor_usage))
+        await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
         return DebateResult.COMPLETED
 
     while True:
@@ -879,13 +891,15 @@ async def continue_debate(
                 server_executors=safe_server_executors,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
-                usage_accumulator=usage_accumulator,
+                usage_ledger=usage_ledger,
             )
+            if outcome is None:
+                if held_anchor_index is not None and usage_ledger.anchor is None:
+                    usage_ledger.use_hidden_as_anchor(held_anchor_index)
+                await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+                return DebateResult.COMPLETED
             if isinstance(outcome, ActorAwaitingClientTool):
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.main.public_usage, held_anchor_usage)
-                    held_anchor_usage = None
-                    held_anchor_service_tier = None
+                usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
                     state=state,
                     side=Side.REVIEWER,
@@ -901,7 +915,7 @@ async def continue_debate(
                     out=out,
                     keyring=keyring,
                 )
-                await out.completed(service_tier=outcome.service_tier, usage=usage_accumulator.to_response_usage(outcome.usage))
+                await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
             decision = parse_reviewer_decision(outcome.assistant)
@@ -914,19 +928,16 @@ async def continue_debate(
                 keyring=keyring,
             )
             if decision.action == ReviewerActionType.ACCEPT:
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.reviewer.public_usage, outcome.usage)
-                    await publish_accepted_candidate(state=state, out=out, keyring=keyring)
-                    await out.completed(
-                        service_tier=held_anchor_service_tier,
-                        usage=usage_accumulator.to_response_usage(held_anchor_usage),
-                    )
+                if held_anchor_index is not None:
+                    usage_ledger.record_hidden(profile.reviewer.public_usage, outcome.usage)
+                    usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
-                    await publish_accepted_candidate(state=state, out=out, keyring=keyring)
-                    await out.completed(service_tier=outcome.service_tier, usage=usage_accumulator.to_response_usage(outcome.usage))
+                    usage_ledger.set_anchor(outcome.usage)
+                await publish_accepted_candidate(state=state, out=out, keyring=keyring)
+                await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            usage_accumulator.add_hidden(profile.reviewer.public_usage, outcome.usage)
+            usage_ledger.record_hidden(profile.reviewer.public_usage, outcome.usage)
             parts = state.temp_main_parts()
             continue
 
@@ -941,13 +952,15 @@ async def continue_debate(
                 server_executors=safe_server_executors,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
-                usage_accumulator=usage_accumulator,
+                usage_ledger=usage_ledger,
             )
+            if outcome is None:
+                if held_anchor_index is not None and usage_ledger.anchor is None:
+                    usage_ledger.use_hidden_as_anchor(held_anchor_index)
+                await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+                return DebateResult.COMPLETED
             if isinstance(outcome, ActorAwaitingClientTool):
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.main.public_usage, held_anchor_usage)
-                    held_anchor_usage = None
-                    held_anchor_service_tier = None
+                usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
                     state=state,
                     side=Side.MAIN,
@@ -963,10 +976,10 @@ async def continue_debate(
                     out=out,
                     keyring=keyring,
                 )
-                await out.completed(service_tier=outcome.service_tier, usage=usage_accumulator.to_response_usage(outcome.usage))
+                await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            usage_accumulator.add_hidden(profile.main_debate.public_usage, outcome.usage)
+            usage_ledger.record_hidden(profile.main_debate.public_usage, outcome.usage)
             await _persist_temp_turn(
                 state=state,
                 side=Side.MAIN,
@@ -989,13 +1002,15 @@ async def continue_debate(
                 server_executors=safe_server_executors,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
-                usage_accumulator=usage_accumulator,
+                usage_ledger=usage_ledger,
             )
+            if outcome is None:
+                if held_anchor_index is not None and usage_ledger.anchor is None:
+                    usage_ledger.use_hidden_as_anchor(held_anchor_index)
+                await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+                return DebateResult.COMPLETED
             if isinstance(outcome, ActorAwaitingClientTool):
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.main.public_usage, held_anchor_usage)
-                    held_anchor_usage = None
-                    held_anchor_service_tier = None
+                usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
                     state=state,
                     side=Side.ARBITRATOR,
@@ -1011,7 +1026,7 @@ async def continue_debate(
                     out=out,
                     keyring=keyring,
                 )
-                await out.completed(service_tier=outcome.service_tier, usage=usage_accumulator.to_response_usage(outcome.usage))
+                await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
             decision = parse_arbitrator_decision(outcome.assistant)
@@ -1030,22 +1045,17 @@ async def continue_debate(
                 keyring=keyring,
             )
             if decision.action == ArbitratorActionType.ACCEPT:
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.arbitrator.public_usage, outcome.usage)
-                    await publish_accepted_candidate(state=state, out=out, keyring=keyring)
-                    await out.completed(
-                        service_tier=held_anchor_service_tier,
-                        usage=usage_accumulator.to_response_usage(held_anchor_usage),
-                    )
+                if held_anchor_index is not None:
+                    usage_ledger.record_hidden(profile.arbitrator.public_usage, outcome.usage)
+                    usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
-                    await publish_accepted_candidate(state=state, out=out, keyring=keyring)
-                    await out.completed(service_tier=outcome.service_tier, usage=usage_accumulator.to_response_usage(outcome.usage))
+                    usage_ledger.set_anchor(outcome.usage)
+                await publish_accepted_candidate(state=state, out=out, keyring=keyring)
+                await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            usage_accumulator.add_hidden(profile.arbitrator.public_usage, outcome.usage)
+            usage_ledger.record_hidden(profile.arbitrator.public_usage, outcome.usage)
             if decision.action == ArbitratorActionType.REVISE:
-                if held_anchor_usage is not None:
-                    usage_accumulator.add_hidden(profile.main.public_usage, held_anchor_usage)
                 await resume_main_with_revise_bundle(state=state, out=out, keyring=keyring, note=decision.note or "")
                 return DebateResult.CONTINUE_MAIN
 

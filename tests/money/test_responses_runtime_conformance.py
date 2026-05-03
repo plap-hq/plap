@@ -258,7 +258,7 @@ async def test_money_responses_wisp_nano_basic_completion(
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Reply with one short sentence containing the word wisp.",
-        max_output_tokens=256,
+        max_output_tokens=16384,
         temperature=0,
     )
 
@@ -267,13 +267,29 @@ async def test_money_responses_wisp_nano_basic_completion(
     assert _response_text(response).strip()
 
 
+async def test_money_responses_wisp_nano_direct_answer_debate(
+    money_openai_client: AsyncOpenAI,
+) -> None:
+    response = await money_openai_client.responses.create(
+        model=RUNTIME_PROFILE,
+        input="Reply with exactly: wisp debate ok",
+        max_output_tokens=16384,
+        temperature=0,
+    )
+
+    reasoning_items = [item for item in response.output if item.type == "reasoning"]
+    assert response.status == "completed"
+    assert len(reasoning_items) >= 2
+    assert "wisp" in _response_text(response).lower()
+
+
 async def test_money_responses_wisp_nano_sse_stream(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     stream = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Reply with exactly: streaming wisp",
-        max_output_tokens=256,
+        max_output_tokens=16384,
         stream=True,
         temperature=0,
     )
@@ -309,6 +325,48 @@ async def test_money_responses_wisp_nano_client_tool_continuation_loop(
     assert "42" in _response_text(responses[-1])
 
 
+async def test_money_responses_wisp_nano_risky_tool_debate_loop(
+    money_openai_client: AsyncOpenAI,
+) -> None:
+    first = await money_openai_client.responses.create(
+        model=RUNTIME_PROFILE,
+        input=(
+            "Briefly say that you are updating the record, then call update_record with id rec-1 "
+            "and value runtime-mutation-42. After the tool result arrives, answer with the exact updated value that was written."
+        ),
+        max_output_tokens=16384,
+        temperature=0,
+        tool_choice={"type": "function", "name": "update_record"},
+        tools=[_mutation_tool_definition()],
+    )
+
+    first_reasoning = [item for item in first.output if item.type == "reasoning"]
+    first_function_calls = [item for item in first.output if item.type == "function_call"]
+    assert first.status == "completed"
+    assert len(first_reasoning) >= 2
+    assert first_function_calls
+
+    second = await money_openai_client.responses.create(
+        model=RUNTIME_PROFILE,
+        input=[
+            *_replay_output_items(first),
+            {
+                "type": "function_call_output",
+                "call_id": first_function_calls[0].call_id,
+                "output": "updated value: runtime-mutation-42",
+                "status": "completed",
+            },
+        ],
+        max_output_tokens=16384,
+        temperature=0,
+    )
+
+    second_reasoning = [item for item in second.output if item.type == "reasoning"]
+    assert second.status == "completed"
+    assert len(second_reasoning) >= 2
+    assert "runtime-mutation-42" in _response_text(second)
+
+
 async def test_money_responses_wisp_nano_compression_replay_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
@@ -337,7 +395,7 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
                 ),
             },
         ],
-        max_output_tokens=512,
+        max_output_tokens=16384,
         temperature=0,
     )
 
@@ -356,7 +414,7 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
     followup = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input=replay_input,
-        max_output_tokens=256,
+        max_output_tokens=16384,
         temperature=0,
     )
 
@@ -370,7 +428,7 @@ async def test_money_responses_wisp_nano_server_mcp_loopback(
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input=("Use the search tool to find the runtime MCP marker, then answer with the exact marker string from the tool result."),
-        max_output_tokens=512,
+        max_output_tokens=16384,
         temperature=0,
         tool_choice={"type": "function", "name": MONEY_MCP_TOOL_NAME},
         tools=[{"type": "web_search"}],
@@ -392,7 +450,7 @@ async def test_money_responses_wisp_nano_reasoning_summary(
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Think through 17 + 25 and give a short final answer.",
-        max_output_tokens=512,
+        max_output_tokens=4096,
         reasoning={"effort": "low", "summary": "concise"},
         temperature=0,
     )
@@ -413,6 +471,10 @@ def _response_text(response: object) -> str:
     return "".join(part.text for item in response.output if item.type == "message" for part in item.content if part.type == "output_text")
 
 
+def _replay_output_items(response: object) -> list[dict[str, object]]:
+    return [_item_to_input(item) for item in response.output]
+
+
 async def _run_client_tool_loop(
     client: AsyncOpenAI,
     *,
@@ -430,7 +492,7 @@ async def _run_client_tool_loop(
         response = await client.responses.create(
             model=RUNTIME_PROFILE,
             input=next_input,
-            max_output_tokens=256,
+            max_output_tokens=16384,
             temperature=0,
             tool_choice=next_tool_choice,
             tools=next_tools,
@@ -482,8 +544,39 @@ def _constant_tool_definition() -> dict[str, object]:
     }
 
 
+def _mutation_tool_definition() -> dict[str, object]:
+    return {
+        "type": "function",
+        "name": "update_record",
+        "description": (
+            "Update a record value in application state. This tool mutates stored data and changes state."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Record identifier to update.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "New value to write into the record.",
+                },
+            },
+            "required": ["id", "value"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
 def _runtime_profile(
     *,
+    main_model: str = "crof/qwen3.5-9b",
+    main_debate_model: str = "crof/qwen3.5-9b",
+    reviewer_model: str = "crof/qwen3.5-9b",
+    arbitrator_model: str = "crof/qwen3.5-9b",
+    reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
     transcript_token_budget: int = 200_000,
     compression_soft_token_budget: int | None = 100_000,
     compression_hard_token_budget: int | None = 150_000,
@@ -517,11 +610,11 @@ def _runtime_profile(
             provider="plap",
             deprecated=False,
         ),
-        main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-        main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-        reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-        arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-        reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
+        main=RuntimeActorConfig(model=main_model),
+        main_debate=RuntimeActorConfig(model=main_debate_model),
+        reviewer=RuntimeActorConfig(model=reviewer_model),
+        arbitrator=RuntimeActorConfig(model=arbitrator_model),
+        reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
         transcript_token_budget=transcript_token_budget,
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,

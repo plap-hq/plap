@@ -12,6 +12,7 @@ import msgspec
 from plap.auth import AuthContext
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
+    ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
     ChatResponseFormat,
@@ -58,7 +59,7 @@ from plap.responses.ingest.sealing import (
     seal_reasoning_payload,
 )
 from plap.responses.io import ResponseEventIO
-from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall, UsageAccumulator
+from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall, UsageLedger
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.tools import (
     IToolCallPolicyResolver,
@@ -212,6 +213,14 @@ def _response_error(exc: Exception) -> ResponseError:
     if isinstance(exc, ResponseError):
         return exc
     return ResponseError.internal(private_message=str(exc), cause=exc)
+
+
+def _is_tool_handoff(finish_reason: ChatFinishReason) -> bool:
+    return finish_reason in {ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}
+
+
+def _is_user_return(finish_reason: ChatFinishReason) -> bool:
+    return finish_reason == ChatFinishReason.STOP
 
 
 def _context_token_count(spans: Sequence[ChatMessageSpan], *, include_citations: bool) -> int:
@@ -549,7 +558,7 @@ async def run_response(
 
     compression_rounds = 0
     compression_bailout = _CompressionBailout.NONE
-    usage_accumulator = UsageAccumulator()
+    usage_ledger = UsageLedger(budget=request.max_output_tokens)
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
@@ -567,7 +576,7 @@ async def run_response(
                 server_executors=base_server_executors,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
-                usage_accumulator=usage_accumulator,
+                usage_ledger=usage_ledger,
             )
             if debate_result == DebateResult.COMPLETED:
                 return
@@ -613,6 +622,11 @@ async def run_response(
             tool_choice = ChatToolChoiceFunction(name=COMPRESS_TOOL_NAME)
             forced_compression = True
 
+        main_cap = usage_ledger.cap_for(profile.main.public_usage)
+        if main_cap == 0:
+            await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+            return
+
         model_request = build_completion_request(
             actor="main",
             actor_config=profile.main,
@@ -622,12 +636,62 @@ async def run_response(
             tool_choice=tool_choice,
             response_format=_chat_response_format(request),
             prompt_cache_key_base=prompt_cache_key_base,
+            max_completion_tokens=main_cap,
         )
 
         result = await chat_completion_client.complete(model_request)
+        if result.finish_reason is None:
+            raise ResponseError.internal(private_message="completion finish_reason is missing")
+
         tool_calls = result.message.tool_calls or []
+        tool_handoff = _is_tool_handoff(result.finish_reason)
+        user_return = _is_user_return(result.finish_reason)
+        if tool_calls and not tool_handoff:
+            raise ResponseError.internal(private_message="completion returned tool calls without tool handoff finish_reason")
+        if tool_handoff and not tool_calls:
+            raise ResponseError.internal(private_message="completion returned tool handoff finish_reason without tool calls")
+
         if forced_compression and not any(call.name == COMPRESS_TOOL_NAME for call in tool_calls):
             raise ResponseError.tool_policy(private_message="hard compression budget requires compress")
+
+        if user_return and profile.debate_max_rounds > 0:
+            held_anchor_index = usage_ledger.record_hidden(profile.main.public_usage, result.usage)
+            await start_debate_from_candidate(
+                state=state,
+                out=out,
+                keyring=sealing_keyring,
+                assistant=StateMessage(
+                    role=result.message.role,
+                    content=result.message.content,
+                    name=result.message.name,
+                    tool_call_id=result.message.tool_call_id,
+                    tool_calls=[
+                        StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
+                        for call in result.message.tool_calls or ()
+                    ],
+                    reasoning_content=result.message.reasoning_content,
+                    reasoning_details=list(result.message.reasoning_details or ()),
+                ),
+                tool_calls=tool_calls,
+                server_outputs={},
+            )
+            debate_result = await continue_debate(
+                state=state,
+                out=out,
+                request=request,
+                profile=profile,
+                keyring=sealing_keyring,
+                tools=base_tools,
+                tool_policies=base_tool_policies,
+                server_executors=base_server_executors,
+                chat_completion_client=chat_completion_client,
+                prompt_cache_key_base=prompt_cache_key_base,
+                usage_ledger=usage_ledger,
+                held_anchor_index=held_anchor_index,
+            )
+            if debate_result == DebateResult.COMPLETED:
+                return
+            continue
 
         if tool_calls:
             resolved_policies = await resolve_tool_calls(
@@ -663,7 +727,7 @@ async def run_response(
                 elif compression_reminder_level == _CompressionReminderLevel.SOFT:
                     compression_bailout = _CompressionBailout.SOFT
                 compression_rounds += 1
-                usage_accumulator.add_hidden(profile.main.public_usage, result.usage)
+                usage_ledger.record_hidden(profile.main.public_usage, result.usage)
                 continue
 
             if compression_reminder_level == _CompressionReminderLevel.SOFT:
@@ -721,9 +785,8 @@ async def run_response(
                         server_executors=base_server_executors,
                         chat_completion_client=chat_completion_client,
                         prompt_cache_key_base=prompt_cache_key_base,
-                        usage_accumulator=usage_accumulator,
-                        held_anchor_usage=result.usage,
-                        held_anchor_service_tier=result.service_tier,
+                        usage_ledger=usage_ledger,
+                        held_anchor_index=usage_ledger.record_hidden(profile.main.public_usage, result.usage),
                     )
                     if debate_result == DebateResult.COMPLETED:
                         return
@@ -862,12 +925,13 @@ async def run_response(
             state.append_main_stable(tool_message)
 
         if server_outputs and not client_call_indexes:
-            usage_accumulator.add_hidden(profile.main.public_usage, result.usage)
+            usage_ledger.record_hidden(profile.main.public_usage, result.usage)
             continue
 
+        usage_ledger.set_anchor(result.usage)
         await out.completed(
-            service_tier=result.service_tier,
-            usage=usage_accumulator.to_response_usage(result.usage),
+            service_tier=request.service_tier,
+            usage=usage_ledger.to_response_usage(),
         )
         return
 

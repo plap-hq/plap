@@ -123,6 +123,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
                 arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 transcript_token_budget=0,
+                debate_max_rounds=0,
             )
         },
         sealing_keys=["a" * 43],

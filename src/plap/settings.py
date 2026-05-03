@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from math import ceil, floor
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -196,7 +197,24 @@ class PublicUsageConfig(BaseModel):
 
     uncached_input_to_output: float = Field(default=0.25, ge=0)
     cached_input_to_output: float = Field(default=0.05, ge=0)
-    output_to_output: float = Field(default=1.0, ge=0)
+    output_to_output: float = Field(default=1.0, gt=0)
+
+    def cap_from_budget(self, budget: int | None) -> int | None:
+        if budget is None:
+            return None
+        if budget <= 0:
+            return 0
+        return floor(budget / self.output_to_output)
+
+    def hidden_debit(self, usage) -> int:
+        cached_input = min(usage.cached_tokens or 0, usage.input_tokens)
+        uncached_input = usage.input_tokens - cached_input
+        debit = (
+            uncached_input * self.uncached_input_to_output
+            + cached_input * self.cached_input_to_output
+            + usage.output_tokens * self.output_to_output
+        )
+        return ceil(debit)
 
 
 class RuntimeActorConfig(BaseModel):

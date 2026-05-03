@@ -22,6 +22,7 @@ from plap.responses.contracts import (
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionCallItem,
+    ResponseIncompleteDetails,
     ResponseInProgressEvent,
     ResponseMessageItem,
     ResponseObject,
@@ -121,6 +122,23 @@ class ResponseEventIO:
                 "completed_at": time.time(),
                 "service_tier": service_tier or self._response.service_tier,
                 "status": "completed",
+                "usage": usage,
+            }
+        )
+        await self._commit_send.send((_CommitKind.COMPLETED, response, None))
+
+    async def incomplete(
+        self,
+        *,
+        service_tier: str | None = None,
+        usage: ResponseUsage | None = None,
+    ) -> None:
+        response = self._response.model_copy(
+            update={
+                "completed_at": time.time(),
+                "service_tier": service_tier or self._response.service_tier,
+                "status": "incomplete",
+                "incomplete_details": ResponseIncompleteDetails(reason="max_output_tokens"),
                 "usage": usage,
             }
         )
