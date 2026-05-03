@@ -91,7 +91,8 @@ def money_settings(
         runtime_model_profiles={
             RUNTIME_PROFILE: _runtime_profile(),
             COMPRESSION_PROFILE: _runtime_profile(
-                transcript_token_budget=2_000,
+                reviewer_transcript_token_budget=2_000,
+                arbitrator_transcript_token_budget=2_000,
                 compression_soft_token_budget=120,
                 compression_hard_token_budget=180,
                 compression_max_rounds=2,
@@ -577,7 +578,8 @@ def _runtime_profile(
     reviewer_model: str = "crof/qwen3.5-9b",
     arbitrator_model: str = "crof/qwen3.5-9b",
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
-    transcript_token_budget: int = 200_000,
+    reviewer_transcript_token_budget: int = 200_000,
+    arbitrator_transcript_token_budget: int = 200_000,
     compression_soft_token_budget: int | None = 100_000,
     compression_hard_token_budget: int | None = 150_000,
     compression_max_rounds: int = 3,
@@ -590,7 +592,7 @@ def _runtime_profile(
             mode="responses",
             input_modalities=["text"],
             output_modalities=["text"],
-            max_input_tokens=transcript_token_budget,
+            max_input_tokens=max(reviewer_transcript_token_budget, arbitrator_transcript_token_budget),
             max_output_tokens=32_768,
             supported_parameters=[
                 "context_management",
@@ -615,7 +617,8 @@ def _runtime_profile(
         reviewer=RuntimeActorConfig(model=reviewer_model),
         arbitrator=RuntimeActorConfig(model=arbitrator_model),
         reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
-        transcript_token_budget=transcript_token_budget,
+        reviewer_transcript_token_budget=reviewer_transcript_token_budget,
+        arbitrator_transcript_token_budget=arbitrator_transcript_token_budget,
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,

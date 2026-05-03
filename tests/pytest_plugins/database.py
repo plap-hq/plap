@@ -122,7 +122,8 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
                 reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                transcript_token_budget=0,
+                reviewer_transcript_token_budget=0,
+                arbitrator_transcript_token_budget=0,
                 debate_max_rounds=0,
             )
         },

@@ -71,7 +71,8 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.reviewer.model == "crof/qwen3.5-9b"
     assert profile.arbitrator.model == "crof/qwen3.5-9b"
     assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.transcript_token_budget == 200_000
+    assert profile.reviewer_transcript_token_budget == 200_000
+    assert profile.arbitrator_transcript_token_budget == 200_000
     assert profile.compression_soft_token_budget == 100_000
     assert profile.compression_hard_token_budget == 150_000
     assert profile.compression_max_rounds == 3
@@ -84,6 +85,27 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.by_service_tier == {}
     assert profile.by_reasoning_effort["high"].main is not None
     assert profile.by_reasoning_effort["high"].main.reasoning_effort == "high"
+
+
+def test_app_runtime_includes_wisp_default_profile() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        llm_lightning_api_key="lightning-key",
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+    profile = settings.runtime_model_profiles["plap-ai/wisp"]
+    assert profile.display_name == "Wisp"
+    assert profile.main.model == "crof/glm-5.1"
+    assert profile.main_debate.model == "crof/qwen3.5-397b-a17b"
+    assert profile.reviewer.model == "crof/deepseek-v4-flash"
+    assert profile.arbitrator.model == "crof/deepseek-v4-flash"
+    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.reviewer_transcript_token_budget == 500_000
+    assert profile.arbitrator_transcript_token_budget == 500_000
+    assert profile.model_info.max_input_tokens == 200_000
+    assert profile.model_info.max_output_tokens == 32_768
 
 
 def test_app_runtime_wisp_nano_rejects_service_tier() -> None:
@@ -245,7 +267,8 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
                     "priority": RuntimeProfileOverride(
                         main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
-                        transcript_token_budget=4096,
+                        reviewer_transcript_token_budget=4096,
+                        arbitrator_transcript_token_budget=2048,
                         compression_soft_token_budget=4096,
                         compression_hard_token_budget=8192,
                         compression_max_rounds=1,
@@ -291,7 +314,8 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
-                transcript_token_budget=1024,
+                reviewer_transcript_token_budget=1024,
+                arbitrator_transcript_token_budget=768,
             )
         },
     )
@@ -301,7 +325,8 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     assert profile is settings.runtime_model_profiles["plap/standard"]
     assert profile.display_name == "Test Model"
     assert profile.main.model == "lightning/lightning-ai/gpt-oss-20b"
-    assert profile.transcript_token_budget == 1024
+    assert profile.reviewer_transcript_token_budget == 1024
+    assert profile.arbitrator_transcript_token_budget == 768
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="default")) is profile
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="auto")) is profile
     with pytest.raises(ValueError, match="model is required"):
@@ -393,7 +418,8 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
                     "priority": RuntimeProfileOverride(
                         main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
-                        transcript_token_budget=8192,
+                        reviewer_transcript_token_budget=8192,
+                        arbitrator_transcript_token_budget=4096,
                         compression_soft_token_budget=5000,
                         compression_hard_token_budget=6000,
                         compression_max_rounds=1,
@@ -414,7 +440,8 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
     assert priority.reviewer.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.main_debate.model == "crof/qwen3.5-9b"
     assert priority.arbitrator.model == "crof/qwen3.5-9b"
-    assert priority.transcript_token_budget == 8192
+    assert priority.reviewer_transcript_token_budget == 8192
+    assert priority.arbitrator_transcript_token_budget == 4096
     assert priority.compression_soft_token_budget == 5000
     assert priority.compression_hard_token_budget == 6000
     assert priority.compression_max_rounds == 1
@@ -539,7 +566,8 @@ def _profile_config(
     reviewer_model: str,
     arbitrator_model: str,
     reasoning_summarizer_model: str,
-    transcript_token_budget: int = 0,
+    reviewer_transcript_token_budget: int = 0,
+    arbitrator_transcript_token_budget: int = 0,
     compression_soft_token_budget: int | None = None,
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
@@ -582,7 +610,8 @@ def _profile_config(
         reviewer=RuntimeActorConfig(model=reviewer_model),
         arbitrator=RuntimeActorConfig(model=arbitrator_model),
         reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
-        transcript_token_budget=transcript_token_budget,
+        reviewer_transcript_token_budget=reviewer_transcript_token_budget,
+        arbitrator_transcript_token_budget=arbitrator_transcript_token_budget,
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,

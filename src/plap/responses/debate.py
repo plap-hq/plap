@@ -540,7 +540,7 @@ async def run_reviewer_turn(
     thread = _thread_messages(state.reviewer)
     header_messages = [
         ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
-        _transcript_wrapper(state.compact_transcript(token_budget=profile.transcript_token_budget)),
+        _transcript_wrapper(state.compact_transcript(token_budget=profile.reviewer_transcript_token_budget)),
         *(message.to_chat_message() for message in thread),
     ]
     if _thread_waiting_after_tool_output(thread):
@@ -635,7 +635,7 @@ async def run_arbitrator_turn(
     thread = _thread_messages(state.arbitrator)
     header_messages = [
         ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
-        _transcript_wrapper(state.compact_transcript(token_budget=profile.transcript_token_budget)),
+        _transcript_wrapper(state.compact_transcript(token_budget=profile.arbitrator_transcript_token_budget)),
         *(message.to_chat_message() for message in thread),
     ]
     if _thread_waiting_after_tool_output(thread):

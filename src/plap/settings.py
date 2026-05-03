@@ -47,7 +47,50 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
             arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
-            transcript_token_budget=200_000,
+            reviewer_transcript_token_budget=200_000,
+            arbitrator_transcript_token_budget=200_000,
+            compression_soft_token_budget=100_000,
+            compression_hard_token_budget=150_000,
+            compression_max_rounds=3,
+            debate_max_rounds=2,
+            by_reasoning_effort=_default_reasoning_effort_overrides(),
+        ),
+        "plap-ai/wisp": RuntimeModelProfileConfig(
+            display_name="Wisp",
+            model_info=RuntimeModelInfoConfig(
+                display_name="Wisp",
+                description="Higher-quality plap responses model for text and tool use.",
+                mode="responses",
+                input_modalities=["text"],
+                output_modalities=["text"],
+                max_input_tokens=200_000,
+                max_output_tokens=32_768,
+                supported_parameters=[
+                    "context_management",
+                    "temperature",
+                    "top_p",
+                    "tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "response_format",
+                    "max_output_tokens",
+                    "reasoning_effort",
+                    "stream",
+                ],
+                pricing=RuntimeModelPricingConfig(
+                    input_per_token=0.0,
+                    output_per_token=0.0,
+                ),
+                provider="plap",
+                deprecated=False,
+            ),
+            main=RuntimeActorConfig(model="crof/glm-5.1"),
+            main_debate=RuntimeActorConfig(model="crof/qwen3.5-397b-a17b"),
+            reviewer=RuntimeActorConfig(model="crof/deepseek-v4-flash"),
+            arbitrator=RuntimeActorConfig(model="crof/deepseek-v4-flash"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
+            reviewer_transcript_token_budget=500_000,
+            arbitrator_transcript_token_budget=500_000,
             compression_soft_token_budget=100_000,
             compression_hard_token_budget=150_000,
             compression_max_rounds=3,
@@ -259,7 +302,8 @@ class RuntimeProfileOverride(BaseModel):
     reviewer: RuntimeActorOverride | None = None
     arbitrator: RuntimeActorOverride | None = None
     reasoning_summarizer: RuntimeActorOverride | None = None
-    transcript_token_budget: int | None = Field(default=None, ge=0)
+    reviewer_transcript_token_budget: int | None = Field(default=None, ge=0)
+    arbitrator_transcript_token_budget: int | None = Field(default=None, ge=0)
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int | None = Field(default=None, ge=0)
@@ -286,8 +330,10 @@ class RuntimeProfileOverride(BaseModel):
             updates["arbitrator"] = profile.arbitrator.apply_override(self.arbitrator)
         if self.reasoning_summarizer is not None:
             updates["reasoning_summarizer"] = profile.reasoning_summarizer.apply_override(self.reasoning_summarizer)
-        if self.transcript_token_budget is not None:
-            updates["transcript_token_budget"] = self.transcript_token_budget
+        if self.reviewer_transcript_token_budget is not None:
+            updates["reviewer_transcript_token_budget"] = self.reviewer_transcript_token_budget
+        if self.arbitrator_transcript_token_budget is not None:
+            updates["arbitrator_transcript_token_budget"] = self.arbitrator_transcript_token_budget
         if self.compression_soft_token_budget is not None:
             updates["compression_soft_token_budget"] = self.compression_soft_token_budget
         if self.compression_hard_token_budget is not None:
@@ -314,8 +360,10 @@ class RuntimeProfileOverride(BaseModel):
             fields.update(self.arbitrator.overridden_fields("arbitrator"))
         if self.reasoning_summarizer is not None:
             fields.update(self.reasoning_summarizer.overridden_fields("reasoning_summarizer"))
-        if self.transcript_token_budget is not None:
-            fields.add("transcript_token_budget")
+        if self.reviewer_transcript_token_budget is not None:
+            fields.add("reviewer_transcript_token_budget")
+        if self.arbitrator_transcript_token_budget is not None:
+            fields.add("arbitrator_transcript_token_budget")
         if self.compression_soft_token_budget is not None:
             fields.add("compression_soft_token_budget")
         if self.compression_hard_token_budget is not None:
@@ -347,7 +395,8 @@ class RuntimeModelProfileConfig(BaseModel):
     reviewer: RuntimeActorConfig
     arbitrator: RuntimeActorConfig
     reasoning_summarizer: RuntimeActorConfig
-    transcript_token_budget: int = Field(default=0, ge=0)
+    reviewer_transcript_token_budget: int = Field(default=0, ge=0)
+    arbitrator_transcript_token_budget: int = Field(default=0, ge=0)
     compression_soft_token_budget: int | None = Field(default=None, ge=0)
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int = Field(default=3, ge=0)
