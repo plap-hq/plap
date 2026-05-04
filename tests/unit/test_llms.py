@@ -978,10 +978,22 @@ async def test_crof_client_uses_openai_create_with_crof_params() -> None:
     assert result.message.content == "ok"
 
 
-async def test_crof_glm_4_7_flash_copies_json_from_reasoning_content() -> None:
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-v3.2",
+        "gemma-4-31b-it",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-5",
+        "minimax-m2.5",
+        "qwen3.5-397b-a17b",
+    ],
+)
+async def test_crof_compensates_schema_json_from_reasoning_content(model: str) -> None:
     fake_completion = _FakeOpenAICompletion(
         _completion_response(
-            model="glm-4.7-flash",
+            model=model,
             content="",
             reasoning_content='{"ok":true}',
         )
@@ -990,18 +1002,38 @@ async def test_crof_glm_4_7_flash_copies_json_from_reasoning_content() -> None:
 
     result = await client.complete(
         ChatCompletionRequest(
-            model="glm-4.7-flash",
+            model=model,
             messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-            response_format=ChatResponseFormat(type="json_object"),
+            response_format=ChatResponseFormat(
+                type="json_schema",
+                name="answer",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
             max_completion_tokens=128,
         )
     )
 
     assert result.message.content == '{"ok":true}'
     assert result.message.reasoning_content == '{"ok":true}'
-    call = fake_completion.calls[0]
-    assert call["response_format"] == {"type": "json_object"}
-    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert fake_completion.calls[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    }
 
 
 async def test_novita_client_uses_openai_create_with_novita_params() -> None:
