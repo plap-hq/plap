@@ -57,66 +57,59 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     assert isinstance(client, RoutingChatCompletionClient)
 
 
-def test_app_runtime_includes_wisp_nano_default_profile() -> None:
+def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
+        llm_openrouter_api_key="openrouter-key",
     )
 
     _validate_runtime_model_profiles(settings)
 
-    profile = settings.runtime_model_profiles["plap-ai/wisp-nano"]
-    assert profile.display_name == "Wisp Nano"
-    assert profile.main.model == "crof/qwen3.5-9b"
-    assert profile.main_debate.model == "crof/qwen3.5-9b"
-    assert profile.reviewer.model == "crof/qwen3.5-9b-chat"
-    assert profile.arbitrator.model == "crof/qwen3.5-9b-chat"
-    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.reviewer_transcript_token_budget == 200_000
-    assert profile.arbitrator_transcript_token_budget == 200_000
-    assert profile.compression_soft_token_budget == 100_000
-    assert profile.compression_hard_token_budget == 150_000
-    assert profile.compression_max_rounds == 3
-    assert profile.debate_max_rounds == 2
+    profile = settings.runtime_model_profiles["plap-ai/wisp-mini"]
+    _assert_profile_model_prefixes(profile, main_prefix="openrouter/", reviewer_prefix="openrouter/")
+    assert profile.compression_max_rounds > 0
+    assert profile.debate_max_rounds > 0
+    assert profile.model_info.mode == "responses"
     assert profile.model_info.provider == "plap"
-    assert profile.model_info.max_input_tokens == 200_000
-    assert profile.model_info.description == "General-purpose plap responses model for text and tool use."
+    assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
+    assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
     assert "service_tier" not in profile.model_info.supported_parameters
     assert profile.by_service_tier == {}
     assert profile.by_reasoning_effort["high"].main is not None
     assert profile.by_reasoning_effort["high"].main.reasoning_effort == "high"
+    assert profile.by_reasoning_effort["high"].reviewer is not None
+    assert profile.by_reasoning_effort["high"].reviewer.reasoning_effort == "high"
 
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
+        llm_openrouter_api_key="openrouter-key",
     )
 
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp"]
-    assert profile.display_name == "Wisp"
-    assert profile.main.model == "crof/glm-5.1"
-    assert profile.main_debate.model == "crof/qwen3.5-397b-a17b"
-    assert profile.reviewer.model == "crof/deepseek-v4-flash"
-    assert profile.arbitrator.model == "crof/deepseek-v4-flash"
-    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.reviewer_transcript_token_budget == 500_000
-    assert profile.arbitrator_transcript_token_budget == 500_000
-    assert profile.model_info.max_input_tokens == 200_000
-    assert profile.model_info.max_output_tokens == 32_768
+    _assert_profile_model_prefixes(profile, main_prefix="crof/", reviewer_prefix="openrouter/")
+    assert profile.model_info.mode == "responses"
+    assert profile.model_info.provider == "plap"
+    assert not profile.model_info.deprecated
+    assert profile.main.public_usage == PublicUsageConfig()
+    assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
 
 
-def test_app_runtime_wisp_nano_rejects_service_tier() -> None:
+def test_app_runtime_wisp_mini_rejects_service_tier() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
+        llm_openrouter_api_key="openrouter-key",
     )
 
     with pytest.raises(ValueError, match="unsupported request parameters: service_tier"):
-        settings.resolve_runtime_model_profile("plap-ai/wisp-nano", selector=RuntimeSelector(service_tier="priority"))
+        settings.resolve_runtime_model_profile("plap-ai/wisp-mini", selector=RuntimeSelector(service_tier="priority"))
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -620,3 +613,16 @@ def _profile_config(
         by_service_tier=by_service_tier or {},
         by_reasoning_effort=by_reasoning_effort or {},
     )
+
+
+def _assert_profile_model_prefixes(
+    profile: RuntimeModelProfileConfig,
+    *,
+    main_prefix: str,
+    reviewer_prefix: str,
+) -> None:
+    assert profile.main.model.startswith(main_prefix)
+    assert profile.main_debate.model.startswith(main_prefix)
+    assert profile.reviewer.model.startswith(reviewer_prefix)
+    assert profile.arbitrator.model.startswith(reviewer_prefix)
+    assert profile.reasoning_summarizer.model.startswith("lightning/")

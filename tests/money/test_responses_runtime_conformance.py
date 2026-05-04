@@ -43,15 +43,15 @@ from tests.pytest_plugins.database import (
 
 pytestmark = pytest.mark.money
 
-RUNTIME_PROFILE = "plap-ai/wisp-nano"
-COMPRESSION_PROFILE = "plap-ai/wisp-nano-money-compress"
+RUNTIME_PROFILE = "plap-ai/wisp-mini"
+COMPRESSION_PROFILE = "plap-ai/wisp-mini-money-compress"
 MONEY_MCP_TOOL_NAME = "money_search"
-REQUIRED_ENV_KEYS = ("CROF_API_KEY", "LIGHTNING_API_KEY")
+REQUIRED_ENV_KEYS = ("OPENROUTER_API_KEY", "LIGHTNING_API_KEY")
 
 
 @dataclass(frozen=True, slots=True)
 class _MoneyProviderKeys:
-    crof_api_key: str
+    openrouter_api_key: str
     lightning_api_key: str
 
 
@@ -73,7 +73,7 @@ def money_provider_keys() -> _MoneyProviderKeys:
     if missing:
         pytest.skip(f"missing money provider env keys: {', '.join(missing)}")
     return _MoneyProviderKeys(
-        crof_api_key=os.environ["CROF_API_KEY"],
+        openrouter_api_key=os.environ["OPENROUTER_API_KEY"],
         lightning_api_key=os.environ["LIGHTNING_API_KEY"],
     )
 
@@ -86,8 +86,8 @@ def money_settings(
     return Settings(
         api_key_pepper="money-test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
-        llm_crof_api_key=money_provider_keys.crof_api_key,
         llm_lightning_api_key=money_provider_keys.lightning_api_key,
+        llm_openrouter_api_key=money_provider_keys.openrouter_api_key,
         runtime_model_profiles={
             RUNTIME_PROFILE: _runtime_profile(),
             COMPRESSION_PROFILE: _runtime_profile(
@@ -253,13 +253,13 @@ async def money_openai_client(
         await client.close()
 
 
-async def test_money_responses_wisp_nano_basic_completion(
+async def test_money_responses_wisp_mini_basic_completion(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Reply with one short sentence containing the word wisp.",
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
     )
 
@@ -268,13 +268,13 @@ async def test_money_responses_wisp_nano_basic_completion(
     assert _response_text(response).strip()
 
 
-async def test_money_responses_wisp_nano_direct_answer_debate(
+async def test_money_responses_wisp_mini_direct_answer_debate(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Reply with exactly: wisp debate ok",
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
     )
 
@@ -284,13 +284,13 @@ async def test_money_responses_wisp_nano_direct_answer_debate(
     assert "wisp" in _response_text(response).lower()
 
 
-async def test_money_responses_wisp_nano_sse_stream(
+async def test_money_responses_wisp_mini_sse_stream(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     stream = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input="Reply with exactly: streaming wisp",
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         stream=True,
         temperature=0,
     )
@@ -310,7 +310,7 @@ async def test_money_responses_wisp_nano_sse_stream(
     assert _response_text(completed_response).strip()
 
 
-async def test_money_responses_wisp_nano_client_tool_continuation_loop(
+async def test_money_responses_wisp_mini_client_tool_continuation_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     responses = await _run_client_tool_loop(
@@ -326,7 +326,7 @@ async def test_money_responses_wisp_nano_client_tool_continuation_loop(
     assert "42" in _response_text(responses[-1])
 
 
-async def test_money_responses_wisp_nano_risky_tool_debate_loop(
+async def test_money_responses_wisp_mini_risky_tool_debate_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     first = await money_openai_client.responses.create(
@@ -335,7 +335,7 @@ async def test_money_responses_wisp_nano_risky_tool_debate_loop(
             "Briefly say that you are updating the record, then call update_record with id rec-1 "
             "and value runtime-mutation-42. After the tool result arrives, answer with the exact updated value that was written."
         ),
-        max_output_tokens=32768,
+        max_output_tokens=32_768,
         temperature=0,
         tool_choice={"type": "function", "name": "update_record"},
         tools=[_mutation_tool_definition()],
@@ -358,7 +358,7 @@ async def test_money_responses_wisp_nano_risky_tool_debate_loop(
                 "status": "completed",
             },
         ],
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
     )
 
@@ -368,7 +368,7 @@ async def test_money_responses_wisp_nano_risky_tool_debate_loop(
     assert "runtime-mutation-42" in _response_text(second)
 
 
-async def test_money_responses_wisp_nano_compression_replay_loop(
+async def test_money_responses_wisp_mini_compression_replay_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
@@ -396,7 +396,7 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
                 ),
             },
         ],
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
     )
 
@@ -415,7 +415,7 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
     followup = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input=replay_input,
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
     )
 
@@ -423,13 +423,13 @@ async def test_money_responses_wisp_nano_compression_replay_loop(
     assert "RETAIN-MONEY-314" in _response_text(followup)
 
 
-async def test_money_responses_wisp_nano_server_mcp_loopback(
+async def test_money_responses_wisp_mini_server_mcp_loopback(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
         model=RUNTIME_PROFILE,
         input=("Use the search tool to find the runtime MCP marker, then answer with the exact marker string from the tool result."),
-        max_output_tokens=16384,
+        max_output_tokens=16_384,
         temperature=0,
         tool_choice={"type": "function", "name": MONEY_MCP_TOOL_NAME},
         tools=[{"type": "web_search"}],
@@ -445,7 +445,7 @@ async def test_money_responses_wisp_nano_server_mcp_loopback(
     assert "runtime-mcp-731" in _response_text(response)
 
 
-async def test_money_responses_wisp_nano_reasoning_summary(
+async def test_money_responses_wisp_mini_reasoning_summary(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
@@ -493,7 +493,7 @@ async def _run_client_tool_loop(
         response = await client.responses.create(
             model=RUNTIME_PROFILE,
             input=next_input,
-            max_output_tokens=16384,
+            max_output_tokens=16_384,
             temperature=0,
             tool_choice=next_tool_choice,
             tools=next_tools,
@@ -573,26 +573,26 @@ def _mutation_tool_definition() -> dict[str, object]:
 
 def _runtime_profile(
     *,
-    main_model: str = "crof/qwen3.5-9b",
-    main_debate_model: str = "crof/qwen3.5-9b",
-    reviewer_model: str = "crof/qwen3.5-9b-chat",
-    arbitrator_model: str = "crof/qwen3.5-9b-chat",
+    main_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
+    main_debate_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
+    reviewer_model: str = "openrouter/deepseek/deepseek-v4-flash:nitro",
+    arbitrator_model: str = "openrouter/deepseek/deepseek-v4-flash:nitro",
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
-    reviewer_transcript_token_budget: int = 200_000,
-    arbitrator_transcript_token_budget: int = 200_000,
-    compression_soft_token_budget: int | None = 100_000,
-    compression_hard_token_budget: int | None = 150_000,
+    reviewer_transcript_token_budget: int = 500_000,
+    arbitrator_transcript_token_budget: int = 500_000,
+    compression_soft_token_budget: int | None = 150_000,
+    compression_hard_token_budget: int | None = 200_000,
     compression_max_rounds: int = 3,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
-        display_name="Wisp Nano",
+        display_name="Wisp Mini",
         model_info=RuntimeModelInfoConfig(
-            display_name="Wisp Nano",
+            display_name="Wisp Mini",
             description="plap responses model for money tests.",
             mode="responses",
             input_modalities=["text"],
             output_modalities=["text"],
-            max_input_tokens=max(reviewer_transcript_token_budget, arbitrator_transcript_token_budget),
+            max_input_tokens=200_000,
             max_output_tokens=32_768,
             supported_parameters=[
                 "context_management",

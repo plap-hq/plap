@@ -13,10 +13,10 @@ from plap.responses.contracts import ModelInfoObject, ModelInfoPricingObject, Mo
 
 def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
     return {
-        "plap-ai/wisp-nano": RuntimeModelProfileConfig(
-            display_name="Wisp Nano",
+        "plap-ai/wisp-mini": RuntimeModelProfileConfig(
+            display_name="Wisp Mini",
             model_info=RuntimeModelInfoConfig(
-                display_name="Wisp Nano",
+                display_name="Wisp Mini",
                 description="General-purpose plap responses model for text and tool use.",
                 mode="responses",
                 input_modalities=["text"],
@@ -42,15 +42,15 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 provider="plap",
                 deprecated=False,
             ),
-            main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-            main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-            reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b-chat"),
-            arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b-chat"),
+            main=RuntimeActorConfig(model="openrouter/stepfun/step-3.5-flash:nitro"),
+            main_debate=RuntimeActorConfig(model="openrouter/stepfun/step-3.5-flash:nitro"),
+            reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
+            arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
-            reviewer_transcript_token_budget=200_000,
-            arbitrator_transcript_token_budget=200_000,
-            compression_soft_token_budget=100_000,
-            compression_hard_token_budget=150_000,
+            reviewer_transcript_token_budget=500_000,
+            arbitrator_transcript_token_budget=500_000,
+            compression_soft_token_budget=150_000,
+            compression_hard_token_budget=200_000,
             compression_max_rounds=3,
             debate_max_rounds=2,
             by_reasoning_effort=_default_reasoning_effort_overrides(),
@@ -86,8 +86,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             ),
             main=RuntimeActorConfig(model="crof/glm-5.1"),
             main_debate=RuntimeActorConfig(model="crof/qwen3.5-397b-a17b"),
-            reviewer=RuntimeActorConfig(model="crof/deepseek-v4-flash"),
-            arbitrator=RuntimeActorConfig(model="crof/deepseek-v4-flash"),
+            reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
+            arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=500_000,
             arbitrator_transcript_token_budget=500_000,

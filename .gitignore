@@ -26,4 +26,5 @@ build/
 
 archive/
 
+.dev/
 .env*

@@ -85,7 +85,7 @@ ruff = ">=0.15.11,<0.16"
 default = ["dev"]
 
 [tool.pixi.tasks]
-dev = "uvicorn plap.app:create_app --factory --reload"
+dev = "python scripts/dev.py"
 db-current = "alembic current"
 db-history = "alembic history"
 db-upgrade = "alembic upgrade head"
