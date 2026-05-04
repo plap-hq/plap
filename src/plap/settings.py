@@ -519,6 +519,7 @@ class Settings(BaseSettings):
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None
+    llm_openrouter_api_key: str | None = None
     tool_classifier_max_concurrency: int = 4
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096

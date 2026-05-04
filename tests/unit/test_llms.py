@@ -34,6 +34,7 @@ from plap.llms.openai import (
     OpenAICompatibleChatCompletionClient,
     to_openai_chat_params,
 )
+from plap.llms.openrouter import OPENROUTER_OPENAI_BASE_URL, OpenRouterChatCompletionClient, to_openrouter_chat_params
 from plap.llms.router import (
     ModelRoute,
     RoutingChatCompletionClient,
@@ -455,6 +456,27 @@ def test_crof_newer_glm_params_do_not_use_flash_thinking_quirk() -> None:
     params = to_crof_chat_params(request, stream=False)
 
     assert "extra_body" not in params
+
+
+def test_openrouter_params_preserve_openai_compatible_fields() -> None:
+    params = to_openrouter_chat_params(_request(), stream=True)
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_completion_tokens"] == 128
+    assert params["parallel_tool_calls"] is True
+    assert params["reasoning_effort"] == "low"
+    assert params["prompt_cache_key"] == "cache-a"
+    assert params["metadata"] == {"k": "v"}
+    assert params["service_tier"] == "flex"
+    assert params["prediction"] == {"type": "content", "content": "expected"}
+
+
+def test_openrouter_client_defaults_to_openrouter_base_url() -> None:
+    client = OpenRouterChatCompletionClient(api_key="test-key")
+
+    assert str(client._client.base_url).rstrip("/") == OPENROUTER_OPENAI_BASE_URL
 
 
 async def test_openai_client_normalizes_completion_result() -> None:

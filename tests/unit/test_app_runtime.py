@@ -50,6 +50,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
             llm_lightning_api_key="lightning-key",
             llm_novita_api_key="novita-key",
             llm_crof_api_key="crof-key",
+            llm_openrouter_api_key="openrouter-key",
         )
     )
 

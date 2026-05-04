@@ -16,6 +16,7 @@ from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.fireworks import FireworksChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.openrouter import OpenRouterChatCompletionClient
 from plap.llms.router import (
     ModelRoute,
     RoutingChatCompletionClient,
@@ -208,6 +209,10 @@ def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
         client = CrofChatCompletionClient(api_key=settings.llm_crof_api_key)
         yield ModelRoute(prefix="crof/", client=client)
 
+    if settings.llm_openrouter_api_key:
+        client = OpenRouterChatCompletionClient(api_key=settings.llm_openrouter_api_key)
+        yield ModelRoute(prefix="openrouter/", client=client)
+
 
 def _create_tool_classifier(
     settings: Settings,
@@ -272,6 +277,8 @@ def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
         yield "fireworks/"
     if settings.llm_crof_api_key:
         yield "crof/"
+    if settings.llm_openrouter_api_key:
+        yield "openrouter/"
 
 
 def create_app(settings: Settings | None = None) -> Litestar:

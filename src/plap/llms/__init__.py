@@ -31,6 +31,7 @@ from plap.llms.errors import (
     ChatCompletionUnsupportedRequestError,
 )
 from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.openrouter import OpenRouterChatCompletionClient
 from plap.llms.router import (
     ModelRoute,
     RoutingChatCompletionClient,
@@ -66,6 +67,7 @@ __all__ = [
     "IChatCompletionClient",
     "ModelRoute",
     "NovitaChatCompletionClient",
+    "OpenRouterChatCompletionClient",
     "ReasoningEffort",
     "RoutingChatCompletionClient",
     "ServiceTier",
