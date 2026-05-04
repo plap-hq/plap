@@ -24,6 +24,7 @@ from plap.llms.openai import (
 
 CROF_OPENAI_BASE_URL = "https://beta.crof.ai/v1"
 CROF_REASONING_CONTENT_RESPONSE_FORMAT_MODELS = frozenset({
+    "deepseek-v3.2",
     "glm-4.7-flash",
     "gemma-4-31b-it",
 })
