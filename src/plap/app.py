@@ -21,7 +21,7 @@ from plap.llms.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
 )
-from plap.persistence import create_database_engine, create_session_maker
+from plap.persistence import Database
 from plap.responses.errors import ResponseError
 from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
@@ -181,8 +181,7 @@ def handle_unexpected_exception(
 
 
 async def _shutdown_database(app: Litestar) -> None:
-    if app.state.owns_engine:
-        await app.state.db_engine.dispose()
+    await app.state.database.dispose_all()
 
 
 def _create_chat_completion_client(settings: Settings) -> IChatCompletionClient:
@@ -277,8 +276,6 @@ def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
 
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
-    db_engine = create_database_engine(resolved_settings.database_url)
-    session_maker = create_session_maker(db_engine)
     chat_completion_client = _create_chat_completion_client(resolved_settings)
     reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
     tool_classifier = _create_tool_classifier(
@@ -295,11 +292,9 @@ def create_app(settings: Settings | None = None) -> Litestar:
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
             "chat_completion_client": chat_completion_client,
-            "db_engine": db_engine,
-            "owns_engine": True,
+            "database": Database(resolved_settings.database_url),
             "runtime_model_profiles": resolved_settings.runtime_model_profiles,
             "reasoning_summarizer": reasoning_summarizer,
-            "session_maker": session_maker,
             "sealing_keyring": SealingKeyring.from_encoded(resolved_settings.sealing_keys),
             "settings": resolved_settings,
             "tool_call_classifier": tool_call_classifier,

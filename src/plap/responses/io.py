@@ -45,6 +45,7 @@ from plap.responses.contracts import (
 )
 from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
 from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.store import PreparedRequest, ResponseStore
 
 
 class _CommitKind(StrEnum):
@@ -65,6 +66,8 @@ class ResponseEventIO:
         self,
         *,
         request: ResponseCreateRequest,
+        prepared: PreparedRequest,
+        response_store: ResponseStore,
         send: ObjectSendStream[ResponseStreamEvent],
         reasoning_summarizer: IReasoningSummarizer,
         reasoning_summarizer_model: str,
@@ -74,6 +77,8 @@ class ResponseEventIO:
         reasoning_summary_mode: ReasoningSummary | None,
     ) -> None:
         self._response = _response_object(request, status="in_progress")
+        self._prepared = prepared
+        self._response_store = response_store
         self._send = send
         self._reasoning_summarizer = reasoning_summarizer
         self._reasoning_summarizer_model = reasoning_summarizer_model
@@ -151,6 +156,7 @@ class ResponseEventIO:
         async with self._commit_receive:
             async for kind, value, metadata in self._commit_receive:
                 if kind == _CommitKind.CREATED:
+                    await self._response_store.begin_response(self._prepared, cast(ResponseObject, value))
                     await self._send_event(
                         ResponseCreatedEvent(
                             response=cast(ResponseObject, value),
@@ -170,6 +176,7 @@ class ResponseEventIO:
                     await self._emit_output(cast(ResponseOutputItem, value), metadata)
                 else:
                     response = cast(ResponseObject, value).model_copy(update={"output": self._output_items})
+                    await self._response_store.finish_response(self._prepared, response)
                     await self._send_event(
                         ResponseCompletedEvent(
                             response=response,
@@ -200,6 +207,12 @@ class ResponseEventIO:
             completed_item = item
             await self._emit_output_item_events(item, output_index=output_index)
         self._output_items.append(completed_item)
+        await self._response_store.append_output_item(
+            self._prepared,
+            self._response.id,
+            output_index,
+            completed_item.model_dump(mode="json", exclude_none=True),
+        )
 
     async def _emit_output_item_events(
         self,

@@ -42,9 +42,13 @@ def test_app(test_settings: Settings):
 @pytest.fixture
 def live_server(test_settings: Settings) -> LiveServer:
     port = _find_free_port()
-    app = create_app(test_settings)
-    app.state.chat_completion_client = _StaticChatCompletionClient()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+
+    def app_factory():
+        app = create_app(test_settings)
+        app.state.chat_completion_client = _StaticChatCompletionClient()
+        return app
+
+    config = uvicorn.Config(app_factory, host="127.0.0.1", port=port, log_level="warning", factory=True)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

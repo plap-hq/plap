@@ -1,5 +1,9 @@
-from litestar.testing import AsyncTestClient
+from collections.abc import AsyncIterator
 
+from litestar.testing import AsyncTestClient
+from sqlalchemy import text
+
+from plap.llms.chat import ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
 from plap.responses.tools import (
     IToolClassifier,
     ToolClassification,
@@ -132,11 +136,93 @@ async def test_unimplemented_response_routes_return_honest_errors(
             headers=headers,
         )
 
-    assert _error_code(retrieved) == (404, "unsupported_operation")
-    assert _error_code(deleted) == (404, "unsupported_operation")
-    assert _error_code(input_items) == (404, "unsupported_operation")
+    assert retrieved.status_code == 404
+    assert retrieved.json()["error"]["code"] == "not_found"
+    assert deleted.status_code == 404
+    assert deleted.json()["error"]["code"] == "not_found"
+    assert input_items.status_code == 404
+    assert input_items.json()["error"]["code"] == "not_found"
     assert _error_code(compacted) == (501, "unsupported_operation")
     assert _error_code(input_tokens) == (501, "unsupported_operation")
+
+
+async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        created = await client.post("/v1/responses", json=_request_payload(), headers=headers)
+        created_body = created.json()
+        response_id = created_body["id"]
+
+        retrieved = await client.get(f"/v1/responses/{response_id}", headers=headers)
+        input_items = await client.get(f"/v1/responses/{response_id}/input_items", headers=headers)
+        deleted = await client.delete(f"/v1/responses/{response_id}", headers=headers)
+        missing = await client.get(f"/v1/responses/{response_id}", headers=headers)
+
+    assert created.status_code == 200
+    assert retrieved.status_code == 200
+    assert retrieved.json()["id"] == response_id
+    assert retrieved.json()["output"][0]["content"][0]["text"] == "test response"
+
+    input_items_body = input_items.json()
+    assert input_items.status_code == 200
+    assert input_items_body["object"] == "list"
+    assert len(input_items_body["data"]) == 1
+    assert input_items_body["data"][0]["type"] == "message"
+    assert input_items_body["data"][0]["content"] == "hello from the client"
+    assert input_items_body["data"][0]["id"].startswith(f"in_{response_id}_")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "id": response_id, "object": "response"}
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "not_found"
+
+
+async def test_previous_response_id_replays_persisted_history(
+    test_app,
+    seeded_auth_data,
+    db_session_maker,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        first = await client.post(
+            "/v1/responses",
+            json={"model": "plap/test", "input": "first turn"},
+            headers=headers,
+        )
+        first_id = first.json()["id"]
+        second = await client.post(
+            "/v1/responses",
+            json={"model": "plap/test", "input": "second turn", "previous_response_id": first_id},
+            headers=headers,
+        )
+        second_body = second.json()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second_body["previous_response_id"] == first_id
+
+    async with db_session_maker() as session:
+        replay_rows = (
+            await session.execute(
+                text(
+                    """
+                    select direction, payload
+                      from responses.list_response_replay(:scope_id, :response_id)
+                    """
+                ),
+                {"scope_id": seeded_auth_data.organization_id, "response_id": second_body["id"]},
+            )
+        ).all()
+
+    assert [row.direction for row in replay_rows] == ["input", "output", "input", "output"]
+    assert replay_rows[0].payload["content"] == "first turn"
+    assert replay_rows[1].payload["content"][0]["text"] == "test response"
+    assert replay_rows[2].payload["content"] == "second turn"
 
 
 async def test_create_response_prepares_runtime_tools_without_changing_behavior(
@@ -300,6 +386,26 @@ class _RecordingToolClassifier(IToolClassifier):
             )
             for signature in signatures
         }
+
+
+class _RecordingChatCompletionClient(IChatCompletionClient):
+    def __init__(self) -> None:
+        self.requests: list[ChatCompletionRequest] = []
+
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        self.requests.append(request)
+        return ChatCompletionResult(
+            id=f"chatcmpl_{len(self.requests)}",
+            model=request.model,
+            created_at=None,
+            message=ChatMessage(role="assistant", content=f"reply {len(self.requests)}"),
+            finish_reason="stop",
+        )
+
+    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
+        _ = request
+        if False:
+            yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
 
 
 def _error_code(response) -> tuple[int, str | None]:

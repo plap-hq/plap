@@ -61,6 +61,7 @@ from plap.responses.ingest.sealing import (
 from plap.responses.io import ResponseEventIO
 from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall, UsageLedger
 from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.store import ResponseStore
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
@@ -946,6 +947,7 @@ async def stream_response_events(
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     reasoning_summarizer: IReasoningSummarizer,
+    response_store: ResponseStore,
     mcp_tool_providers: Sequence[IMCPToolProvider] = (),
 ) -> AsyncIterator[ResponseStreamEvent]:
     send, receive = anyio.create_memory_object_stream[ResponseStreamEvent](16)
@@ -956,32 +958,40 @@ async def stream_response_events(
         async with send:
             try:
                 try:
-                    profile = settings.resolve_runtime_model_profile(request.model, selector=_runtime_selector(request))
-                    profile.validate_requested_parameters(_requested_parameters(request))
+                    if auth_context is None:
+                        raise ResponseError.internal(private_message="response runtime requires auth context")
+                    prepared = await response_store.prepare_request(auth_context, request)
+                    profile = settings.resolve_runtime_model_profile(
+                        prepared.response_request.model,
+                        selector=_runtime_selector(prepared.response_request),
+                    )
+                    profile.validate_requested_parameters(_requested_parameters(prepared.response_request))
                 except ValueError as exc:
                     raise ResponseError.invalid_request(private_message=str(exc), cause=exc) from exc
                 prompt_cache_key_base = _base_prompt_cache_key(
                     settings=settings,
                     auth_context=auth_context,
-                    prompt_cache_key=request.prompt_cache_key,
-                    user=request.user,
+                    prompt_cache_key=prepared.response_request.prompt_cache_key,
+                    user=prepared.response_request.user,
                 )
                 async with anyio.create_task_group() as task_group:
                     out = ResponseEventIO(
-                        request=request,
+                        request=prepared.response_request,
+                        prepared=prepared,
+                        response_store=response_store,
                         reasoning_summarizer=reasoning_summarizer,
                         reasoning_summarizer_model=profile.reasoning_summarizer.model,
                         reasoning_summarizer_prompt_cache_key_base=prompt_cache_key_base,
                         reasoning_summarizer_reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
                         reasoning_summarizer_service_tier=profile.reasoning_summarizer.service_tier,
-                        reasoning_summary_mode=_reasoning_summary_mode(request),
+                        reasoning_summary_mode=_reasoning_summary_mode(prepared.response_request),
                         send=send,
                     )
                     out.start(task_group)
                     try:
                         await run_response(
                             out,
-                            request,
+                            prepared.execution_request,
                             profile=profile,
                             sealing_keyring=sealing_keyring,
                             tool_policy_resolver=tool_policy_resolver,

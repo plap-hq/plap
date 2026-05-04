@@ -157,6 +157,20 @@ create table response_output_items (
   check (output_index >= 0)
 );
 
+create table response_tombstones (
+  scope_id uuid not null,
+  response_id text not null,
+  deleted_at timestamptz not null default now(),
+
+  primary key (scope_id, response_id),
+
+  foreign key (scope_id, response_id)
+    references response_records (scope_id, response_id)
+    on delete cascade,
+
+  check (response_id <> '')
+);
+
 create table response_leases (
   scope_id uuid not null,
   lease_id uuid not null default gen_random_uuid(),
@@ -299,7 +313,6 @@ begin
     or old.response_id is distinct from new.response_id
     or old.prev_response_id is distinct from new.prev_response_id
     or old.replay_base_response_id is distinct from new.replay_base_response_id
-    or old.fields is distinct from new.fields
     or old.created_at is distinct from new.created_at then
     raise exception 'response_records rows are structurally immutable';
   end if;
@@ -573,6 +586,7 @@ drop index if exists ix_payloads_gc;
 drop index if exists uq_response_leases_live_owner;
 
 drop table if exists conversations;
+drop table if exists response_tombstones;
 drop table if exists response_leases;
 drop table if exists response_output_items;
 drop table if exists response_input_items;

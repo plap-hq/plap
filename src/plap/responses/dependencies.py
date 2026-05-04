@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 from litestar import Request
@@ -18,11 +17,8 @@ from plap.llms.dependencies import (
     provide_request_chat_completion_client,
     provide_socket_chat_completion_client,
 )
-from plap.persistence.dependencies import (
-    provide_request_db_session,
-    provide_socket_db_session,
-)
 from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.store import ResponseStore
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -32,7 +28,7 @@ from plap.responses.tools import (
     StaticToolPolicyResolver,
 )
 from plap.responses.tools.mcp import IMCPToolProvider
-from plap.responses.tools.repository import ToolClassificationRepository
+from plap.responses.tools.repository import ToolClassificationStore
 from plap.settings import Settings
 
 
@@ -78,66 +74,52 @@ def provide_socket_reasoning_summarizer(
     return socket.app.state.reasoning_summarizer
 
 
-async def provide_tool_policy_resolver(
-    request: Request[Any, Any, Any] | WebSocket,
-) -> AsyncIterator[IToolPolicyResolver]:
-    async for resolver in _provide_tool_policy_resolver(request):
-        yield resolver
+def provide_response_store(request: Request[Any, Any, Any]) -> ResponseStore:
+    return ResponseStore(request.app.state.database)
 
 
-async def provide_socket_tool_policy_resolver(
-    socket: WebSocket,
-) -> AsyncIterator[IToolPolicyResolver]:
-    async for resolver in _provide_tool_policy_resolver(socket):
-        yield resolver
+def provide_socket_response_store(socket: WebSocket) -> ResponseStore:
+    return ResponseStore(socket.app.state.database)
 
 
-async def _provide_tool_policy_resolver(
-    connection: Request[Any, Any, Any] | WebSocket,
-) -> AsyncIterator[IToolPolicyResolver]:
+def _tool_policy_resolver(connection: Request[Any, Any, Any] | WebSocket) -> IToolPolicyResolver:
     classifier = connection.app.state.tool_classifier
     if classifier is None:
-        yield StaticToolPolicyResolver()
-        return
+        return StaticToolPolicyResolver()
 
-    async with connection.app.state.session_maker.begin() as session:
-        resolver = CachedToolPolicyResolver(
-            ToolClassificationRepository(session),
-            classifier,
-            classification_l1=connection.app.state.tool_policy_l1_cache,
-        )
-        yield resolver
+    return CachedToolPolicyResolver(
+        ToolClassificationStore(connection.app.state.database),
+        classifier,
+        classification_l1=connection.app.state.tool_policy_l1_cache,
+    )
 
 
-async def provide_tool_call_policy_resolver(
-    request: Request[Any, Any, Any] | WebSocket,
-) -> AsyncIterator[IToolCallPolicyResolver]:
-    async for resolver in _provide_tool_call_policy_resolver(request):
-        yield resolver
+def provide_tool_policy_resolver(request: Request[Any, Any, Any]) -> IToolPolicyResolver:
+    return _tool_policy_resolver(request)
 
 
-async def provide_socket_tool_call_policy_resolver(
-    socket: WebSocket,
-) -> AsyncIterator[IToolCallPolicyResolver]:
-    async for resolver in _provide_tool_call_policy_resolver(socket):
-        yield resolver
+def provide_socket_tool_policy_resolver(socket: WebSocket) -> IToolPolicyResolver:
+    return _tool_policy_resolver(socket)
 
 
-async def _provide_tool_call_policy_resolver(
-    connection: Request[Any, Any, Any] | WebSocket,
-) -> AsyncIterator[IToolCallPolicyResolver]:
+def _tool_call_policy_resolver(connection: Request[Any, Any, Any] | WebSocket) -> IToolCallPolicyResolver:
     classifier = connection.app.state.tool_call_classifier
     if classifier is None:
-        yield StaticToolCallPolicyResolver()
-        return
+        return StaticToolCallPolicyResolver()
 
-    async with connection.app.state.session_maker.begin() as session:
-        resolver = CachedToolCallPolicyResolver(
-            ToolClassificationRepository(session),
-            classifier,
-            classification_l1=connection.app.state.tool_call_policy_l1_cache,
-        )
-        yield resolver
+    return CachedToolCallPolicyResolver(
+        ToolClassificationStore(connection.app.state.database),
+        classifier,
+        classification_l1=connection.app.state.tool_call_policy_l1_cache,
+    )
+
+
+def provide_tool_call_policy_resolver(request: Request[Any, Any, Any]) -> IToolCallPolicyResolver:
+    return _tool_call_policy_resolver(request)
+
+
+def provide_socket_tool_call_policy_resolver(socket: WebSocket) -> IToolCallPolicyResolver:
+    return _tool_call_policy_resolver(socket)
 
 
 HTTP_ROUTE_DEPENDENCIES = {
@@ -147,7 +129,6 @@ HTTP_ROUTE_DEPENDENCIES = {
         sync_to_thread=False,
     ),
     "auth_context": Provide(provide_request_auth_context),
-    "db_session": Provide(provide_request_db_session),
     "settings": Provide(provide_settings, use_cache=True, sync_to_thread=False),
     "sealing_keyring": Provide(
         provide_sealing_keyring,
@@ -161,9 +142,11 @@ HTTP_ROUTE_DEPENDENCIES = {
     ),
     "tool_policy_resolver": Provide(
         provide_tool_policy_resolver,
+        sync_to_thread=False,
     ),
     "tool_call_policy_resolver": Provide(
         provide_tool_call_policy_resolver,
+        sync_to_thread=False,
     ),
     "mcp_tool_providers": Provide(
         provide_mcp_tool_providers,
@@ -172,6 +155,11 @@ HTTP_ROUTE_DEPENDENCIES = {
     ),
     "reasoning_summarizer": Provide(
         provide_reasoning_summarizer,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
+    "response_store": Provide(
+        provide_response_store,
         use_cache=True,
         sync_to_thread=False,
     ),
@@ -185,7 +173,6 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
         sync_to_thread=False,
     ),
     "auth_context": Provide(provide_socket_auth_context),
-    "db_session": Provide(provide_socket_db_session),
     "settings": Provide(provide_socket_settings, use_cache=True, sync_to_thread=False),
     "sealing_keyring": Provide(
         provide_socket_sealing_keyring,
@@ -199,9 +186,11 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
     ),
     "tool_policy_resolver": Provide(
         provide_socket_tool_policy_resolver,
+        sync_to_thread=False,
     ),
     "tool_call_policy_resolver": Provide(
         provide_socket_tool_call_policy_resolver,
+        sync_to_thread=False,
     ),
     "mcp_tool_providers": Provide(
         provide_socket_mcp_tool_providers,
@@ -210,6 +199,11 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
     ),
     "reasoning_summarizer": Provide(
         provide_socket_reasoning_summarizer,
+        use_cache=True,
+        sync_to_thread=False,
+    ),
+    "response_store": Provide(
+        provide_socket_response_store,
         use_cache=True,
         sync_to_thread=False,
     ),

@@ -35,6 +35,25 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     assert created.output[0].content[0].text == "test response"
 
 
+async def test_async_openai_client_stateful_methods(openai_client: AsyncOpenAI) -> None:
+    created = await openai_client.responses.create(model="plap/test", input="hello stateful")
+    retrieved = await openai_client.responses.retrieve(created.id)
+    input_items = await openai_client.responses.input_items.list(created.id)
+    await openai_client.responses.delete(created.id)
+
+    assert retrieved.id == created.id
+    assert retrieved.output[0].content[0].text == created.output[0].content[0].text
+    assert input_items.object == "list"
+    assert len(input_items.data) == 1
+    assert input_items.data[0].type == "message"
+    assert input_items.data[0].content == "hello stateful"
+    assert input_items.data[0].id.startswith(f"in_{created.id}_")
+
+    with pytest.raises(APIStatusError) as missing:
+        await openai_client.responses.retrieve(created.id)
+    assert missing.value.status_code == 404
+
+
 async def test_async_openai_client_models_list(openai_client: AsyncOpenAI) -> None:
     models = await openai_client.models.list()
 

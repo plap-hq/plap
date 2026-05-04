@@ -47,8 +47,11 @@ from plap.responses.runtime import (
     COMPRESS_TOOL_NAME,
     prepare_tools,
     resolve_tool_calls,
-    stream_response_events,
 )
+from plap.responses.runtime import (
+    stream_response_events as _stream_response_events,
+)
+from plap.responses.store import PreparedRequest
 from plap.responses.tools import (
     EffectClass,
     IToolCallPolicyResolver,
@@ -67,6 +70,12 @@ from plap.settings import (
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
+
+
+async def stream_response_events(*args, **kwargs):
+    kwargs.setdefault("auth_context", _auth_context())
+    async for event in _stream_response_events(*args, response_store=_NoopResponseStore(), **kwargs):
+        yield event
 
 
 async def test_prepare_tools_classifies_client_tools_without_compress() -> None:
@@ -2104,6 +2113,36 @@ class _FakeMCPToolProvider(IMCPToolProvider):
         if self.fail:
             raise RuntimeError("mcp failed")
         return self.output
+
+
+class _NoopResponseStore:
+    async def prepare_request(
+        self,
+        auth_context: AuthContext,
+        request: ResponseCreateRequest,
+        *,
+        session=None,
+    ) -> PreparedRequest:
+        _ = auth_context
+        _ = session
+        return PreparedRequest(
+            scope_id=auth_context.organization_id or auth_context.user_id,
+            response_request=request,
+            execution_request=request,
+            current_input_items=[],
+            parent_response_id=request.previous_response_id,
+            conversation_id=None,
+            persist_response=False,
+        )
+
+    async def begin_response(self, *args, **kwargs) -> None:
+        return None
+
+    async def append_output_item(self, *args, **kwargs) -> None:
+        return None
+
+    async def finish_response(self, *args, **kwargs) -> None:
+        return None
 
 
 class _FakeReasoningSummarizer(IReasoningSummarizer):

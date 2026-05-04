@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
 import msgspec
 from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from plap.persistence import Database
 from plap.responses.tools.policy import (
     EffectClass,
     ToolCallClassification,
@@ -35,7 +38,7 @@ class ToolClassificationRepository:
                 for signature in signatures
             ]
         )
-        await self._session.execute(
+        result = await self._session.execute(
             text(
                 """
                 insert into responses.tool_signatures (
@@ -51,6 +54,7 @@ class ToolClassificationRepository:
             ),
             {"signatures": signatures_json},
         )
+        result.close()
         return signatures
 
     async def get_classification(
@@ -87,10 +91,13 @@ class ToolClassificationRepository:
                 "prompt_hash": prompt_hash,
             },
         )
-        row = result.one_or_none()
-        if row is None:
-            return None
-        return _classification_from_row(row)
+        try:
+            row = result.mappings().one_or_none()
+            if row is None:
+                return None
+            return _classification_from_row(row)
+        finally:
+            result.close()
 
     async def get_classifications(
         self,
@@ -136,8 +143,11 @@ class ToolClassificationRepository:
                 "prompt_hash": prompt_hash,
             },
         )
-        classifications = [_classification_from_row(row) for row in result]
-        return {classification.signature_hash: classification for classification in classifications}
+        try:
+            classifications = [_classification_from_row(row) for row in result.mappings()]
+            return {classification.signature_hash: classification for classification in classifications}
+        finally:
+            result.close()
 
     async def store_classification(self, classification: ToolClassification) -> ToolClassification:
         stored = await self.store_classifications([classification])
@@ -169,7 +179,7 @@ class ToolClassificationRepository:
                 for classification in classifications
             ]
         )
-        await self._session.execute(
+        result = await self._session.execute(
             text(
                 """
                 insert into responses.tool_classifications (
@@ -202,6 +212,7 @@ class ToolClassificationRepository:
             ),
             {"classifications": classifications_json},
         )
+        result.close()
         stored = await self.get_classifications(
             [classification.signature_hash for classification in classifications],
             classifier=first.classifier,
@@ -211,6 +222,7 @@ class ToolClassificationRepository:
         if len(stored) != len({item.signature_hash for item in classifications}):
             raise RuntimeError("tool classification insert did not produce a row")
         return stored
+
 
     async def get_tool_call_classification(
         self,
@@ -283,14 +295,17 @@ class ToolClassificationRepository:
                 "prompt_hash": prompt_hash,
             },
         )
-        classifications = [_tool_call_classification_from_row(row) for row in result]
-        return {
-            (
-                classification.signature_hash,
-                classification.arguments_hash,
-            ): classification
-            for classification in classifications
-        }
+        try:
+            classifications = [_tool_call_classification_from_row(row) for row in result.mappings()]
+            return {
+                (
+                    classification.signature_hash,
+                    classification.arguments_hash,
+                ): classification
+                for classification in classifications
+            }
+        finally:
+            result.close()
 
     async def store_tool_call_classification(self, classification: ToolCallClassification) -> ToolCallClassification:
         stored = await self.store_tool_call_classifications([classification])
@@ -325,7 +340,7 @@ class ToolClassificationRepository:
                 for classification in classifications
             ]
         )
-        await self._session.execute(
+        result = await self._session.execute(
             text(
                 """
                 insert into responses.tool_call_classifications (
@@ -361,6 +376,7 @@ class ToolClassificationRepository:
             ),
             {"classifications": classifications_json},
         )
+        result.close()
         stored = await self.get_tool_call_classifications(
             [(classification.signature_hash, classification.arguments_hash) for classification in classifications],
             classifier=first.classifier,
@@ -372,30 +388,128 @@ class ToolClassificationRepository:
         return stored
 
 
-def _classification_from_row(row: Any) -> ToolClassification:
+class ToolClassificationStore:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def get_or_create_signature(self, signature: ToolSignature) -> ToolSignature:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).get_or_create_signature(signature)
+
+    async def get_or_create_signatures(self, signatures: list[ToolSignature]) -> list[ToolSignature]:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).get_or_create_signatures(signatures)
+
+    async def get_classification(
+        self,
+        signature_hash: bytes,
+        *,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> ToolClassification | None:
+        async with self._database.session() as session:
+            return await ToolClassificationRepository(session).get_classification(
+                signature_hash,
+                classifier=classifier,
+                classifier_model=classifier_model,
+                prompt_hash=prompt_hash,
+            )
+
+    async def get_classifications(
+        self,
+        signature_hashes: list[bytes],
+        *,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> dict[bytes, ToolClassification]:
+        async with self._database.session() as session:
+            return await ToolClassificationRepository(session).get_classifications(
+                signature_hashes,
+                classifier=classifier,
+                classifier_model=classifier_model,
+                prompt_hash=prompt_hash,
+            )
+
+    async def store_classification(self, classification: ToolClassification) -> ToolClassification:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).store_classification(classification)
+
+    async def store_classifications(self, classifications: list[ToolClassification]) -> dict[bytes, ToolClassification]:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).store_classifications(classifications)
+
+    async def get_tool_call_classification(
+        self,
+        *,
+        signature_hash: bytes,
+        arguments_hash: bytes,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> ToolCallClassification | None:
+        async with self._database.session() as session:
+            return await ToolClassificationRepository(session).get_tool_call_classification(
+                signature_hash=signature_hash,
+                arguments_hash=arguments_hash,
+                classifier=classifier,
+                classifier_model=classifier_model,
+                prompt_hash=prompt_hash,
+            )
+
+    async def get_tool_call_classifications(
+        self,
+        keys: list[tuple[bytes, bytes]],
+        *,
+        classifier: str,
+        classifier_model: str,
+        prompt_hash: bytes,
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        async with self._database.session() as session:
+            return await ToolClassificationRepository(session).get_tool_call_classifications(
+                keys,
+                classifier=classifier,
+                classifier_model=classifier_model,
+                prompt_hash=prompt_hash,
+            )
+
+    async def store_tool_call_classification(self, classification: ToolCallClassification) -> ToolCallClassification:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).store_tool_call_classification(classification)
+
+    async def store_tool_call_classifications(
+        self,
+        classifications: list[ToolCallClassification],
+    ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        async with self._database.session_transaction() as session:
+            return await ToolClassificationRepository(session).store_tool_call_classifications(classifications)
+
+
+def _classification_from_row(row: RowMapping) -> ToolClassification:
     return ToolClassification(
-        signature_hash=bytes(row.signature_hash),
-        classifier=row.classifier,
-        classifier_model=row.classifier_model,
-        prompt_hash=bytes(row.prompt_hash),
-        effect_class=_effect_class(row.effect_class),
-        confidence=float(row.confidence),
-        rationale=row.rationale,
-        raw_output=row.raw_output,
+        signature_hash=bytes(row["signature_hash"]),
+        classifier=str(row["classifier"]),
+        classifier_model=str(row["classifier_model"]),
+        prompt_hash=bytes(row["prompt_hash"]),
+        effect_class=_effect_class(str(row["effect_class"])),
+        confidence=float(row["confidence"]),
+        rationale=str(row["rationale"]),
+        raw_output=dict(cast(Mapping[str, object], row["raw_output"])),
     )
 
 
-def _tool_call_classification_from_row(row: Any) -> ToolCallClassification:
+def _tool_call_classification_from_row(row: RowMapping) -> ToolCallClassification:
     return ToolCallClassification(
-        signature_hash=bytes(row.signature_hash),
-        arguments_hash=bytes(row.arguments_hash),
-        classifier=row.classifier,
-        classifier_model=row.classifier_model,
-        prompt_hash=bytes(row.prompt_hash),
-        effect_class=_tool_call_effect_class(row.effect_class),
-        confidence=float(row.confidence),
-        rationale=row.rationale,
-        raw_output=row.raw_output,
+        signature_hash=bytes(row["signature_hash"]),
+        arguments_hash=bytes(row["arguments_hash"]),
+        classifier=str(row["classifier"]),
+        classifier_model=str(row["classifier_model"]),
+        prompt_hash=bytes(row["prompt_hash"]),
+        effect_class=_tool_call_effect_class(str(row["effect_class"])),
+        confidence=float(row["confidence"]),
+        rationale=str(row["rationale"]),
+        raw_output=dict(cast(Mapping[str, object], row["raw_output"])),
     )
 
 

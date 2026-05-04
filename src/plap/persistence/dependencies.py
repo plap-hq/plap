@@ -11,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def provide_request_db_session(
     request: Request[Any, Any, Any],
 ) -> AsyncIterator[AsyncSession]:
-    async with request.app.state.session_maker() as session:
+    async with request.app.state.database.session() as session:
         yield session
 
 
 async def provide_socket_db_session(socket: WebSocket) -> AsyncIterator[AsyncSession]:
-    async with socket.app.state.session_maker() as session:
+    async with socket.app.state.database.session() as session:
         yield session

@@ -152,6 +152,38 @@ class ResponseError(Exception):
         )
 
     @classmethod
+    def not_found(
+        cls,
+        *,
+        private_message: str,
+        public_message: str = "Response not found.",
+        public_code: str = "not_found",
+        public_type: str = "invalid_request_error",
+        param: str | None = None,
+        headers: dict[str, str] | None = None,
+        event: str = "response.not_found",
+        context: Mapping[str, Any] | None = None,
+        cause: BaseException | None = None,
+    ) -> ResponseError:
+        return cls(
+            PublicResponseError(
+                status_code=404,
+                type=public_type,
+                code=public_code,
+                message=public_message,
+                param=param,
+                headers=headers,
+            ),
+            PrivateResponseError(
+                event=event,
+                message=private_message,
+                level=PrivateErrorLevel.WARNING,
+                context=dict(context or {}),
+                cause=cause,
+            ),
+        )
+
+    @classmethod
     def unavailable(
         cls,
         *,

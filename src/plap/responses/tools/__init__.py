@@ -41,7 +41,7 @@ from plap.responses.tools.policy import (
     signature_hash_hex,
     tool_arguments_hash,
 )
-from plap.responses.tools.repository import ToolClassificationRepository
+from plap.responses.tools.repository import ToolClassificationRepository, ToolClassificationStore
 from plap.responses.tools.web_search import web_search_policy
 
 __all__ = [
@@ -73,6 +73,7 @@ __all__ = [
     "ToolCallSignature",
     "ToolClassification",
     "ToolClassificationRepository",
+    "ToolClassificationStore",
     "ToolPolicy",
     "ToolSignature",
     "ToolSource",

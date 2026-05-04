@@ -68,8 +68,8 @@ def test_app_runtime_includes_wisp_nano_default_profile() -> None:
     assert profile.display_name == "Wisp Nano"
     assert profile.main.model == "crof/qwen3.5-9b"
     assert profile.main_debate.model == "crof/qwen3.5-9b"
-    assert profile.reviewer.model == "crof/qwen3.5-9b"
-    assert profile.arbitrator.model == "crof/qwen3.5-9b"
+    assert profile.reviewer.model == "crof/qwen3.5-9b-chat"
+    assert profile.arbitrator.model == "crof/qwen3.5-9b-chat"
     assert profile.reasoning_summarizer.model == "lightning/lightning-ai/gpt-oss-120b"
     assert profile.reviewer_transcript_token_budget == 200_000
     assert profile.arbitrator_transcript_token_budget == 200_000

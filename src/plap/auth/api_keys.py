@@ -104,7 +104,10 @@ class APIKeyManager:
             raise AuthError("Invalid API key")
 
         result = await session.execute(select(APIKey).where(APIKey.key_id == key_id))
-        api_key = result.scalar_one_or_none()
+        try:
+            api_key = result.scalar_one_or_none()
+        finally:
+            result.close()
         if api_key is None:
             raise AuthError("Invalid API key")
 

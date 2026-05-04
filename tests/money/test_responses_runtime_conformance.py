@@ -335,7 +335,7 @@ async def test_money_responses_wisp_nano_risky_tool_debate_loop(
             "Briefly say that you are updating the record, then call update_record with id rec-1 "
             "and value runtime-mutation-42. After the tool result arrives, answer with the exact updated value that was written."
         ),
-        max_output_tokens=16384,
+        max_output_tokens=32768,
         temperature=0,
         tool_choice={"type": "function", "name": "update_record"},
         tools=[_mutation_tool_definition()],
@@ -575,8 +575,8 @@ def _runtime_profile(
     *,
     main_model: str = "crof/qwen3.5-9b",
     main_debate_model: str = "crof/qwen3.5-9b",
-    reviewer_model: str = "crof/qwen3.5-9b",
-    arbitrator_model: str = "crof/qwen3.5-9b",
+    reviewer_model: str = "crof/qwen3.5-9b-chat",
+    arbitrator_model: str = "crof/qwen3.5-9b-chat",
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
     reviewer_transcript_token_budget: int = 200_000,
     arbitrator_transcript_token_budget: int = 200_000,

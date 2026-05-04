@@ -12,6 +12,7 @@ from plap.keyring import SealingKeyring
 from plap.llms.chat import IChatCompletionClient
 from plap.responses.contracts import (
     CompactRequest,
+    InputItemsPage,
     InputTokensCountRequest,
     ModelInfoListObject,
     ModelListObject,
@@ -19,6 +20,7 @@ from plap.responses.contracts import (
     ResponseCompletedEvent,
     ResponseCreateClientEvent,
     ResponseCreateRequest,
+    ResponseDeleted,
     ResponseErrorEvent,
     ResponseObject,
     ResponseStreamEvent,
@@ -31,6 +33,7 @@ from plap.responses.dependencies import (
 from plap.responses.errors import ResponseError
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import stream_response_events
+from plap.responses.store import ResponseStore
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import RuntimeSelector, Settings
@@ -61,6 +64,7 @@ async def create_response(
     sealing_keyring: SealingKeyring,
     chat_completion_client: IChatCompletionClient,
     reasoning_summarizer: IReasoningSummarizer,
+    response_store: ResponseStore,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     mcp_tool_providers: tuple[IMCPToolProvider, ...],
@@ -73,6 +77,7 @@ async def create_response(
         sealing_keyring=sealing_keyring,
         chat_completion_client=chat_completion_client,
         reasoning_summarizer=reasoning_summarizer,
+        response_store=response_store,
         tool_policy_resolver=tool_policy_resolver,
         tool_call_policy_resolver=tool_call_policy_resolver,
         mcp_tool_providers=mcp_tool_providers,
@@ -125,17 +130,17 @@ async def model_info(
 async def retrieve_response(
     response_id: str,
     auth_context: AuthContext,
+    response_store: ResponseStore,
     include: list[str] | None = None,
     include_obfuscation: bool | None = None,
     starting_after: int | None = None,
     stream: bool | None = None,
-) -> object:
-    _ = auth_context
-    _ = response_id, include, include_obfuscation, starting_after, stream
-    raise ResponseError.unsupported_operation(
-        private_message="response retrieval is not supported",
-        status_code=404,
-    )
+) -> ResponseObject:
+    _ = include, include_obfuscation, starting_after, stream
+    response = await response_store.get_response(auth_context, response_id)
+    if response is None:
+        raise ResponseError.not_found(private_message=f"response not found: {response_id}")
+    return response
 
 
 @delete(
@@ -146,13 +151,12 @@ async def retrieve_response(
 async def delete_response(
     response_id: str,
     auth_context: AuthContext,
-) -> object:
-    _ = auth_context
-    _ = response_id
-    raise ResponseError.unsupported_operation(
-        private_message="response deletion is not supported",
-        status_code=404,
-    )
+    response_store: ResponseStore,
+) -> ResponseDeleted:
+    deleted = await response_store.delete_response(auth_context, response_id)
+    if not deleted:
+        raise ResponseError.not_found(private_message=f"response not found for deletion: {response_id}")
+    return ResponseDeleted(deleted=True, id=response_id)
 
 
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -172,16 +176,19 @@ async def compact_response(
 async def list_input_items(
     response_id: str,
     auth_context: AuthContext,
+    response_store: ResponseStore,
     after: str | None = None,
     include: list[str] | None = None,
     limit: int | None = None,
     order: str | None = None,
-) -> object:
-    _ = auth_context
-    _ = response_id, after, include, limit, order
-    raise ResponseError.unsupported_operation(
-        private_message="response input item listing is not supported",
-        status_code=404,
+) -> InputItemsPage:
+    _ = include
+    return await response_store.list_input_items(
+        auth_context,
+        response_id,
+        after=after,
+        limit=limit,
+        order=order,
     )
 
 
@@ -207,6 +214,7 @@ async def responses_socket(
     sealing_keyring: SealingKeyring,
     chat_completion_client: IChatCompletionClient,
     reasoning_summarizer: IReasoningSummarizer,
+    response_store: ResponseStore,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     mcp_tool_providers: tuple[IMCPToolProvider, ...],
@@ -240,6 +248,7 @@ async def responses_socket(
                 sealing_keyring=sealing_keyring,
                 chat_completion_client=chat_completion_client,
                 reasoning_summarizer=reasoning_summarizer,
+                response_store=response_store,
                 tool_policy_resolver=tool_policy_resolver,
                 tool_call_policy_resolver=tool_call_policy_resolver,
                 mcp_tool_providers=mcp_tool_providers,
