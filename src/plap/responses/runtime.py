@@ -72,6 +72,7 @@ from plap.responses.tools import (
 from plap.responses.tools.compress import (
     COMPRESS_DEVELOPER_PROMPT,
     COMPRESS_TOOL_NAME,
+    DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
     compress_policy,
     compress_tool,
 )
@@ -364,6 +365,9 @@ def _apply_compression(
         raise ResponseError.tool_policy(private_message="compress arguments must be valid JSON", cause=exc) from exc
     if not isinstance(payload, dict):
         raise ResponseError.tool_policy(private_message="compress arguments must be an object")
+    prune_duplicate_tool_calls = payload.get("prune_duplicate_tool_calls", True)
+    if not isinstance(prune_duplicate_tool_calls, bool):
+        raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls must be a boolean")
     ranges = payload.get("ranges")
     if isinstance(ranges, str):
         try:
@@ -429,6 +433,11 @@ def _apply_compression(
         )
         cursor = end_index + 1
     compressed.extend(main_context[cursor:])
+    if prune_duplicate_tool_calls:
+        compressed = ChatMessageSpan.deduplicate_tool_call_outputs(
+            compressed,
+            tombstone=DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
+        )
     return compressed, True
 
 

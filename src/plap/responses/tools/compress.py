@@ -4,6 +4,7 @@ from plap.responses.contracts import FunctionTool
 from plap.responses.tools.policy import ToolPolicy
 
 COMPRESS_TOOL_NAME = "compress"
+DUPLICATE_TOOL_OUTPUT_TOMBSTONE = "This tool output was omitted; a later identical call retains the full result."
 
 COMPRESS_DEVELOPER_PROMPT = """The `compress` tool replaces selected ranges of
 earlier conversation messages with focused summaries you write. The system
@@ -26,6 +27,12 @@ except for exact wording or minor detail; 4 = solid summary that preserves the
 main reusable information but may need expansion if exactness matters; 3 =
 usable gist with useful details missing; 2 = lossy orientation; 1 = minimal
 breadcrumb that should be expanded before relying on it substantively.
+
+If `prune_duplicate_tool_calls` is true (the default), identical tool calls across
+the full available main context are deduplicated by tool name and arguments.
+Older identical tool outputs may be replaced with a tombstone while the latest
+identical call retains the full result. Set this to false only when exact repeated
+tool-call history matters, for example while tracking nondeterminism.
 
 Do not include citation markers in summaries. Do not add meta-commentary like
 "this was compressed" or "this summary replaces earlier messages"; if
@@ -53,6 +60,14 @@ def compress_tool() -> FunctionTool:
         parameters={
             "type": "object",
             "properties": {
+                "prune_duplicate_tool_calls": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to deduplicate identical tool calls across the full available main context. "
+                        "When true, older duplicate tool outputs may be omitted while the latest identical call "
+                        "retains the full result. Defaults to true."
+                    ),
+                },
                 "ranges": {
                     "type": "array",
                     "description": (

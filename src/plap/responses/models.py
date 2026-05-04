@@ -87,6 +87,16 @@ class StateToolCall:
             arguments=self.arguments,
         )
 
+    def canonical_arguments(self) -> str:
+        try:
+            value = msgspec.json.decode(self.arguments.encode())
+        except msgspec.DecodeError:
+            return self.arguments
+        return msgspec.json.encode(value, order="deterministic").decode()
+
+    def deduplication_key(self) -> tuple[str, str]:
+        return self.name, self.canonical_arguments()
+
 
 @dataclass(slots=True)
 class StateMessage:
@@ -212,6 +222,35 @@ class StateMessage:
                 for call in self.tool_calls
             ),
         )
+
+    def duplicate_tool_call_ids(self, latest_call_id_by_key: Mapping[tuple[str, str], str]) -> set[str]:
+        if not self.is_assistant() or not self.tool_calls:
+            return set()
+        return {
+            call.id
+            for call in self.tool_calls
+            if latest_call_id_by_key.get(call.deduplication_key()) != call.id
+        }
+
+    def with_content(self, content: str | None) -> StateMessage:
+        return StateMessage(
+            role=self.role,
+            content=content,
+            name=self.name,
+            tool_call_id=self.tool_call_id,
+            tool_calls=list(self.tool_calls),
+            reasoning_content=self.reasoning_content,
+            reasoning_details=list(self.reasoning_details),
+        )
+
+    def with_duplicate_tool_output_tombstone(
+        self,
+        duplicate_call_ids: set[str],
+        tombstone: str,
+    ) -> StateMessage:
+        if not self.is_tool() or self.tool_call_id not in duplicate_call_ids or self.content == tombstone:
+            return self
+        return self.with_content(tombstone)
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +449,79 @@ class ChatMessageSpan:
             untrusted=True,
             citation=self.citation if include_citation else None,
         )
+
+    def with_message(self, message: StateMessage) -> ChatMessageSpan:
+        if message is self.message:
+            return self
+        return ChatMessageSpan(
+            start=self.start,
+            end=self.end,
+            message=message,
+            token_count=message.estimated_token_count(),
+            children=self.children,
+            children_pruned=self.children_pruned,
+            summary_fidelity=self.summary_fidelity,
+        )
+
+    def with_children(self, children: tuple[ChatMessageSpan, ...]) -> ChatMessageSpan:
+        if children == self.children:
+            return self
+        return ChatMessageSpan(
+            start=self.start,
+            end=self.end,
+            message=self.message,
+            token_count=self.token_count,
+            content_hash=self.content_hash,
+            children=children,
+            children_pruned=self.children_pruned,
+            summary_fidelity=self.summary_fidelity,
+        )
+
+    def collect_latest_tool_call_ids(self, latest_call_id_by_key: dict[tuple[str, str], str]) -> None:
+        if self.children:
+            for child in self.children:
+                child.collect_latest_tool_call_ids(latest_call_id_by_key)
+            return
+        for call in self.message.tool_calls:
+            latest_call_id_by_key[call.deduplication_key()] = call.id
+
+    def collect_duplicate_tool_call_ids(
+        self,
+        latest_call_id_by_key: Mapping[tuple[str, str], str],
+        duplicate_call_ids: set[str],
+    ) -> None:
+        if self.children:
+            for child in self.children:
+                child.collect_duplicate_tool_call_ids(latest_call_id_by_key, duplicate_call_ids)
+            return
+        duplicate_call_ids.update(self.message.duplicate_tool_call_ids(latest_call_id_by_key))
+
+    def with_duplicate_tool_output_tombstones(
+        self,
+        duplicate_call_ids: set[str],
+        tombstone: str,
+    ) -> ChatMessageSpan:
+        if self.children:
+            children = tuple(child.with_duplicate_tool_output_tombstones(duplicate_call_ids, tombstone) for child in self.children)
+            return self.with_children(children)
+        return self.with_message(self.message.with_duplicate_tool_output_tombstone(duplicate_call_ids, tombstone))
+
+    @classmethod
+    def deduplicate_tool_call_outputs(
+        cls,
+        spans: list[ChatMessageSpan],
+        *,
+        tombstone: str,
+    ) -> list[ChatMessageSpan]:
+        latest_call_id_by_key: dict[tuple[str, str], str] = {}
+        for span in spans:
+            span.collect_latest_tool_call_ids(latest_call_id_by_key)
+        duplicate_call_ids: set[str] = set()
+        for span in spans:
+            span.collect_duplicate_tool_call_ids(latest_call_id_by_key, duplicate_call_ids)
+        if not duplicate_call_ids:
+            return spans
+        return [span.with_duplicate_tool_output_tombstones(duplicate_call_ids, tombstone) for span in spans]
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
