@@ -1450,6 +1450,173 @@ async def test_stream_response_events_compression_can_preserve_duplicate_tool_ou
     assert payload.active[2].message.content == "new result"
 
 
+async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_only_before_cutoff() -> None:
+    old_arguments = '{"query":"cats","limit":1}'
+    new_arguments = '{"limit":1,"query":"cats"}'
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "prune_duplicate_tool_calls_before": "~2",
+                                "ranges": [
+                                    {
+                                        "start": "[~6]",
+                                        "end": "[~8]",
+                                        "summary": "notes",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        _assistant_tool_call_span(
+                            0,
+                            "call_search_1",
+                            MCP_SEARCH_TOOL_NAME,
+                            old_arguments,
+                            content="first search",
+                        ),
+                        _tool_output_span(1, "call_search_1", "old result"),
+                        _assistant_tool_call_span(
+                            2,
+                            "call_search_2",
+                            MCP_SEARCH_TOOL_NAME,
+                            old_arguments,
+                            content="second search",
+                        ),
+                        _tool_output_span(3, "call_search_2", "mid result"),
+                        _assistant_tool_call_span(
+                            4,
+                            "call_search_3",
+                            MCP_SEARCH_TOOL_NAME,
+                            new_arguments,
+                            content="third search",
+                        ),
+                        _tool_output_span(5, "call_search_3", "new result"),
+                        _span(6, "note one with extra redundant detail", token_count=12),
+                        _span(7, "note two with extra redundant detail", token_count=12),
+                        _span(8, "note three with extra redundant detail", token_count=12),
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    payload = open_compaction_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert payload.active[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
+    assert payload.active[3].message.content == "mid result"
+    assert payload.active[5].message.content == "new result"
+
+
+async def test_stream_response_events_ignores_duplicate_tool_call_cutoff_when_pruning_disabled() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "prune_duplicate_tool_calls": False,
+                                "prune_duplicate_tool_calls_before": "~2",
+                                "ranges": [
+                                    {
+                                        "start": "[~6]",
+                                        "end": "[~8]",
+                                        "summary": "notes",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        _assistant_tool_call_span(
+                            0,
+                            "call_search_1",
+                            MCP_SEARCH_TOOL_NAME,
+                            '{"query":"cats","limit":1}',
+                            content="first search",
+                        ),
+                        _tool_output_span(1, "call_search_1", "old result"),
+                        _assistant_tool_call_span(
+                            2,
+                            "call_search_2",
+                            MCP_SEARCH_TOOL_NAME,
+                            '{"query":"cats","limit":1}',
+                            content="second search",
+                        ),
+                        _tool_output_span(3, "call_search_2", "mid result"),
+                        _assistant_tool_call_span(
+                            4,
+                            "call_search_3",
+                            MCP_SEARCH_TOOL_NAME,
+                            '{"limit":1,"query":"cats"}',
+                            content="third search",
+                        ),
+                        _tool_output_span(5, "call_search_3", "new result"),
+                        _span(6, "note one with extra redundant detail", token_count=12),
+                        _span(7, "note two with extra redundant detail", token_count=12),
+                        _span(8, "note three with extra redundant detail", token_count=12),
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    payload = open_compaction_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert payload.active[1].message.content == "old result"
+    assert payload.active[3].message.content == "mid result"
+    assert payload.active[5].message.content == "new result"
+
+
 async def test_stream_response_events_rejects_missing_compression_fidelity() -> None:
     client = _StaticChatClient(
         ChatMessage(

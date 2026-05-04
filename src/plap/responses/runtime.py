@@ -368,6 +368,9 @@ def _apply_compression(
     prune_duplicate_tool_calls = payload.get("prune_duplicate_tool_calls", True)
     if not isinstance(prune_duplicate_tool_calls, bool):
         raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls must be a boolean")
+    prune_duplicate_tool_calls_before = payload.get("prune_duplicate_tool_calls_before")
+    if prune_duplicate_tool_calls_before is not None and not isinstance(prune_duplicate_tool_calls_before, str):
+        raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls_before must be a citation string")
     ranges = payload.get("ranges")
     if isinstance(ranges, str):
         try:
@@ -380,6 +383,12 @@ def _apply_compression(
         return main_context, False
 
     index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
+    prune_duplicate_tool_calls_before_index = None
+    if prune_duplicate_tool_calls and prune_duplicate_tool_calls_before is not None:
+        normalized_before = _normalize_citation(prune_duplicate_tool_calls_before)
+        prune_duplicate_tool_calls_before_index = index_by_citation.get(normalized_before)
+        if prune_duplicate_tool_calls_before_index is None:
+            raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls_before citation is not visible")
     parsed_ranges: list[tuple[int, int, str, int]] = []
     for item in ranges:
         if not isinstance(item, dict):
@@ -437,6 +446,7 @@ def _apply_compression(
         compressed = ChatMessageSpan.deduplicate_tool_call_outputs(
             compressed,
             tombstone=DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
+            before_top_level_index=prune_duplicate_tool_calls_before_index,
         )
     return compressed, True
 

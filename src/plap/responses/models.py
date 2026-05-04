@@ -512,12 +512,15 @@ class ChatMessageSpan:
         spans: list[ChatMessageSpan],
         *,
         tombstone: str,
+        before_top_level_index: int | None = None,
     ) -> list[ChatMessageSpan]:
         latest_call_id_by_key: dict[tuple[str, str], str] = {}
         for span in spans:
             span.collect_latest_tool_call_ids(latest_call_id_by_key)
         duplicate_call_ids: set[str] = set()
-        for span in spans:
+        for top_level_index, span in enumerate(spans):
+            if before_top_level_index is not None and top_level_index >= before_top_level_index:
+                continue
             span.collect_duplicate_tool_call_ids(latest_call_id_by_key, duplicate_call_ids)
         if not duplicate_call_ids:
             return spans

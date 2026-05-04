@@ -32,7 +32,9 @@ If `prune_duplicate_tool_calls` is true (the default), identical tool calls acro
 the full available main context are deduplicated by tool name and arguments.
 Older identical tool outputs may be replaced with a tombstone while the latest
 identical call retains the full result. Set this to false only when exact repeated
-tool-call history matters, for example while tracking nondeterminism.
+tool-call history matters, for example while tracking nondeterminism. If
+`prune_duplicate_tool_calls_before` is set, duplicate pruning only applies to calls
+strictly before that visible citation.
 
 Do not include citation markers in summaries. Do not add meta-commentary like
 "this was compressed" or "this summary replaces earlier messages"; if
@@ -66,6 +68,14 @@ def compress_tool() -> FunctionTool:
                         "Whether to deduplicate identical tool calls across the full available main context. "
                         "When true, older duplicate tool outputs may be omitted while the latest identical call "
                         "retains the full result. Defaults to true."
+                    ),
+                },
+                "prune_duplicate_tool_calls_before": {
+                    "type": "string",
+                    "pattern": r"^\[~\d+(?:_\d+)?\]$",
+                    "description": (
+                        "Optional visible citation cutoff. When set, duplicate tool-call pruning only applies "
+                        "to calls strictly before this citation."
                     ),
                 },
                 "ranges": {
