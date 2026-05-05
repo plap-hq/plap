@@ -46,7 +46,7 @@ from tests.pytest_plugins.database import (
 pytestmark = pytest.mark.money
 
 RUNTIME_PROFILE = "plap-ai/wisp-mini"
-COMPRESSION_PROFILE = "plap-ai/wisp-mini-money-compress"
+COMPACTION_PROFILE = "plap-ai/wisp-mini-money-compact"
 MONEY_MCP_TOOL_NAME = "money_search"
 REQUIRED_ENV_KEYS = ("OPENROUTER_API_KEY", "LIGHTNING_API_KEY")
 
@@ -92,12 +92,12 @@ def money_settings(
         llm_openrouter_api_key=money_provider_keys.openrouter_api_key,
         runtime_model_profiles={
             RUNTIME_PROFILE: _runtime_profile(),
-            COMPRESSION_PROFILE: _runtime_profile(
+            COMPACTION_PROFILE: _runtime_profile(
                 reviewer_transcript_token_budget=2_000,
                 arbitrator_transcript_token_budget=2_000,
-                compression_soft_token_budget=120,
-                compression_hard_token_budget=180,
-                compression_max_rounds=2,
+                compaction_soft_token_budget=120,
+                compaction_hard_token_budget=180,
+                compaction_max_rounds=2,
             ),
         },
         sealing_keys=["a" * 43],
@@ -370,11 +370,11 @@ async def test_money_responses_wisp_mini_risky_tool_debate_loop(
     assert "runtime-mutation-42" in _response_text(second)
 
 
-async def test_money_responses_wisp_mini_compression_replay_loop(
+async def test_money_responses_wisp_mini_compaction_replay_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
     response = await money_openai_client.responses.create(
-        model=COMPRESSION_PROFILE,
+        model=COMPACTION_PROFILE,
         input=[
             {
                 "type": "message",
@@ -411,7 +411,7 @@ async def test_money_responses_wisp_mini_compression_replay_loop(
         {
             "type": "message",
             "role": "user",
-            "content": "What marker did the compressed context preserve?",
+            "content": "What marker did the compacted context preserve?",
         }
     )
     followup = await money_openai_client.responses.create(
@@ -582,9 +582,9 @@ def _runtime_profile(
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
     reviewer_transcript_token_budget: int = 500_000,
     arbitrator_transcript_token_budget: int = 500_000,
-    compression_soft_token_budget: int | None = 150_000,
-    compression_hard_token_budget: int | None = 200_000,
-    compression_max_rounds: int = 3,
+    compaction_soft_token_budget: int | None = 150_000,
+    compaction_hard_token_budget: int | None = 200_000,
+    compaction_max_rounds: int = 3,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Wisp Mini",
@@ -621,9 +621,9 @@ def _runtime_profile(
         reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
         reviewer_transcript_token_budget=reviewer_transcript_token_budget,
         arbitrator_transcript_token_budget=arbitrator_transcript_token_budget,
-        compression_soft_token_budget=compression_soft_token_budget,
-        compression_hard_token_budget=compression_hard_token_budget,
-        compression_max_rounds=compression_max_rounds,
+        compaction_soft_token_budget=compaction_soft_token_budget,
+        compaction_hard_token_budget=compaction_hard_token_budget,
+        compaction_max_rounds=compaction_max_rounds,
         default_reasoning_effort=ReasoningEffort.MEDIUM,
         by_reasoning_effort=_default_reasoning_effort_overrides(),
     )

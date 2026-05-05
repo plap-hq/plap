@@ -106,7 +106,7 @@ They do not get:
 - mutation
 - unknown
 - unresolved contextual
-- compress
+- compact
 Because the surface is already filtered, debate actor execution should not rerun the call-policy resolver.
 Initial Risky Main Interception
 When normal main returns any client tool call whose resolved policy is not safe or visible:

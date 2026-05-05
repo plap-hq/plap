@@ -73,44 +73,44 @@ from plap.responses.tools import (
     ToolPolicy,
     canonical_tool_arguments,
 )
-from plap.responses.tools.compress import (
-    COMPRESS_DEVELOPER_PROMPT,
-    COMPRESS_TOOL_NAME,
+from plap.responses.tools.compact import (
+    COMPACT_DEVELOPER_PROMPT,
+    COMPACT_TOOL_NAME,
     DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
-    compress_policy,
-    compress_tool,
+    compact_policy,
+    compact_tool,
 )
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.responses.tools.web_search import web_search_policy
 from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
-SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
+SERVER_TOOL_NAMES = frozenset({COMPACT_TOOL_NAME})
 _CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
 logger = structlog.get_logger(__name__)
 
 
-class _CompressionBailout(StrEnum):
+class _CompactionBailout(StrEnum):
     NONE = "none"
     SOFT = "soft"
     HARD = "hard"
 
 
-class _CompressionReminderLevel(StrEnum):
+class _CompactionReminderLevel(StrEnum):
     NONE = "none"
     SOFT = "soft"
     HARD = "hard"
 
 
-SOFT_COMPRESSION_REMINDER = (
+SOFT_COMPACTION_REMINDER = (
     "Context is getting long. If a closed, stale, or repetitive cited range can be replaced by a useful summary, call "
-    "`compress` before answering. If compression would lose important active detail or another tool is needed first, "
+    "`compact` before answering. If compaction would lose important active detail or another tool is needed first, "
     "continue with the best next action."
 )
-HARD_COMPRESSION_REMINDER = (
-    "Context is at the hard compression limit. You must call `compress` before continuing. Summarize any safe cited ranges. "
-    'If no useful safe compression is possible, call `compress` with {"ranges": []}.'
+HARD_COMPACTION_REMINDER = (
+    "Context is at the hard compaction limit. You must call `compact` before continuing. Summarize any safe cited ranges. "
+    'If no useful safe compaction is possible, call `compact` with {"ranges": []}.'
 )
-COMPRESS_VALIDATION_MAX_ATTEMPTS = 3
+COMPACT_VALIDATION_MAX_ATTEMPTS = 3
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
 
@@ -296,7 +296,7 @@ def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private
 
 
 def _is_retryable_compaction_error(exc: PlapError) -> bool:
-    return exc.private.reason.startswith("compress_")
+    return exc.private.reason.startswith("compact_")
 
 
 def _missing_auth_context_error() -> PlapError:
@@ -322,22 +322,22 @@ def _context_token_count(spans: Sequence[ChatMessageSpan], *, include_citations:
     return sum(span.context_token_count(include_citation=include_citations) for span in spans)
 
 
-def _compression_reminder(
+def _compaction_reminder(
     soft_token_budget: int | None,
     hard_token_budget: int | None,
     token_count: int,
-    bailout: _CompressionBailout,
-) -> tuple[_CompressionReminderLevel, str | None]:
-    if _hard_compression_budget_crossed(hard_token_budget, token_count):
-        if bailout != _CompressionBailout.HARD:
-            return _CompressionReminderLevel.HARD, HARD_COMPRESSION_REMINDER
-        return _CompressionReminderLevel.NONE, None
-    if soft_token_budget is not None and token_count >= soft_token_budget and bailout == _CompressionBailout.NONE:
-        return _CompressionReminderLevel.SOFT, SOFT_COMPRESSION_REMINDER
-    return _CompressionReminderLevel.NONE, None
+    bailout: _CompactionBailout,
+) -> tuple[_CompactionReminderLevel, str | None]:
+    if _hard_compaction_budget_crossed(hard_token_budget, token_count):
+        if bailout != _CompactionBailout.HARD:
+            return _CompactionReminderLevel.HARD, HARD_COMPACTION_REMINDER
+        return _CompactionReminderLevel.NONE, None
+    if soft_token_budget is not None and token_count >= soft_token_budget and bailout == _CompactionBailout.NONE:
+        return _CompactionReminderLevel.SOFT, SOFT_COMPACTION_REMINDER
+    return _CompactionReminderLevel.NONE, None
 
 
-def _hard_compression_budget_crossed(hard_token_budget: int | None, token_count: int) -> bool:
+def _hard_compaction_budget_crossed(hard_token_budget: int | None, token_count: int) -> bool:
     return hard_token_budget is not None and token_count >= hard_token_budget
 
 
@@ -363,13 +363,13 @@ def _context_management_compaction(request: ResponseCreateRequest) -> ContextMan
     return request.context_management[0]
 
 
-def _effective_compression_settings(
+def _effective_compaction_settings(
     profile: RuntimeModelProfileConfig,
     request: ResponseCreateRequest,
 ) -> tuple[int | None, int | None, int]:
-    soft_token_budget = profile.compression_soft_token_budget
-    hard_token_budget = profile.compression_hard_token_budget
-    max_rounds = profile.compression_max_rounds
+    soft_token_budget = profile.compaction_soft_token_budget
+    hard_token_budget = profile.compaction_hard_token_budget
+    max_rounds = profile.compaction_max_rounds
     override = _context_management_compaction(request)
     if override is not None:
         if override.soft_token_budget is not None:
@@ -473,7 +473,7 @@ async def resolve_tool_calls(
     return tuple(policy for policy in resolved if policy is not None)
 
 
-def _apply_compression(
+def _apply_compaction(
     main_context: list[ChatMessageSpan],
     arguments: str,
 ) -> tuple[list[ChatMessageSpan], bool]:
@@ -481,26 +481,26 @@ def _apply_compression(
         payload = msgspec.json.decode(arguments.encode())
     except msgspec.DecodeError as exc:
         raise _runtime_unavailable_error(
-            reason="compress_arguments_invalid_json",
-            private_message="compress arguments must be valid JSON",
+            reason="compact_arguments_invalid_json",
+            private_message="compact arguments must be valid JSON",
             cause=exc,
         ) from exc
     if not isinstance(payload, dict):
         raise _runtime_unavailable_error(
-            reason="compress_arguments_not_object",
-            private_message="compress arguments must be an object",
+            reason="compact_arguments_not_object",
+            private_message="compact arguments must be an object",
         )
     prune_duplicate_tool_calls = payload.get("prune_duplicate_tool_calls", True)
     if not isinstance(prune_duplicate_tool_calls, bool):
         raise _runtime_unavailable_error(
-            reason="compress_prune_duplicate_tool_calls_invalid",
-            private_message="compress prune_duplicate_tool_calls must be a boolean",
+            reason="compact_prune_duplicate_tool_calls_invalid",
+            private_message="compact prune_duplicate_tool_calls must be a boolean",
         )
     prune_duplicate_tool_calls_before = payload.get("prune_duplicate_tool_calls_before")
     if prune_duplicate_tool_calls_before is not None and not isinstance(prune_duplicate_tool_calls_before, str):
         raise _runtime_unavailable_error(
-            reason="compress_prune_duplicate_tool_calls_before_invalid",
-            private_message="compress prune_duplicate_tool_calls_before must be a citation string",
+            reason="compact_prune_duplicate_tool_calls_before_invalid",
+            private_message="compact prune_duplicate_tool_calls_before must be a citation string",
         )
     ranges = payload.get("ranges")
     if isinstance(ranges, str):
@@ -508,14 +508,14 @@ def _apply_compression(
             ranges = msgspec.json.decode(ranges.encode())
         except msgspec.DecodeError as exc:
             raise _runtime_unavailable_error(
-                reason="compress_ranges_invalid_json",
-                private_message="compress ranges must be valid JSON",
+                reason="compact_ranges_invalid_json",
+                private_message="compact ranges must be valid JSON",
                 cause=exc,
             ) from exc
     if not isinstance(ranges, list):
         raise _runtime_unavailable_error(
-            reason="compress_ranges_missing",
-            private_message="compress ranges are required",
+            reason="compact_ranges_missing",
+            private_message="compact ranges are required",
         )
     if not ranges:
         return main_context, False
@@ -527,27 +527,27 @@ def _apply_compression(
         prune_duplicate_tool_calls_before_index = index_by_citation.get(normalized_before)
         if prune_duplicate_tool_calls_before_index is None:
             raise _runtime_unavailable_error(
-                reason="compress_prune_duplicate_tool_calls_before_not_visible",
-                private_message="compress prune_duplicate_tool_calls_before citation is not visible",
+                reason="compact_prune_duplicate_tool_calls_before_not_visible",
+                private_message="compact prune_duplicate_tool_calls_before citation is not visible",
             )
     parsed_ranges: list[tuple[int, int, str, int]] = []
     for item in ranges:
         if not isinstance(item, dict):
-            raise _runtime_unavailable_error(reason="compress_range_not_object", private_message="compress range must be an object")
+            raise _runtime_unavailable_error(reason="compact_range_not_object", private_message="compact range must be an object")
         start = item.get("start")
         end = item.get("end")
         summary = item.get("summary")
         summary_fidelity = item.get("summary_fidelity")
         if not isinstance(start, str) or not isinstance(end, str):
             raise _runtime_unavailable_error(
-                reason="compress_range_citations_missing", private_message="compress range citations are required"
+                reason="compact_range_citations_missing", private_message="compact range citations are required"
             )
         if not isinstance(summary, str) or not summary.strip():
-            raise _runtime_unavailable_error(reason="compress_range_summary_missing", private_message="compress range summary is required")
+            raise _runtime_unavailable_error(reason="compact_range_summary_missing", private_message="compact range summary is required")
         if not isinstance(summary_fidelity, int) or isinstance(summary_fidelity, bool) or not 1 <= summary_fidelity <= 5:
             raise _runtime_unavailable_error(
-                reason="compress_range_summary_fidelity_invalid",
-                private_message="compress range summary_fidelity must be an integer from 1 to 5",
+                reason="compact_range_summary_fidelity_invalid",
+                private_message="compact range summary_fidelity must be an integer from 1 to 5",
             )
         start = _normalize_citation(start)
         end = _normalize_citation(end)
@@ -555,11 +555,11 @@ def _apply_compression(
         end_index = index_by_citation.get(end)
         if start_index is None or end_index is None:
             raise _runtime_unavailable_error(
-                reason="compress_range_citation_not_visible", private_message="compress range citation is not visible"
+                reason="compact_range_citation_not_visible", private_message="compact range citation is not visible"
             )
         if start_index > end_index:
             raise _runtime_unavailable_error(
-                reason="compress_range_start_after_end", private_message="compress range start must not follow end"
+                reason="compact_range_start_after_end", private_message="compact range start must not follow end"
             )
         parsed_ranges.append((start_index, end_index, summary.strip(), summary_fidelity))
 
@@ -567,22 +567,22 @@ def _apply_compression(
     previous_end = -1
     for start_index, end_index, _, _ in parsed_ranges:
         if start_index <= previous_end:
-            raise _runtime_unavailable_error(reason="compress_ranges_overlap", private_message="compress ranges must not overlap")
+            raise _runtime_unavailable_error(reason="compact_ranges_overlap", private_message="compact ranges must not overlap")
         previous_end = end_index
 
-    compressed: list[ChatMessageSpan] = []
+    compacted: list[ChatMessageSpan] = []
     cursor = 0
     for start_index, end_index, summary, summary_fidelity in parsed_ranges:
-        compressed.extend(main_context[cursor:start_index])
+        compacted.extend(main_context[cursor:start_index])
         selected = tuple(main_context[start_index : end_index + 1])
         summary_message = StateMessage(role="assistant", content=summary)
         summary_token_count = summary_message.estimated_token_count()
         selected_token_count = sum(row.token_count for row in selected)
         if summary_token_count >= selected_token_count:
             raise _runtime_unavailable_error(
-                reason="compress_summary_not_reductive", private_message="compress summary must reduce token count"
+                reason="compact_summary_not_reductive", private_message="compact summary must reduce token count"
             )
-        compressed.append(
+        compacted.append(
             ChatMessageSpan(
                 start=selected[0].start,
                 end=selected[-1].end,
@@ -593,29 +593,29 @@ def _apply_compression(
             )
         )
         cursor = end_index + 1
-    compressed.extend(main_context[cursor:])
+    compacted.extend(main_context[cursor:])
     if prune_duplicate_tool_calls:
-        compressed = ChatMessageSpan.deduplicate_tool_call_outputs(
-            compressed,
+        compacted = ChatMessageSpan.deduplicate_tool_call_outputs(
+            compacted,
             tombstone=DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
             before_top_level_index=prune_duplicate_tool_calls_before_index,
         )
-    return compressed, True
+    return compacted, True
 
 
 def _normalize_citation(value: str) -> str:
     if value.startswith("[") or value.endswith("]"):
         if not (value.startswith("[") and value.endswith("]")):
-            raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
+            raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
         value = value[1:-1]
 
     match = _CITATION_RE.fullmatch(value)
     if match is None:
-        raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
+        raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
     start = int(match.group(1))
     end = int(match.group(2) or start)
     if start > end:
-        raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
+        raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
     suffix = f"_{end}" if match.group(2) is not None else ""
     return f"[~{start}{suffix}]"
 
@@ -700,8 +700,8 @@ def _validate_tool_call_batch(
     for call in calls:
         if call.name not in tool_policies:
             raise _runtime_internal_error(reason="unknown_tool_call", private_message=f"unknown tool call: {call.name}")
-    if any(call.name == COMPRESS_TOOL_NAME for call in calls) and len(calls) != 1:
-        raise _runtime_unavailable_error(reason="compress_must_be_called_alone", private_message="compress must be called alone")
+    if any(call.name == COMPACT_TOOL_NAME for call in calls) and len(calls) != 1:
+        raise _runtime_unavailable_error(reason="compact_must_be_called_alone", private_message="compact must be called alone")
 
 
 async def run_response(
@@ -720,7 +720,7 @@ async def run_response(
         request,
         keyring=sealing_keyring,
     )
-    compression_soft_token_budget, compression_hard_token_budget, compression_max_rounds = _effective_compression_settings(
+    compaction_soft_token_budget, compaction_hard_token_budget, compaction_max_rounds = _effective_compaction_settings(
         profile,
         request,
     )
@@ -735,9 +735,9 @@ async def run_response(
     log_debug(
         logger,
         "response.runtime.start",
-        compression_hard_token_budget=compression_hard_token_budget,
-        compression_max_rounds=compression_max_rounds,
-        compression_soft_token_budget=compression_soft_token_budget,
+        compaction_hard_token_budget=compaction_hard_token_budget,
+        compaction_max_rounds=compaction_max_rounds,
+        compaction_soft_token_budget=compaction_soft_token_budget,
         effective_reasoning_effort=profile.main.reasoning_effort,
         input_context_items=len(ingested.main_context),
         model=request.model,
@@ -750,9 +750,9 @@ async def run_response(
     await out.created()
     await out.in_progress()
 
-    compression_rounds = 0
-    compression_bailout = _CompressionBailout.NONE
-    compression_validation_attempts = 0
+    compaction_rounds = 0
+    compaction_bailout = _CompactionBailout.NONE
+    compaction_validation_attempts = 0
     soft_compaction_failure: PlapError | None = None
     usage_ledger = UsageLedger(budget=request.max_output_tokens)
     while True:
@@ -777,13 +777,13 @@ async def run_response(
             if debate_result == DebateResult.COMPLETED:
                 return
             continue
-        if compression_rounds < compression_max_rounds:
-            effective_tools.append(compress_tool())
-            effective_tool_policies[COMPRESS_TOOL_NAME] = compress_policy()
+        if compaction_rounds < compaction_max_rounds:
+            effective_tools.append(compact_tool())
+            effective_tool_policies[COMPACT_TOOL_NAME] = compact_policy()
 
         developer_prompt_parts = [MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)]
-        if COMPRESS_TOOL_NAME in effective_tool_policies:
-            developer_prompt_parts.append(COMPRESS_DEVELOPER_PROMPT)
+        if COMPACT_TOOL_NAME in effective_tool_policies:
+            developer_prompt_parts.append(COMPACT_DEVELOPER_PROMPT)
         if request.instructions:
             developer_prompt_parts.append(APPLICATION_INSTRUCTIONS_TEMPLATE.format(instructions=request.instructions))
 
@@ -794,36 +794,36 @@ async def run_response(
             )
         ]
         effective_main_context = state.effective_main_context()
-        include_citations = COMPRESS_TOOL_NAME in effective_tool_policies
+        include_citations = COMPACT_TOOL_NAME in effective_tool_policies
         messages.extend(_chat_message_from_span(row, include_citation=include_citations) for row in effective_main_context)
         token_count = _context_token_count(
             effective_main_context,
             include_citations=include_citations,
         )
-        compression_reminder_level = _CompressionReminderLevel.NONE
-        compression_reminder = None
-        if COMPRESS_TOOL_NAME in effective_tool_policies:
-            compression_reminder_level, compression_reminder = _compression_reminder(
-                compression_soft_token_budget,
-                compression_hard_token_budget,
+        compaction_reminder_level = _CompactionReminderLevel.NONE
+        compaction_reminder = None
+        if COMPACT_TOOL_NAME in effective_tool_policies:
+            compaction_reminder_level, compaction_reminder = _compaction_reminder(
+                compaction_soft_token_budget,
+                compaction_hard_token_budget,
                 token_count,
-                compression_bailout,
+                compaction_bailout,
             )
-        if compression_reminder is not None:
-            messages.append(ChatMessage(role="user", content=compression_reminder))
+        if compaction_reminder is not None:
+            messages.append(ChatMessage(role="user", content=compaction_reminder))
 
         tool_choice = _chat_tool_choice(request)
-        forced_compression = False
-        if compression_reminder_level == _CompressionReminderLevel.HARD:
-            tool_choice = ChatToolChoiceFunction(name=COMPRESS_TOOL_NAME)
-            forced_compression = True
+        forced_compaction = False
+        if compaction_reminder_level == _CompactionReminderLevel.HARD:
+            tool_choice = ChatToolChoiceFunction(name=COMPACT_TOOL_NAME)
+            forced_compaction = True
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
         log_debug(
             logger,
             "response.runtime.turn",
-            compression_reminder_level=compression_reminder_level,
-            forced_compression=forced_compression,
+            compaction_reminder_level=compaction_reminder_level,
+            forced_compaction=forced_compaction,
             in_temp_debate=state.in_temp_debate,
             main_cap=main_cap,
             token_count=token_count,
@@ -872,9 +872,9 @@ async def run_response(
         )
         log_payload(logger, "response.runtime.main_result.payload", result=asdict(result))
 
-        if forced_compression and not any(call.name == COMPRESS_TOOL_NAME for call in tool_calls):
+        if forced_compaction and not any(call.name == COMPACT_TOOL_NAME for call in tool_calls):
             raise _runtime_unavailable_error(
-                reason="hard_compression_requires_compress", private_message="hard compression budget requires compress"
+                reason="hard_compaction_requires_compact", private_message="hard compaction budget requires compact"
             )
 
         if user_return and profile.debate_max_rounds > 0:
@@ -922,41 +922,41 @@ async def run_response(
                 tool_policies=effective_tool_policies,
                 resolver=tool_call_policy_resolver,
             )
-            if len(tool_calls) == 1 and tool_calls[0].name == COMPRESS_TOOL_NAME:
-                if compression_reminder_level != _CompressionReminderLevel.HARD and soft_compaction_failure is not None:
+            if len(tool_calls) == 1 and tool_calls[0].name == COMPACT_TOOL_NAME:
+                if compaction_reminder_level != _CompactionReminderLevel.HARD and soft_compaction_failure is not None:
                     raise soft_compaction_failure
                 try:
-                    state.main_context, compressed = _apply_compression(
+                    state.main_context, compacted = _apply_compaction(
                         state.main_context,
                         tool_calls[0].arguments,
                     )
                 except PlapError as exc:
                     if not _is_retryable_compaction_error(exc):
                         raise
-                    if compression_reminder_level != _CompressionReminderLevel.HARD:
+                    if compaction_reminder_level != _CompactionReminderLevel.HARD:
                         soft_compaction_failure = exc
-                        compression_bailout = _CompressionBailout.SOFT
-                        compression_rounds += 1
+                        compaction_bailout = _CompactionBailout.SOFT
+                        compaction_rounds += 1
                         usage_ledger.record_hidden(profile.main.public_usage, result.usage)
                         continue
-                    compression_validation_attempts += 1
+                    compaction_validation_attempts += 1
                     log_debug(
                         logger,
                         "response.runtime.compaction_retry",
-                        attempt=compression_validation_attempts,
-                        max_attempts=COMPRESS_VALIDATION_MAX_ATTEMPTS,
+                        attempt=compaction_validation_attempts,
+                        max_attempts=COMPACT_VALIDATION_MAX_ATTEMPTS,
                         reason=exc.private.reason,
-                        reminder_level=compression_reminder_level,
+                        reminder_level=compaction_reminder_level,
                     )
-                    if compression_validation_attempts >= COMPRESS_VALIDATION_MAX_ATTEMPTS:
-                        compression_validation_attempts = 0
+                    if compaction_validation_attempts >= COMPACT_VALIDATION_MAX_ATTEMPTS:
+                        compaction_validation_attempts = 0
                         raise
                     usage_ledger.record_hidden(profile.main.public_usage, result.usage)
                     continue
-                compression_validation_attempts = 0
+                compaction_validation_attempts = 0
                 soft_compaction_failure = None
-                if compressed:
-                    compression_bailout = _CompressionBailout.NONE
+                if compacted:
+                    compaction_bailout = _CompactionBailout.NONE
                     compaction_payload = CompactionPayload(
                         active=tuple(state.main_context),
                         cursors=state.cursors,
@@ -972,16 +972,16 @@ async def run_response(
                             type="compaction",
                         )
                     )
-                elif compression_reminder_level == _CompressionReminderLevel.HARD:
-                    compression_bailout = _CompressionBailout.HARD
-                elif compression_reminder_level == _CompressionReminderLevel.SOFT:
-                    compression_bailout = _CompressionBailout.SOFT
-                compression_rounds += 1
+                elif compaction_reminder_level == _CompactionReminderLevel.HARD:
+                    compaction_bailout = _CompactionBailout.HARD
+                elif compaction_reminder_level == _CompactionReminderLevel.SOFT:
+                    compaction_bailout = _CompactionBailout.SOFT
+                compaction_rounds += 1
                 usage_ledger.record_hidden(profile.main.public_usage, result.usage)
                 continue
 
-            if compression_reminder_level == _CompressionReminderLevel.SOFT:
-                compression_bailout = _CompressionBailout.SOFT
+            if compaction_reminder_level == _CompactionReminderLevel.SOFT:
+                compaction_bailout = _CompactionBailout.SOFT
 
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []

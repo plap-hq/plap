@@ -50,9 +50,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=500_000,
             arbitrator_transcript_token_budget=500_000,
-            compression_soft_token_budget=150_000,
-            compression_hard_token_budget=200_000,
-            compression_max_rounds=3,
+            compaction_soft_token_budget=150_000,
+            compaction_hard_token_budget=200_000,
+            compaction_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort=_default_reasoning_effort_overrides(),
@@ -93,9 +93,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=500_000,
             arbitrator_transcript_token_budget=500_000,
-            compression_soft_token_budget=100_000,
-            compression_hard_token_budget=150_000,
-            compression_max_rounds=3,
+            compaction_soft_token_budget=100_000,
+            compaction_hard_token_budget=150_000,
+            compaction_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort=_default_reasoning_effort_overrides(),
@@ -103,9 +103,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
     }
 
 
-def _validate_compression_budgets(soft_budget: int | None, hard_budget: int | None) -> None:
+def _validate_compaction_budgets(soft_budget: int | None, hard_budget: int | None) -> None:
     if soft_budget is not None and hard_budget is not None and hard_budget <= soft_budget:
-        raise ValueError("compression hard token budget must exceed the soft token budget")
+        raise ValueError("compaction hard token budget must exceed the soft token budget")
 
 
 def _missing_model_error() -> PlapError:
@@ -447,14 +447,14 @@ class RuntimeProfileOverride(BaseModel):
     reasoning_summarizer: RuntimeActorOverride | None = None
     reviewer_transcript_token_budget: int | None = Field(default=None, ge=0)
     arbitrator_transcript_token_budget: int | None = Field(default=None, ge=0)
-    compression_soft_token_budget: int | None = Field(default=None, ge=0)
-    compression_hard_token_budget: int | None = Field(default=None, ge=0)
-    compression_max_rounds: int | None = Field(default=None, ge=0)
+    compaction_soft_token_budget: int | None = Field(default=None, ge=0)
+    compaction_hard_token_budget: int | None = Field(default=None, ge=0)
+    compaction_max_rounds: int | None = Field(default=None, ge=0)
     debate_max_rounds: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def validate_compression_config(self) -> RuntimeProfileOverride:
-        _validate_compression_budgets(self.compression_soft_token_budget, self.compression_hard_token_budget)
+    def validate_compaction_config(self) -> RuntimeProfileOverride:
+        _validate_compaction_budgets(self.compaction_soft_token_budget, self.compaction_hard_token_budget)
         return self
 
     def apply_to(self, profile: RuntimeModelProfileConfig) -> RuntimeModelProfileConfig:
@@ -477,12 +477,12 @@ class RuntimeProfileOverride(BaseModel):
             updates["reviewer_transcript_token_budget"] = self.reviewer_transcript_token_budget
         if self.arbitrator_transcript_token_budget is not None:
             updates["arbitrator_transcript_token_budget"] = self.arbitrator_transcript_token_budget
-        if self.compression_soft_token_budget is not None:
-            updates["compression_soft_token_budget"] = self.compression_soft_token_budget
-        if self.compression_hard_token_budget is not None:
-            updates["compression_hard_token_budget"] = self.compression_hard_token_budget
-        if self.compression_max_rounds is not None:
-            updates["compression_max_rounds"] = self.compression_max_rounds
+        if self.compaction_soft_token_budget is not None:
+            updates["compaction_soft_token_budget"] = self.compaction_soft_token_budget
+        if self.compaction_hard_token_budget is not None:
+            updates["compaction_hard_token_budget"] = self.compaction_hard_token_budget
+        if self.compaction_max_rounds is not None:
+            updates["compaction_max_rounds"] = self.compaction_max_rounds
         if self.debate_max_rounds is not None:
             updates["debate_max_rounds"] = self.debate_max_rounds
         return profile.model_copy(update=updates)
@@ -507,12 +507,12 @@ class RuntimeProfileOverride(BaseModel):
             fields.add("reviewer_transcript_token_budget")
         if self.arbitrator_transcript_token_budget is not None:
             fields.add("arbitrator_transcript_token_budget")
-        if self.compression_soft_token_budget is not None:
-            fields.add("compression_soft_token_budget")
-        if self.compression_hard_token_budget is not None:
-            fields.add("compression_hard_token_budget")
-        if self.compression_max_rounds is not None:
-            fields.add("compression_max_rounds")
+        if self.compaction_soft_token_budget is not None:
+            fields.add("compaction_soft_token_budget")
+        if self.compaction_hard_token_budget is not None:
+            fields.add("compaction_hard_token_budget")
+        if self.compaction_max_rounds is not None:
+            fields.add("compaction_max_rounds")
         if self.debate_max_rounds is not None:
             fields.add("debate_max_rounds")
         return fields
@@ -540,9 +540,9 @@ class RuntimeModelProfileConfig(BaseModel):
     reasoning_summarizer: RuntimeActorConfig
     reviewer_transcript_token_budget: int = Field(default=0, ge=0)
     arbitrator_transcript_token_budget: int = Field(default=0, ge=0)
-    compression_soft_token_budget: int | None = Field(default=None, ge=0)
-    compression_hard_token_budget: int | None = Field(default=None, ge=0)
-    compression_max_rounds: int = Field(default=3, ge=0)
+    compaction_soft_token_budget: int | None = Field(default=None, ge=0)
+    compaction_hard_token_budget: int | None = Field(default=None, ge=0)
+    compaction_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
     default_reasoning_effort: ReasoningEffort | None = None
     by_service_tier: dict[ServiceTier, RuntimeProfileOverride] = Field(default_factory=dict)
@@ -558,7 +558,7 @@ class RuntimeModelProfileConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_profile(self) -> RuntimeModelProfileConfig:
-        _validate_compression_budgets(self.compression_soft_token_budget, self.compression_hard_token_budget)
+        _validate_compaction_budgets(self.compaction_soft_token_budget, self.compaction_hard_token_budget)
 
         if self.by_service_tier and not self.supports_parameter("service_tier"):
             raise ValueError("service_tier overrides require model_info.supported_parameters to include service_tier")
@@ -572,11 +572,11 @@ class RuntimeModelProfileConfig(BaseModel):
 
         for override in self.by_service_tier.values():
             resolved = override.apply_to(self)
-            _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+            _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
 
         for override in self.by_reasoning_effort.values():
             resolved = override.apply_to(self)
-            _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+            _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
 
         for service_override in self.by_service_tier.values():
             for reasoning_override in self.by_reasoning_effort.values():
@@ -585,7 +585,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     fields = ", ".join(sorted(conflicts))
                     raise ValueError(f"service_tier and reasoning_effort overrides both set: {fields}")
                 resolved = reasoning_override.apply_to(service_override.apply_to(self))
-                _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+                _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
 
         return self
 
@@ -638,7 +638,7 @@ class RuntimeModelProfileConfig(BaseModel):
                 )
             resolved = override.apply_to(resolved)
 
-        _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
+        _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
         return resolved
 
     def all_models(self) -> tuple[str, ...]:

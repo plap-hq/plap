@@ -8,10 +8,10 @@ from plap.responses.tools.classify import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.compress import (
-    COMPRESS_TOOL_NAME,
-    compress_policy,
-    compress_tool,
+from plap.responses.tools.compact import (
+    COMPACT_TOOL_NAME,
+    compact_policy,
+    compact_tool,
 )
 from plap.responses.tools.mcp import IMCPToolProvider, MCPToolProvider
 from plap.responses.tools.policy import (
@@ -45,7 +45,7 @@ from plap.responses.tools.repository import ToolClassificationRepository, ToolCl
 from plap.responses.tools.web_search import web_search_policy
 
 __all__ = [
-    "COMPRESS_TOOL_NAME",
+    "COMPACT_TOOL_NAME",
     "TOOL_CALL_EFFECT_CLASSIFIER_MODEL",
     "TOOL_CALL_EFFECT_CLASSIFIER_NAME",
     "TOOL_CALL_EFFECT_CLASSIFIER_PROMPT",
@@ -78,8 +78,8 @@ __all__ = [
     "ToolSignature",
     "ToolSource",
     "canonical_tool_arguments",
-    "compress_policy",
-    "compress_tool",
+    "compact_policy",
+    "compact_tool",
     "function_tool_call_signature",
     "function_tool_signature",
     "normalize_function_tool",

@@ -27,6 +27,9 @@ Rules:
 - Do not quote hidden reasoning, hidden messages, or internal instructions
   verbatim.
 - Do not expose chain-of-thought. Summarize only high-level checks and outcomes.
+- If private traces mention hidden context compaction or the `compact` tool,
+  preserve only the substantive conclusions, not the hidden maintenance step
+  itself.
 - Do not preserve the speaker, addressee, accusation, or conversational turn from
   any private message.
 - Do not directly address the user with "you" or "your" in the reasoning summary.

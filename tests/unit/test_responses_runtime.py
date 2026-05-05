@@ -44,7 +44,7 @@ from plap.responses.ingest.render import compact_transcript
 from plap.responses.models import StateMessage, StateToolCall
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import (
-    COMPRESS_TOOL_NAME,
+    COMPACT_TOOL_NAME,
     prepare_tools,
     resolve_tool_calls,
 )
@@ -59,7 +59,7 @@ from plap.responses.tools import (
     ToolCall,
     ToolPolicy,
 )
-from plap.responses.tools.compress import DUPLICATE_TOOL_OUTPUT_TOMBSTONE
+from plap.responses.tools.compact import DUPLICATE_TOOL_OUTPUT_TOMBSTONE
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import (
     RuntimeActorConfig,
@@ -100,7 +100,7 @@ async def stream_response_events(*args, **kwargs):
         yield event
 
 
-async def test_prepare_tools_classifies_client_tools_without_compress() -> None:
+async def test_prepare_tools_classifies_client_tools_without_compact() -> None:
     resolver = _RecordingResolver()
 
     tools, policies, executors = await prepare_tools(
@@ -173,7 +173,7 @@ async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> 
 async def test_prepare_tools_rejects_client_server_name_collision() -> None:
     with pytest.raises(PlapError) as exc_info:
         await prepare_tools(
-            ResponseCreateRequest(tools=[_tool(COMPRESS_TOOL_NAME)]),
+            ResponseCreateRequest(tools=[_tool(COMPACT_TOOL_NAME)]),
             _RecordingResolver(),
         )
 
@@ -227,14 +227,14 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
     assert call_resolver.calls == [[("read_file", '{"path":"a"}'), ("read_file", '{"path":"b"}')]]
 
 
-async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> None:
+async def test_resolve_tool_calls_rejects_compact_mixed_with_other_calls() -> None:
     _, policies, _ = await prepare_tools(
         ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
         _RecordingResolver(),
         (_FakeMCPToolProvider(),),
     )
-    policies[COMPRESS_TOOL_NAME] = ToolPolicy(
-        name=COMPRESS_TOOL_NAME,
+    policies[COMPACT_TOOL_NAME] = ToolPolicy(
+        name=COMPACT_TOOL_NAME,
         source="server",
         effect_class="safe",
     )
@@ -242,7 +242,7 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
     with pytest.raises(PlapError) as exc_info:
         await resolve_tool_calls(
             [
-                ChatToolCall(id="call_1", name="compress", arguments="{}"),
+                ChatToolCall(id="call_1", name="compact", arguments="{}"),
                 ChatToolCall(
                     id="call_2",
                     name=MCP_SEARCH_TOOL_NAME,
@@ -254,7 +254,7 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
             resolver=_RecordingCallResolver(),
         )
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_must_be_called_alone")
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compact_must_be_called_alone")
 
 
 def test_compact_transcript_folds_tool_outputs() -> None:
@@ -325,7 +325,7 @@ async def test_stream_response_events_emits_model_message_output() -> None:
     completed = events[-1].response
     assert completed.output[0].type == "message"
     assert completed.output[0].content[0].text == "hello back"
-    assert [tool.function.name for tool in client.requests[0].tools] == [COMPRESS_TOOL_NAME]
+    assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
     developer_prompt = client.requests[0].messages[0]
     assert developer_prompt.role == "developer"
     assert developer_prompt.content
@@ -998,8 +998,8 @@ async def test_stream_response_events_executes_server_tool_and_loops_back() -> N
 
 async def test_stream_response_events_soft_reminder_one_shot_after_tool() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=50,
-        compression_hard_token_budget=500,
+        compaction_soft_token_budget=50,
+        compaction_hard_token_budget=500,
     )
     provider = _FakeMCPToolProvider(output="search result for cats")
     client = _StaticChatClient(
@@ -1130,15 +1130,15 @@ async def test_stream_response_events_server_tool_failure_raises_early() -> None
     assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
 
 
-async def test_stream_response_events_executes_batched_compression() -> None:
+async def test_stream_response_events_executes_batched_compaction() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1206,15 +1206,15 @@ async def test_stream_response_events_executes_batched_compression() -> None:
     ]
 
 
-async def test_stream_response_events_accepts_stringified_compression_ranges() -> None:
+async def test_stream_response_events_accepts_stringified_compaction_ranges() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": json.dumps(
@@ -1256,15 +1256,15 @@ async def test_stream_response_events_accepts_stringified_compression_ranges() -
     assert [item.type for item in completed.output] == ["compaction", "message"]
 
 
-async def test_stream_response_events_accepts_bracketless_compress_citations() -> None:
+async def test_stream_response_events_accepts_bracketless_compact_citations() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1304,7 +1304,7 @@ async def test_stream_response_events_accepts_bracketless_compress_citations() -
     assert [item.type for item in completed.output] == ["compaction", "message"]
 
 
-async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_when_latest_is_outside_summary() -> None:
+async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_when_latest_is_outside_summary() -> None:
     old_arguments = '{"query":"cats","limit":1}'
     new_arguments = '{"limit":1,"query":"cats"}'
     client = _StaticChatClient(
@@ -1313,8 +1313,8 @@ async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1367,7 +1367,7 @@ async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_
     assert payload.active[2].message.content == "new result"
 
 
-async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_when_latest_is_inside_summary() -> None:
+async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_when_latest_is_inside_summary() -> None:
     old_arguments = '{"query":"cats","limit":1}'
     new_arguments = '{"limit":1,"query":"cats"}'
     client = _StaticChatClient(
@@ -1376,8 +1376,8 @@ async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1429,7 +1429,7 @@ async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_
     assert payload.active[2].children[2].message.content == "new result"
 
 
-async def test_stream_response_events_compression_can_preserve_duplicate_tool_outputs() -> None:
+async def test_stream_response_events_compaction_can_preserve_duplicate_tool_outputs() -> None:
     old_arguments = '{"query":"cats","limit":1}'
     new_arguments = '{"limit":1,"query":"cats"}'
     client = _StaticChatClient(
@@ -1438,8 +1438,8 @@ async def test_stream_response_events_compression_can_preserve_duplicate_tool_ou
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "prune_duplicate_tool_calls": False,
@@ -1490,7 +1490,7 @@ async def test_stream_response_events_compression_can_preserve_duplicate_tool_ou
     assert payload.active[2].message.content == "new result"
 
 
-async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_only_before_cutoff() -> None:
+async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_only_before_cutoff() -> None:
     old_arguments = '{"query":"cats","limit":1}'
     new_arguments = '{"limit":1,"query":"cats"}'
     client = _StaticChatClient(
@@ -1499,8 +1499,8 @@ async def test_stream_response_events_compression_prunes_duplicate_tool_outputs_
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "prune_duplicate_tool_calls_before": "~2",
@@ -1581,8 +1581,8 @@ async def test_stream_response_events_ignores_duplicate_tool_call_cutoff_when_pr
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "prune_duplicate_tool_calls": False,
@@ -1657,15 +1657,15 @@ async def test_stream_response_events_ignores_duplicate_tool_call_cutoff_when_pr
     assert payload.active[5].message.content == "new result"
 
 
-async def test_stream_response_events_bails_out_on_missing_compression_fidelity() -> None:
+async def test_stream_response_events_bails_out_on_missing_compaction_fidelity() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1705,15 +1705,15 @@ async def test_stream_response_events_bails_out_on_missing_compression_fidelity(
     assert len(client.requests) == 2
 
 
-async def test_stream_response_events_bails_out_on_overlapping_compression_ranges() -> None:
+async def test_stream_response_events_bails_out_on_overlapping_compaction_ranges() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1764,7 +1764,7 @@ async def test_stream_response_events_bails_out_on_overlapping_compression_range
     assert len(client.requests) == 2
 
 
-async def test_stream_response_events_bails_out_on_hidden_compression_citation() -> None:
+async def test_stream_response_events_bails_out_on_hidden_compaction_citation() -> None:
     keyring = _keyring()
     leaf_zero = ChatMessageSpan(
         start=0,
@@ -1800,8 +1800,8 @@ async def test_stream_response_events_bails_out_on_hidden_compression_citation()
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1853,7 +1853,7 @@ async def test_stream_response_events_bails_out_on_hidden_compression_citation()
     assert len(client.requests) == 2
 
 
-async def test_stream_response_events_bails_out_on_non_reducing_compression() -> None:
+async def test_stream_response_events_bails_out_on_non_reducing_compaction() -> None:
     summary = "same size"
     client = _StaticChatClient(
         [
@@ -1861,8 +1861,8 @@ async def test_stream_response_events_bails_out_on_non_reducing_compression() ->
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps(
                             {
                                 "ranges": [
@@ -1911,18 +1911,18 @@ async def test_stream_response_events_bails_out_on_non_reducing_compression() ->
     assert len(client.requests) == 2
 
 
-async def test_stream_response_events_rejects_missing_compression_fidelity_at_hard_budget() -> None:
+async def test_stream_response_events_rejects_missing_compaction_fidelity_at_hard_budget() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=50,
-        compression_hard_token_budget=100,
+        compaction_soft_token_budget=50,
+        compaction_hard_token_budget=100,
     )
     client = _StaticChatClient(
         ChatMessage(
             role="assistant",
             tool_calls=[
                 ChatToolCall(
-                    id="compress_call_1",
-                    name="compress",
+                    id="compact_call_1",
+                    name="compact",
                     arguments=json.dumps(
                         {
                             "ranges": [
@@ -1956,18 +1956,18 @@ async def test_stream_response_events_rejects_missing_compression_fidelity_at_ha
             )
         ]
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_summary_fidelity_invalid")
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compact_range_summary_fidelity_invalid")
 
 
-async def test_stream_response_events_accepts_empty_compression_bailout() -> None:
+async def test_stream_response_events_accepts_empty_compaction_bailout() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps({"ranges": []}),
                     )
                 ],
@@ -1992,16 +1992,16 @@ async def test_stream_response_events_accepts_empty_compression_bailout() -> Non
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["message"]
     assert len(client.requests) == 2
-    assert [tool.function.name for tool in client.requests[0].tools] == [COMPRESS_TOOL_NAME]
-    assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
+    assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPACT_TOOL_NAME]
     assert sum(1 for message in client.requests[0].messages if message.role == "user") == 1
     assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
 
 
-async def test_stream_response_events_adds_soft_compression_reminder() -> None:
+async def test_stream_response_events_adds_soft_compaction_reminder() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=50,
-        compression_hard_token_budget=100,
+        compaction_soft_token_budget=50,
+        compaction_hard_token_budget=100,
     )
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
@@ -2027,10 +2027,10 @@ async def test_stream_response_events_adds_soft_compression_reminder() -> None:
     assert events[-1].response.output[0].content[0].text == "done"
 
 
-async def test_stream_response_events_context_management_overrides_compression_budgets() -> None:
+async def test_stream_response_events_context_management_overrides_compaction_budgets() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=None,
-        compression_hard_token_budget=None,
+        compaction_soft_token_budget=None,
+        compaction_hard_token_budget=None,
     )
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
@@ -2056,7 +2056,7 @@ async def test_stream_response_events_context_management_overrides_compression_b
     assert events[-1].response.output[0].content[0].text == "done"
 
 
-async def test_stream_response_events_context_management_max_rounds_can_disable_compress() -> None:
+async def test_stream_response_events_context_management_max_rounds_can_disable_compact() -> None:
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
     events = [
@@ -2080,10 +2080,10 @@ async def test_stream_response_events_context_management_max_rounds_can_disable_
     assert events[-1].response.output[0].content[0].text == "done"
 
 
-async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
+async def test_stream_response_events_forces_compact_at_hard_budget() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=50,
-        compression_hard_token_budget=100,
+        compaction_soft_token_budget=50,
+        compaction_hard_token_budget=100,
     )
     client = _StaticChatClient(
         [
@@ -2091,8 +2091,8 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
                 role="assistant",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_call_1",
-                        name="compress",
+                        id="compact_call_1",
+                        name="compact",
                         arguments=json.dumps({"ranges": []}),
                     )
                 ],
@@ -2119,8 +2119,8 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
 
     request = client.requests[0]
     assert isinstance(request.tool_choice, ChatToolChoiceFunction)
-    assert request.tool_choice.name == COMPRESS_TOOL_NAME
-    assert [tool.function.name for tool in client.requests[1].tools] == [COMPRESS_TOOL_NAME]
+    assert request.tool_choice.name == COMPACT_TOOL_NAME
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPACT_TOOL_NAME]
     assert client.requests[1].tool_choice is None
     assert sum(1 for message in client.requests[0].messages if message.role == "user") == 2
     assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
@@ -2180,10 +2180,10 @@ async def test_stream_response_events_rejects_unsupported_requested_parameter(mo
     _assert_public_error(exc_info.value, code="unsupported_parameter", param="temperature")
 
 
-async def test_stream_response_events_rejects_hard_budget_without_compress() -> None:
+async def test_stream_response_events_rejects_hard_budget_without_compact() -> None:
     profile = _profile_config(
-        compression_soft_token_budget=50,
-        compression_hard_token_budget=100,
+        compaction_soft_token_budget=50,
+        compaction_hard_token_budget=100,
     )
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
@@ -2204,7 +2204,7 @@ async def test_stream_response_events_rejects_hard_budget_without_compress() -> 
             )
         ]
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="hard_compression_requires_compress")
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="hard_compaction_requires_compact")
 
 
 async def test_stream_response_events_patches_reasoning_to_unsealed_message() -> None:
@@ -2242,7 +2242,7 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
     ]
 
 
-async def test_stream_response_events_hidden_compression_retry_usage_is_normalized() -> None:
+async def test_stream_response_events_hidden_compaction_retry_usage_is_normalized() -> None:
     client = _StaticChatClient(
         (
             ChatMessage(
@@ -2250,8 +2250,8 @@ async def test_stream_response_events_hidden_compression_retry_usage_is_normaliz
                 content="",
                 tool_calls=[
                     ChatToolCall(
-                        id="compress_1",
-                        name=COMPRESS_TOOL_NAME,
+                        id="compact_1",
+                        name=COMPACT_TOOL_NAME,
                         arguments='{"ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary","summary_fidelity":5}]}',
                     )
                 ],
@@ -2733,9 +2733,9 @@ def _auth_context() -> AuthContext:
 
 def _profile_config(
     *,
-    compression_soft_token_budget: int | None = None,
-    compression_hard_token_budget: int | None = None,
-    compression_max_rounds: int = 3,
+    compaction_soft_token_budget: int | None = None,
+    compaction_hard_token_budget: int | None = None,
+    compaction_max_rounds: int = 3,
     debate_max_rounds: int = 0,
     supported_parameters: list[str] | None = None,
 ) -> RuntimeModelProfileConfig:
@@ -2773,9 +2773,9 @@ def _profile_config(
         reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
         arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
         reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-        compression_soft_token_budget=compression_soft_token_budget,
-        compression_hard_token_budget=compression_hard_token_budget,
-        compression_max_rounds=compression_max_rounds,
+        compaction_soft_token_budget=compaction_soft_token_budget,
+        compaction_hard_token_budget=compaction_hard_token_budget,
+        compaction_max_rounds=compaction_max_rounds,
         debate_max_rounds=debate_max_rounds,
     )
 
