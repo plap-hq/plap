@@ -134,6 +134,13 @@ Definitions:
 Return JSON only.
 
 Use available tools when they help.
+You only have access here to a restricted safe subset of tools. If the current
+proposed answer includes tool availability metadata, treat it as authoritative.
+If a tool is unavailable in this debate step, that does not mean the normal
+answer-writing step lacks it. Do not claim a tool "doesn't exist" just because
+it is unavailable in this restricted debate toolset. If the current proposed
+answer would require a non-safe tool in the normal step, describe that as a need
+for a non-safe tool, not as a missing or nonexistent tool.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
@@ -164,6 +171,12 @@ Do not write a replacement answer for the user.
 Do not decide whether the current proposed answer should be sent.
 You may agree, partly agree, or disagree with the review note.
 Use available tools when they help.
+You only have access here to a restricted safe subset of tools. If a tool is not
+available in this debate step, that does not mean the normal answer-writing step
+lacks it. Do not claim a tool "doesn't exist" just because it is unavailable in
+this restricted debate toolset. If the current proposed answer would require a
+non-safe tool in the normal step, describe that as a need for a non-safe tool,
+not as a missing or nonexistent tool.
 """
 
 ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed answer.
@@ -184,6 +197,13 @@ Definitions:
 Return JSON only.
 
 Use available tools when they help.
+You only have access here to a restricted safe subset of tools. If the current
+proposed answer includes tool availability metadata, treat it as authoritative.
+If a tool is unavailable in this debate step, that does not mean the normal
+answer-writing step lacks it. Do not claim a tool "doesn't exist" just because
+it is unavailable in this restricted debate toolset. If the current proposed
+answer would require a non-safe tool in the normal step, describe that as a need
+for a non-safe tool, not as a missing or nonexistent tool.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
@@ -372,7 +392,12 @@ def _decode_decision(message: StateMessage, typ, label: str):
         raise _debate_unavailable_error(reason="decision_invalid", private_message=f"{label} is invalid", cause=exc) from exc
 
 
-def _compact_candidate(parts: TempMainParts) -> dict[str, object]:
+def _compact_candidate(
+    parts: TempMainParts,
+    *,
+    normal_tool_policies: Mapping[str, ToolPolicy],
+    debate_tool_policies: Mapping[str, ToolPolicy],
+) -> dict[str, object]:
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     candidate = parts.held_candidate.message
@@ -387,10 +412,16 @@ def _compact_candidate(parts: TempMainParts) -> dict[str, object]:
     if candidate.tool_calls:
         compact_tool_calls: list[dict[str, object]] = []
         for call in candidate.tool_calls:
+            normal_policy = normal_tool_policies.get(call.name)
+            debate_policy = debate_tool_policies.get(call.name)
             compact_call: dict[str, object] = {
                 "name": call.name,
                 "arguments": call.arguments_value(),
+                "available_in_debate": debate_policy is not None,
+                "available_in_normal_step": normal_policy is not None,
             }
+            if normal_policy is not None:
+                compact_call["normal_effect_class"] = normal_policy.effect_class.value
             output = outputs.get(call.id)
             if output is not None:
                 compact_call["output"] = output
@@ -403,12 +434,18 @@ def _transcript_wrapper(transcript: Sequence[TranscriptMessage]) -> ChatMessage:
     return ChatMessage(role="user", content=f"Conversation transcript:\n{_json_text([message.to_primitive() for message in transcript])}")
 
 
-def _reviewer_initial_turn(parts: TempMainParts) -> StateMessage:
+def _reviewer_initial_turn(
+    parts: TempMainParts,
+    *,
+    normal_tool_policies: Mapping[str, ToolPolicy],
+    debate_tool_policies: Mapping[str, ToolPolicy],
+) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
             "Review the current proposed answer below. Decide whether to accept it as-is or reopen with one short review note.\n\n"
-            f"Current proposed answer:\n{_json_text(_compact_candidate(parts))}"
+            "Current proposed answer:\n"
+            f"{_json_text(_compact_candidate(parts, normal_tool_policies=normal_tool_policies, debate_tool_policies=debate_tool_policies))}"
         ),
     )
 
@@ -439,12 +476,15 @@ def _arbitrator_initial_turn(
     parts: TempMainParts,
     reviewer_decision: ReviewerDecision,
     latest_response_note: StateMessage,
+    normal_tool_policies: Mapping[str, ToolPolicy],
+    debate_tool_policies: Mapping[str, ToolPolicy],
 ) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
             "Current proposed answer:\n"
-            f"{_json_text(_compact_candidate(parts))}\n\n"
+            f"{_json_text(_compact_candidate(parts, normal_tool_policies=normal_tool_policies, debate_tool_policies=debate_tool_policies))}"
+            "\n\n"
             "Latest review note:\n"
             f"{reviewer_decision.note or ''}\n\n"
             "Latest response note:\n"
@@ -619,6 +659,7 @@ async def run_reviewer_turn(
     request,
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
+    normal_tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
@@ -646,7 +687,13 @@ async def run_reviewer_turn(
             )
         ]
     else:
-        turn_messages = [_reviewer_initial_turn(parts)]
+        turn_messages = [
+            _reviewer_initial_turn(
+                parts,
+                normal_tool_policies=normal_tool_policies,
+                debate_tool_policies=tool_policies,
+            )
+        ]
     return await _execute_actor_turn(
         actor_name=Side.REVIEWER.value,
         actor_config=profile.reviewer,
@@ -714,6 +761,7 @@ async def run_arbitrator_turn(
     request,
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
+    normal_tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IMCPToolProvider],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
@@ -747,6 +795,8 @@ async def run_arbitrator_turn(
                 parts=parts,
                 reviewer_decision=reviewer_decision,
                 latest_response_note=latest_response_note,
+                normal_tool_policies=normal_tool_policies,
+                debate_tool_policies=tool_policies,
             )
         ]
     return await _execute_actor_turn(
@@ -984,6 +1034,7 @@ async def continue_debate(
                     request=request,
                     tools=safe_tools,
                     tool_policies=safe_tool_policies,
+                    normal_tool_policies=tool_policies,
                     server_executors=safe_server_executors,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
@@ -1105,6 +1156,7 @@ async def continue_debate(
                     request=request,
                     tools=safe_tools,
                     tool_policies=safe_tool_policies,
+                    normal_tool_policies=tool_policies,
                     server_executors=safe_server_executors,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,

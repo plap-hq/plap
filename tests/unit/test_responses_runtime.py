@@ -648,6 +648,9 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert reviewer_payload.messages[0].role == "user"
     assert "original question" not in (reviewer_payload.messages[0].content or "")
     assert "draft answer" in (reviewer_payload.messages[0].content or "")
+    assert '"available_in_debate":false' in (reviewer_payload.messages[0].content or "")
+    assert '"available_in_normal_step":true' in (reviewer_payload.messages[0].content or "")
+    assert '"normal_effect_class":"mutation"' in (reviewer_payload.messages[0].content or "")
     assert completed.output[-1].name == "mutate_record"
     assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
     assert len(client.requests) == 2
@@ -896,6 +899,9 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert "original question" not in (arbitrator_payload.messages[0].content or "")
     assert "draft answer" in (arbitrator_payload.messages[0].content or "")
     assert "after review" in (arbitrator_payload.messages[0].content or "")
+    assert '"available_in_debate":false' in (arbitrator_payload.messages[0].content or "")
+    assert '"available_in_normal_step":true' in (arbitrator_payload.messages[0].content or "")
+    assert '"normal_effect_class":"mutation"' in (arbitrator_payload.messages[0].content or "")
     stable_guidance = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert stable_guidance.temp is False
     assert stable_guidance.messages[0].role == "assistant"
