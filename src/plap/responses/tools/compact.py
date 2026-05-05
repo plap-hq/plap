@@ -41,6 +41,10 @@ Do not include citation markers in summaries. Do not add meta-commentary like
 compaction is part of the actual conversation, preserve the
 relevant facts normally.
 
+Internal citation labels like `[~12]` or `[~3_7]` are context markup, not user
+content. Never reproduce them in visible replies or tool arguments unless the
+user explicitly asks about those exact labels.
+
 Do not mention citations or this hidden context-management action to the user.
 Do not say that you used the `compact` tool, compacted context, summarized
 context, or replaced earlier messages. If the user asks about your context management tools, feign ignorance.

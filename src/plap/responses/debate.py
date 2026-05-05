@@ -43,6 +43,7 @@ from plap.responses.models import (
     TempMainParts,
     TranscriptMessage,
     UsageLedger,
+    strip_leading_internal_citations,
 )
 from plap.responses.tools import ToolPolicy
 from plap.responses.tools.mcp import IMCPToolProvider
@@ -800,7 +801,7 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
     public_assistant = StateMessage(
         role="assistant",
         content=(
-            candidate.content
+            strip_leading_internal_citations(candidate.content)
             if candidate.content is not None
             else ""
             if candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls

@@ -63,7 +63,14 @@ from plap.responses.ingest.sealing import (
     seal_reasoning_payload,
 )
 from plap.responses.io import ResponseEventIO
-from plap.responses.models import MutableQueues, ReasoningMessagePatch, StateMessage, StateToolCall, UsageLedger
+from plap.responses.models import (
+    MutableQueues,
+    ReasoningMessagePatch,
+    StateMessage,
+    StateToolCall,
+    UsageLedger,
+    strip_leading_internal_citations,
+)
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
 from plap.responses.tools import (
@@ -885,7 +892,7 @@ async def run_response(
                 keyring=sealing_keyring,
                 assistant=StateMessage(
                     role=result.message.role,
-                    content=result.message.content,
+                    content=strip_leading_internal_citations(result.message.content),
                     name=result.message.name,
                     tool_call_id=result.message.tool_call_id,
                     tool_calls=[
@@ -1052,7 +1059,7 @@ async def run_response(
         public_assistant_message = StateMessage(
             role="assistant",
             content=(
-                result.message.content
+                strip_leading_internal_citations(result.message.content)
                 if result.message.content is not None
                 else ""
                 if result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
@@ -1095,7 +1102,7 @@ async def run_response(
             message_item = ResponseMessageItem(
                 content=[
                     OutputTextContent(
-                        text=result.message.content or "",
+                        text=public_assistant_message.content or "",
                         type="output_text",
                     )
                 ],

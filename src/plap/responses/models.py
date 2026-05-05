@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -20,6 +21,7 @@ from plap.responses.contracts import (
 from plap.settings import PublicUsageConfig
 
 _DEFAULT_ENCODING = "o200k_base"
+_LEADING_INTERNAL_CITATION_RE = re.compile(r"^\s*(?:(?:\[~\d+(?:_\d+)?\])\s+)+")
 
 
 @lru_cache(maxsize=1)
@@ -31,6 +33,12 @@ def _estimate_text_tokens(text: str | None) -> int:
     if not text:
         return 1
     return max(1, len(_encoding().encode(text)))
+
+
+def strip_leading_internal_citations(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return _LEADING_INTERNAL_CITATION_RE.sub("", text, count=1)
 
 
 class Side(StrEnum):

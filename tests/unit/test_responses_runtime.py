@@ -332,6 +332,46 @@ async def test_stream_response_events_emits_model_message_output() -> None:
     assert client.requests[0].messages[1].content == "[~0]\nhello"
 
 
+async def test_stream_response_events_strips_leading_internal_citation_from_public_output() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="[~6]\nhello back"))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "hello back"
+
+
+async def test_stream_response_events_preserves_non_leading_citation_like_text() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="Value [~6] stays in place"))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "Value [~6] stays in place"
+
+
 async def test_stream_response_events_keeps_application_instructions_in_single_developer_message() -> None:
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
@@ -459,7 +499,7 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
 async def test_stream_response_events_stop_answer_triggers_debate() -> None:
     client = _StaticChatClient(
         [
-            ChatMessage(role="assistant", content="hello back"),
+            ChatMessage(role="assistant", content="[~6]\nhello back"),
             _assistant_json({"action": "accept", "note": None}),
         ]
     )
