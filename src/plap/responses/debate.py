@@ -1192,6 +1192,7 @@ async def _persist_temp_turn(
         continuation_side=continuation_side,
         messages=tuple(messages),
     )
+    summary_messages = _temp_turn_summary_messages(state=state, side=side, messages=messages)
     await out.output(
         ResponseReasoningItem(
             encrypted_content=seal_reasoning_payload(payload, keyring=keyring),
@@ -1201,7 +1202,7 @@ async def _persist_temp_turn(
             type="reasoning",
         ),
         reasoning_side=payload.side,
-        reasoning_messages=payload.messages,
+        reasoning_messages=summary_messages,
     )
     if side == Side.MAIN:
         for message in messages:
@@ -1210,6 +1211,24 @@ async def _persist_temp_turn(
         for message in messages:
             state.append_side(side, message)
     state.set_continuation(continuation_side, in_temp_debate=True)
+
+
+def _temp_turn_summary_messages(
+    *,
+    state: MutableQueues,
+    side: Side,
+    messages: Sequence[StateMessage],
+) -> tuple[StateMessage, ...]:
+    if side == Side.MAIN and not state.main_context_temp:
+        return tuple(messages)
+    parts = state.temp_main_parts()
+    if parts.held_candidate is None:
+        return tuple(messages)
+    return (
+        parts.held_candidate.message,
+        *(row.message for row in parts.held_hidden_tool_rows),
+        *messages,
+    )
 
 
 async def _emit_debate_function_calls(

@@ -777,6 +777,64 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
     assert "Check ids." in (debate_request.messages[-1].content or "")
 
 
+async def test_stream_response_events_main_debate_reasoning_summary_includes_held_candidate_context() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked the note",))
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            _assistant_json(
+                {
+                    "action": "reopen",
+                    "note": "Be shorter.",
+                }
+            ),
+            ChatMessage(role="assistant", content="I can shorten it."),
+            _assistant_json(
+                {
+                    "action": "accept",
+                    "note": None,
+                }
+            ),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello", reasoning=ReasoningConfig(summary="concise")),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=summarizer,
+        )
+    ]
+
+    main_debate_call = next(
+        messages
+        for _, _, _, _, _, side, messages in summarizer.calls
+        if side == "main"
+        and any(
+            isinstance(message, StateMessage) and (message.content or "").startswith("Latest review note:\nBe shorter.")
+            for message in messages
+        )
+    )
+
+    assert [message.to_primitive() for message in main_debate_call] == [
+        {"role": "assistant", "content": "draft answer"},
+        {
+            "role": "user",
+            "content": (
+                "Latest review note:\nBe shorter.\n\n"
+                "Write one short response note about the current proposed answer. "
+                "You may agree, partly agree, or disagree with the review note."
+            ),
+        },
+        {"role": "assistant", "content": "I can shorten it."},
+    ]
+
+
 async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     client = _StaticChatClient(
         [
