@@ -5,11 +5,11 @@ from enum import StrEnum
 
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
-    ReasoningItem,
     RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
     RequestMessageItem,
+    RequestReasoningItem,
     ResponseCreateRequest,
 )
 from plap.responses.errors import ResponseError
@@ -411,7 +411,7 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
             if in_temp_debate:
                 in_temp_debate = False
             continue
-        if isinstance(item, ReasoningItem):
+        if isinstance(item, RequestReasoningItem):
             payload = _open_reasoning_item(item, keyring=keyring)
             decoded.append(
                 _DecodedItem(
@@ -438,7 +438,7 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
     return decoded, in_temp_debate
 
 
-def _open_reasoning_item(item: ReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
+def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
     if item.encrypted_content is None:
         raise ResponseError.ingestion(private_message="unsealed reasoning input is not trusted")
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)

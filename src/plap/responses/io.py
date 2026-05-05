@@ -12,7 +12,6 @@ from anyio.abc import ObjectSendStream, TaskGroup
 from plap.llms.chat import ReasoningEffort, ServiceTier
 from plap.responses.contracts import (
     ConversationReference,
-    ReasoningItem,
     ReasoningSummary,
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
@@ -30,6 +29,7 @@ from plap.responses.contracts import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputTextAnnotationAddedEvent,
+    ResponseReasoningItem,
     ResponseReasoningSummaryPartAddedEvent,
     ResponseReasoningSummaryPartDoneEvent,
     ResponseReasoningSummaryTextDeltaEvent,
@@ -108,7 +108,7 @@ class ResponseEventIO:
     ) -> None:
         metadata: _OutputMetadata = None
         if reasoning_messages is not None:
-            if not isinstance(item, ReasoningItem):
+            if not isinstance(item, ResponseReasoningItem):
                 raise TypeError("reasoning_messages can only be attached to reasoning items")
             if self._reasoning_summary_mode is not None:
                 if reasoning_side is None:
@@ -197,7 +197,7 @@ class ResponseEventIO:
         metadata: _OutputMetadata,
     ) -> None:
         output_index = len(self._output_items)
-        if isinstance(item, ReasoningItem) and metadata is not None:
+        if isinstance(item, ResponseReasoningItem) and metadata is not None:
             completed_item = await self._emit_reasoning_with_summary(
                 item,
                 metadata,
@@ -228,7 +228,7 @@ class ResponseEventIO:
                 type="response.output_item.added",
             )
         )
-        if isinstance(item, ReasoningItem):
+        if isinstance(item, ResponseReasoningItem):
             await self._emit_reasoning_events(item, output_index=output_index)
         if isinstance(item, ResponseFunctionCallItem):
             await self._send_event(
@@ -263,11 +263,11 @@ class ResponseEventIO:
 
     async def _emit_reasoning_with_summary(
         self,
-        item: ReasoningItem,
+        item: ResponseReasoningItem,
         metadata: _ReasoningMetadata,
         *,
         output_index: int,
-    ) -> ReasoningItem:
+    ) -> ResponseReasoningItem:
         side, messages = metadata
         added_item = item.model_copy(update={"status": "in_progress", "summary": []})
         await self._send_event(
@@ -355,7 +355,7 @@ class ResponseEventIO:
 
     async def _emit_reasoning_events(
         self,
-        item: ReasoningItem,
+        item: ResponseReasoningItem,
         *,
         output_index: int,
     ) -> None:

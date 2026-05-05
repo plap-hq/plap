@@ -10,11 +10,11 @@ from nacl.secret import Aead
 
 from plap.keyring import SealingKeyring, purpose_label
 from plap.responses.contracts import (
-    ReasoningItem,
     RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
     RequestMessageItem,
+    RequestReasoningItem,
     ResponseCreateRequest,
     SummaryTextContent,
 )
@@ -791,7 +791,7 @@ async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
         await ingest_response_request(
             _request(
                 input=[
-                    ReasoningItem(
+                    RequestReasoningItem(
                         encrypted_content="not-valid",
                         id="rs_bad",
                         summary=[SummaryTextContent(text="bad", type="summary_text")],
@@ -1133,16 +1133,17 @@ def _reasoning_item(
     messages: list[dict[str, object]],
     *,
     continuation_side: str | None = None,
-) -> ReasoningItem:
+    item_id: str | None = None,
+) -> RequestReasoningItem:
     payload = ReasoningPayload(
         side=side,
         temp=temp,
         messages=tuple(_reasoning_message(message) for message in messages),
         continuation_side=continuation_side,
     )
-    return ReasoningItem(
+    return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
-        id="rs_test",
+        id=item_id,
         summary=[SummaryTextContent(text="sealed", type="summary_text")],
         type="reasoning",
     )

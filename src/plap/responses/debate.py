@@ -22,10 +22,10 @@ from plap.llms.chat import (
 from plap.responses.contracts import (
     FunctionTool,
     OutputTextContent,
-    ReasoningItem,
     ResponseFunctionCallItem,
     ResponseFunctionCallOutputItem,
     ResponseMessageItem,
+    ResponseReasoningItem,
 )
 from plap.responses.errors import ResponseError
 from plap.responses.ingest import SealedCallID, content_hash_prefix, seal_call_id, seal_reasoning_payload
@@ -740,7 +740,7 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
             ),
         )
         await out.output(
-            ReasoningItem(
+            ResponseReasoningItem(
                 encrypted_content=seal_reasoning_payload(reasoning_payload, keyring=keyring),
                 id=f"rs_{secrets.token_urlsafe(18)}",
                 status="completed",
@@ -833,7 +833,7 @@ async def resume_main_with_revise_bundle(
         messages=bundled_messages,
     )
     await out.output(
-        ReasoningItem(
+        ResponseReasoningItem(
             encrypted_content=seal_reasoning_payload(reasoning_payload, keyring=keyring),
             id=f"rs_{secrets.token_urlsafe(18)}",
             status="completed",
@@ -1081,7 +1081,7 @@ async def _persist_temp_turn(
         messages=tuple(messages),
     )
     await out.output(
-        ReasoningItem(
+        ResponseReasoningItem(
             encrypted_content=seal_reasoning_payload(payload, keyring=keyring),
             id=f"rs_{secrets.token_urlsafe(18)}",
             status="completed",

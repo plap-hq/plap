@@ -17,6 +17,36 @@ def test_rejects_unsupported_input_variant() -> None:
         raise AssertionError("expected validation error")
 
 
+def test_accepts_easy_input_message_shorthand() -> None:
+    request = ResponseCreateRequest.model_validate(
+        {
+            "input": [{"role": "user", "content": "hello"}],
+            "model": "gpt-4.1",
+        }
+    )
+
+    assert request.input is not None
+    assert isinstance(request.input, list)
+    assert len(request.input) == 1
+    assert request.input[0].type == "message"
+    assert request.input[0].role == "user"
+    assert request.input[0].content == "hello"
+
+
+def test_rejects_typeless_input_item_without_message_role_shape() -> None:
+    try:
+        ResponseCreateRequest.model_validate(
+            {
+                "input": [{"content": "hello"}],
+                "model": "gpt-4.1",
+            }
+        )
+    except ValidationError as exc:
+        assert "Missing input item type at index 0" in str(exc)
+    else:
+        raise AssertionError("expected validation error")
+
+
 def test_rejects_unsupported_tool_variant() -> None:
     try:
         ResponseCreateRequest.model_validate(
@@ -29,6 +59,56 @@ def test_rejects_unsupported_tool_variant() -> None:
         assert "Unsupported tool variant 'file_search'" in str(exc)
     else:
         raise AssertionError("expected validation error")
+
+
+def test_accepts_function_tool_without_strict() -> None:
+    request = ResponseCreateRequest.model_validate(
+        {
+            "model": "gpt-4.1",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "question",
+                    "description": "Ask the user for clarification.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                        },
+                        "required": ["question"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert request.tools is not None
+    assert len(request.tools) == 1
+    assert request.tools[0].type == "function"
+    assert request.tools[0].name == "question"
+    assert request.tools[0].strict is None
+
+
+def test_accepts_reasoning_input_without_id() -> None:
+    request = ResponseCreateRequest.model_validate(
+        {
+            "input": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "sealed",
+                    "summary": [],
+                }
+            ],
+            "model": "gpt-4.1",
+        }
+    )
+
+    assert request.input is not None
+    assert isinstance(request.input, list)
+    assert len(request.input) == 1
+    assert request.input[0].type == "reasoning"
+    assert request.input[0].id is None
 
 
 def test_rejects_unsupported_context_management_variant() -> None:

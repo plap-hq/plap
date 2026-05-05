@@ -1,0 +1,40 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "plap": {
+      "npm": "@ai-sdk/openai",
+      "name": "plap",
+      "models": {
+        "plap-ai/wisp": {
+          "name": "Wisp",
+          "reasoning": true,
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          }
+        },
+        "plap-ai/wisp-mini": {
+          "name": "Wisp Mini",
+          "reasoning": true,
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          }
+        }
+      }
+    }
+  },
+  "plugin": [
+    "cc-safety-net@latest"
+  ],
+  "permission": {
+    "external_directory": {
+      "*": "deny",
+      "/tmp/*": "allow"
+    }
+  },
+  "tools": {
+    "websearch": true,
+    "codesearch": true
+  }
+}

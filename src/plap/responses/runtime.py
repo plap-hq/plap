@@ -25,13 +25,13 @@ from plap.responses.contracts import (
     ContextManagementCompaction,
     FunctionTool,
     OutputTextContent,
-    ReasoningItem,
     ReasoningSummary,
     ResponseCompactionItem,
     ResponseCreateRequest,
     ResponseFunctionCallItem,
     ResponseFunctionCallOutputItem,
     ResponseMessageItem,
+    ResponseReasoningItem,
     ResponseStreamEvent,
     TextFormatJSONObject,
     TextFormatJSONSchema,
@@ -856,7 +856,7 @@ async def run_response(
                     ),
                 ),
             )
-            reasoning_item = ReasoningItem(
+            reasoning_item = ResponseReasoningItem(
                 encrypted_content=seal_reasoning_payload(
                     reasoning_payload,
                     keyring=sealing_keyring,

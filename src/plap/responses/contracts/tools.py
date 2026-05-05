@@ -18,7 +18,10 @@ class FunctionTool(StrictModel):
     )
     name: str = Field(description="Function name exposed to the model.")
     parameters: dict[str, Any] | None = Field(description="JSON Schema object describing function parameters.")
-    strict: bool | None = Field(description="Whether strict parameter validation should be enforced.")
+    strict: bool | None = Field(
+        default=None,
+        description="Whether strict parameter validation should be enforced.",
+    )
     type: Literal["function"] = Field(description="Tool discriminator.")
 
 

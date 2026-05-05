@@ -19,6 +19,20 @@ from plap.responses.contracts.tools import (
 )
 
 
+def _normalize_easy_input_messages(value: object) -> object:
+    if not isinstance(value, list):
+        return value
+    normalized: list[object] = []
+    changed = False
+    for item in value:
+        if isinstance(item, dict) and "type" not in item and "role" in item:
+            normalized.append({"type": "message", **item})
+            changed = True
+            continue
+        normalized.append(item)
+    return normalized if changed else value
+
+
 class ConversationReference(StrictModel):
     id: str = Field(description="Conversation ID.")
 
@@ -231,6 +245,7 @@ class ResponseCreateRequest(StrictModel):
     @field_validator("input", mode="before")
     @classmethod
     def validate_input_variants(cls, value: object) -> object:
+        value = _normalize_easy_input_messages(value)
         return _reject_unsupported_type_variants(
             value,
             allowed={

@@ -140,7 +140,7 @@ class RequestFunctionCallOutputItem(_FunctionCallOutputItemBase):
     )
 
 
-class ReasoningItem(StrictModel):
+class _ReasoningItemBase(StrictModel):
     content: list[ReasoningTextContent] | None = Field(
         default=None,
         description="Optional reasoning text content blocks.",
@@ -158,6 +158,14 @@ class ReasoningItem(StrictModel):
     type: Literal["reasoning"] = Field(description="Item discriminator.")
 
 
+class RequestReasoningItem(_ReasoningItemBase):
+    id: str | None = Field(default=None, description="Optional reasoning item ID.")
+
+
+class ResponseReasoningItem(_ReasoningItemBase):
+    id: str = Field(description="Reasoning item ID.")
+
+
 class _CompactionItemBase(StrictModel):
     encrypted_content: str = Field(description="Encrypted compacted context payload.")
     type: Literal["compaction"] = Field(description="Item discriminator.")
@@ -168,7 +176,7 @@ class RequestCompactionItem(_CompactionItemBase):
 
 
 type RequestInputItem = Annotated[
-    RequestMessageItem | RequestFunctionCallItem | RequestFunctionCallOutputItem | ReasoningItem | RequestCompactionItem,
+    RequestMessageItem | RequestFunctionCallItem | RequestFunctionCallOutputItem | RequestReasoningItem | RequestCompactionItem,
     Field(discriminator="type"),
 ]
 
@@ -211,7 +219,7 @@ class ResponseCompactionItem(_CompactionItemBase):
 
 
 type ResponseOutputItem = Annotated[
-    ResponseMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ReasoningItem | ResponseCompactionItem,
+    ResponseMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ResponseReasoningItem | ResponseCompactionItem,
     # | ResponseWebSearchCallItem,
     Field(discriminator="type"),
 ]
@@ -233,6 +241,6 @@ class InputItemsMessageItem(StrictModel):
 
 
 type InputItemsPageItem = Annotated[
-    InputItemsMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ReasoningItem | ResponseCompactionItem,
+    InputItemsMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ResponseReasoningItem | ResponseCompactionItem,
     Field(discriminator="type"),
 ]
