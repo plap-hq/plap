@@ -10,6 +10,7 @@ from litestar.datastructures import State
 from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
 
 from plap.auth import APIKeyManager
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import IChatCompletionClient
 from plap.llms.crof import CrofChatCompletionClient
@@ -22,8 +23,8 @@ from plap.llms.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
 )
+from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
-from plap.responses.errors import ResponseError
 from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tools import (
@@ -82,25 +83,31 @@ def _error_response(
     )
 
 
-def handle_response_error(
+def handle_plap_error(
     request: Request[Any, Any, Any],
-    exc: ResponseError,
+    exc: PlapError,
 ) -> Response[dict[str, Any]]:
+    public = exc.public or PublicError(
+        status_code=500,
+        type="server_error",
+        code="server_error",
+        message="Response generation failed.",
+    )
     exc.log(
         logger,
-        failure_code=exc.public.code,
-        failure_type=exc.public.type,
+        failure_code=public.code,
+        failure_type=public.type,
         method=request.method,
         path=request.url.path,
-        status_code=exc.public.status_code,
+        status_code=public.status_code,
     )
     return _error_response(
-        message=exc.public.message,
-        status_code=exc.public.status_code,
-        error_type=exc.public.type,
-        code=exc.public.code,
-        param=exc.public.param,
-        headers=exc.public.headers,
+        message=public.message,
+        status_code=public.status_code,
+        error_type=public.type,
+        code=public.code,
+        param=public.param,
+        headers=public.headers,
     )
 
 
@@ -222,7 +229,16 @@ def _create_tool_classifier(
         settings,
         TOOL_EFFECT_CLASSIFIER_MODEL,
     ):
-        raise ValueError(f"tool effect classifier model does not match any configured LLM route: {TOOL_EFFECT_CLASSIFIER_MODEL!r}")
+        raise PlapError(
+            public=None,
+            private=PrivateError(
+                event="app.startup_invalid",
+                reason="tool_effect_classifier_route_unconfigured",
+                message=f"tool effect classifier model does not match any configured LLM route: {TOOL_EFFECT_CLASSIFIER_MODEL!r}",
+                level=ErrorLevel.ERROR,
+                context={"model": TOOL_EFFECT_CLASSIFIER_MODEL},
+            ),
+        )
     return LLMToolClassifier(
         client=chat_completion_client,
         classifier_model=TOOL_EFFECT_CLASSIFIER_MODEL,
@@ -238,7 +254,16 @@ def _create_tool_call_classifier(
         settings,
         TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     ):
-        raise ValueError(f"tool call classifier model does not match any configured LLM route: {TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}")
+        raise PlapError(
+            public=None,
+            private=PrivateError(
+                event="app.startup_invalid",
+                reason="tool_call_classifier_route_unconfigured",
+                message=f"tool call classifier model does not match any configured LLM route: {TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}",
+                level=ErrorLevel.ERROR,
+                context={"model": TOOL_CALL_EFFECT_CLASSIFIER_MODEL},
+            ),
+        )
     return LLMToolCallClassifier(
         client=chat_completion_client,
         classifier_model=TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
@@ -253,7 +278,16 @@ def _create_mcp_tool_providers(settings: Settings) -> tuple[IMCPToolProvider, ..
 def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
     transport = server.url if server.url is not None else server.config
     if transport is None:
-        raise ValueError("mcp server config requires a transport")
+        raise PlapError(
+            public=None,
+            private=PrivateError(
+                event="app.startup_invalid",
+                reason="mcp_transport_missing",
+                message="mcp server config requires a transport",
+                level=ErrorLevel.ERROR,
+                context={"server_name": server.name},
+            ),
+        )
     return MCPToolProvider(transport, tool_names=server.tool_names)
 
 
@@ -261,7 +295,16 @@ def _validate_runtime_model_profiles(settings: Settings) -> None:
     for name, profile in settings.runtime_model_profiles.items():
         for model in profile.all_models():
             if not _has_configured_chat_completion_route(settings, model):
-                raise ValueError(f"runtime model profile references an unconfigured LLM route: {name!r} -> {model!r}")
+                raise PlapError(
+                    public=None,
+                    private=PrivateError(
+                        event="app.startup_invalid",
+                        reason="runtime_profile_route_unconfigured",
+                        message=f"runtime model profile references an unconfigured LLM route: {name!r} -> {model!r}",
+                        level=ErrorLevel.ERROR,
+                        context={"model": model, "runtime_model_profile": name},
+                    ),
+                )
 
 
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
@@ -283,18 +326,33 @@ def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
 
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
-    chat_completion_client = _create_chat_completion_client(resolved_settings)
-    reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
-    tool_classifier = _create_tool_classifier(
-        resolved_settings,
-        chat_completion_client,
+    configure_logging(resolved_settings)
+    try:
+        chat_completion_client = _create_chat_completion_client(resolved_settings)
+        reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
+        tool_classifier = _create_tool_classifier(
+            resolved_settings,
+            chat_completion_client,
+        )
+        tool_call_classifier = _create_tool_call_classifier(
+            resolved_settings,
+            chat_completion_client,
+        )
+        mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
+        _validate_runtime_model_profiles(resolved_settings)
+    except PlapError as exc:
+        exc.log(logger)
+        raise
+    log_debug(
+        logger,
+        "app.startup",
+        debug_payloads=resolved_settings.debug_payloads,
+        log_file=resolved_settings.log_file,
+        log_json=resolved_settings.log_json,
+        mcp_servers=[server.name for server in resolved_settings.mcp_servers],
+        provider_routes=sorted(_configured_chat_completion_prefixes(resolved_settings)),
+        runtime_models=sorted(resolved_settings.runtime_model_profiles),
     )
-    tool_call_classifier = _create_tool_call_classifier(
-        resolved_settings,
-        chat_completion_client,
-    )
-    mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
-    _validate_runtime_model_profiles(resolved_settings)
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
@@ -317,7 +375,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         exception_handlers={
             HTTPException: handle_http_exception,
             NotAuthorizedException: handle_auth_exception,
-            ResponseError: handle_response_error,
+            PlapError: handle_plap_error,
             ValidationException: handle_validation_exception,
             Exception: handle_unexpected_exception,
         },

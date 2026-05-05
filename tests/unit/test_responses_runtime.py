@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from plap.auth import AuthContext
+from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatCompletionDelta,
@@ -29,7 +30,6 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     WebSearchTool,
 )
-from plap.responses.errors import ResponseError
 from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
@@ -71,6 +71,27 @@ from plap.settings import (
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
+
+
+def _assert_public_error(
+    exc: PlapError,
+    *,
+    code: str | None = None,
+    param: str | None = None,
+    message_contains: str | None = None,
+    private_reason: str | None = None,
+) -> None:
+    if code is not None:
+        assert exc.public is not None
+        assert exc.public.code == code
+    if param is not None:
+        assert exc.public is not None
+        assert exc.public.param == param
+    if message_contains is not None:
+        assert exc.public is not None
+        assert message_contains in exc.public.message
+    if private_reason is not None:
+        assert exc.private.reason == private_reason
 
 
 async def stream_response_events(*args, **kwargs):
@@ -126,7 +147,7 @@ async def test_prepare_tools_flattens_mcp_tools_across_servers() -> None:
 
 
 async def test_prepare_tools_rejects_duplicate_mcp_tool_names_across_servers() -> None:
-    with pytest.raises(ResponseError, match="server tool names must be unique"):
+    with pytest.raises(PlapError) as exc_info:
         await prepare_tools(
             ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
             _RecordingResolver(),
@@ -136,23 +157,29 @@ async def test_prepare_tools_rejects_duplicate_mcp_tool_names_across_servers() -
             ),
         )
 
+    _assert_public_error(exc_info.value, code="invalid_tool_definition", param="input", private_reason="duplicate_server_tool_name")
+
 
 async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> None:
-    with pytest.raises(ResponseError, match="web_search requested"):
+    with pytest.raises(PlapError) as exc_info:
         await prepare_tools(
             ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
             _RecordingResolver(),
         )
 
+    _assert_public_error(exc_info.value, code="unsupported_tool", param="tools", private_reason="web_search_provider_missing")
+
 
 async def test_prepare_tools_rejects_client_server_name_collision() -> None:
-    with pytest.raises(ResponseError, match="reserved"):
+    with pytest.raises(PlapError) as exc_info:
         await prepare_tools(
             ResponseCreateRequest(tools=[_tool(COMPRESS_TOOL_NAME)]),
             _RecordingResolver(),
         )
 
-    with pytest.raises(ResponseError, match="reserved"):
+    _assert_public_error(exc_info.value, code="invalid_tool_definition", param="input", message_contains="reserved")
+
+    with pytest.raises(PlapError) as exc_info:
         await prepare_tools(
             ResponseCreateRequest(
                 tools=[
@@ -163,6 +190,8 @@ async def test_prepare_tools_rejects_client_server_name_collision() -> None:
             _RecordingResolver(),
             (_FakeMCPToolProvider(),),
         )
+
+    _assert_public_error(exc_info.value, code="invalid_tool_definition", param="input", message_contains="reserved")
 
 
 async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> None:
@@ -210,7 +239,7 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
         effect_class="safe",
     )
 
-    with pytest.raises(ResponseError, match="compress must be called alone"):
+    with pytest.raises(PlapError) as exc_info:
         await resolve_tool_calls(
             [
                 ChatToolCall(id="call_1", name="compress", arguments="{}"),
@@ -224,6 +253,8 @@ async def test_resolve_tool_calls_rejects_compress_mixed_with_other_calls() -> N
             tool_policies=policies,
             resolver=_RecordingCallResolver(),
         )
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_must_be_called_alone")
 
 
 def test_compact_transcript_folds_tool_outputs() -> None:
@@ -489,7 +520,7 @@ async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -
 
 
 async def test_stream_response_events_rejects_finish_reason_mismatch_with_tool_calls() -> None:
-    with pytest.raises(ResponseError, match="tool calls without tool handoff"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -509,9 +540,12 @@ async def test_stream_response_events_rejects_finish_reason_mismatch_with_tool_c
             )
         ]
 
+    _assert_public_error(exc_info.value, private_reason="tool_calls_without_tool_handoff_finish_reason")
+    assert exc_info.value.public is None
+
 
 async def test_stream_response_events_rejects_finish_reason_tool_handoff_without_calls() -> None:
-    with pytest.raises(ResponseError, match="tool handoff finish_reason without tool calls"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -527,6 +561,9 @@ async def test_stream_response_events_rejects_finish_reason_tool_handoff_without
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, private_reason="tool_handoff_finish_reason_without_tool_calls")
+    assert exc_info.value.public is None
 
 
 async def test_stream_response_events_reviewer_accept_publishes_risky_candidate() -> None:
@@ -1070,7 +1107,7 @@ async def test_stream_response_events_server_tool_failure_raises_early() -> None
             ],
         )
     )
-    with pytest.raises(ResponseError, match="mcp failed"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -1087,6 +1124,9 @@ async def test_stream_response_events_server_tool_failure_raises_early() -> None
                 mcp_tool_providers=(provider,),
             )
         ]
+
+    _assert_public_error(exc_info.value, private_reason="unexpected_runtime_exception")
+    assert exc_info.value.public is None
     assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
 
 
@@ -1641,7 +1681,7 @@ async def test_stream_response_events_rejects_missing_compression_fidelity() -> 
         )
     )
 
-    with pytest.raises(ResponseError, match="summary_fidelity"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -1657,6 +1697,8 @@ async def test_stream_response_events_rejects_missing_compression_fidelity() -> 
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_summary_fidelity_invalid")
 
 
 async def test_stream_response_events_rejects_overlapping_compression_ranges() -> None:
@@ -1690,7 +1732,7 @@ async def test_stream_response_events_rejects_overlapping_compression_ranges() -
         )
     )
 
-    with pytest.raises(ResponseError, match="overlap"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -1710,6 +1752,8 @@ async def test_stream_response_events_rejects_overlapping_compression_ranges() -
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_ranges_overlap")
 
 
 async def test_stream_response_events_rejects_hidden_compression_citation() -> None:
@@ -1766,7 +1810,7 @@ async def test_stream_response_events_rejects_hidden_compression_citation() -> N
         )
     )
 
-    with pytest.raises(ResponseError, match="not visible"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -1793,6 +1837,8 @@ async def test_stream_response_events_rejects_hidden_compression_citation() -> N
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_citation_not_visible")
 
 
 async def test_stream_response_events_rejects_non_reducing_compression() -> None:
@@ -1821,7 +1867,7 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
         )
     )
 
-    with pytest.raises(ResponseError, match="reduce token count"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -1845,6 +1891,8 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_summary_not_reductive")
 
 
 async def test_stream_response_events_accepts_empty_compression_bailout() -> None:
@@ -2017,7 +2065,7 @@ async def test_stream_response_events_forces_compress_at_hard_budget() -> None:
 async def test_stream_response_events_rejects_multiple_context_management_entries() -> None:
     client = _StaticChatClient(ChatMessage(role="assistant", content="unused"))
 
-    with pytest.raises(ResponseError, match="at most one compaction context_management entry"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -2038,6 +2086,8 @@ async def test_stream_response_events_rejects_multiple_context_management_entrie
             )
         ]
 
+    _assert_public_error(exc_info.value, code="invalid_context_management", param="context_management")
+
 
 async def test_stream_response_events_rejects_unsupported_requested_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_ingest_response_request(*_args, **_kwargs) -> IngestedQueues:
@@ -2046,7 +2096,7 @@ async def test_stream_response_events_rejects_unsupported_requested_parameter(mo
     monkeypatch.setattr("plap.responses.runtime.ingest_response_request", fake_ingest_response_request)
     client = _StaticChatClient(ChatMessage(role="assistant", content="unused"))
 
-    with pytest.raises(ResponseError, match="unsupported request parameters: temperature"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -2063,6 +2113,8 @@ async def test_stream_response_events_rejects_unsupported_requested_parameter(mo
             )
         ]
 
+    _assert_public_error(exc_info.value, code="unsupported_parameter", param="temperature")
+
 
 async def test_stream_response_events_rejects_hard_budget_without_compress() -> None:
     profile = _profile_config(
@@ -2071,7 +2123,7 @@ async def test_stream_response_events_rejects_hard_budget_without_compress() -> 
     )
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
-    with pytest.raises(ResponseError, match="hard compression budget"):
+    with pytest.raises(PlapError) as exc_info:
         _ = [
             event
             async for event in stream_response_events(
@@ -2087,6 +2139,8 @@ async def test_stream_response_events_rejects_hard_budget_without_compress() -> 
                 reasoning_summarizer=_FakeReasoningSummarizer(),
             )
         ]
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="hard_compression_requires_compress")
 
 
 async def test_stream_response_events_patches_reasoning_to_unsealed_message() -> None:

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 
 import msgspec
+import structlog
 
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatCompletionRequest,
@@ -19,6 +21,7 @@ from plap.llms.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
+from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
     OutputTextContent,
@@ -27,7 +30,6 @@ from plap.responses.contracts import (
     ResponseMessageItem,
     ResponseReasoningItem,
 )
-from plap.responses.errors import ResponseError
 from plap.responses.ingest import SealedCallID, content_hash_prefix, seal_call_id, seal_reasoning_payload
 from plap.responses.io import ResponseEventIO
 from plap.responses.models import (
@@ -47,6 +49,39 @@ from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
+logger = structlog.get_logger(__name__)
+
+
+def _debate_unavailable_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=503,
+            type="server_error",
+            code="temporarily_unavailable",
+            message="Response review is temporarily unavailable.",
+        ),
+        private=PrivateError(
+            event="response.unavailable",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _debate_internal_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=None,
+        private=PrivateError(
+            event="response.internal_error",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.ERROR,
+            cause=cause,
+        ),
+    )
+
 
 REVIEWER_DEVELOPER_PROMPT = """You are checking whether the current proposed answer should be sent to the user now.
 
@@ -276,7 +311,7 @@ def build_completion_request(
 def parse_reviewer_decision(message: StateMessage) -> ReviewerDecision:
     decision = _decode_decision(message, ReviewerDecision, "reviewer decision")
     if decision.action == ReviewerActionType.REOPEN and not decision.note:
-        raise ResponseError.unavailable(private_message="reviewer reopen requires note")
+        raise _debate_unavailable_error(reason="reviewer_reopen_requires_note", private_message="reviewer reopen requires note")
     if decision.action == ReviewerActionType.ACCEPT:
         return ReviewerDecision(action=ReviewerActionType.ACCEPT)
     return decision
@@ -285,7 +320,7 @@ def parse_reviewer_decision(message: StateMessage) -> ReviewerDecision:
 def parse_arbitrator_decision(message: StateMessage) -> ArbitratorDecision:
     decision = _decode_decision(message, ArbitratorDecision, "arbitrator decision")
     if decision.action in {ArbitratorActionType.REVISE, ArbitratorActionType.REOPEN} and not decision.note:
-        raise ResponseError.unavailable(private_message="arbitrator note is required")
+        raise _debate_unavailable_error(reason="arbitrator_note_required", private_message="arbitrator note is required")
     if decision.action == ArbitratorActionType.ACCEPT:
         return ArbitratorDecision(action=ArbitratorActionType.ACCEPT)
     return decision
@@ -293,18 +328,18 @@ def parse_arbitrator_decision(message: StateMessage) -> ArbitratorDecision:
 
 def _decode_decision(message: StateMessage, typ, label: str):
     if message.content is None:
-        raise ResponseError.unavailable(private_message=f"{label} is missing content")
+        raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
     try:
         return msgspec.json.decode(message.content.encode(), type=typ)
     except msgspec.DecodeError as exc:
-        raise ResponseError.unavailable(private_message=f"{label} is invalid JSON", cause=exc) from exc
+        raise _debate_unavailable_error(reason="decision_invalid_json", private_message=f"{label} is invalid JSON", cause=exc) from exc
     except msgspec.ValidationError as exc:
-        raise ResponseError.unavailable(private_message=f"{label} is invalid", cause=exc) from exc
+        raise _debate_unavailable_error(reason="decision_invalid", private_message=f"{label} is invalid", cause=exc) from exc
 
 
 def _compact_candidate(parts: TempMainParts) -> dict[str, object]:
     if parts.held_candidate is None:
-        raise ResponseError.internal(private_message="debate temp state is missing held candidate")
+        raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     candidate = parts.held_candidate.message
     outputs = {
         row.message.tool_call_id: row.message.content_text() or ""
@@ -446,9 +481,11 @@ def _arguments_object(arguments: str, *, label: str) -> dict[str, object]:
     try:
         value = msgspec.json.decode(arguments.encode())
     except msgspec.DecodeError as exc:
-        raise ResponseError.unavailable(private_message=f"{label} must be valid JSON", cause=exc) from exc
+        raise _debate_unavailable_error(
+            reason="debate_tool_arguments_invalid_json", private_message=f"{label} must be valid JSON", cause=exc
+        ) from exc
     if not isinstance(value, dict):
-        raise ResponseError.unavailable(private_message=f"{label} must be a JSON object")
+        raise _debate_unavailable_error(reason="debate_tool_arguments_not_object", private_message=f"{label} must be a JSON object")
     return value
 
 
@@ -471,13 +508,13 @@ async def _execute_actor_turn(
     usage_ledger: UsageLedger,
     response_format: ChatResponseFormat | None,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
-    while True:
-        cap = usage_ledger.cap_for(actor_config.public_usage)
-        if cap == 0:
-            return None
-        request_messages = [*header_messages, *(message.to_chat_message() for message in turn_messages)]
-        result = await chat_completion_client.complete(
-            build_completion_request(
+    with bound_context(actor=actor_name):
+        while True:
+            cap = usage_ledger.cap_for(actor_config.public_usage)
+            if cap == 0:
+                return None
+            request_messages = [*header_messages, *(message.to_chat_message() for message in turn_messages)]
+            actor_request = build_completion_request(
                 actor=actor_name,
                 actor_config=actor_config,
                 request=request,
@@ -488,40 +525,55 @@ async def _execute_actor_turn(
                 prompt_cache_key_base=prompt_cache_key_base,
                 max_completion_tokens=cap,
             )
-        )
-        assistant = _state_message_from_result(result.message)
-        turn_messages.append(assistant)
-        tool_calls = result.message.tool_calls or []
-        if not tool_calls:
-            return ActorFinished(messages=turn_messages, assistant=assistant, usage=result.usage, service_tier=result.service_tier)
-
-        client_calls: list[ChatToolCall] = []
-        server_output_seen = False
-        for call in tool_calls:
-            policy = tool_policies.get(call.name)
-            if policy is None or policy.effect_class != "safe":
-                raise ResponseError.unavailable(private_message="debate actor called unsupported tool")
-            if policy.source == "server":
-                executor = server_executors.get(call.name)
-                if executor is None:
-                    raise ResponseError.unavailable(private_message="debate server tool executor is missing")
-                output = await executor.call_tool(call.name, _arguments_object(call.arguments, label="debate tool arguments"))
-                turn_messages.append(StateMessage(role="tool", tool_call_id=call.id, content=output))
-                server_output_seen = True
-            else:
-                client_calls.append(call)
-
-        if client_calls:
-            return ActorAwaitingClientTool(
-                messages=turn_messages,
-                assistant=assistant,
-                tool_calls=client_calls,
-                usage=result.usage,
-                service_tier=result.service_tier,
+            log_debug(logger, "debate.actor.request", actor=actor_name, max_completion_tokens=cap, tool_count=len(tools))
+            log_payload(logger, "debate.actor.request.payload", actor=actor_name, request=asdict(actor_request))
+            result = await chat_completion_client.complete(actor_request)
+            assistant = _state_message_from_result(result.message)
+            turn_messages.append(assistant)
+            tool_calls = result.message.tool_calls or []
+            log_debug(
+                logger,
+                "debate.actor.result",
+                actor=actor_name,
+                finish_reason=result.finish_reason,
+                has_content=result.message.content is not None,
+                tool_call_count=len(tool_calls),
             )
+            log_payload(logger, "debate.actor.result.payload", actor=actor_name, result=asdict(result))
+            if not tool_calls:
+                return ActorFinished(messages=turn_messages, assistant=assistant, usage=result.usage, service_tier=result.service_tier)
 
-        if server_output_seen:
-            usage_ledger.record_hidden(actor_config.public_usage, result.usage)
+            client_calls: list[ChatToolCall] = []
+            server_output_seen = False
+            for call in tool_calls:
+                policy = tool_policies.get(call.name)
+                if policy is None or policy.effect_class != "safe":
+                    raise _debate_unavailable_error(
+                        reason="debate_actor_called_unsupported_tool", private_message="debate actor called unsupported tool"
+                    )
+                if policy.source == "server":
+                    executor = server_executors.get(call.name)
+                    if executor is None:
+                        raise _debate_internal_error(
+                            reason="debate_server_tool_executor_missing", private_message="debate server tool executor is missing"
+                        )
+                    output = await executor.call_tool(call.name, _arguments_object(call.arguments, label="debate tool arguments"))
+                    turn_messages.append(StateMessage(role="tool", tool_call_id=call.id, content=output))
+                    server_output_seen = True
+                else:
+                    client_calls.append(call)
+
+            if client_calls:
+                return ActorAwaitingClientTool(
+                    messages=turn_messages,
+                    assistant=assistant,
+                    tool_calls=client_calls,
+                    usage=result.usage,
+                    service_tier=result.service_tier,
+                )
+
+            if server_output_seen:
+                usage_ledger.record_hidden(actor_config.public_usage, result.usage)
 
 
 async def run_reviewer_turn(
@@ -549,7 +601,9 @@ async def run_reviewer_turn(
         latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
         latest_next_step_note = _latest_arbitrator_note(_thread_messages(state.arbitrator))
         if latest_response_note is None:
-            raise ResponseError.internal(private_message="reviewer reopen is missing latest response note")
+            raise _debate_internal_error(
+                reason="reviewer_reopen_missing_latest_response_note", private_message="reviewer reopen is missing latest response note"
+            )
         turn_messages = [
             _reviewer_reopen_turn(
                 latest_response_note=latest_response_note,
@@ -597,7 +651,9 @@ async def run_main_debate_turn(
     else:
         reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
         if reviewer_decision is None:
-            raise ResponseError.internal(private_message="main debate is missing reviewer decision")
+            raise _debate_internal_error(
+                reason="main_debate_missing_reviewer_decision", private_message="main debate is missing reviewer decision"
+            )
         turn_messages = [_main_debate_turn(reviewer_decision=reviewer_decision)]
     return await _execute_actor_turn(
         actor_name=Actor.MAIN_DEBATE.value,
@@ -631,7 +687,10 @@ async def run_arbitrator_turn(
     reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
     latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
     if reviewer_decision is None or latest_response_note is None:
-        raise ResponseError.internal(private_message="final decision step is missing review or response note")
+        raise _debate_internal_error(
+            reason="final_decision_missing_review_or_response_note",
+            private_message="final decision step is missing review or response note",
+        )
     thread = _thread_messages(state.arbitrator)
     header_messages = [
         ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
@@ -702,7 +761,7 @@ async def start_debate_from_candidate(
 async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEventIO, keyring: SealingKeyring) -> None:
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
-        raise ResponseError.internal(private_message="debate temp state is missing held candidate")
+        raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     candidate = parts.held_candidate.message
     public_assistant = StateMessage(
         role="assistant",
@@ -818,7 +877,7 @@ async def resume_main_with_revise_bundle(
 ) -> None:
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
-        raise ResponseError.internal(private_message="revise requires held candidate state")
+        raise _debate_internal_error(reason="revise_requires_held_candidate", private_message="revise requires held candidate state")
 
     note_message = StateMessage(role="assistant", content=note)
     bundled_messages = (
@@ -868,7 +927,7 @@ async def continue_debate(
     safe_tools, safe_tool_policies, safe_server_executors = debate_safe_surface(tools, tool_policies, server_executors)
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
-        raise ResponseError.internal(private_message="debate temp state is missing held candidate")
+        raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
 
     if profile.debate_max_rounds == 0:
         if held_anchor_index is not None:
@@ -879,6 +938,7 @@ async def continue_debate(
 
     while True:
         actor = state.current_actor()
+        log_debug(logger, "debate.turn", actor=actor, held_anchor_index=held_anchor_index)
 
         if actor == Actor.REVIEWER:
             outcome = await run_reviewer_turn(
@@ -919,6 +979,7 @@ async def continue_debate(
                 return DebateResult.COMPLETED
 
             decision = parse_reviewer_decision(outcome.assistant)
+            log_debug(logger, "debate.reviewer.decision", action=decision.action, note=decision.note)
             await _persist_temp_turn(
                 state=state,
                 side=Side.REVIEWER,
@@ -1030,6 +1091,7 @@ async def continue_debate(
                 return DebateResult.COMPLETED
 
             decision = parse_arbitrator_decision(outcome.assistant)
+            log_debug(logger, "debate.arbitrator.decision", action=decision.action, note=decision.note)
             if decision.action == ArbitratorActionType.REOPEN and _reviewer_round_count(state.reviewer) >= profile.debate_max_rounds:
                 decision = ArbitratorDecision(
                     action=ArbitratorActionType.REVISE,
@@ -1062,7 +1124,7 @@ async def continue_debate(
             parts = state.temp_main_parts()
             continue
 
-        raise ResponseError.internal(private_message="debate actor resolution is invalid")
+        raise _debate_internal_error(reason="debate_actor_resolution_invalid", private_message="debate actor resolution is invalid")
 
 
 async def _persist_temp_turn(
@@ -1113,7 +1175,10 @@ async def _emit_debate_function_calls(
     for call in tool_calls:
         index = index_by_id.get(call.id)
         if index is None:
-            raise ResponseError.internal(private_message="debate assistant tool call is missing from persisted state")
+            raise _debate_internal_error(
+                reason="debate_assistant_tool_call_missing_from_persisted_state",
+                private_message="debate assistant tool call is missing from persisted state",
+            )
         await out.output(
             ResponseFunctionCallItem(
                 arguments=call.arguments,

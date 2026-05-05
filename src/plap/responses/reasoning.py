@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import asdict
 from typing import Protocol, runtime_checkable
 
 import msgspec
+import structlog
 
 from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient, ReasoningEffort, ServiceTier
+from plap.logging import log_debug, log_payload
 from plap.responses.contracts import ReasoningSummary
 from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
+
+logger = structlog.get_logger(__name__)
 
 REASONING_SUMMARY_PROMPT = """Rewrite private mixed-perspective reasoning messages
 into a user-facing reasoning summary.
@@ -74,28 +79,33 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
         side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
-        async for delta in self._client.stream(
-            ChatCompletionRequest(
-                max_completion_tokens=_summary_max_tokens(mode),
-                messages=[
-                    ChatMessage(
-                        role="developer",
-                        content=REASONING_SUMMARY_PROMPT,
-                    ),
-                    ChatMessage(
-                        role="user",
-                        content=_summary_request_text(mode, side, messages),
-                    ),
-                ],
-                model=model,
-                prompt_cache_key=prompt_cache_key,
-                reasoning_effort=reasoning_effort,
-                service_tier=service_tier,
-                temperature=0,
-            )
-        ):
+        summary_request = ChatCompletionRequest(
+            max_completion_tokens=_summary_max_tokens(mode),
+            messages=[
+                ChatMessage(
+                    role="developer",
+                    content=REASONING_SUMMARY_PROMPT,
+                ),
+                ChatMessage(
+                    role="user",
+                    content=_summary_request_text(mode, side, messages),
+                ),
+            ],
+            model=model,
+            prompt_cache_key=prompt_cache_key,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
+            temperature=0,
+        )
+        log_debug(logger, "reasoning.summary.start", message_count=len(messages), mode=mode, model=model, side=side)
+        log_payload(logger, "reasoning.summary.request.payload", request=asdict(summary_request))
+        delta_count = 0
+        async for delta in self._client.stream(summary_request):
             if delta.content_delta:
+                delta_count += 1
+                log_payload(logger, "reasoning.summary.delta", delta=delta.content_delta)
                 yield delta.content_delta
+        log_debug(logger, "reasoning.summary.done", delta_count=delta_count, model=model, side=side)
 
 
 class NullReasoningSummarizer(IReasoningSummarizer):

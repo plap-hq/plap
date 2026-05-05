@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from plap.errors import PlapError
 from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -13,7 +14,6 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool
-from plap.responses.errors import ResponseError
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -211,13 +211,21 @@ def test_tool_arguments_hash_is_canonical_for_key_order() -> None:
 
 
 def test_tool_arguments_reject_non_object_json() -> None:
-    with pytest.raises(ResponseError, match="JSON object"):
+    with pytest.raises(PlapError) as exc_info:
         canonical_tool_arguments('["not", "object"]')
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "invalid_tool_arguments"
+    assert exc_info.value.public.param == "input"
 
 
 def test_tool_arguments_reject_malformed_json() -> None:
-    with pytest.raises(ResponseError, match="valid JSON"):
+    with pytest.raises(PlapError) as exc_info:
         canonical_tool_arguments("not json")
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "invalid_tool_arguments"
+    assert exc_info.value.public.param == "input"
 
 
 async def test_llm_tool_call_classifier_parses_valid_json() -> None:
@@ -316,7 +324,7 @@ async def test_static_policy_resolver_returns_unknown_client_tools() -> None:
 async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> None:
     resolver = StaticToolPolicyResolver()
 
-    with pytest.raises(ResponseError, match="duplicate function tool name"):
+    with pytest.raises(PlapError) as exc_info:
         await resolver.resolve(
             [
                 _read_file_tool(),
@@ -329,6 +337,10 @@ async def test_policy_resolver_rejects_duplicate_names_with_different_signatures
                 ),
             ]
         )
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "invalid_tool_definition"
+    assert exc_info.value.public.param == "input"
 
 
 async def test_cached_policy_resolver_classifies_client_tools() -> None:

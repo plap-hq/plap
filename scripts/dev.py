@@ -33,6 +33,10 @@ from plap.settings import Settings, _default_runtime_model_profiles  # noqa: E40
 STATE_ENV_KEYS = (
     "PLAP_DATABASE_URL",
     "PLAP_API_KEY_PEPPER",
+    "PLAP_DEBUG",
+    "PLAP_DEBUG_PAYLOADS",
+    "PLAP_LOG_FILE",
+    "PLAP_LOG_JSON",
     "PLAP_SEALING_KEYS",
     "PLAP_DEV_API_KEY",
     "PLAP_DEV_BASE_URL",
@@ -55,6 +59,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_POSTGRES_PORT = 55432
 DEFAULT_MODEL = "plap-ai/wisp-mini"
+DEFAULT_LOG_FILE = (REPO_ROOT / ".dev" / "plap.log.jsonl").resolve()
 SERVER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 ROUTE_ENV_VARS = {
     "lightning/": "PLAP_LLM_LIGHTNING_API_KEY",
@@ -107,15 +112,24 @@ def main() -> int:
         }
 
         _ensure_managed_postgres(args, managed_state, resources)
+        os.environ.setdefault("PLAP_DEBUG", "true")
+        os.environ.setdefault("PLAP_DEBUG_PAYLOADS", "true")
+        os.environ.setdefault("PLAP_LOG_JSON", "true")
+        os.environ.setdefault("PLAP_LOG_FILE", str(DEFAULT_LOG_FILE))
         os.environ.setdefault("PLAP_API_KEY_PEPPER", secrets.token_hex(24))
         os.environ.setdefault("PLAP_SEALING_KEYS", json.dumps([_generate_sealing_key()]))
         _normalize_sealing_keys_env()
+        _reset_log_file(Path(os.environ["PLAP_LOG_FILE"]))
         _require_provider_keys()
 
         managed_state.update(
             {
                 "PLAP_DATABASE_URL": os.environ["PLAP_DATABASE_URL"],
                 "PLAP_API_KEY_PEPPER": os.environ["PLAP_API_KEY_PEPPER"],
+                "PLAP_DEBUG": os.environ["PLAP_DEBUG"],
+                "PLAP_DEBUG_PAYLOADS": os.environ["PLAP_DEBUG_PAYLOADS"],
+                "PLAP_LOG_FILE": os.environ["PLAP_LOG_FILE"],
+                "PLAP_LOG_JSON": os.environ["PLAP_LOG_JSON"],
                 "PLAP_SEALING_KEYS": os.environ["PLAP_SEALING_KEYS"],
             }
         )
@@ -132,7 +146,14 @@ def main() -> int:
         managed_state["PLAP_DEV_WEBSOCKET_BASE_URL"] = f"ws://{client_host}:{args.port}/v1"
         managed_state["PLAP_DEV_MODEL"] = dev_model
         _write_state_file(state_file, managed_state)
-        _print_summary(state_file=state_file, host=client_host, port=args.port, api_key=api_key, model=dev_model)
+        _print_summary(
+            state_file=state_file,
+            log_file=Path(os.environ["PLAP_LOG_FILE"]),
+            host=client_host,
+            port=args.port,
+            api_key=api_key,
+            model=dev_model,
+        )
 
         if args.no_server:
             return 0
@@ -482,17 +503,24 @@ def _write_state_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def _reset_log_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+
+
 def _client_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
 
 
-def _print_summary(*, state_file: Path, host: str, port: int, api_key: str, model: str) -> None:
+def _print_summary(*, state_file: Path, log_file: Path, host: str, port: int, api_key: str, model: str) -> None:
     print(f"State file (removed on exit): {state_file}")
+    print(f"Log file: {log_file}")
     print(f"Base URL: http://{host}:{port}/v1")
     print(f"WebSocket URL: ws://{host}:{port}/v1")
     print(f"Model: {model}")
     print(f"API key: {api_key}")
     print("Source this from another shell while the server is running: source .dev/dev.env")
+    print(f"Explore logs: lnav {shlex.quote(str(log_file))}")
     print(
         f"Smoke test: curl http://{host}:{port}/v1/models -H 'Authorization: Bearer {api_key}'"
     )

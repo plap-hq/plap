@@ -5,6 +5,7 @@ from typing import Any
 import anyio
 import blake3
 import msgspec
+import structlog
 
 from plap.llms.chat import (
     ChatCompletionRequest,
@@ -12,6 +13,7 @@ from plap.llms.chat import (
     ChatResponseFormat,
     IChatCompletionClient,
 )
+from plap.logging import log_debug, log_payload
 from plap.responses.tools.policy import (
     EffectClass,
     IToolCallClassifier,
@@ -22,6 +24,8 @@ from plap.responses.tools.policy import (
     ToolClassification,
     ToolSignature,
 )
+
+logger = structlog.get_logger(__name__)
 
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
@@ -172,7 +176,7 @@ class LLMToolClassifier(IToolClassifier):
                 )
             )
             raw = _parse_raw_output(result.message.content)
-            return _classification_from_raw(
+            classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
@@ -180,6 +184,19 @@ class LLMToolClassifier(IToolClassifier):
                 raw=raw,
             )
         except Exception as exc:
+            log_debug(
+                logger,
+                "tool.classifier.failed",
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                error_type=type(exc).__name__,
+                signature_hash=signature.signature_hash.hex(),
+            )
+            log_payload(
+                logger,
+                "tool.classifier.failed.payload",
+                signature=signature.signature,
+            )
             return _unknown_classification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
@@ -188,6 +205,23 @@ class LLMToolClassifier(IToolClassifier):
                 rationale=f"classifier failed: {type(exc).__name__}",
                 raw_output={},
             )
+        else:
+            log_debug(
+                logger,
+                "tool.classifier.fresh",
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                confidence=classification.confidence,
+                effect_class=classification.effect_class,
+                signature_hash=signature.signature_hash.hex(),
+            )
+            log_payload(
+                logger,
+                "tool.classifier.fresh.payload",
+                raw_output=raw,
+                signature=signature.signature,
+            )
+            return classification
 
 
 class LLMToolCallClassifier(IToolCallClassifier):
@@ -267,7 +301,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 )
             )
             raw = _parse_raw_output(result.message.content)
-            return _tool_call_classification_from_raw(
+            classification = _tool_call_classification_from_raw(
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
                 classifier=self.classifier,
@@ -276,6 +310,21 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 raw=raw,
             )
         except Exception as exc:
+            log_debug(
+                logger,
+                "tool.call_classifier.failed",
+                arguments_hash=call.arguments_hash.hex(),
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                error_type=type(exc).__name__,
+                signature_hash=call.signature_hash.hex(),
+            )
+            log_payload(
+                logger,
+                "tool.call_classifier.failed.payload",
+                arguments=call.arguments,
+                signature=call.signature.signature,
+            )
             return _unknown_tool_call_classification(
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
@@ -285,6 +334,25 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 rationale=f"classifier failed: {type(exc).__name__}",
                 raw_output={},
             )
+        else:
+            log_debug(
+                logger,
+                "tool.call_classifier.fresh",
+                arguments_hash=call.arguments_hash.hex(),
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                confidence=classification.confidence,
+                effect_class=classification.effect_class,
+                signature_hash=call.signature_hash.hex(),
+            )
+            log_payload(
+                logger,
+                "tool.call_classifier.fresh.payload",
+                arguments=call.arguments,
+                raw_output=raw,
+                signature=call.signature.signature,
+            )
+            return classification
 
 
 def _parse_raw_output(content: str | None) -> dict[str, Any]:

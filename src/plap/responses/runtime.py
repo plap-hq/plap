@@ -3,13 +3,17 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import asdict
 from enum import StrEnum
+from typing import NoReturn
 
 import anyio
 import blake3
 import msgspec
+import structlog
 
 from plap.auth import AuthContext
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatFinishReason,
@@ -21,6 +25,7 @@ from plap.llms.chat import (
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
+from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     ContextManagementCompaction,
     FunctionTool,
@@ -44,7 +49,6 @@ from plap.responses.debate import (
     continue_debate,
     start_debate_from_candidate,
 )
-from plap.responses.errors import ResponseError
 from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
@@ -82,6 +86,7 @@ from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
 SERVER_TOOL_NAMES = frozenset({COMPRESS_TOOL_NAME})
 _CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
+logger = structlog.get_logger(__name__)
 
 
 class _CompressionBailout(StrEnum):
@@ -211,10 +216,93 @@ def _actor_prompt_cache_key(base_prompt_cache_key: str | None, actor: str) -> st
     return f"{base_prompt_cache_key}|{actor}"
 
 
-def _response_error(exc: Exception) -> ResponseError:
-    if isinstance(exc, ResponseError):
+def _response_error(exc: Exception) -> PlapError:
+    if isinstance(exc, PlapError):
         return exc
-    return ResponseError.internal(private_message=str(exc), cause=exc)
+    return PlapError(
+        public=None,
+        private=PrivateError(
+            event="response.internal_error",
+            reason="unexpected_runtime_exception",
+            message=str(exc),
+            level=ErrorLevel.ERROR,
+            cause=exc,
+        ),
+    )
+
+
+def _runtime_invalid_request_error(
+    *, code: str, message: str, reason: str, private_message: str, param: str | None = None, cause: BaseException | None = None
+) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code=code,
+            message=message,
+            param=param,
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+            context={"param": param} if param is not None else {},
+        ),
+    )
+
+
+def _runtime_internal_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=None,
+        private=PrivateError(
+            event="response.internal_error",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.ERROR,
+            cause=cause,
+        ),
+    )
+
+
+def _runtime_unavailable_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=503,
+            type="server_error",
+            code="temporarily_unavailable",
+            message="Response generation is temporarily unavailable.",
+        ),
+        private=PrivateError(
+            event="response.unavailable",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private_message: str) -> PlapError:
+    return _runtime_invalid_request_error(
+        code="invalid_tool_definition",
+        message=message,
+        reason=reason,
+        private_message=private_message,
+        param="input",
+    )
+
+
+def _missing_auth_context_error() -> PlapError:
+    return _runtime_internal_error(
+        reason="missing_auth_context",
+        private_message="response runtime requires auth context",
+    )
+
+
+def _raise_missing_auth_context_error() -> NoReturn:
+    raise _missing_auth_context_error()
 
 
 def _is_tool_handoff(finish_reason: ChatFinishReason) -> bool:
@@ -252,8 +340,20 @@ def _context_management_compaction(request: ResponseCreateRequest) -> ContextMan
     if not request.context_management:
         return None
     if len(request.context_management) > 1:
-        raise ResponseError.invalid_request(
-            private_message="at most one compaction context_management entry is supported"
+        raise PlapError(
+            public=PublicError(
+                status_code=400,
+                type="invalid_request_error",
+                code="invalid_context_management",
+                message="At most one compaction context management entry is supported.",
+                param="context_management",
+            ),
+            private=PrivateError(
+                event="response.invalid_request",
+                reason="multiple_compaction_entries",
+                message="at most one compaction context_management entry is supported",
+                level=ErrorLevel.WARNING,
+            ),
         )
     return request.context_management[0]
 
@@ -274,8 +374,12 @@ def _effective_compression_settings(
         if override.max_rounds is not None:
             max_rounds = override.max_rounds
     if soft_token_budget is not None and hard_token_budget is not None and hard_token_budget <= soft_token_budget:
-        raise ResponseError.invalid_request(
-            private_message="compaction hard_token_budget must exceed soft_token_budget"
+        raise _runtime_invalid_request_error(
+            code="invalid_context_management",
+            message="Compaction hard token budget must exceed soft token budget.",
+            reason="invalid_compaction_budget_order",
+            private_message="compaction hard_token_budget must exceed soft_token_budget",
+            param="context_management",
         )
     return soft_token_budget, hard_token_budget, max_rounds
 
@@ -295,7 +399,13 @@ async def prepare_tools(
     server_executors: dict[str, IMCPToolProvider] = {}
     if _has_web_search(request.tools or ()):
         if not mcp_tool_providers:
-            raise ResponseError.tool_policy(private_message="web_search requested but no MCP provider configured")
+            raise _runtime_invalid_request_error(
+                code="unsupported_tool",
+                message="Web search is not available for this model.",
+                reason="web_search_provider_missing",
+                private_message="web_search requested but no MCP provider configured",
+                param="tools",
+            )
         for provider in mcp_tool_providers:
             for tool in await provider.tools():
                 server_tools.append(tool)
@@ -334,7 +444,10 @@ async def resolve_tool_calls(
 
         tool = tools.get(call.name)
         if tool is None:
-            raise ResponseError.tool_policy(private_message=f"unknown client tool call: {call.name}")
+            raise _runtime_internal_error(
+                reason="unknown_client_tool_call",
+                private_message=f"unknown client tool call: {call.name}",
+            )
         client_indexes.append(len(resolved))
         resolved.append(None)
         client_calls.append(
@@ -362,23 +475,43 @@ def _apply_compression(
     try:
         payload = msgspec.json.decode(arguments.encode())
     except msgspec.DecodeError as exc:
-        raise ResponseError.tool_policy(private_message="compress arguments must be valid JSON", cause=exc) from exc
+        raise _runtime_unavailable_error(
+            reason="compress_arguments_invalid_json",
+            private_message="compress arguments must be valid JSON",
+            cause=exc,
+        ) from exc
     if not isinstance(payload, dict):
-        raise ResponseError.tool_policy(private_message="compress arguments must be an object")
+        raise _runtime_unavailable_error(
+            reason="compress_arguments_not_object",
+            private_message="compress arguments must be an object",
+        )
     prune_duplicate_tool_calls = payload.get("prune_duplicate_tool_calls", True)
     if not isinstance(prune_duplicate_tool_calls, bool):
-        raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls must be a boolean")
+        raise _runtime_unavailable_error(
+            reason="compress_prune_duplicate_tool_calls_invalid",
+            private_message="compress prune_duplicate_tool_calls must be a boolean",
+        )
     prune_duplicate_tool_calls_before = payload.get("prune_duplicate_tool_calls_before")
     if prune_duplicate_tool_calls_before is not None and not isinstance(prune_duplicate_tool_calls_before, str):
-        raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls_before must be a citation string")
+        raise _runtime_unavailable_error(
+            reason="compress_prune_duplicate_tool_calls_before_invalid",
+            private_message="compress prune_duplicate_tool_calls_before must be a citation string",
+        )
     ranges = payload.get("ranges")
     if isinstance(ranges, str):
         try:
             ranges = msgspec.json.decode(ranges.encode())
         except msgspec.DecodeError as exc:
-            raise ResponseError.tool_policy(private_message="compress ranges must be valid JSON", cause=exc) from exc
+            raise _runtime_unavailable_error(
+                reason="compress_ranges_invalid_json",
+                private_message="compress ranges must be valid JSON",
+                cause=exc,
+            ) from exc
     if not isinstance(ranges, list):
-        raise ResponseError.tool_policy(private_message="compress ranges are required")
+        raise _runtime_unavailable_error(
+            reason="compress_ranges_missing",
+            private_message="compress ranges are required",
+        )
     if not ranges:
         return main_context, False
 
@@ -388,36 +521,48 @@ def _apply_compression(
         normalized_before = _normalize_citation(prune_duplicate_tool_calls_before)
         prune_duplicate_tool_calls_before_index = index_by_citation.get(normalized_before)
         if prune_duplicate_tool_calls_before_index is None:
-            raise ResponseError.tool_policy(private_message="compress prune_duplicate_tool_calls_before citation is not visible")
+            raise _runtime_unavailable_error(
+                reason="compress_prune_duplicate_tool_calls_before_not_visible",
+                private_message="compress prune_duplicate_tool_calls_before citation is not visible",
+            )
     parsed_ranges: list[tuple[int, int, str, int]] = []
     for item in ranges:
         if not isinstance(item, dict):
-            raise ResponseError.tool_policy(private_message="compress range must be an object")
+            raise _runtime_unavailable_error(reason="compress_range_not_object", private_message="compress range must be an object")
         start = item.get("start")
         end = item.get("end")
         summary = item.get("summary")
         summary_fidelity = item.get("summary_fidelity")
         if not isinstance(start, str) or not isinstance(end, str):
-            raise ResponseError.tool_policy(private_message="compress range citations are required")
+            raise _runtime_unavailable_error(
+                reason="compress_range_citations_missing", private_message="compress range citations are required"
+            )
         if not isinstance(summary, str) or not summary.strip():
-            raise ResponseError.tool_policy(private_message="compress range summary is required")
+            raise _runtime_unavailable_error(reason="compress_range_summary_missing", private_message="compress range summary is required")
         if not isinstance(summary_fidelity, int) or isinstance(summary_fidelity, bool) or not 1 <= summary_fidelity <= 5:
-            raise ResponseError.tool_policy(private_message="compress range summary_fidelity must be an integer from 1 to 5")
+            raise _runtime_unavailable_error(
+                reason="compress_range_summary_fidelity_invalid",
+                private_message="compress range summary_fidelity must be an integer from 1 to 5",
+            )
         start = _normalize_citation(start)
         end = _normalize_citation(end)
         start_index = index_by_citation.get(start)
         end_index = index_by_citation.get(end)
         if start_index is None or end_index is None:
-            raise ResponseError.tool_policy(private_message="compress range citation is not visible")
+            raise _runtime_unavailable_error(
+                reason="compress_range_citation_not_visible", private_message="compress range citation is not visible"
+            )
         if start_index > end_index:
-            raise ResponseError.tool_policy(private_message="compress range start must not follow end")
+            raise _runtime_unavailable_error(
+                reason="compress_range_start_after_end", private_message="compress range start must not follow end"
+            )
         parsed_ranges.append((start_index, end_index, summary.strip(), summary_fidelity))
 
     parsed_ranges.sort(key=lambda item: (item[0], item[1]))
     previous_end = -1
     for start_index, end_index, _, _ in parsed_ranges:
         if start_index <= previous_end:
-            raise ResponseError.tool_policy(private_message="compress ranges must not overlap")
+            raise _runtime_unavailable_error(reason="compress_ranges_overlap", private_message="compress ranges must not overlap")
         previous_end = end_index
 
     compressed: list[ChatMessageSpan] = []
@@ -429,7 +574,9 @@ def _apply_compression(
         summary_token_count = summary_message.estimated_token_count()
         selected_token_count = sum(row.token_count for row in selected)
         if summary_token_count >= selected_token_count:
-            raise ResponseError.tool_policy(private_message="compress summary must reduce token count")
+            raise _runtime_unavailable_error(
+                reason="compress_summary_not_reductive", private_message="compress summary must reduce token count"
+            )
         compressed.append(
             ChatMessageSpan(
                 start=selected[0].start,
@@ -454,16 +601,16 @@ def _apply_compression(
 def _normalize_citation(value: str) -> str:
     if value.startswith("[") or value.endswith("]"):
         if not (value.startswith("[") and value.endswith("]")):
-            raise ResponseError.tool_policy(private_message="compress range citation is invalid")
+            raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
         value = value[1:-1]
 
     match = _CITATION_RE.fullmatch(value)
     if match is None:
-        raise ResponseError.tool_policy(private_message="compress range citation is invalid")
+        raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
     start = int(match.group(1))
     end = int(match.group(2) or start)
     if start > end:
-        raise ResponseError.tool_policy(private_message="compress range citation is invalid")
+        raise _runtime_unavailable_error(reason="compress_citation_invalid", private_message="compress range citation is invalid")
     suffix = f"_{end}" if match.group(2) is not None else ""
     return f"[~{start}{suffix}]"
 
@@ -526,11 +673,19 @@ def _reject_server_name_collisions(
 ) -> None:
     server_names = [tool.name for tool in server_tools]
     if len(set(server_names)) != len(server_names):
-        raise ResponseError.tool_policy(private_message="server tool names must be unique")
+        raise _runtime_invalid_tool_definition_error(
+            message="Server tool names must be unique.",
+            reason="duplicate_server_tool_name",
+            private_message="server tool names must be unique",
+        )
     server_tool_names = set(server_names) | SERVER_TOOL_NAMES
     for tool in client_tools:
         if tool.name in server_tool_names:
-            raise ResponseError.tool_policy(private_message=f"function tool name is reserved: {tool.name}")
+            raise _runtime_invalid_tool_definition_error(
+                message=f"Tool name '{tool.name}' is reserved.",
+                reason="reserved_function_tool_name",
+                private_message=f"function tool name is reserved: {tool.name}",
+            )
 
 
 def _validate_tool_call_batch(
@@ -539,9 +694,9 @@ def _validate_tool_call_batch(
 ) -> None:
     for call in calls:
         if call.name not in tool_policies:
-            raise ResponseError.tool_policy(private_message=f"unknown tool call: {call.name}")
+            raise _runtime_internal_error(reason="unknown_tool_call", private_message=f"unknown tool call: {call.name}")
     if any(call.name == COMPRESS_TOOL_NAME for call in calls) and len(calls) != 1:
-        raise ResponseError.tool_policy(private_message="compress must be called alone")
+        raise _runtime_unavailable_error(reason="compress_must_be_called_alone", private_message="compress must be called alone")
 
 
 async def run_response(
@@ -572,6 +727,20 @@ async def run_response(
         tool_policy_resolver,
         mcp_tool_providers,
     )
+    log_debug(
+        logger,
+        "response.runtime.start",
+        compression_hard_token_budget=compression_hard_token_budget,
+        compression_max_rounds=compression_max_rounds,
+        compression_soft_token_budget=compression_soft_token_budget,
+        effective_reasoning_effort=profile.main.reasoning_effort,
+        input_context_items=len(ingested.main_context),
+        model=request.model,
+        requested_reasoning_effort=request.reasoning.effort if request.reasoning else None,
+        reasoning_summary_mode=_reasoning_summary_mode(request),
+        tool_count=len(base_tools),
+    )
+    log_payload(logger, "response.runtime.start.payload", request=request.model_dump(mode="json", exclude_none=True))
 
     await out.created()
     await out.in_progress()
@@ -643,6 +812,15 @@ async def run_response(
             forced_compression = True
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
+        log_debug(
+            logger,
+            "response.runtime.turn",
+            compression_reminder_level=compression_reminder_level,
+            forced_compression=forced_compression,
+            in_temp_debate=state.in_temp_debate,
+            main_cap=main_cap,
+            token_count=token_count,
+        )
         if main_cap == 0:
             await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
             return
@@ -658,21 +836,39 @@ async def run_response(
             prompt_cache_key_base=prompt_cache_key_base,
             max_completion_tokens=main_cap,
         )
+        log_payload(logger, "response.runtime.main_request.payload", request=asdict(model_request))
 
         result = await chat_completion_client.complete(model_request)
         if result.finish_reason is None:
-            raise ResponseError.internal(private_message="completion finish_reason is missing")
+            raise _runtime_internal_error(reason="completion_finish_reason_missing", private_message="completion finish_reason is missing")
 
         tool_calls = result.message.tool_calls or []
         tool_handoff = _is_tool_handoff(result.finish_reason)
         user_return = _is_user_return(result.finish_reason)
         if tool_calls and not tool_handoff:
-            raise ResponseError.internal(private_message="completion returned tool calls without tool handoff finish_reason")
+            raise _runtime_internal_error(
+                reason="tool_calls_without_tool_handoff_finish_reason",
+                private_message="completion returned tool calls without tool handoff finish_reason",
+            )
         if tool_handoff and not tool_calls:
-            raise ResponseError.internal(private_message="completion returned tool handoff finish_reason without tool calls")
+            raise _runtime_internal_error(
+                reason="tool_handoff_finish_reason_without_tool_calls",
+                private_message="completion returned tool handoff finish_reason without tool calls",
+            )
+        log_debug(
+            logger,
+            "response.runtime.main_result",
+            finish_reason=result.finish_reason,
+            has_content=result.message.content is not None,
+            has_reasoning=bool(result.message.reasoning_content or result.message.reasoning_details),
+            tool_call_count=len(tool_calls),
+        )
+        log_payload(logger, "response.runtime.main_result.payload", result=asdict(result))
 
         if forced_compression and not any(call.name == COMPRESS_TOOL_NAME for call in tool_calls):
-            raise ResponseError.tool_policy(private_message="hard compression budget requires compress")
+            raise _runtime_unavailable_error(
+                reason="hard_compression_requires_compress", private_message="hard compression budget requires compress"
+            )
 
         if user_return and profile.debate_max_rounds > 0:
             held_anchor_index = usage_ledger.record_hidden(profile.main.public_usage, result.usage)
@@ -686,8 +882,7 @@ async def run_response(
                     name=result.message.name,
                     tool_call_id=result.message.tool_call_id,
                     tool_calls=[
-                        StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
-                        for call in result.message.tool_calls or ()
+                        StateToolCall(id=call.id, name=call.name, arguments=call.arguments) for call in result.message.tool_calls or ()
                     ],
                     reasoning_content=result.message.reasoning_content,
                     reasoning_details=list(result.message.reasoning_details or ()),
@@ -760,7 +955,9 @@ async def run_response(
                 if policy.source == "server":
                     executor = effective_server_executors.get(call.name)
                     if executor is None:
-                        raise ResponseError.tool_policy(private_message="server tool executor is not configured")
+                        raise _runtime_internal_error(
+                            reason="server_tool_executor_missing", private_message="server tool executor is not configured"
+                        )
                     server_outputs[index] = await executor.call_tool(
                         call.name,
                         canonical_tool_arguments(call.arguments),
@@ -813,7 +1010,9 @@ async def run_response(
                     continue
 
             if risky_client_indexes:
-                raise ResponseError.tool_policy(private_message="tool call requires unsupported policy path")
+                raise _runtime_unavailable_error(
+                    reason="unsupported_tool_policy_path", private_message="tool call requires unsupported policy path"
+                )
 
         public_assistant_message = StateMessage(
             role="assistant",
@@ -949,6 +1148,7 @@ async def run_response(
             continue
 
         usage_ledger.set_anchor(result.usage)
+        log_debug(logger, "response.runtime.completed", status="completed")
         await out.completed(
             service_tier=request.service_tier,
             usage=usage_ledger.to_response_usage(),
@@ -976,51 +1176,71 @@ async def stream_response_events(
         nonlocal producer_error
         async with send:
             try:
-                try:
-                    if auth_context is None:
-                        raise ResponseError.internal(private_message="response runtime requires auth context")
-                    prepared = await response_store.prepare_request(auth_context, request)
-                    profile = settings.resolve_runtime_model_profile(
-                        prepared.response_request.model,
-                        selector=_runtime_selector(prepared.response_request),
-                    )
-                    profile.validate_requested_parameters(_requested_parameters(prepared.response_request))
-                except ValueError as exc:
-                    raise ResponseError.invalid_request(private_message=str(exc), cause=exc) from exc
+                if auth_context is None:
+                    _raise_missing_auth_context_error()
+                prepared = await response_store.prepare_request(auth_context, request)
+                profile = settings.resolve_runtime_model_profile(
+                    prepared.response_request.model,
+                    selector=_runtime_selector(prepared.response_request),
+                )
+                profile.validate_requested_parameters(
+                    _requested_parameters(prepared.response_request),
+                    model=prepared.response_request.model,
+                )
+                log_debug(
+                    logger,
+                    "response.stream.prepared",
+                    model=prepared.response_request.model,
+                    reasoning_summary_mode=_reasoning_summary_mode(prepared.response_request),
+                    runtime_profile=profile.display_name,
+                )
+                log_payload(
+                    logger,
+                    "response.stream.prepared.payload",
+                    execution_request=prepared.execution_request.model_dump(mode="json", exclude_none=True),
+                    response_request=prepared.response_request.model_dump(mode="json", exclude_none=True),
+                )
                 prompt_cache_key_base = _base_prompt_cache_key(
                     settings=settings,
                     auth_context=auth_context,
                     prompt_cache_key=prepared.response_request.prompt_cache_key,
                     user=prepared.response_request.user,
                 )
-                async with anyio.create_task_group() as task_group:
-                    out = ResponseEventIO(
-                        request=prepared.response_request,
-                        prepared=prepared,
-                        response_store=response_store,
-                        reasoning_summarizer=reasoning_summarizer,
-                        reasoning_summarizer_model=profile.reasoning_summarizer.model,
-                        reasoning_summarizer_prompt_cache_key_base=prompt_cache_key_base,
-                        reasoning_summarizer_reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
-                        reasoning_summarizer_service_tier=profile.reasoning_summarizer.service_tier,
-                        reasoning_summary_mode=_reasoning_summary_mode(prepared.response_request),
-                        send=send,
-                    )
-                    out.start(task_group)
-                    try:
-                        await run_response(
-                            out,
-                            prepared.execution_request,
-                            profile=profile,
-                            sealing_keyring=sealing_keyring,
-                            tool_policy_resolver=tool_policy_resolver,
-                            tool_call_policy_resolver=tool_call_policy_resolver,
-                            chat_completion_client=chat_completion_client,
-                            mcp_tool_providers=mcp_tool_providers,
-                            prompt_cache_key_base=prompt_cache_key_base,
-                        )
-                    finally:
-                        await out.aclose()
+                out = ResponseEventIO(
+                    request=prepared.response_request,
+                    prepared=prepared,
+                    response_store=response_store,
+                    reasoning_summarizer=reasoning_summarizer,
+                    reasoning_summarizer_model=profile.reasoning_summarizer.model,
+                    reasoning_summarizer_prompt_cache_key_base=prompt_cache_key_base,
+                    reasoning_summarizer_reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
+                    reasoning_summarizer_service_tier=profile.reasoning_summarizer.service_tier,
+                    reasoning_summary_mode=_reasoning_summary_mode(prepared.response_request),
+                    send=send,
+                )
+                with bound_context(
+                    conversation_id=prepared.conversation_id,
+                    model=prepared.response_request.model,
+                    parent_response_id=prepared.parent_response_id,
+                    response_id=out.response_id,
+                    runtime_profile=profile.display_name,
+                ):
+                    async with anyio.create_task_group() as task_group:
+                        out.start(task_group)
+                        try:
+                            await run_response(
+                                out,
+                                prepared.execution_request,
+                                profile=profile,
+                                sealing_keyring=sealing_keyring,
+                                tool_policy_resolver=tool_policy_resolver,
+                                tool_call_policy_resolver=tool_call_policy_resolver,
+                                chat_completion_client=chat_completion_client,
+                                mcp_tool_providers=mcp_tool_providers,
+                                prompt_cache_key_base=prompt_cache_key_base,
+                            )
+                        finally:
+                            await out.aclose()
             except Exception as exc:
                 root = exc.exceptions[0] if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1 else exc
                 producer_error = _response_error(root)

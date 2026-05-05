@@ -7,9 +7,11 @@ from enum import StrEnum
 from typing import cast
 
 import anyio
+import structlog
 from anyio.abc import ObjectSendStream, TaskGroup
 
 from plap.llms.chat import ReasoningEffort, ServiceTier
+from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     ConversationReference,
     ReasoningSummary,
@@ -46,6 +48,8 @@ from plap.responses.contracts import (
 from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import PreparedRequest, ResponseStore
+
+logger = structlog.get_logger(__name__)
 
 
 class _CommitKind(StrEnum):
@@ -93,6 +97,10 @@ class ResponseEventIO:
     def start(self, task_group: TaskGroup) -> None:
         task_group.start_soon(self._emit_commits)
 
+    @property
+    def response_id(self) -> str:
+        return self._response.id
+
     async def created(self) -> None:
         await self._commit_send.send((_CommitKind.CREATED, self._response, None))
 
@@ -114,6 +122,8 @@ class ResponseEventIO:
                 if reasoning_side is None:
                     raise TypeError("reasoning_side is required for reasoning messages")
                 metadata = (reasoning_side, tuple(reasoning_messages))
+        log_debug(logger, "response.io.output.queued", item_type=item.type, reasoning_metadata=metadata is not None)
+        log_payload(logger, "response.io.output.payload", item=item.model_dump(mode="json", exclude_none=True))
         await self._commit_send.send((_CommitKind.OUTPUT, item, metadata))
 
     async def completed(
@@ -189,6 +199,8 @@ class ResponseEventIO:
         self._sequence_number += 1
         payload = event.model_dump(mode="json")
         payload["sequence_number"] = self._sequence_number
+        log_debug(logger, "response.io.event.sent", event_type=payload.get("type"), sequence_number=self._sequence_number)
+        log_payload(logger, "response.io.event.payload", payload=payload)
         await self._send.send(type(event).model_validate(payload))
 
     async def _emit_output(
@@ -281,6 +293,14 @@ class ResponseEventIO:
 
         summary_text = ""
         summary_index = 0
+        log_debug(
+            logger,
+            "response.io.reasoning_summary.start",
+            item_id=item.id,
+            mode=self._reasoning_summary_mode,
+            output_index=output_index,
+            side=side,
+        )
         await self._send_event(
             ResponseReasoningSummaryPartAddedEvent(
                 item_id=item.id,
@@ -313,6 +333,7 @@ class ResponseEventIO:
                     )
                 )
         except Exception:
+            log_debug(logger, "response.io.reasoning_summary.failed", item_id=item.id, output_index=output_index)
             summary_text = ""
 
         summary_part = SummaryTextContent(text=summary_text, type="summary_text")
@@ -338,6 +359,13 @@ class ResponseEventIO:
         )
 
         completed_item = item.model_copy(update={"summary": [summary_part]})
+        log_debug(
+            logger,
+            "response.io.reasoning_summary.done",
+            item_id=item.id,
+            output_index=output_index,
+            summary_length=len(summary_text),
+        )
         await self._send_event(
             ResponseOutputItemDoneEvent(
                 item=completed_item,

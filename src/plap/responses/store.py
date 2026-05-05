@@ -7,6 +7,7 @@ from typing import cast
 from uuid import UUID
 
 import msgspec
+import structlog
 from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
 
 from plap.auth import AuthContext
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.logging import log_debug, log_payload
 from plap.persistence import Database
 from plap.responses.contracts import (
     ConversationReference,
@@ -24,13 +27,122 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     ResponseObject,
 )
-from plap.responses.errors import ResponseError
 
 _REQUEST_INPUT_ADAPTER = TypeAdapter(RequestInputItem)
 _INPUT_ITEMS_PAGE_ADAPTER = TypeAdapter(InputItemsPageItem)
+logger = structlog.get_logger(__name__)
 
 type PayloadObject = dict[str, object]
 type ResponseFields = dict[str, object]
+
+
+def _conflicting_continuation_parameters_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_request_conflict",
+            message="Parameters 'previous_response_id' and 'conversation' cannot be used together.",
+            param="previous_response_id",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="previous_response_and_conversation_conflict",
+            message="previous_response_id and conversation cannot be combined",
+            level=ErrorLevel.WARNING,
+        ),
+    )
+
+
+def _conversation_requires_store_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="conversation_requires_store",
+            message="Conversation continuation requires 'store' to be enabled.",
+            param="store",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="conversation_requires_store",
+            message="conversation continuation requires a stored response",
+            level=ErrorLevel.WARNING,
+        ),
+    )
+
+
+def _previous_response_not_found_error(response_id: str, *, param: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=404,
+            type="not_found_error",
+            code="previous_response_not_found",
+            message=f"Previous response '{response_id}' not found.",
+            param=param,
+        ),
+        private=PrivateError(
+            event="response.store.not_found",
+            reason="previous_response_not_found",
+            message=f"previous response was not found: {response_id}",
+            level=ErrorLevel.WARNING,
+            context={"response_id": response_id},
+        ),
+    )
+
+
+def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=404,
+            type="not_found_error",
+            code="response_not_found",
+            message=f"Response '{response_id}' not found.",
+        ),
+        private=PrivateError(
+            event="response.store.not_found",
+            reason="response_not_found",
+            message=f"response not found for {action}: {response_id}",
+            level=ErrorLevel.WARNING,
+            context={"action": action, "response_id": response_id},
+        ),
+    )
+
+
+def _input_items_order_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_cursor_order",
+            message="Parameter 'order' must be 'asc' or 'desc'.",
+            param="order",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="invalid_input_items_order",
+            message="input_items order must be asc or desc",
+            level=ErrorLevel.WARNING,
+        ),
+    )
+
+
+def _input_items_after_not_found_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="cursor_not_found",
+            message="Input items cursor was not found.",
+            param="after",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="input_items_after_not_found",
+            message="input_items after cursor was not found",
+            level=ErrorLevel.WARNING,
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -52,15 +164,9 @@ class ResponseStore:
         scope_id = self._scope_id(auth_context)
         conversation_id = self._conversation_id(request.conversation)
         if request.previous_response_id is not None and conversation_id is not None:
-            raise ResponseError.invalid_request(
-                private_message="previous_response_id and conversation cannot be combined",
-                param="previous_response_id",
-            )
+            raise _conflicting_continuation_parameters_error()
         if conversation_id is not None and request.store is False:
-            raise ResponseError.invalid_request(
-                private_message="conversation continuation requires a stored response",
-                param="store",
-            )
+            raise _conversation_requires_store_error()
 
         current_input_items = self._current_input_items(request)
         parent_response_id = request.previous_response_id
@@ -82,6 +188,22 @@ class ResponseStore:
 
         response_request = request.model_copy(update={"previous_response_id": parent_response_id})
         execution_request = request.model_copy(update={"input": [*replay_items, *current_input_items]})
+        log_debug(
+            logger,
+            "response.store.prepared",
+            conversation_id=conversation_id,
+            current_input_items=len(current_input_items),
+            parent_response_id=parent_response_id,
+            persist_response=request.store is not False,
+            replay_items=len(replay_items),
+        )
+        log_payload(
+            logger,
+            "response.store.prepared.payload",
+            current_input_items=[item.model_dump(mode="json", exclude_none=True) for item in current_input_items],
+            execution_request=execution_request.model_dump(mode="json", exclude_none=True),
+            response_request=response_request.model_dump(mode="json", exclude_none=True),
+        )
         return PreparedRequest(
             scope_id=scope_id,
             response_request=response_request,
@@ -96,6 +218,18 @@ class ResponseStore:
         if not prepared.persist_response:
             return
         input_items = self._stored_input_payloads(response.id, prepared.current_input_items)
+        log_debug(
+            logger,
+            "response.store.begin",
+            input_item_count=len(input_items),
+            response_id=response.id,
+        )
+        log_payload(
+            logger,
+            "response.store.begin.payload",
+            input_items=input_items,
+            response=response.model_dump(mode="json", exclude_none=True),
+        )
         async with self._database.connection_transaction() as connection:
             create_result = await connection.execute(
                 text(
@@ -135,6 +269,20 @@ class ResponseStore:
     ) -> None:
         if not prepared.persist_response:
             return
+        log_debug(
+            logger,
+            "response.store.append_output_item",
+            output_index=output_index,
+            response_id=response_id,
+            type=item.get("type") if isinstance(item, dict) else None,
+        )
+        log_payload(
+            logger,
+            "response.store.append_output_item.payload",
+            item=item,
+            output_index=output_index,
+            response_id=response_id,
+        )
         async with self._database.connection_transaction() as connection:
             insert_result = await connection.execute(
                 text(
@@ -164,6 +312,18 @@ class ResponseStore:
     async def finish_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
         if not prepared.persist_response:
             return
+        log_debug(
+            logger,
+            "response.store.finish",
+            output_count=len(response.output),
+            response_id=response.id,
+            status=response.status,
+        )
+        log_payload(
+            logger,
+            "response.store.finish.payload",
+            response=response.model_dump(mode="json", exclude_none=True),
+        )
         async with self._database.connection_transaction() as connection:
             update_result = await connection.execute(
                 text(
@@ -187,9 +347,7 @@ class ResponseStore:
             update_result.close()
             if prepared.conversation_id is not None:
                 move_head_result = await connection.execute(
-                    text(
-                        "select responses.move_conversation_head(:scope_id, :conversation_id, :response_id, :retention)"
-                    ),
+                    text("select responses.move_conversation_head(:scope_id, :conversation_id, :response_id, :retention)"),
                     {
                         "scope_id": prepared.scope_id,
                         "conversation_id": prepared.conversation_id,
@@ -238,12 +396,12 @@ class ResponseStore:
         scope_id = self._scope_id(auth_context)
         direction = order or "asc"
         if direction not in {"asc", "desc"}:
-            raise ResponseError.invalid_request(private_message="input_items order must be asc or desc", param="order")
+            raise _input_items_order_error()
         page_limit = limit or 20
         async with self._database.connection() as connection:
             exists = await self._response_exists(connection, scope_id, response_id)
             if not exists:
-                raise ResponseError.not_found(private_message=f"response not found for input_items: {response_id}")
+                raise _response_not_found_error(response_id, action="input_items")
             payloads = await self._input_payloads(connection, scope_id, response_id)
 
         items = [self._input_items_page_item_from_payload(payload) for payload in payloads]
@@ -256,7 +414,7 @@ class ResponseStore:
                     start = index + 1
                     break
             else:
-                raise ResponseError.invalid_request(private_message="input_items after cursor was not found", param="after")
+                raise _input_items_after_not_found_error()
         page_items = items[start : start + page_limit]
         return InputItemsPage(
             data=page_items,
@@ -287,9 +445,7 @@ class ResponseStore:
             if inserted is None:
                 return False
             delete_conversation_result = await connection.execute(
-                text(
-                    "delete from responses.conversations where scope_id = :scope_id and current_response_id = :response_id"
-                ),
+                text("delete from responses.conversations where scope_id = :scope_id and current_response_id = :response_id"),
                 {"scope_id": scope_id, "response_id": response_id},
             )
             delete_conversation_result.close()
@@ -331,12 +487,7 @@ class ResponseStore:
     ) -> None:
         exists = await self._response_exists(connection, scope_id, response_id)
         if not exists:
-            raise ResponseError.not_found(
-                private_message=f"previous response was not found: {response_id}",
-                public_message="Previous response not found.",
-                public_code="previous_response_not_found",
-                param=param,
-            )
+            raise _previous_response_not_found_error(response_id, param=param)
 
     async def _conversation_head(self, connection: AsyncConnection, scope_id: UUID, conversation_id: str) -> str | None:
         result = await connection.execute(

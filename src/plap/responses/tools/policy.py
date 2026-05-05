@@ -7,10 +7,52 @@ from typing import Any, Protocol, runtime_checkable
 
 import blake3
 import msgspec
+import structlog
 from cachetools import LRUCache
 
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
-from plap.responses.errors import ResponseError
+
+logger = structlog.get_logger(__name__)
+
+
+def _invalid_tool_arguments_error(*, reason: str, message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_tool_arguments",
+            message="Tool call arguments must be a valid JSON object.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="tool.policy.invalid_request",
+            reason=reason,
+            message=message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _duplicate_tool_signature_error(tool_name: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_tool_definition",
+            message=f"Tool '{tool_name}' is defined more than once with conflicting schemas.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="tool.policy.invalid_request",
+            reason="duplicate_function_tool_name",
+            message=f"duplicate function tool name with different signature: {tool_name}",
+            level=ErrorLevel.WARNING,
+            context={"tool_name": tool_name},
+        ),
+    )
 
 
 class EffectClass(StrEnum):
@@ -173,9 +215,16 @@ def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
     try:
         value = msgspec.json.decode(arguments.encode())
     except msgspec.DecodeError as exc:
-        raise ResponseError.tool_policy(private_message="function call arguments must be valid JSON", cause=exc) from exc
+        raise _invalid_tool_arguments_error(
+            reason="tool_arguments_invalid_json",
+            message="function call arguments must be valid JSON",
+            cause=exc,
+        ) from exc
     if not isinstance(value, dict):
-        raise ResponseError.tool_policy(private_message="function call arguments must be a JSON object")
+        raise _invalid_tool_arguments_error(
+            reason="tool_arguments_not_object",
+            message="function call arguments must be a JSON object",
+        )
     return value
 
 
@@ -211,11 +260,12 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
         policies: dict[str, ToolPolicy] = {}
         signatures_by_name: dict[str, bytes] = {}
         client_signatures_by_name: dict[str, ToolSignature] = {}
+        classification_sources: dict[bytes, str] = {}
         for tool in tools:
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
             if previous_hash is not None and previous_hash != signature.signature_hash:
-                raise ResponseError.tool_policy(private_message=f"duplicate function tool name with different signature: {tool.name}")
+                raise _duplicate_tool_signature_error(tool.name)
             signatures_by_name[tool.name] = signature.signature_hash
             if tool.name not in client_signatures_by_name:
                 client_signatures_by_name[tool.name] = signature
@@ -227,6 +277,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 l2_signatures.append(signature)
                 continue
             classifications[signature.signature_hash] = cached
+            classification_sources[signature.signature_hash] = "l1"
         if l2_signatures:
             await self._repository.get_or_create_signatures(l2_signatures)
             l2_cached = await self._repository.get_classifications(
@@ -237,6 +288,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             )
             for classification in l2_cached.values():
                 self._classifications_l1[self._classification_l1_key(classification.signature_hash)] = classification
+                classification_sources[classification.signature_hash] = "l2"
             classifications.update(l2_cached)
             missing = [signature for signature in l2_signatures if signature.signature_hash not in l2_cached]
             if missing:
@@ -244,6 +296,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 stored = await self._repository.store_classifications(list(new_classifications.values()))
                 for classification in stored.values():
                     self._classifications_l1[self._classification_l1_key(classification.signature_hash)] = classification
+                    classification_sources[classification.signature_hash] = "fresh"
                 classifications.update(stored)
         for tool_name, signature in client_signatures_by_name.items():
             classification = classifications[signature.signature_hash]
@@ -252,6 +305,25 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 source="client",
                 effect_class=classification.effect_class,
                 classification=classification,
+            )
+            source = classification_sources.get(signature.signature_hash, "unknown")
+            log_debug(
+                logger,
+                "tool.policy.resolved",
+                classifier=classification.classifier,
+                classifier_model=classification.classifier_model,
+                confidence=classification.confidence,
+                effect_class=classification.effect_class,
+                source=source,
+                tool_name=tool_name,
+            )
+            log_payload(
+                logger,
+                "tool.policy.resolved.payload",
+                raw_output=classification.raw_output,
+                signature=signature.signature,
+                source=source,
+                tool_name=tool_name,
             )
         return policies
 
@@ -282,10 +354,19 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
         contextual_by_index: dict[int, ToolCallSignature] = {}
         contextual_by_key: dict[tuple[bytes, bytes], ToolCallSignature] = {}
         classifications: dict[tuple[bytes, bytes], ToolCallClassification] = {}
+        classification_sources: dict[tuple[bytes, bytes], str] = {}
 
         for call in calls:
             if call.policy.effect_class != "contextual":
                 resolved.append(call.policy)
+                log_debug(logger, "tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
+                log_payload(
+                    logger,
+                    "tool.call_policy.preclassified.payload",
+                    arguments=call.arguments,
+                    tool=normalize_function_tool(call.tool),
+                    tool_name=call.tool.name,
+                )
                 continue
 
             call_signature = function_tool_call_signature(
@@ -303,6 +384,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             if cached is not None:
                 classifications[call_signature.classification_key] = cached
                 contextual_by_index[index] = call_signature
+                classification_sources[call_signature.classification_key] = "l1"
                 continue
             contextual_by_index[index] = call_signature
             contextual_by_key.setdefault(
@@ -326,6 +408,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                         classification.arguments_hash,
                     )
                 ] = classification
+                classification_sources[(classification.signature_hash, classification.arguments_hash)] = "l2"
             classifications.update(l2_cached)
 
             missing = [call_signature for key, call_signature in contextual_by_key.items() if key not in l2_cached]
@@ -339,6 +422,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                             classification.arguments_hash,
                         )
                     ] = classification
+                    classification_sources[(classification.signature_hash, classification.arguments_hash)] = "fresh"
                 classifications.update(stored)
 
         for index, call_signature in contextual_by_index.items():
@@ -349,6 +433,26 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                 source=call.policy.source,
                 effect_class=classification.effect_class,
                 classification=classification,
+            )
+            source = classification_sources.get(call_signature.classification_key, "unknown")
+            log_debug(
+                logger,
+                "tool.call_policy.resolved",
+                classifier=classification.classifier,
+                classifier_model=classification.classifier_model,
+                confidence=classification.confidence,
+                effect_class=classification.effect_class,
+                source=source,
+                tool_name=call.tool.name,
+            )
+            log_payload(
+                logger,
+                "tool.call_policy.resolved.payload",
+                arguments=call_signature.arguments,
+                raw_output=classification.raw_output,
+                signature=call_signature.signature.signature,
+                source=source,
+                tool_name=call.tool.name,
             )
 
         if any(policy is None for policy in resolved):
@@ -377,7 +481,7 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
             signature = function_tool_signature(tool)
             previous_hash = signatures_by_name.get(tool.name)
             if previous_hash is not None and previous_hash != signature.signature_hash:
-                raise ResponseError.tool_policy(private_message=f"duplicate function tool name with different signature: {tool.name}")
+                raise _duplicate_tool_signature_error(tool.name)
             signatures_by_name[tool.name] = signature.signature_hash
             policies.setdefault(
                 tool.name,
@@ -387,6 +491,8 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
                     effect_class="unknown",
                 ),
             )
+            log_debug(logger, "tool.policy.static", effect_class="unknown", tool_name=tool.name)
+            log_payload(logger, "tool.policy.static.payload", signature=signature.signature, tool_name=tool.name)
         return policies
 
 
@@ -396,7 +502,23 @@ class StaticToolCallPolicyResolver(IToolCallPolicyResolver):
         for call in calls:
             if call.policy.effect_class != "contextual":
                 policies.append(call.policy)
+                log_debug(logger, "tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
+                log_payload(
+                    logger,
+                    "tool.call_policy.preclassified.payload",
+                    arguments=call.arguments,
+                    tool=normalize_function_tool(call.tool),
+                    tool_name=call.tool.name,
+                )
                 continue
+            log_debug(logger, "tool.call_policy.static", effect_class="unknown", tool_name=call.tool.name)
+            log_payload(
+                logger,
+                "tool.call_policy.static.payload",
+                arguments=call.arguments,
+                tool=normalize_function_tool(call.tool),
+                tool_name=call.tool.name,
+            )
             policies.append(
                 ToolPolicy(
                     name=call.tool.name,

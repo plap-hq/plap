@@ -137,13 +137,13 @@ async def test_unimplemented_response_routes_return_honest_errors(
         )
 
     assert retrieved.status_code == 404
-    assert retrieved.json()["error"]["code"] == "not_found"
+    assert retrieved.json()["error"]["code"] == "response_not_found"
     assert deleted.status_code == 404
-    assert deleted.json()["error"]["code"] == "not_found"
+    assert deleted.json()["error"]["code"] == "response_not_found"
     assert input_items.status_code == 404
-    assert input_items.json()["error"]["code"] == "not_found"
-    assert _error_code(compacted) == (501, "unsupported_operation")
-    assert _error_code(input_tokens) == (501, "unsupported_operation")
+    assert input_items.json()["error"]["code"] == "response_not_found"
+    assert _error_code(compacted) == (400, "unsupported_operation", "Response compaction is not supported.")
+    assert _error_code(input_tokens) == (400, "unsupported_operation", "Response input token counting is not supported.")
 
 
 async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(
@@ -178,7 +178,7 @@ async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True, "id": response_id, "object": "response"}
     assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "not_found"
+    assert missing.json()["error"]["code"] == "response_not_found"
 
 
 async def test_previous_response_id_replays_persisted_history(
@@ -289,8 +289,9 @@ async def test_create_response_sanitizes_ingestion_errors(
 
     body = response.json()
     assert response.status_code == 400
-    assert body["error"]["message"] == "Invalid request."
-    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "Input replay items are invalid."
+    assert body["error"]["code"] == "invalid_input_replay"
+    assert body["error"]["param"] == "input"
     assert "sealed" not in body["error"]["message"]
     assert "encrypted" not in body["error"]["message"]
 
@@ -314,8 +315,9 @@ async def test_create_response_sanitizes_tool_preparation_errors(
 
     body = response.json()
     assert response.status_code == 400
-    assert body["error"]["message"] == "Invalid request."
-    assert body["error"]["code"] == "invalid_tool"
+    assert body["error"]["message"] == "Web search is not available for this model."
+    assert body["error"]["code"] == "unsupported_tool"
+    assert body["error"]["param"] == "tools"
     assert "web_search" not in body["error"]["message"]
     assert "MCP" not in body["error"]["message"]
 
@@ -360,7 +362,9 @@ async def test_websocket_create_uses_runtime_validation(
             event = socket.receive_json()
 
     assert event["type"] == "error"
-    assert event["message"] == "Invalid request."
+    assert event["code"] == "model_not_found"
+    assert event["message"] == "Model 'unknown/model' not found."
+    assert event["param"] == "model"
 
 
 class _RecordingToolClassifier(IToolClassifier):
@@ -408,7 +412,6 @@ class _RecordingChatCompletionClient(IChatCompletionClient):
             yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
 
 
-def _error_code(response) -> tuple[int, str | None]:
+def _error_code(response) -> tuple[int, str | None, str]:
     body = response.json()
-    assert body["error"]["message"] == "Operation is not supported."
-    return response.status_code, body["error"]["code"]
+    return response.status_code, body["error"]["code"], body["error"]["message"]

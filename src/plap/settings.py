@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.chat import ReasoningEffort, ServiceTier
 from plap.responses.contracts import ModelInfoObject, ModelInfoPricingObject, ModelObject
 
@@ -53,6 +54,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             compression_hard_token_budget=200_000,
             compression_max_rounds=3,
             debate_max_rounds=2,
+            default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort=_default_reasoning_effort_overrides(),
         ),
         "plap-ai/wisp": RuntimeModelProfileConfig(
@@ -95,8 +97,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             compression_hard_token_budget=150_000,
             compression_max_rounds=3,
             debate_max_rounds=2,
+            default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort=_default_reasoning_effort_overrides(),
-        )
+        ),
     }
 
 
@@ -105,15 +108,155 @@ def _validate_compression_budgets(soft_budget: int | None, hard_budget: int | No
         raise ValueError("compression hard token budget must exceed the soft token budget")
 
 
+def _missing_model_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="missing_required_parameter",
+            message="Missing required parameter: 'model'.",
+            param="model",
+        ),
+        private=PrivateError(
+            event="runtime_profile.invalid_request",
+            reason="missing_model",
+            message="model is required",
+            level=ErrorLevel.WARNING,
+        ),
+    )
+
+
+def _unknown_runtime_model_error(model: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=404,
+            type="not_found_error",
+            code="model_not_found",
+            message=f"Model '{model}' not found.",
+            param="model",
+        ),
+        private=PrivateError(
+            event="runtime_profile.invalid_request",
+            reason="unknown_runtime_model",
+            message=f"unknown runtime model: {model!r}",
+            level=ErrorLevel.WARNING,
+            context={"model": model},
+        ),
+    )
+
+
+def _unsupported_parameters_error(model: str, unsupported: list[str]) -> PlapError:
+    if len(unsupported) == 1:
+        parameter = unsupported[0]
+        message = f"Parameter '{parameter}' is not supported for model '{model}'."
+        param = parameter
+    else:
+        joined = ", ".join(f"'{parameter}'" for parameter in unsupported)
+        message = f"Parameters {joined} are not supported for model '{model}'."
+        param = None
+    joined_private = ", ".join(unsupported)
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="unsupported_parameter",
+            message=message,
+            param=param,
+        ),
+        private=PrivateError(
+            event="runtime_profile.invalid_request",
+            reason="unsupported_request_parameter",
+            message=f"unsupported request parameters: {joined_private}",
+            level=ErrorLevel.WARNING,
+            context={"model": model, "parameters": unsupported},
+        ),
+    )
+
+
+def _unsupported_service_tier_error(model: str, service_tier: ServiceTier, *, reason: str, message: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="unsupported_service_tier",
+            message=f"Service tier '{service_tier}' is not supported for model '{model}'.",
+            param="service_tier",
+        ),
+        private=PrivateError(
+            event="runtime_profile.invalid_request",
+            reason=reason,
+            message=message,
+            level=ErrorLevel.WARNING,
+            context={"model": model, "service_tier": service_tier},
+        ),
+    )
+
+
+def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, reason: str, message: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="unsupported_reasoning_effort",
+            message=f"Reasoning effort '{effort}' is not supported for model '{model}'.",
+            param="reasoning.effort",
+        ),
+        private=PrivateError(
+            event="runtime_profile.invalid_request",
+            reason=reason,
+            message=message,
+            level=ErrorLevel.WARNING,
+            context={"model": model, "reasoning_effort": effort},
+        ),
+    )
+
+
 def _default_reasoning_effort_overrides() -> dict[ReasoningEffort, RuntimeProfileOverride]:
-    return {
-        effort: RuntimeProfileOverride(
-            main=RuntimeActorOverride(reasoning_effort=effort),
-            main_debate=RuntimeActorOverride(reasoning_effort=effort),
-            reviewer=RuntimeActorOverride(reasoning_effort=effort),
-            arbitrator=RuntimeActorOverride(reasoning_effort=effort),
+    def override(
+        *,
+        main: ReasoningEffort,
+        main_debate: ReasoningEffort,
+        reviewer: ReasoningEffort,
+        arbitrator: ReasoningEffort,
+    ) -> RuntimeProfileOverride:
+        return RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=main),
+            main_debate=RuntimeActorOverride(reasoning_effort=main_debate),
+            reviewer=RuntimeActorOverride(reasoning_effort=reviewer),
+            arbitrator=RuntimeActorOverride(reasoning_effort=arbitrator),
         )
-        for effort in ReasoningEffort
+
+    return {
+        ReasoningEffort.MINIMAL: override(
+            main=ReasoningEffort.MINIMAL,
+            main_debate=ReasoningEffort.LOW,
+            reviewer=ReasoningEffort.LOW,
+            arbitrator=ReasoningEffort.MEDIUM,
+        ),
+        ReasoningEffort.LOW: override(
+            main=ReasoningEffort.LOW,
+            main_debate=ReasoningEffort.LOW,
+            reviewer=ReasoningEffort.LOW,
+            arbitrator=ReasoningEffort.MEDIUM,
+        ),
+        ReasoningEffort.MEDIUM: override(
+            main=ReasoningEffort.MEDIUM,
+            main_debate=ReasoningEffort.MEDIUM,
+            reviewer=ReasoningEffort.MEDIUM,
+            arbitrator=ReasoningEffort.MEDIUM,
+        ),
+        ReasoningEffort.HIGH: override(
+            main=ReasoningEffort.HIGH,
+            main_debate=ReasoningEffort.HIGH,
+            reviewer=ReasoningEffort.MEDIUM,
+            arbitrator=ReasoningEffort.HIGH,
+        ),
+        ReasoningEffort.XHIGH: override(
+            main=ReasoningEffort.XHIGH,
+            main_debate=ReasoningEffort.XHIGH,
+            reviewer=ReasoningEffort.HIGH,
+            arbitrator=ReasoningEffort.XHIGH,
+        ),
     }
 
 
@@ -401,6 +544,7 @@ class RuntimeModelProfileConfig(BaseModel):
     compression_hard_token_budget: int | None = Field(default=None, ge=0)
     compression_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
+    default_reasoning_effort: ReasoningEffort | None = None
     by_service_tier: dict[ServiceTier, RuntimeProfileOverride] = Field(default_factory=dict)
     by_reasoning_effort: dict[ReasoningEffort, RuntimeProfileOverride] = Field(default_factory=dict)
 
@@ -419,9 +563,12 @@ class RuntimeModelProfileConfig(BaseModel):
         if self.by_service_tier and not self.supports_parameter("service_tier"):
             raise ValueError("service_tier overrides require model_info.supported_parameters to include service_tier")
         if self.by_reasoning_effort and not self.supports_parameter("reasoning_effort"):
-            raise ValueError(
-                "reasoning_effort overrides require model_info.supported_parameters to include reasoning_effort"
-            )
+            raise ValueError("reasoning_effort overrides require model_info.supported_parameters to include reasoning_effort")
+        if self.default_reasoning_effort is not None:
+            if not self.supports_parameter("reasoning_effort"):
+                raise ValueError("default_reasoning_effort requires model_info.supported_parameters to include reasoning_effort")
+            if self.default_reasoning_effort not in self.by_reasoning_effort:
+                raise ValueError("default_reasoning_effort must reference a configured reasoning_effort override")
 
         for override in self.by_service_tier.values():
             resolved = override.apply_to(self)
@@ -445,29 +592,51 @@ class RuntimeModelProfileConfig(BaseModel):
     def supports_parameter(self, name: str) -> bool:
         return self.model_info.supports_parameter(name)
 
-    def validate_requested_parameters(self, parameters: set[str]) -> None:
+    def validate_requested_parameters(self, parameters: set[str], *, model: str) -> None:
         unsupported = sorted(parameter for parameter in parameters if not self.supports_parameter(parameter))
         if unsupported:
-            joined = ", ".join(unsupported)
-            raise ValueError(f"unsupported request parameters: {joined}")
+            raise _unsupported_parameters_error(model, unsupported)
 
-    def resolve(self, selector: RuntimeSelector | None = None) -> RuntimeModelProfileConfig:
+    def resolve(self, selector: RuntimeSelector | None = None, *, model: str) -> RuntimeModelProfileConfig:
         resolved = self
         selector = selector or RuntimeSelector()
 
         if selector.service_tier not in {None, "default", "auto"}:
             if not self.supports_parameter("service_tier"):
-                raise ValueError("unsupported request parameters: service_tier")
+                raise _unsupported_service_tier_error(
+                    model,
+                    selector.service_tier,
+                    reason="unsupported_service_tier",
+                    message="unsupported request parameters: service_tier",
+                )
             override = self.by_service_tier.get(selector.service_tier)
-            if override is not None:
-                resolved = override.apply_to(resolved)
+            if override is None:
+                raise _unsupported_service_tier_error(
+                    model,
+                    selector.service_tier,
+                    reason="missing_service_tier_override",
+                    message=f"missing runtime profile override for service_tier: {selector.service_tier}",
+                )
+            resolved = override.apply_to(resolved)
 
-        if selector.reasoning_effort is not None:
+        effective_reasoning_effort = selector.reasoning_effort if selector.reasoning_effort is not None else self.default_reasoning_effort
+        if effective_reasoning_effort is not None:
             if not self.supports_parameter("reasoning_effort"):
-                raise ValueError("unsupported request parameters: reasoning_effort")
-            override = self.by_reasoning_effort.get(selector.reasoning_effort)
-            if override is not None:
-                resolved = override.apply_to(resolved)
+                raise _unsupported_reasoning_effort_error(
+                    model,
+                    effective_reasoning_effort,
+                    reason="unsupported_reasoning_effort",
+                    message="unsupported request parameters: reasoning_effort",
+                )
+            override = self.by_reasoning_effort.get(effective_reasoning_effort)
+            if override is None:
+                raise _unsupported_reasoning_effort_error(
+                    model,
+                    effective_reasoning_effort,
+                    reason="missing_reasoning_effort_override",
+                    message=f"missing runtime profile override for reasoning_effort: {effective_reasoning_effort}",
+                )
+            resolved = override.apply_to(resolved)
 
         _validate_compression_budgets(resolved.compression_soft_token_budget, resolved.compression_hard_token_budget)
         return resolved
@@ -515,6 +684,10 @@ class Settings(BaseSettings):
     api_key_pepper: str
     database_url: str
     sealing_keys: list[str]
+    debug: bool = False
+    debug_payloads: bool = False
+    log_json: bool = False
+    log_file: str | None = None
     llm_lightning_api_key: str | None = None
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None
@@ -540,11 +713,11 @@ class Settings(BaseSettings):
         selector: RuntimeSelector | None = None,
     ) -> RuntimeModelProfileConfig:
         if model is None:
-            raise ValueError("model is required")
+            raise _missing_model_error()
         profile = self.runtime_model_profiles.get(model)
         if profile is None:
-            raise ValueError(f"unknown runtime model: {model!r}")
-        return profile.resolve(selector)
+            raise _unknown_runtime_model_error(model)
+        return profile.resolve(selector, model=model)
 
 
 @lru_cache(maxsize=1)

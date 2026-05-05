@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
     RequestCompactionItem,
@@ -12,7 +13,6 @@ from plap.responses.contracts import (
     RequestReasoningItem,
     ResponseCreateRequest,
 )
-from plap.responses.errors import ResponseError
 from plap.responses.ingest.sealing import (
     CALL_ID_PREFIX,
     open_call_id,
@@ -31,6 +31,82 @@ from plap.responses.models import (
     StateMessage,
     StateToolCall,
 )
+
+
+def _input_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_input_replay",
+            message="Input replay items are invalid.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_reasoning_replay",
+            message="Reasoning replay data is invalid.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _tool_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_tool_replay",
+            message="Tool replay data is invalid.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
+def _compaction_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_compaction_replay",
+            message="Compaction replay data is invalid.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
 
 
 class _EventKind(StrEnum):
@@ -132,10 +208,12 @@ class _QueueBase:
                 self._track_reasoning_message(appended)
                 continue
             if not isinstance(message, ReasoningMessagePatch):
-                raise ResponseError.ingestion(private_message="reasoning message is invalid")
+                raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="reasoning message is invalid")
             target = self._message_by_hash(message.content_hash)
             if target is None:
-                raise ResponseError.ingestion(private_message="reasoning content_hash target is missing")
+                raise _reasoning_replay_error(
+                    reason="reasoning_content_hash_target_missing", private_message="reasoning content_hash target is missing"
+                )
             message.apply_to(target)
             if message.tool_calls is not None or message.role == "tool" or (target.is_tool() and message.tool_call_id is not None):
                 self._track_reasoning_message(target)
@@ -149,12 +227,16 @@ class _QueueBase:
         if call_id.tool_call_index < len(target.tool_calls):
             existing = target.tool_call_at(call_id.tool_call_index)
             if existing.id != call_id.upstream_tool_call_id:
-                raise ResponseError.ingestion(private_message="sealed function_call upstream id mismatch")
+                raise _tool_replay_error(
+                    reason="sealed_function_call_upstream_id_mismatch", private_message="sealed function_call upstream id mismatch"
+                )
             self._mark_reasoning_tool_call_replayed(call_id.upstream_tool_call_id)
             self._mark_pending_tool_call(call_id.upstream_tool_call_id)
             return
         if call_id.tool_call_index != len(target.tool_calls):
-            raise ResponseError.ingestion(private_message="sealed function_call index is not contiguous")
+            raise _tool_replay_error(
+                reason="sealed_function_call_index_not_contiguous", private_message="sealed function_call index is not contiguous"
+            )
         target.append_tool_call(_chat_tool_call(item, call_id))
         self._mark_pending_tool_call(call_id.upstream_tool_call_id)
 
@@ -194,25 +276,37 @@ class _QueueBase:
         for entry in reversed(self._entries):
             if entry.content_hash.startswith(prefix) and entry.message.is_assistant():
                 return entry.message
-        raise ResponseError.ingestion(private_message="sealed function call content_hash target is missing")
+        raise _tool_replay_error(
+            reason="sealed_function_call_content_hash_target_missing", private_message="sealed function call content_hash target is missing"
+        )
 
     def _require_tool_call(self, call_id: SealedCallID) -> None:
         target = self._message_for_call(call_id)
         if not target.tool_calls:
-            raise ResponseError.ingestion(private_message="sealed function_call_output target has no tool_calls")
+            raise _tool_replay_error(
+                reason="sealed_function_call_output_target_has_no_tool_calls",
+                private_message="sealed function_call_output target has no tool_calls",
+            )
         if call_id.tool_call_index >= len(target.tool_calls):
-            raise ResponseError.ingestion(private_message="sealed function_call_output index is out of range")
+            raise _tool_replay_error(
+                reason="sealed_function_call_output_index_out_of_range", private_message="sealed function_call_output index is out of range"
+            )
         existing = target.tool_call_at(call_id.tool_call_index)
         if existing.id != call_id.upstream_tool_call_id:
-            raise ResponseError.ingestion(private_message="sealed function_call_output upstream id mismatch")
+            raise _tool_replay_error(
+                reason="sealed_function_call_output_upstream_id_mismatch",
+                private_message="sealed function_call_output upstream id mismatch",
+            )
 
     def _ensure_no_pending_tool_calls(self) -> None:
         if self._pending_tool_call_ids:
-            raise ResponseError.ingestion(private_message="same-side message cannot appear before pending tool outputs")
+            raise _tool_replay_error(
+                reason="pending_tool_outputs_block_message", private_message="same-side message cannot appear before pending tool outputs"
+            )
 
     def _mark_pending_tool_call(self, call_id: str) -> None:
         if call_id in self._pending_tool_call_ids:
-            raise ResponseError.ingestion(private_message="duplicate pending function_call")
+            raise _tool_replay_error(reason="duplicate_pending_function_call", private_message="duplicate pending function_call")
         self._pending_tool_call_ids.add(call_id)
 
     def _mark_reasoning_tool_call_replayed(self, call_id: str) -> None:
@@ -220,7 +314,10 @@ class _QueueBase:
 
     def _consume_pending_tool_call(self, call_id: str) -> None:
         if call_id not in self._pending_tool_call_ids:
-            raise ResponseError.ingestion(private_message="function_call_output has no pending function_call")
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
         self._pending_tool_call_ids.remove(call_id)
 
     def _track_reasoning_tool_calls(self, message: StateMessage) -> None:
@@ -231,9 +328,9 @@ class _QueueBase:
         for tool_call in message.tool_calls:
             tool_call_id = tool_call.id
             if not tool_call_id:
-                raise ResponseError.ingestion(private_message="reasoning tool call id is missing")
+                raise _reasoning_replay_error(reason="reasoning_tool_call_id_missing", private_message="reasoning tool call id is missing")
             if tool_call_id in self._reasoning_tool_call_ids_seen:
-                raise ResponseError.ingestion(private_message="duplicate reasoning tool call")
+                raise _reasoning_replay_error(reason="duplicate_reasoning_tool_call", private_message="duplicate reasoning tool call")
             self._reasoning_tool_call_ids_seen.add(tool_call_id)
             self._unreplayed_reasoning_tool_call_ids.add(tool_call_id)
 
@@ -242,9 +339,13 @@ class _QueueBase:
             return
         tool_call_id = message.tool_call_id
         if not tool_call_id:
-            raise ResponseError.ingestion(private_message="reasoning tool output tool_call_id is missing")
+            raise _reasoning_replay_error(
+                reason="reasoning_tool_output_call_id_missing", private_message="reasoning tool output tool_call_id is missing"
+            )
         if tool_call_id not in self._unreplayed_reasoning_tool_call_ids:
-            raise ResponseError.ingestion(private_message="reasoning tool output has no pending tool call")
+            raise _reasoning_replay_error(
+                reason="reasoning_tool_output_without_pending_call", private_message="reasoning tool output has no pending tool call"
+            )
         self._unreplayed_reasoning_tool_call_ids.remove(tool_call_id)
 
     def _track_reasoning_message(self, message: StateMessage) -> None:
@@ -253,9 +354,13 @@ class _QueueBase:
 
     def assert_no_pending_tool_calls(self) -> None:
         if self._unreplayed_reasoning_tool_call_ids:
-            raise ResponseError.ingestion(private_message="reasoning tool call is missing function_call item")
+            raise _reasoning_replay_error(
+                reason="reasoning_tool_call_missing_function_call_item", private_message="reasoning tool call is missing function_call item"
+            )
         if self._pending_tool_call_ids:
-            raise ResponseError.ingestion(private_message="function_call is missing function_call_output")
+            raise _tool_replay_error(
+                reason="function_call_missing_function_call_output", private_message="function_call is missing function_call_output"
+            )
 
 
 class _MainQueue(_QueueBase):
@@ -344,7 +449,10 @@ class _MainQueue(_QueueBase):
         for entry in reversed(self._entries):
             if entry.message.is_assistant():
                 return entry.message
-        raise ResponseError.ingestion(private_message="fabricated function_call has no previous assistant message")
+        raise _tool_replay_error(
+            reason="fabricated_function_call_without_previous_assistant",
+            private_message="fabricated function_call has no previous assistant message",
+        )
 
 
 class _PrivateSideQueue(_QueueBase):
@@ -440,7 +548,9 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
 
 def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
     if item.encrypted_content is None:
-        raise ResponseError.ingestion(private_message="unsealed reasoning input is not trusted")
+        raise _reasoning_replay_error(
+            reason="unsealed_reasoning_input_untrusted", private_message="unsealed reasoning input is not trusted"
+        )
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)
 
 
@@ -468,7 +578,9 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
         if isinstance(item.item, RequestFunctionCallItem):
             if item.call_id is None:
                 if item.item.call_id in pending_unsealed:
-                    raise ResponseError.ingestion(private_message="duplicate pending unsealed function_call")
+                    raise _tool_replay_error(
+                        reason="duplicate_pending_unsealed_function_call", private_message="duplicate pending unsealed function_call"
+                    )
                 pending_unsealed[item.item.call_id] = item.item
                 routed.continuation_side = Side.MAIN
                 routed.main.append(_SideEvent(kind=_EventKind.FABRICATED_FUNCTION_CALL, call=item.item))
@@ -486,7 +598,10 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
             if item.call_id is None:
                 call = pending_unsealed.pop(item.item.call_id, None)
                 if call is None:
-                    raise ResponseError.ingestion(private_message="unsealed function_call_output has no matching function_call")
+                    raise _tool_replay_error(
+                        reason="unsealed_function_call_output_without_matching_function_call",
+                        private_message="unsealed function_call_output has no matching function_call",
+                    )
                 routed.continuation_side = Side.MAIN
                 routed.main.append(_SideEvent(kind=_EventKind.FABRICATED_FUNCTION_CALL_OUTPUT, output=item.item))
             else:
@@ -500,7 +615,9 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
                     )
                 )
     if pending_unsealed:
-        raise ResponseError.ingestion(private_message="unsealed function_call is missing function_call_output")
+        raise _tool_replay_error(
+            reason="unsealed_function_call_missing_output", private_message="unsealed function_call is missing function_call_output"
+        )
     return routed
 
 
@@ -523,6 +640,8 @@ def _associate_side_queues(
     _apply_side_events(queues.arbitrator, routed.arbitrator)
     _assert_no_pending_tool_calls(queues)
     return queues
+
+
 def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:
     for event in events:
         if event.kind == _EventKind.MESSAGE:
@@ -547,14 +666,18 @@ def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:
             continue
         if event.kind == _EventKind.FABRICATED_FUNCTION_CALL:
             if not isinstance(queue, _MainQueue):
-                raise ResponseError.ingestion(private_message="fabricated function_call can only route to main")
+                raise _tool_replay_error(
+                    reason="fabricated_function_call_wrong_side", private_message="fabricated function_call can only route to main"
+                )
             if event.call is None:
                 raise TypeError("fabricated_function_call event is malformed")
             queue.attach_fabricated_call(event.call)
             continue
         if event.kind == _EventKind.FABRICATED_FUNCTION_CALL_OUTPUT:
             if not isinstance(queue, _MainQueue):
-                raise ResponseError.ingestion(private_message="fabricated function_call can only route to main")
+                raise _tool_replay_error(
+                    reason="fabricated_function_call_output_wrong_side", private_message="fabricated function_call can only route to main"
+                )
             if event.output is None:
                 raise TypeError("fabricated_function_call_output event is malformed")
             queue.attach_fabricated_output(event.output)
@@ -571,7 +694,7 @@ def _initial_cursors(compaction: CompactionPayload | None) -> dict[str, int]:
         return {"m": 0}
     cursors = {"m": 0, **compaction.cursors}
     if cursors["m"] < 0:
-        raise ResponseError.ingestion(private_message="compaction cursors must be non-negative")
+        raise _compaction_replay_error(reason="compaction_cursors_negative", private_message="compaction cursors must be non-negative")
     return cursors
 
 

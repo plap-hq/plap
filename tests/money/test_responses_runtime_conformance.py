@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from plap.app import create_app
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
+from plap.llms.chat import ReasoningEffort
 from plap.persistence import create_database_engine, create_session_maker
 from plap.persistence.models import (
     Organization,
@@ -34,6 +35,7 @@ from plap.settings import (
     RuntimeModelPricingConfig,
     RuntimeModelProfileConfig,
     Settings,
+    _default_reasoning_effort_overrides,
 )
 from tests.pytest_plugins.database import (
     _reset_database_schema,
@@ -622,6 +624,8 @@ def _runtime_profile(
         compression_soft_token_budget=compression_soft_token_budget,
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
+        default_reasoning_effort=ReasoningEffort.MEDIUM,
+        by_reasoning_effort=_default_reasoning_effort_overrides(),
     )
 
 

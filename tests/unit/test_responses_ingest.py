@@ -8,6 +8,7 @@ import pytest
 import zstandard as zstd
 from nacl.secret import Aead
 
+from plap.errors import PlapError
 from plap.keyring import SealingKeyring, purpose_label
 from plap.responses.contracts import (
     RequestCompactionItem,
@@ -18,7 +19,6 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
-from plap.responses.errors import ResponseError
 from plap.responses.ingest import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
     ChatMessageSpan,
@@ -54,6 +54,23 @@ async def ingest_response_request(
         request,
         keyring=keyring,
     )
+
+
+def _assert_plap_error(
+    exc: PlapError,
+    *,
+    code: str | None = None,
+    param: str | None = None,
+    private_reason: str | None = None,
+) -> None:
+    if code is not None:
+        assert exc.public is not None
+        assert exc.public.code == code
+    if param is not None:
+        assert exc.public is not None
+        assert exc.public.param == param
+    if private_reason is not None:
+        assert exc.private.reason == private_reason
 
 
 def _main_transcript(
@@ -463,7 +480,7 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
 
 
 async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> None:
-    with pytest.raises(ResponseError, match="pending tool outputs"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
                 input=[
@@ -481,6 +498,8 @@ async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> N
             keyring=_keyring(),
         )
 
+    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="pending_tool_outputs_block_message")
+
 
 async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
     first_call = RequestFunctionCallItem(
@@ -496,11 +515,13 @@ async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
         type="function_call",
     )
 
-    with pytest.raises(ResponseError, match="duplicate pending unsealed"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(input=[_message("assistant", "anchor"), first_call, second_call]),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="duplicate_pending_unsealed_function_call")
 
 
 async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> None:
@@ -511,7 +532,7 @@ async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> Non
         upstream_tool_call_id="up_reviewer_0",
     )
 
-    with pytest.raises(ResponseError, match="pending tool outputs"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
                 input=[
@@ -527,6 +548,8 @@ async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> Non
             ),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="pending_tool_outputs_block_message")
 
 
 async def test_ingestion_allows_stripped_tool_call_association() -> None:
@@ -565,11 +588,15 @@ async def test_ingestion_requires_reasoning_tool_call_public_replay() -> None:
         "tool_calls": [_tool_call("up_reasoning_0")],
     }
 
-    with pytest.raises(ResponseError, match="missing function_call item"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(input=[_reasoning_item("reviewer", False, [assistant])]),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(
+        exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_tool_call_missing_function_call_item"
+    )
 
 
 async def test_ingestion_accepts_reasoning_tool_call_satisfied_by_hidden_output() -> None:
@@ -638,7 +665,7 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
         upstream_tool_call_id="up_reasoning_0",
     )
 
-    with pytest.raises(ResponseError, match="missing function_call_output"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
                 input=[
@@ -649,11 +676,15 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
             keyring=_keyring(),
         )
 
+    _assert_plap_error(
+        exc_info.value, code="invalid_tool_replay", param="input", private_reason="function_call_missing_function_call_output"
+    )
+
 
 async def test_ingestion_rejects_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 
-    with pytest.raises(ResponseError, match="content_hash target is missing"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
                 input=[
@@ -672,6 +703,10 @@ async def test_ingestion_rejects_reasoning_forward_refs() -> None:
             ),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(
+        exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_content_hash_target_missing"
+    )
 
 
 async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None:
@@ -732,11 +767,18 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
         upstream_tool_call_id="up_missing_0",
     )
 
-    with pytest.raises(ResponseError, match="content_hash target is missing"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(input=[_function_call(call_id)]),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_tool_replay",
+        param="input",
+        private_reason="sealed_function_call_content_hash_target_missing",
+    )
 
 
 async def test_ingestion_uses_nearest_backward_hash_prefix_match(
@@ -787,7 +829,7 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
 
 
 async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
-    with pytest.raises(ResponseError):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
                 input=[
@@ -801,6 +843,8 @@ async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
             ),
             keyring=_keyring(),
         )
+
+    _assert_plap_error(exc_info.value, code="invalid_input_replay", param="input", private_reason="sealed_payload_not_base64url")
 
 
 def test_payload_domain_objects_do_not_expose_version_or_type_truths() -> None:
@@ -842,8 +886,10 @@ def test_sealed_compaction_rejects_wrong_payload_type() -> None:
         },
     )
 
-    with pytest.raises(ResponseError, match="unsupported compaction payload"):
+    with pytest.raises(PlapError) as exc_info:
         open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="unsupported_compaction_payload")
 
 
 def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
@@ -862,8 +908,12 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
         keyring=_keyring(),
     )
 
-    with pytest.raises(ResponseError, match="outside cursor"):
+    with pytest.raises(PlapError) as exc_info:
         open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(
+        exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_active_span_outside_cursor"
+    )
 
 
 def test_sealed_compaction_requires_token_count() -> None:
@@ -883,8 +933,10 @@ def test_sealed_compaction_requires_token_count() -> None:
         },
     )
 
-    with pytest.raises(ResponseError, match="token_count"):
+    with pytest.raises(PlapError) as exc_info:
         open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_payload_invalid")
 
 
 def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None:
@@ -911,8 +963,12 @@ def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None
         },
     )
 
-    with pytest.raises(ResponseError, match="summary_fidelity"):
+    with pytest.raises(PlapError) as exc_info:
         open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(
+        exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_summary_fidelity_missing"
+    )
 
 
 def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
@@ -939,8 +995,10 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
         keyring=_keyring(),
     )
 
-    with pytest.raises(ResponseError, match="overlap"):
+    with pytest.raises(PlapError) as exc_info:
         open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_active_spans_overlap")
 
 
 async def test_ingestion_main_context_active_transcript_budgeted() -> None:

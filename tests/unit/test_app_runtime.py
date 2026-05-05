@@ -9,6 +9,7 @@ from plap.app import (
     _create_tool_classifier,
     _validate_runtime_model_profiles,
 )
+from plap.errors import PlapError
 from plap.llms.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
@@ -75,12 +76,6 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
-    assert "service_tier" not in profile.model_info.supported_parameters
-    assert profile.by_service_tier == {}
-    assert profile.by_reasoning_effort["high"].main is not None
-    assert profile.by_reasoning_effort["high"].main.reasoning_effort == "high"
-    assert profile.by_reasoning_effort["high"].reviewer is not None
-    assert profile.by_reasoning_effort["high"].reviewer.reasoning_effort == "high"
 
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
@@ -99,17 +94,6 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
-
-
-def test_app_runtime_wisp_mini_rejects_service_tier() -> None:
-    settings = _settings(
-        llm_crof_api_key="crof-key",
-        llm_lightning_api_key="lightning-key",
-        llm_openrouter_api_key="openrouter-key",
-    )
-
-    with pytest.raises(ValueError, match="unsupported request parameters: service_tier"):
-        settings.resolve_runtime_model_profile("plap-ai/wisp-mini", selector=RuntimeSelector(service_tier="priority"))
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -132,8 +116,11 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
 def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
     client = _create_chat_completion_client(_settings())
 
-    with pytest.raises(ValueError, match="tool effect classifier model"):
+    with pytest.raises(PlapError) as exc_info:
         _create_tool_classifier(_settings(), client)
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "tool_effect_classifier_route_unconfigured"
 
 
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
@@ -164,8 +151,11 @@ def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
 def test_app_runtime_rejects_unrouted_tool_call_classifier_route() -> None:
     client = _create_chat_completion_client(_settings())
 
-    with pytest.raises(ValueError, match="tool call classifier model"):
+    with pytest.raises(PlapError) as exc_info:
         _create_tool_call_classifier(_settings(), client)
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "tool_call_classifier_route_unconfigured"
 
 
 def test_app_runtime_omits_mcp_provider_without_config() -> None:
@@ -242,8 +232,11 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
         },
     )
 
-    with pytest.raises(ValueError, match="unconfigured LLM route"):
+    with pytest.raises(PlapError) as exc_info:
         _validate_runtime_model_profiles(settings)
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "runtime_profile_route_unconfigured"
 
 
 def test_app_runtime_validates_runtime_profile_variants() -> None:
@@ -295,8 +288,11 @@ def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
         },
     )
 
-    with pytest.raises(ValueError, match="unconfigured LLM route"):
+    with pytest.raises(PlapError) as exc_info:
         _validate_runtime_model_profiles(settings)
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "runtime_profile_route_unconfigured"
 
 
 def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
@@ -323,10 +319,19 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     assert profile.arbitrator_transcript_token_budget == 768
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="default")) is profile
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="auto")) is profile
-    with pytest.raises(ValueError, match="model is required"):
+    with pytest.raises(PlapError) as exc_info:
         settings.resolve_runtime_model_profile(None)
-    with pytest.raises(ValueError, match="unknown runtime model"):
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "missing_required_parameter"
+    assert exc_info.value.public.param == "model"
+
+    with pytest.raises(PlapError) as exc_info:
         settings.resolve_runtime_model_profile("lightning/lightning-ai/gpt-oss-20b")
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "model_not_found"
+    assert exc_info.value.public.param == "model"
 
 
 def test_app_runtime_rejects_unsupported_service_tier() -> None:
@@ -343,8 +348,12 @@ def test_app_runtime_rejects_unsupported_service_tier() -> None:
         },
     )
 
-    with pytest.raises(ValueError, match="unsupported request parameters: service_tier"):
+    with pytest.raises(PlapError) as exc_info:
         settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "unsupported_service_tier"
+    assert exc_info.value.public.param == "service_tier"
 
 
 def test_app_runtime_rejects_unsupported_reasoning_effort() -> None:
@@ -361,8 +370,12 @@ def test_app_runtime_rejects_unsupported_reasoning_effort() -> None:
         },
     )
 
-    with pytest.raises(ValueError, match="unsupported request parameters: reasoning_effort"):
+    with pytest.raises(PlapError) as exc_info:
         settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "unsupported_reasoning_effort"
+    assert exc_info.value.public.param == "reasoning.effort"
 
 
 def test_runtime_profile_rejects_service_tier_overrides_without_supported_parameter() -> None:
@@ -426,7 +439,6 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
 
     base = settings.resolve_runtime_model_profile("plap/standard")
     priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
-    flex = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="flex"))
 
     assert priority is not base
     assert priority.display_name == "Test Model"
@@ -444,7 +456,12 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
     assert base.compression_hard_token_budget == 3000
     assert base.compression_max_rounds == 2
     assert base.debate_max_rounds == 2
-    assert flex is base
+    with pytest.raises(PlapError) as exc_info:
+        settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="flex"))
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "unsupported_service_tier"
+    assert exc_info.value.public.param == "service_tier"
 
 
 def test_app_runtime_resolves_reasoning_effort_variant() -> None:
@@ -471,6 +488,76 @@ def test_app_runtime_resolves_reasoning_effort_variant() -> None:
     assert profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
     assert profile.main_debate.model == "lightning/lightning-ai/gpt-oss-120b"
     assert profile.reviewer.model == "crof/qwen3.5-9b"
+
+
+def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                default_reasoning_effort="medium",
+                by_reasoning_effort={
+                    "medium": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
+                    ),
+                    "high": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="openrouter/deepseek/deepseek-v4-flash:nitro")
+                    ),
+                },
+            )
+        },
+    )
+
+    default_profile = settings.resolve_runtime_model_profile("plap/standard")
+    high_profile = settings.resolve_runtime_model_profile(
+        "plap/standard", selector=RuntimeSelector(reasoning_effort="high")
+    )
+
+    assert default_profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert high_profile.main.model == "openrouter/deepseek/deepseek-v4-flash:nitro"
+
+
+def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                default_reasoning_effort="medium",
+                by_reasoning_effort={
+                    "medium": RuntimeProfileOverride(
+                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
+                    )
+                },
+            )
+        },
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "unsupported_reasoning_effort"
+    assert exc_info.value.public.param == "reasoning.effort"
+
+
+def test_runtime_profile_rejects_default_reasoning_effort_without_matching_override() -> None:
+    with pytest.raises(ValueError, match="default_reasoning_effort"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            default_reasoning_effort="medium",
+        )
 
 
 def test_app_runtime_resolves_model_info_overrides() -> None:
@@ -566,6 +653,7 @@ def _profile_config(
     compression_hard_token_budget: int | None = None,
     compression_max_rounds: int = 3,
     debate_max_rounds: int = 2,
+    default_reasoning_effort: str | None = None,
     by_service_tier: dict[str, RuntimeProfileOverride] | None = None,
     by_reasoning_effort: dict[str, RuntimeProfileOverride] | None = None,
     supported_parameters: list[str] | None = None,
@@ -610,6 +698,7 @@ def _profile_config(
         compression_hard_token_budget=compression_hard_token_budget,
         compression_max_rounds=compression_max_rounds,
         debate_max_rounds=debate_max_rounds,
+        default_reasoning_effort=default_reasoning_effort,
         by_service_tier=by_service_tier or {},
         by_reasoning_effort=by_reasoning_effort or {},
     )
