@@ -101,6 +101,11 @@ class RequestMessageItem(StrictModel):
         )
 
 
+class RequestItemReference(StrictModel):
+    id: str = Field(description="ID of a previously created response item to include by reference.")
+    type: Literal["item_reference"] = Field(description="Input item discriminator.")
+
+
 class _FunctionCallItemBase(StrictModel):
     arguments: str = Field(description="JSON string of arguments emitted by the model.")
     call_id: str = Field(description="Stable call ID paired with function output.")
@@ -178,7 +183,12 @@ class RequestCompactionItem(_CompactionItemBase):
 
 
 type RequestInputItem = Annotated[
-    RequestMessageItem | RequestFunctionCallItem | RequestFunctionCallOutputItem | RequestReasoningItem | RequestCompactionItem,
+    RequestMessageItem
+    | RequestItemReference
+    | RequestFunctionCallItem
+    | RequestFunctionCallOutputItem
+    | RequestReasoningItem
+    | RequestCompactionItem,
     Field(discriminator="type"),
 ]
 
@@ -243,6 +253,11 @@ class InputItemsMessageItem(StrictModel):
 
 
 type InputItemsPageItem = Annotated[
-    InputItemsMessageItem | ResponseFunctionCallItem | ResponseFunctionCallOutputItem | ResponseReasoningItem | ResponseCompactionItem,
+    InputItemsMessageItem
+    | RequestItemReference
+    | ResponseFunctionCallItem
+    | ResponseFunctionCallOutputItem
+    | ResponseReasoningItem
+    | ResponseCompactionItem,
     Field(discriminator="type"),
 ]

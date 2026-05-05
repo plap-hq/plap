@@ -23,6 +23,7 @@ from plap.responses.contracts import (
     InputItemsPage,
     InputItemsPageItem,
     RequestInputItem,
+    RequestItemReference,
     RequestMessageItem,
     ResponseCreateRequest,
     ResponseObject,
@@ -145,6 +146,44 @@ def _input_items_after_not_found_error() -> PlapError:
     )
 
 
+def _item_reference_not_found_error(item_id: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="item_not_found",
+            message=f"Item with id '{item_id}' not found.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="item_reference_not_found",
+            message=f"item_reference target was not found: {item_id}",
+            level=ErrorLevel.WARNING,
+            context={"item_id": item_id},
+        ),
+    )
+
+
+def _item_reference_ambiguous_error(item_id: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="item_reference_ambiguous",
+            message=f"Item reference '{item_id}' is ambiguous.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="item_reference_ambiguous",
+            message=f"item_reference matched multiple stored items: {item_id}",
+            level=ErrorLevel.WARNING,
+            context={"item_id": item_id},
+        ),
+    )
+
+
 @dataclass(slots=True)
 class PreparedRequest:
     scope_id: UUID
@@ -171,7 +210,9 @@ class ResponseStore:
         current_input_items = self._current_input_items(request)
         parent_response_id = request.previous_response_id
         replay_items: list[RequestInputItem] = []
-        if parent_response_id is not None or conversation_id is not None:
+        execution_replay_items: list[RequestInputItem] = []
+        execution_current_input_items: list[RequestInputItem] = list(current_input_items)
+        if parent_response_id is not None or conversation_id is not None or self._has_item_references(current_input_items):
             async with self._database.connection() as connection:
                 if parent_response_id is not None:
                     await self._require_replayable_response(
@@ -185,9 +226,13 @@ class ResponseStore:
 
                 if parent_response_id is not None:
                     replay_items = await self._replay_items(connection, scope_id, parent_response_id)
+                execution_replay_items = await self._resolve_item_references(connection, scope_id, replay_items)
+                execution_current_input_items = await self._resolve_item_references(connection, scope_id, current_input_items)
+        else:
+            execution_replay_items = replay_items
 
         response_request = request.model_copy(update={"previous_response_id": parent_response_id})
-        execution_request = request.model_copy(update={"input": [*replay_items, *current_input_items]})
+        execution_request = request.model_copy(update={"input": [*execution_replay_items, *execution_current_input_items]})
         log_debug(
             logger,
             "response.store.prepared",
@@ -477,6 +522,10 @@ class ResponseStore:
             return [RequestMessageItem(content=request.input, role="user", type="message")]
         return list(request.input)
 
+    @staticmethod
+    def _has_item_references(items: list[RequestInputItem]) -> bool:
+        return any(isinstance(item, RequestItemReference) for item in items)
+
     async def _require_replayable_response(
         self,
         connection: AsyncConnection,
@@ -521,6 +570,71 @@ class ResponseStore:
         finally:
             result.close()
         return [self._request_input_from_payload(payload) for payload in rows]
+
+    async def _resolve_item_references(
+        self,
+        connection: AsyncConnection,
+        scope_id: UUID,
+        items: list[RequestInputItem],
+    ) -> list[RequestInputItem]:
+        resolved: list[RequestInputItem] = []
+        for item in items:
+            if not isinstance(item, RequestItemReference):
+                resolved.append(item)
+                continue
+            resolved.append(await self._resolve_item_reference(connection, scope_id, item.id))
+        return resolved
+
+    async def _resolve_item_reference(
+        self,
+        connection: AsyncConnection,
+        scope_id: UUID,
+        item_id: str,
+    ) -> RequestInputItem:
+        result = await connection.execute(
+            text(
+                """
+                select payload.payload_json
+                  from responses.response_input_items item
+                  join responses.payloads payload
+                    on payload.scope_id = item.scope_id
+                   and payload.payload_id = item.payload_id
+                 where item.scope_id = :scope_id
+                   and payload.payload_json ->> 'id' = :item_id
+                   and coalesce(payload.payload_json ->> 'type', '') <> 'item_reference'
+                   and not exists (
+                     select 1
+                       from responses.response_tombstones tombstone
+                      where tombstone.scope_id = item.scope_id
+                        and tombstone.response_id = item.response_id
+                   )
+                union all
+                select payload.payload_json
+                  from responses.response_output_items item
+                  join responses.payloads payload
+                    on payload.scope_id = item.scope_id
+                   and payload.payload_id = item.payload_id
+                 where item.scope_id = :scope_id
+                   and payload.payload_json ->> 'id' = :item_id
+                   and not exists (
+                     select 1
+                       from responses.response_tombstones tombstone
+                      where tombstone.scope_id = item.scope_id
+                        and tombstone.response_id = item.response_id
+                   )
+                """
+            ),
+            {"scope_id": scope_id, "item_id": item_id},
+        )
+        try:
+            payloads = [dict(cast(Mapping[str, object], payload)) for payload in result.scalars().all()]
+        finally:
+            result.close()
+        if not payloads:
+            raise _item_reference_not_found_error(item_id)
+        if len(payloads) > 1:
+            raise _item_reference_ambiguous_error(item_id)
+        return self._request_input_from_payload(payloads[0])
 
     @staticmethod
     def _request_input_from_payload(payload: Mapping[str, object]) -> RequestInputItem:

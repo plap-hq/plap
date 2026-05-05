@@ -29,6 +29,10 @@ def _normalize_easy_input_messages(value: object) -> object:
             normalized.append({"type": "message", **item})
             changed = True
             continue
+        if isinstance(item, dict) and "type" not in item and set(item) == {"id"}:
+            normalized.append({"type": "item_reference", **item})
+            changed = True
+            continue
         normalized.append(item)
     return normalized if changed else value
 
@@ -250,6 +254,7 @@ class ResponseCreateRequest(StrictModel):
             value,
             allowed={
                 "message",
+                "item_reference",
                 "function_call",
                 "function_call_output",
                 "reasoning",

@@ -1,9 +1,18 @@
+import json
 from collections.abc import AsyncIterator
 
 from litestar.testing import AsyncTestClient
 from sqlalchemy import text
 
+from plap.auth import AuthContext
+from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.chat import ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
+from plap.responses.contracts import ResponseCreateRequest
+from plap.responses.contracts.events import ResponseTextDoneEvent
+from plap.responses.ingest import content_hash, seal_reasoning_payload
+from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, StateMessage
+from plap.responses.routes import _sse_payload
+from plap.responses.store import ResponseStore
 from plap.responses.tools import (
     IToolClassifier,
     ToolClassification,
@@ -225,6 +234,176 @@ async def test_previous_response_id_replays_persisted_history(
     assert replay_rows[2].payload["content"] == "second turn"
 
 
+async def test_item_reference_inputs_expand_for_execution_and_persist_raw_references(
+    test_app,
+    seeded_auth_data,
+    db_session_maker,
+) -> None:
+    response_store = ResponseStore(test_app.state.database)
+    auth_context = AuthContext(
+        api_key_id=seeded_auth_data.api_key_id,
+        organization_id=seeded_auth_data.organization_id,
+        user_id=seeded_auth_data.user_id,
+    )
+    first_message = StateMessage(role="assistant", content="first reply")
+    first_message_hash = content_hash(first_message)
+
+    async with db_session_maker() as session:
+        await _append_response(
+            session,
+            seeded_auth_data.organization_id,
+            "resp_first",
+            input_items=[{"type": "message", "id": "in_resp_first_0", "role": "user", "content": "hello"}],
+            output_items=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_first",
+                    "status": "completed",
+                    "summary": [],
+                    "encrypted_content": seal_reasoning_payload(
+                        ReasoningPayload(
+                            side="main",
+                            temp=False,
+                            messages=(
+                                ReasoningMessagePatch(
+                                    content_hash=first_message_hash,
+                                    reasoning_content="first thinking",
+                                ),
+                            ),
+                        ),
+                        keyring=test_app.state.sealing_keyring,
+                    ),
+                },
+                {
+                    "type": "message",
+                    "id": "msg_first",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "first reply"}],
+                },
+            ],
+        )
+        await _append_response(
+            session,
+            seeded_auth_data.organization_id,
+            "resp_second",
+            input_items=[
+                {"type": "item_reference", "id": "rs_first"},
+                {"type": "item_reference", "id": "msg_first"},
+                {"type": "message", "id": "in_resp_second_2", "role": "user", "content": "follow up"},
+            ],
+            output_items=[
+                {
+                    "type": "message",
+                    "id": "msg_second",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "second reply"}],
+                }
+            ],
+        )
+        await session.commit()
+
+    prepared_second = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                {"type": "item_reference", "id": "rs_first"},
+                {"type": "item_reference", "id": "msg_first"},
+                {"type": "message", "role": "user", "content": "follow up"},
+            ],
+        ),
+    )
+    prepared_third = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="third turn", previous_response_id="resp_second"),
+    )
+    second_input_items = await response_store.list_input_items(
+        auth_context,
+        "resp_second",
+        after=None,
+        limit=None,
+        order=None,
+    )
+
+    second_execution_input = prepared_second.execution_request.input
+    assert [item.type for item in second_execution_input] == ["reasoning", "message", "message"]
+    assert second_execution_input[0].id == "rs_first"
+    assert second_execution_input[1].content[0].text == "first reply"
+    assert second_execution_input[2].content == "follow up"
+
+    third_execution_input = prepared_third.execution_request.input
+    assert [item.type for item in third_execution_input] == ["reasoning", "message", "message", "message", "message"]
+    assert third_execution_input[0].id == "rs_first"
+    assert third_execution_input[1].content[0].text == "first reply"
+    assert third_execution_input[2].content == "follow up"
+    assert third_execution_input[3].content[0].text == "second reply"
+    assert third_execution_input[4].content == "third turn"
+
+    assert [item.type for item in second_input_items.data] == ["item_reference", "item_reference", "message"]
+    assert [item.id for item in second_input_items.data[:2]] == ["rs_first", "msg_first"]
+    assert second_input_items.data[2].content == "follow up"
+
+
+async def test_create_response_rejects_missing_item_reference(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "plap/test", "input": [{"type": "item_reference", "id": "msg_missing"}]},
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "item_not_found"
+    assert body["error"]["message"] == "Item with id 'msg_missing' not found."
+    assert body["error"]["param"] == "input"
+
+
+async def test_sse_payload_emits_error_event_on_late_stream_failure() -> None:
+    async def events() -> AsyncIterator[ResponseTextDoneEvent]:
+        yield ResponseTextDoneEvent(
+            content_index=0,
+            item_id="msg_1",
+            output_index=0,
+            sequence_number=1,
+            text="partial",
+            type="response.output_text.done",
+        )
+        raise PlapError(
+            public=PublicError(
+                status_code=400,
+                type="invalid_request_error",
+                code="provider_error",
+                message="Provider returned error",
+            ),
+            private=PrivateError(
+                event="response.invalid_request",
+                reason="provider_bad_request",
+                message="provider rejected request",
+                level=ErrorLevel.WARNING,
+            ),
+        )
+
+    chunks = [chunk async for chunk in _sse_payload(events())]
+
+    assert '"type":"response.output_text.done"' in chunks[0]
+    assert json.loads(chunks[1]) == {
+        "type": "error",
+        "sequence_number": 2,
+        "code": "provider_error",
+        "message": "Provider returned error",
+    }
+    assert chunks[2] == "[DONE]"
+
+
 async def test_create_response_prepares_runtime_tools_without_changing_behavior(
     test_app,
     seeded_auth_data,
@@ -410,6 +589,38 @@ class _RecordingChatCompletionClient(IChatCompletionClient):
         _ = request
         if False:
             yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
+
+
+async def _append_response(
+    session,
+    scope_id,
+    response_id: str,
+    *,
+    prev_response_id: str | None = None,
+    input_items: list[dict[str, object]] | None = None,
+    output_items: list[dict[str, object]] | None = None,
+) -> None:
+    await session.execute(
+        text(
+            """
+            select responses.append_response(
+              :scope_id,
+              :response_id,
+              :prev_response_id,
+              cast(:input_items as jsonb),
+              cast(:output_items as jsonb),
+              null
+            )
+            """
+        ),
+        {
+            "scope_id": scope_id,
+            "response_id": response_id,
+            "prev_response_id": prev_response_id,
+            "input_items": json.dumps(input_items or []),
+            "output_items": json.dumps(output_items or []),
+        },
+    )
 
 
 def _error_code(response) -> tuple[int, str | None, str]:

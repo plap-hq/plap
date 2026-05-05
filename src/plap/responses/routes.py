@@ -81,8 +81,47 @@ def _unsupported_operation_error(*, code: str, message: str, reason: str, privat
 async def _sse_payload(
     events: AsyncIterator[ResponseStreamEvent],
 ) -> AsyncIterator[str]:
-    async for event in events:
-        yield event.model_dump_json(exclude_none=True)
+    last_sequence_number = 0
+    try:
+        async for event in events:
+            last_sequence_number = event.sequence_number
+            yield event.model_dump_json(exclude_none=True)
+    except PlapError as exc:
+        public = exc.public or PublicError(
+            status_code=500,
+            type="server_error",
+            code="server_error",
+            message="Response generation failed.",
+        )
+        exc.log(
+            logger,
+            failure_code=public.code,
+            failure_type=public.type,
+            path="/v1/responses",
+            status_code=public.status_code,
+            transport="sse",
+        )
+        yield build_error_event(public=public).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(
+            exclude_none=True
+        )
+    except Exception:
+        logger.exception(
+            "response.sse.unhandled_failed",
+            error_type="server_error",
+            failure_code="server_error",
+            failure_type="server_error",
+            path="/v1/responses",
+            status_code=500,
+            transport="sse",
+        )
+        yield build_error_event(
+            public=PublicError(
+                status_code=500,
+                type="server_error",
+                code="server_error",
+                message="Response generation failed.",
+            )
+        ).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(exclude_none=True)
     yield "[DONE]"
 
 
