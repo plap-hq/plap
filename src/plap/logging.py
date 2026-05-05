@@ -30,17 +30,19 @@ def configure_logging(settings: Any) -> None:
         if log_json
         else structlog.dev.ConsoleRenderer(colors=_LOG_STREAM.isatty())
     )
+    processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+    ]
+    if log_json:
+        processors.append(structlog.processors.dict_tracebacks)
+    processors.append(renderer)
     structlog.configure(
         cache_logger_on_first_use=True,
         logger_factory=structlog.PrintLoggerFactory(file=_LOG_STREAM),
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            renderer,
-        ],
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(level),
     )
 
