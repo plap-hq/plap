@@ -173,7 +173,7 @@ def _unsupported_parameters_error(model: str, unsupported: list[str]) -> PlapErr
     )
 
 
-def _unsupported_service_tier_error(model: str, service_tier: ServiceTier, *, reason: str, message: str) -> PlapError:
+def _unsupported_service_tier_error(model: str, service_tier: ServiceTier, *, reason: str, private_message: str) -> PlapError:
     return PlapError(
         public=PublicError(
             status_code=400,
@@ -185,14 +185,14 @@ def _unsupported_service_tier_error(model: str, service_tier: ServiceTier, *, re
         private=PrivateError(
             event="runtime_profile.invalid_request",
             reason=reason,
-            message=message,
+            message=private_message,
             level=ErrorLevel.WARNING,
             context={"model": model, "service_tier": service_tier},
         ),
     )
 
 
-def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, reason: str, message: str) -> PlapError:
+def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, reason: str, private_message: str) -> PlapError:
     return PlapError(
         public=PublicError(
             status_code=400,
@@ -204,7 +204,7 @@ def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, 
         private=PrivateError(
             event="runtime_profile.invalid_request",
             reason=reason,
-            message=message,
+            message=private_message,
             level=ErrorLevel.WARNING,
             context={"model": model, "reasoning_effort": effort},
         ),
@@ -607,7 +607,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     model,
                     selector.service_tier,
                     reason="unsupported_service_tier",
-                    message="unsupported request parameters: service_tier",
+                    private_message="unsupported request parameters: service_tier",
                 )
             override = self.by_service_tier.get(selector.service_tier)
             if override is None:
@@ -615,7 +615,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     model,
                     selector.service_tier,
                     reason="missing_service_tier_override",
-                    message=f"missing runtime profile override for service_tier: {selector.service_tier}",
+                    private_message=f"missing runtime profile override for service_tier: {selector.service_tier}",
                 )
             resolved = override.apply_to(resolved)
 
@@ -626,7 +626,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     model,
                     effective_reasoning_effort,
                     reason="unsupported_reasoning_effort",
-                    message="unsupported request parameters: reasoning_effort",
+                    private_message="unsupported request parameters: reasoning_effort",
                 )
             override = self.by_reasoning_effort.get(effective_reasoning_effort)
             if override is None:
@@ -634,7 +634,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     model,
                     effective_reasoning_effort,
                     reason="missing_reasoning_effort_override",
-                    message=f"missing runtime profile override for reasoning_effort: {effective_reasoning_effort}",
+                    private_message=f"missing runtime profile override for reasoning_effort: {effective_reasoning_effort}",
                 )
             resolved = override.apply_to(resolved)
 

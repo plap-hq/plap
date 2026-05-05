@@ -49,6 +49,7 @@ from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
+DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS = 3
 logger = structlog.get_logger(__name__)
 
 
@@ -58,7 +59,7 @@ def _debate_unavailable_error(*, reason: str, private_message: str, cause: BaseE
             status_code=503,
             type="server_error",
             code="temporarily_unavailable",
-            message="Response review is temporarily unavailable.",
+            message="Response generation is temporarily unavailable.",
         ),
         private=PrivateError(
             event="response.unavailable",
@@ -81,6 +82,39 @@ def _debate_internal_error(*, reason: str, private_message: str, cause: BaseExce
             cause=cause,
         ),
     )
+
+
+def _is_retryable_debate_error(exc: PlapError) -> bool:
+    return exc.private.reason in {
+        "reviewer_reopen_requires_note",
+        "arbitrator_note_required",
+        "decision_missing_content",
+        "decision_invalid_json",
+        "decision_invalid",
+        "debate_tool_arguments_invalid_json",
+        "debate_tool_arguments_not_object",
+    }
+
+
+async def _retry_structured_debate_step(actor: str, operation) -> object:
+    attempts = 0
+    while True:
+        try:
+            return await operation()
+        except PlapError as exc:
+            if not _is_retryable_debate_error(exc):
+                raise
+            attempts += 1
+            log_debug(
+                logger,
+                "debate.step.retry",
+                actor=actor,
+                attempt=attempts,
+                max_attempts=DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS,
+                reason=exc.private.reason,
+            )
+            if attempts >= DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS:
+                raise
 
 
 REVIEWER_DEVELOPER_PROMPT = """You are checking whether the current proposed answer should be sent to the user now.
@@ -941,18 +975,24 @@ async def continue_debate(
         log_debug(logger, "debate.turn", actor=actor, held_anchor_index=held_anchor_index)
 
         if actor == Actor.REVIEWER:
-            outcome = await run_reviewer_turn(
-                state=state,
-                parts=parts,
-                profile=profile,
-                request=request,
-                tools=safe_tools,
-                tool_policies=safe_tool_policies,
-                server_executors=safe_server_executors,
-                chat_completion_client=chat_completion_client,
-                prompt_cache_key_base=prompt_cache_key_base,
-                usage_ledger=usage_ledger,
-            )
+            async def reviewer_step(parts=parts):
+                outcome = await run_reviewer_turn(
+                    state=state,
+                    parts=parts,
+                    profile=profile,
+                    request=request,
+                    tools=safe_tools,
+                    tool_policies=safe_tool_policies,
+                    server_executors=safe_server_executors,
+                    chat_completion_client=chat_completion_client,
+                    prompt_cache_key_base=prompt_cache_key_base,
+                    usage_ledger=usage_ledger,
+                )
+                if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
+                    return outcome, None
+                return outcome, parse_reviewer_decision(outcome.assistant)
+
+            outcome, decision = await _retry_structured_debate_step(Actor.REVIEWER.value, reviewer_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -978,7 +1018,7 @@ async def continue_debate(
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            decision = parse_reviewer_decision(outcome.assistant)
+            assert decision is not None
             log_debug(logger, "debate.reviewer.decision", action=decision.action, note=decision.note)
             await _persist_temp_turn(
                 state=state,
@@ -1003,18 +1043,21 @@ async def continue_debate(
             continue
 
         if actor == Actor.MAIN_DEBATE:
-            outcome = await run_main_debate_turn(
-                state=state,
-                parts=parts,
-                profile=profile,
-                request=request,
-                tools=safe_tools,
-                tool_policies=safe_tool_policies,
-                server_executors=safe_server_executors,
-                chat_completion_client=chat_completion_client,
-                prompt_cache_key_base=prompt_cache_key_base,
-                usage_ledger=usage_ledger,
-            )
+            async def main_debate_step(parts=parts):
+                return await run_main_debate_turn(
+                    state=state,
+                    parts=parts,
+                    profile=profile,
+                    request=request,
+                    tools=safe_tools,
+                    tool_policies=safe_tool_policies,
+                    server_executors=safe_server_executors,
+                    chat_completion_client=chat_completion_client,
+                    prompt_cache_key_base=prompt_cache_key_base,
+                    usage_ledger=usage_ledger,
+                )
+
+            outcome = await _retry_structured_debate_step(Actor.MAIN_DEBATE.value, main_debate_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1053,18 +1096,24 @@ async def continue_debate(
             continue
 
         if actor == Actor.ARBITRATOR:
-            outcome = await run_arbitrator_turn(
-                state=state,
-                parts=parts,
-                profile=profile,
-                request=request,
-                tools=safe_tools,
-                tool_policies=safe_tool_policies,
-                server_executors=safe_server_executors,
-                chat_completion_client=chat_completion_client,
-                prompt_cache_key_base=prompt_cache_key_base,
-                usage_ledger=usage_ledger,
-            )
+            async def arbitrator_step(parts=parts):
+                outcome = await run_arbitrator_turn(
+                    state=state,
+                    parts=parts,
+                    profile=profile,
+                    request=request,
+                    tools=safe_tools,
+                    tool_policies=safe_tool_policies,
+                    server_executors=safe_server_executors,
+                    chat_completion_client=chat_completion_client,
+                    prompt_cache_key_base=prompt_cache_key_base,
+                    usage_ledger=usage_ledger,
+                )
+                if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
+                    return outcome, None
+                return outcome, parse_arbitrator_decision(outcome.assistant)
+
+            outcome, decision = await _retry_structured_debate_step(Actor.ARBITRATOR.value, arbitrator_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1090,7 +1139,7 @@ async def continue_debate(
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            decision = parse_arbitrator_decision(outcome.assistant)
+            assert decision is not None
             log_debug(logger, "debate.arbitrator.decision", action=decision.action, note=decision.note)
             if decision.action == ArbitratorActionType.REOPEN and _reviewer_round_count(state.reviewer) >= profile.debate_max_rounds:
                 decision = ArbitratorDecision(

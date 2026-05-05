@@ -1657,106 +1657,114 @@ async def test_stream_response_events_ignores_duplicate_tool_call_cutoff_when_pr
     assert payload.active[5].message.content == "new result"
 
 
-async def test_stream_response_events_rejects_missing_compression_fidelity() -> None:
+async def test_stream_response_events_bails_out_on_missing_compression_fidelity() -> None:
     client = _StaticChatClient(
-        ChatMessage(
-            role="assistant",
-            tool_calls=[
-                ChatToolCall(
-                    id="compress_call_1",
-                    name="compress",
-                    arguments=json.dumps(
-                        {
-                            "ranges": [
-                                {
-                                    "start": "[~0]",
-                                    "end": "[~1]",
-                                    "summary": "alpha beta summary",
-                                }
-                            ]
-                        }
-                    ),
-                )
-            ],
-        )
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~1]",
+                                        "summary": "alpha beta summary",
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
     )
 
-    with pytest.raises(PlapError) as exc_info:
-        _ = [
-            event
-            async for event in stream_response_events(
-                ResponseCreateRequest(
-                    model="plap/test",
-                    input=[_message("user", "alpha"), _message("assistant", "beta")],
-                ),
-                settings=_settings(),
-                sealing_keyring=_keyring(),
-                tool_policy_resolver=_RecordingResolver(),
-                tool_call_policy_resolver=_RecordingCallResolver(),
-                chat_completion_client=client,
-                reasoning_summarizer=_FakeReasoningSummarizer(),
-            )
-        ]
-
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_summary_fidelity_invalid")
-
-
-async def test_stream_response_events_rejects_overlapping_compression_ranges() -> None:
-    client = _StaticChatClient(
-        ChatMessage(
-            role="assistant",
-            tool_calls=[
-                ChatToolCall(
-                    id="compress_call_1",
-                    name="compress",
-                    arguments=json.dumps(
-                        {
-                            "ranges": [
-                                {
-                                    "start": "[~0]",
-                                    "end": "[~1]",
-                                    "summary": "first",
-                                    "summary_fidelity": 3,
-                                },
-                                {
-                                    "start": "[~1]",
-                                    "end": "[~2]",
-                                    "summary": "second",
-                                    "summary_fidelity": 3,
-                                },
-                            ]
-                        }
-                    ),
-                )
-            ],
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_message("user", "alpha"), _message("assistant", "beta")],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
         )
+    ]
+
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "done"
+    assert len(client.requests) == 2
+
+
+async def test_stream_response_events_bails_out_on_overlapping_compression_ranges() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~1]",
+                                        "summary": "first",
+                                        "summary_fidelity": 3,
+                                    },
+                                    {
+                                        "start": "[~1]",
+                                        "end": "[~2]",
+                                        "summary": "second",
+                                        "summary_fidelity": 3,
+                                    },
+                                ]
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
     )
 
-    with pytest.raises(PlapError) as exc_info:
-        _ = [
-            event
-            async for event in stream_response_events(
-                ResponseCreateRequest(
-                    model="plap/test",
-                    input=[
-                        _message("user", "alpha"),
-                        _message("assistant", "beta"),
-                        _message("user", "gamma"),
-                    ],
-                ),
-                settings=_settings(),
-                sealing_keyring=_keyring(),
-                tool_policy_resolver=_RecordingResolver(),
-                tool_call_policy_resolver=_RecordingCallResolver(),
-                chat_completion_client=client,
-                reasoning_summarizer=_FakeReasoningSummarizer(),
-            )
-        ]
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _message("user", "alpha"),
+                    _message("assistant", "beta"),
+                    _message("user", "gamma"),
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_ranges_overlap")
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "done"
+    assert len(client.requests) == 2
 
 
-async def test_stream_response_events_rejects_hidden_compression_citation() -> None:
+async def test_stream_response_events_bails_out_on_hidden_compression_citation() -> None:
     keyring = _keyring()
     leaf_zero = ChatMessageSpan(
         start=0,
@@ -1787,62 +1795,127 @@ async def test_stream_response_events_rejects_hidden_compression_citation() -> N
         ),
     )
     client = _StaticChatClient(
-        ChatMessage(
-            role="assistant",
-            tool_calls=[
-                ChatToolCall(
-                    id="compress_call_1",
-                    name="compress",
-                    arguments=json.dumps(
-                        {
-                            "ranges": [
-                                {
-                                    "start": "[~0]",
-                                    "end": "[~1]",
-                                    "summary": "invalid partial cut",
-                                    "summary_fidelity": 2,
-                                }
-                            ]
-                        }
-                    ),
-                )
-            ],
-        )
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~1]",
+                                        "summary": "invalid partial cut",
+                                        "summary_fidelity": 2,
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
     )
 
-    with pytest.raises(PlapError) as exc_info:
-        _ = [
-            event
-            async for event in stream_response_events(
-                ResponseCreateRequest(
-                    model="plap/test",
-                    input=[
-                        RequestCompactionItem(
-                            encrypted_content=seal_compaction_payload(
-                                CompactionPayload(
-                                    active=active,
-                                    cursors={"m": 3},
-                                ),
-                                keyring=keyring,
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    RequestCompactionItem(
+                        encrypted_content=seal_compaction_payload(
+                            CompactionPayload(
+                                active=active,
+                                cursors={"m": 3},
                             ),
-                            type="compaction",
-                        )
-                    ],
-                ),
-                settings=_settings(),
-                sealing_keyring=keyring,
-                tool_policy_resolver=_RecordingResolver(),
-                tool_call_policy_resolver=_RecordingCallResolver(),
-                chat_completion_client=client,
-                reasoning_summarizer=_FakeReasoningSummarizer(),
-            )
-        ]
+                            keyring=keyring,
+                        ),
+                        type="compaction",
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=keyring,
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_citation_not_visible")
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "done"
+    assert len(client.requests) == 2
 
 
-async def test_stream_response_events_rejects_non_reducing_compression() -> None:
+async def test_stream_response_events_bails_out_on_non_reducing_compression() -> None:
     summary = "same size"
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compress_call_1",
+                        name="compress",
+                        arguments=json.dumps(
+                            {
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~0]",
+                                        "summary": summary,
+                                        "summary_fidelity": 4,
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        _span(
+                            0,
+                            "alpha",
+                            token_count=StateMessage(role="assistant", content=summary).estimated_token_count(),
+                        )
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert completed.output[0].content[0].text == "done"
+    assert len(client.requests) == 2
+
+
+async def test_stream_response_events_rejects_missing_compression_fidelity_at_hard_budget() -> None:
+    profile = _profile_config(
+        compression_soft_token_budget=50,
+        compression_hard_token_budget=100,
+    )
     client = _StaticChatClient(
         ChatMessage(
             role="assistant",
@@ -1855,9 +1928,8 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
                             "ranges": [
                                 {
                                     "start": "[~0]",
-                                    "end": "[~0]",
-                                    "summary": summary,
-                                    "summary_fidelity": 4,
+                                    "end": "[~1]",
+                                    "summary": "alpha beta summary",
                                 }
                             ]
                         }
@@ -1873,17 +1945,9 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
             async for event in stream_response_events(
                 ResponseCreateRequest(
                     model="plap/test",
-                    input=[
-                        _compaction_item(
-                            _span(
-                                0,
-                                "alpha",
-                                token_count=StateMessage(role="assistant", content=summary).estimated_token_count(),
-                            )
-                        )
-                    ],
+                    input=[_compaction_item(_span(0, "alpha", token_count=125))],
                 ),
-                settings=_settings(),
+                settings=_settings(profile=profile),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver(),
                 tool_call_policy_resolver=_RecordingCallResolver(),
@@ -1892,7 +1956,7 @@ async def test_stream_response_events_rejects_non_reducing_compression() -> None
             )
         ]
 
-    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_summary_not_reductive")
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="compress_range_summary_fidelity_invalid")
 
 
 async def test_stream_response_events_accepts_empty_compression_bailout() -> None:

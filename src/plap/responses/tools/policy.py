@@ -17,7 +17,7 @@ from plap.responses.contracts import FunctionTool
 logger = structlog.get_logger(__name__)
 
 
-def _invalid_tool_arguments_error(*, reason: str, message: str, cause: BaseException | None = None) -> PlapError:
+def _invalid_tool_arguments_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
     return PlapError(
         public=PublicError(
             status_code=400,
@@ -29,7 +29,7 @@ def _invalid_tool_arguments_error(*, reason: str, message: str, cause: BaseExcep
         private=PrivateError(
             event="tool.policy.invalid_request",
             reason=reason,
-            message=message,
+            message=private_message,
             level=ErrorLevel.WARNING,
             cause=cause,
         ),
@@ -217,13 +217,13 @@ def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
     except msgspec.DecodeError as exc:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_invalid_json",
-            message="function call arguments must be valid JSON",
+            private_message="function call arguments must be valid JSON",
             cause=exc,
         ) from exc
     if not isinstance(value, dict):
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_not_object",
-            message="function call arguments must be a JSON object",
+            private_message="function call arguments must be a JSON object",
         )
     return value
 

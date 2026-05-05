@@ -110,6 +110,7 @@ HARD_COMPRESSION_REMINDER = (
     "Context is at the hard compression limit. You must call `compress` before continuing. Summarize any safe cited ranges. "
     'If no useful safe compression is possible, call `compress` with {"ranges": []}.'
 )
+COMPRESS_VALIDATION_MAX_ATTEMPTS = 3
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
 
@@ -292,6 +293,10 @@ def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private
         private_message=private_message,
         param="input",
     )
+
+
+def _is_retryable_compaction_error(exc: PlapError) -> bool:
+    return exc.private.reason.startswith("compress_")
 
 
 def _missing_auth_context_error() -> PlapError:
@@ -747,6 +752,8 @@ async def run_response(
 
     compression_rounds = 0
     compression_bailout = _CompressionBailout.NONE
+    compression_validation_attempts = 0
+    soft_compaction_failure: PlapError | None = None
     usage_ledger = UsageLedger(budget=request.max_output_tokens)
     while True:
         effective_tools = [*base_tools]
@@ -916,10 +923,38 @@ async def run_response(
                 resolver=tool_call_policy_resolver,
             )
             if len(tool_calls) == 1 and tool_calls[0].name == COMPRESS_TOOL_NAME:
-                state.main_context, compressed = _apply_compression(
-                    state.main_context,
-                    tool_calls[0].arguments,
-                )
+                if compression_reminder_level != _CompressionReminderLevel.HARD and soft_compaction_failure is not None:
+                    raise soft_compaction_failure
+                try:
+                    state.main_context, compressed = _apply_compression(
+                        state.main_context,
+                        tool_calls[0].arguments,
+                    )
+                except PlapError as exc:
+                    if not _is_retryable_compaction_error(exc):
+                        raise
+                    if compression_reminder_level != _CompressionReminderLevel.HARD:
+                        soft_compaction_failure = exc
+                        compression_bailout = _CompressionBailout.SOFT
+                        compression_rounds += 1
+                        usage_ledger.record_hidden(profile.main.public_usage, result.usage)
+                        continue
+                    compression_validation_attempts += 1
+                    log_debug(
+                        logger,
+                        "response.runtime.compaction_retry",
+                        attempt=compression_validation_attempts,
+                        max_attempts=COMPRESS_VALIDATION_MAX_ATTEMPTS,
+                        reason=exc.private.reason,
+                        reminder_level=compression_reminder_level,
+                    )
+                    if compression_validation_attempts >= COMPRESS_VALIDATION_MAX_ATTEMPTS:
+                        compression_validation_attempts = 0
+                        raise
+                    usage_ledger.record_hidden(profile.main.public_usage, result.usage)
+                    continue
+                compression_validation_attempts = 0
+                soft_compaction_failure = None
                 if compressed:
                     compression_bailout = _CompressionBailout.NONE
                     compaction_payload = CompactionPayload(
