@@ -48,14 +48,45 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
-            reviewer_transcript_token_budget=500_000,
-            arbitrator_transcript_token_budget=500_000,
+            reviewer_transcript_token_budget=800_000,
+            arbitrator_transcript_token_budget=300_000,
             compaction_soft_token_budget=150_000,
             compaction_hard_token_budget=200_000,
             compaction_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
-            by_reasoning_effort=_default_reasoning_effort_overrides(),
+            by_reasoning_effort={
+                ReasoningEffort.MINIMAL: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                ),
+                ReasoningEffort.LOW: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                ),
+                ReasoningEffort.MEDIUM: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                ),
+                ReasoningEffort.HIGH: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                ),
+                ReasoningEffort.XHIGH: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                ),
+            },
         ),
         "plap-ai/wisp": RuntimeModelProfileConfig(
             display_name="Wisp",
@@ -65,8 +96,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 mode="responses",
                 input_modalities=["text"],
                 output_modalities=["text"],
-                max_input_tokens=200_000,
-                max_output_tokens=32_768,
+                max_input_tokens=1000_000,
+                max_output_tokens=262_144,
                 supported_parameters=[
                     "context_management",
                     "temperature",
@@ -86,19 +117,50 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 provider="plap",
                 deprecated=False,
             ),
-            main=RuntimeActorConfig(model="crof/glm-5.1"),
-            main_debate=RuntimeActorConfig(model="crof/qwen3.5-397b-a17b"),
+            main=RuntimeActorConfig(model="crof/mimo-v2.5-pro"),
+            main_debate=RuntimeActorConfig(model="crof/mimo-v2.5-pro"),
             reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
-            reviewer_transcript_token_budget=500_000,
-            arbitrator_transcript_token_budget=500_000,
-            compaction_soft_token_budget=100_000,
-            compaction_hard_token_budget=150_000,
+            reviewer_transcript_token_budget=800_000,
+            arbitrator_transcript_token_budget=300_000,
+            compaction_soft_token_budget=150_000,
+            compaction_hard_token_budget=200_000,
             compaction_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
-            by_reasoning_effort=_default_reasoning_effort_overrides(),
+            by_reasoning_effort={
+                ReasoningEffort.MINIMAL: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                ),
+                ReasoningEffort.LOW: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                ),
+                ReasoningEffort.MEDIUM: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                ),
+                ReasoningEffort.HIGH: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                ),
+                ReasoningEffort.XHIGH: RuntimeProfileOverride(
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                ),
+            },
         ),
     }
 
@@ -209,57 +271,6 @@ def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, 
             context={"model": model, "reasoning_effort": effort},
         ),
     )
-
-
-def _default_reasoning_effort_overrides() -> dict[ReasoningEffort, RuntimeProfileOverride]:
-    def override(
-        *,
-        main: ReasoningEffort,
-        main_debate: ReasoningEffort,
-        reviewer: ReasoningEffort,
-        arbitrator: ReasoningEffort,
-    ) -> RuntimeProfileOverride:
-        return RuntimeProfileOverride(
-            main=RuntimeActorOverride(reasoning_effort=main),
-            main_debate=RuntimeActorOverride(reasoning_effort=main_debate),
-            reviewer=RuntimeActorOverride(reasoning_effort=reviewer),
-            arbitrator=RuntimeActorOverride(reasoning_effort=arbitrator),
-        )
-
-    return {
-        ReasoningEffort.MINIMAL: override(
-            main=ReasoningEffort.MINIMAL,
-            main_debate=ReasoningEffort.LOW,
-            reviewer=ReasoningEffort.LOW,
-            arbitrator=ReasoningEffort.MEDIUM,
-        ),
-        ReasoningEffort.LOW: override(
-            main=ReasoningEffort.LOW,
-            main_debate=ReasoningEffort.LOW,
-            reviewer=ReasoningEffort.LOW,
-            arbitrator=ReasoningEffort.MEDIUM,
-        ),
-        ReasoningEffort.MEDIUM: override(
-            main=ReasoningEffort.MEDIUM,
-            main_debate=ReasoningEffort.MEDIUM,
-            reviewer=ReasoningEffort.MEDIUM,
-            arbitrator=ReasoningEffort.MEDIUM,
-        ),
-        ReasoningEffort.HIGH: override(
-            main=ReasoningEffort.HIGH,
-            main_debate=ReasoningEffort.HIGH,
-            reviewer=ReasoningEffort.MEDIUM,
-            arbitrator=ReasoningEffort.HIGH,
-        ),
-        ReasoningEffort.XHIGH: override(
-            main=ReasoningEffort.XHIGH,
-            main_debate=ReasoningEffort.XHIGH,
-            reviewer=ReasoningEffort.HIGH,
-            arbitrator=ReasoningEffort.XHIGH,
-        ),
-    }
-
-
 class RuntimeSelector(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
