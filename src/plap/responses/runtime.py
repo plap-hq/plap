@@ -1020,7 +1020,7 @@ async def run_response(
                         keyring=sealing_keyring,
                         assistant=StateMessage(
                             role=result.message.role,
-                            content=result.message.content,
+                            content=strip_leading_internal_citations(result.message.content),
                             name=result.message.name,
                             tool_call_id=result.message.tool_call_id,
                             tool_calls=[
