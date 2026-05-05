@@ -522,10 +522,7 @@ async def _run_client_tool_loop(
 
 
 def _item_to_input(item: object) -> dict[str, object]:
-    value = item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else item.to_dict()
-    if value.get("type") in {"compaction", "function_call_output"}:
-        value.pop("created_by", None)
-    return value
+    return item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else item.to_dict()
 
 
 def _constant_tool_definition() -> dict[str, object]:

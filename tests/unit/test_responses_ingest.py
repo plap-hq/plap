@@ -136,6 +136,38 @@ def test_mutable_queues_append_helpers() -> None:
         queues.append_side("main", StateMessage(role="assistant", content="bad"))
 
 
+def test_request_accepts_verbatim_replayed_function_output_created_by() -> None:
+    request = ResponseCreateRequest(
+        model="test/model",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "tool result",
+                "created_by": "server",
+            }
+        ],
+    )
+
+    item = request.input[0]
+    assert isinstance(item, RequestFunctionCallOutputItem)
+    assert item.created_by == "server"
+
+
+def test_request_accepts_verbatim_replayed_compaction_created_by() -> None:
+    value = _compaction_item("kept", 2).model_dump(mode="python")
+    value["created_by"] = "assistant"
+
+    request = ResponseCreateRequest(
+        model="test/model",
+        input=[value],
+    )
+
+    item = request.input[0]
+    assert isinstance(item, RequestCompactionItem)
+    assert item.created_by == "assistant"
+
+
 async def test_ingestion_compaction_only_continues_main() -> None:
     result = await ingest_response_request(
         _request(input=[_compaction_item("only", 2)]),

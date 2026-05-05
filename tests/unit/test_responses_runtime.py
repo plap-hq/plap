@@ -2795,13 +2795,7 @@ def _assistant_json(value: object) -> ChatMessage:
 
 
 def _replay_output_items(response) -> list[dict[str, object]]:
-    items: list[dict[str, object]] = []
-    for item in response.output:
-        value = item.model_dump(mode="python")
-        if value.get("type") in {"compaction", "function_call_output"}:
-            value.pop("created_by", None)
-        items.append(value)
-    return items
+    return [item.model_dump(mode="python") for item in response.output]
 
 
 def _read_file_tool() -> FunctionTool:

@@ -133,6 +133,7 @@ class _FunctionCallOutputItemBase(StrictModel):
 
 
 class RequestFunctionCallOutputItem(_FunctionCallOutputItemBase):
+    created_by: str | None = Field(default=None, description="Originator of the output when replaying response items verbatim.")
     id: str | None = Field(default=None, description="Optional output item ID.")
     status: ItemStatus | None = Field(
         default=None,
@@ -172,6 +173,7 @@ class _CompactionItemBase(StrictModel):
 
 
 class RequestCompactionItem(_CompactionItemBase):
+    created_by: str | None = Field(default=None, description="Originator of compaction when replaying response items verbatim.")
     id: str | None = Field(default=None, description="Optional compaction item ID.")
 
 
