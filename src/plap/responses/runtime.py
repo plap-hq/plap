@@ -1061,23 +1061,6 @@ async def run_response(
         )
         assistant_hash = public_assistant_message.content_hash()
 
-        if result.message.content is not None or (
-            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
-        ):
-            message_item = ResponseMessageItem(
-                content=[
-                    OutputTextContent(
-                        text=result.message.content or "",
-                        type="output_text",
-                    )
-                ],
-                id=f"msg_{secrets.token_urlsafe(18)}",
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-            await out.output(message_item)
-
         if result.message.reasoning_content or result.message.reasoning_details:
             reasoning_payload = ReasoningPayload(
                 side="main",
@@ -1105,6 +1088,23 @@ async def run_response(
                 reasoning_side=reasoning_payload.side,
                 reasoning_messages=reasoning_payload.messages,
             )
+
+        if result.message.content is not None or (
+            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
+        ):
+            message_item = ResponseMessageItem(
+                content=[
+                    OutputTextContent(
+                        text=result.message.content or "",
+                        type="output_text",
+                    )
+                ],
+                id=f"msg_{secrets.token_urlsafe(18)}",
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+            await out.output(message_item)
 
         if result.message.tool_calls:
             function_call_items: list[ResponseFunctionCallItem] = []

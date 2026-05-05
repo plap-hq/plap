@@ -2228,10 +2228,11 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
     ]
 
     completed = events[-1].response
-    assert [item.type for item in completed.output] == ["message", "reasoning"]
+    assert [item.type for item in completed.output] == ["reasoning", "message"]
+    assert [event.item.type for event in events if event.type == "response.output_item.added"] == ["reasoning", "message"]
     public_message = {"role": "assistant", "content": "answer"}
     payload = open_reasoning_payload(
-        completed.output[1].encrypted_content,
+        completed.output[0].encrypted_content,
         keyring=_keyring(),
     )
     assert [message.to_primitive() for message in payload.messages] == [
@@ -2367,7 +2368,8 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
         "response.reasoning_summary_text.done",
         "response.reasoning_summary_part.done",
     ]
-    completed_reasoning = events[-1].response.output[1]
+    assert [item.type for item in events[-1].response.output] == ["reasoning", "message"]
+    completed_reasoning = events[-1].response.output[0]
     assert completed_reasoning.summary[0].text == "checked the answer"
     assert summarizer.calls[0][0] == "crof/qwen3.5-9b"
     assert summarizer.calls[0][1] is not None
@@ -2520,13 +2522,13 @@ async def test_stream_response_events_patches_reasoning_and_emits_tool_call() ->
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == [
-        "message",
         "reasoning",
+        "message",
         "function_call",
     ]
     public_message = {"role": "assistant", "content": ""}
     payload = open_reasoning_payload(
-        completed.output[1].encrypted_content,
+        completed.output[0].encrypted_content,
         keyring=_keyring(),
     )
     assert [message.to_primitive() for message in payload.messages] == [

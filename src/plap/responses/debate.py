@@ -809,17 +809,6 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
     )
     assistant_hash = public_assistant.content_hash()
 
-    if public_assistant.content is not None or candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls:
-        await out.output(
-            ResponseMessageItem(
-                content=[OutputTextContent(text=public_assistant.content or "", type="output_text")],
-                id=f"msg_{secrets.token_urlsafe(18)}",
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-        )
-
     if candidate.reasoning_content or candidate.reasoning_details:
         reasoning_payload = ReasoningPayload(
             side=Side.MAIN,
@@ -842,6 +831,17 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
             ),
             reasoning_side=reasoning_payload.side,
             reasoning_messages=reasoning_payload.messages,
+        )
+
+    if public_assistant.content is not None or candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls:
+        await out.output(
+            ResponseMessageItem(
+                content=[OutputTextContent(text=public_assistant.content or "", type="output_text")],
+                id=f"msg_{secrets.token_urlsafe(18)}",
+                role="assistant",
+                status="completed",
+                type="message",
+            )
         )
 
     hidden_outputs = {

@@ -198,6 +198,7 @@ class _QueueBase:
         self.side = side
         self._entries: list[ChatMessageSpan | SideMessage] = []
         self._pending_tool_call_ids: set[str] = set()
+        self._pending_reasoning_patches: dict[str, list[ReasoningMessagePatch]] = {}
         self._unreplayed_reasoning_tool_call_ids: set[str] = set()
         self._reasoning_tool_call_ids_seen: set[str] = set()
 
@@ -211,12 +212,9 @@ class _QueueBase:
                 raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="reasoning message is invalid")
             target = self._message_by_hash(message.content_hash)
             if target is None:
-                raise _reasoning_replay_error(
-                    reason="reasoning_content_hash_target_missing", private_message="reasoning content_hash target is missing"
-                )
-            message.apply_to(target)
-            if message.tool_calls is not None or message.role == "tool" or (target.is_tool() and message.tool_call_id is not None):
-                self._track_reasoning_message(target)
+                self._pending_reasoning_patches.setdefault(message.content_hash, []).append(message)
+                continue
+            self._apply_reasoning_patch(message, target)
 
     def associate_function_call(
         self,
@@ -264,6 +262,15 @@ class _QueueBase:
     def _append_tool_output(self, message: StateMessage, *, temp: bool = False) -> None:
         _ = temp
         self._append_message(message)
+
+    def _apply_reasoning_patch(self, patch: ReasoningMessagePatch, target: StateMessage) -> None:
+        patch.apply_to(target)
+        if patch.tool_calls is not None or patch.role == "tool" or (target.is_tool() and patch.tool_call_id is not None):
+            self._track_reasoning_message(target)
+
+    def _resolve_pending_reasoning_patches(self, content_hash: str, message: StateMessage) -> None:
+        for patch in self._pending_reasoning_patches.pop(content_hash, []):
+            self._apply_reasoning_patch(patch, message)
 
     def _message_by_hash(self, hash_value: str) -> StateMessage | None:
         for entry in reversed(self._entries):
@@ -353,6 +360,10 @@ class _QueueBase:
         self._satisfy_reasoning_tool_call_from_hidden_output(message)
 
     def assert_no_pending_tool_calls(self) -> None:
+        if self._pending_reasoning_patches:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing", private_message="reasoning content_hash target is missing"
+            )
         if self._unreplayed_reasoning_tool_call_ids:
             raise _reasoning_replay_error(
                 reason="reasoning_tool_call_missing_function_call_item", private_message="reasoning tool call is missing function_call item"
@@ -390,6 +401,7 @@ class _MainQueue(_QueueBase):
     def add_existing_row(self, row: ChatMessageSpan) -> None:
         self._seed_rows.append(row)
         self._entries.append(row)
+        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
 
     def add_message(self, message: StateMessage) -> ChatMessageSpan:
         return self._append_main_row(message)
@@ -443,6 +455,7 @@ class _MainQueue(_QueueBase):
         else:
             self._stable_rows.append(row)
         self._entries.append(row)
+        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
         return row
 
     def _closest_previous_assistant(self) -> StateMessage:
@@ -469,12 +482,14 @@ class _PrivateSideQueue(_QueueBase):
         self._ensure_no_pending_tool_calls()
         row = SideMessage(message=message)
         self._entries.append(row)
+        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
         return row.message
 
     def _append_tool_output(self, message: StateMessage, *, temp: bool = False) -> None:
         _ = temp
         row = SideMessage(message=message)
         self._entries.append(row)
+        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
 
 
 def _normalize_input_items(request: ResponseCreateRequest) -> list[object]:

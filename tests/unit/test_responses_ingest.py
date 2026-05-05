@@ -328,6 +328,36 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     assert result.in_temp_debate is False
 
 
+async def test_ingestion_message_after_temp_prunes_forward_reasoning_refs_too() -> None:
+    target = {"role": "assistant", "content": "stable public answer"}
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "reviewer",
+                    True,
+                    [
+                        {"role": "assistant", "content": "temp reviewer"},
+                        {
+                            "content_hash": _message_hash(target),
+                            "reasoning_content": "should not leak",
+                        },
+                    ],
+                ),
+                _message("assistant", "stable public answer"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.main_context] == [target]
+    assert result.main_context_temp == ()
+    assert result.reviewer == ()
+    assert result.continuation_side == "main"
+    assert result.in_temp_debate is False
+
+
 async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None:
     result = await ingest_response_request(
         _request(
@@ -713,9 +743,38 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
     )
 
 
-async def test_ingestion_rejects_reasoning_forward_refs() -> None:
+async def test_ingestion_accepts_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "reviewer",
+                    False,
+                    [
+                        {
+                            "content_hash": _message_hash(target),
+                            "reasoning_content": "hidden",
+                        },
+                        target,
+                    ],
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.reviewer] == [
+        {
+            "role": "assistant",
+            "content": "target",
+            "reasoning_content": "hidden",
+        }
+    ]
+
+
+async def test_ingestion_missing_reasoning_forward_ref_fails_closed() -> None:
     with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             _request(
@@ -725,10 +784,9 @@ async def test_ingestion_rejects_reasoning_forward_refs() -> None:
                         False,
                         [
                             {
-                                "content_hash": _message_hash(target),
+                                "content_hash": _message_hash({"role": "assistant", "content": "missing"}),
                                 "reasoning_content": "hidden",
-                            },
-                            target,
+                            }
                         ],
                     )
                 ]
