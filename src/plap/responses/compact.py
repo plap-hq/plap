@@ -91,6 +91,9 @@ Never Do:
 
 Summaries:
 - Treat each summary as replacement-grade working context for later use.
+- When multiple compaction choices seem similarly safe, prefer summarizing
+  earlier visible spans before later ones, and preserve the most recent spans
+  verbatim when practical.
 - If a range contains an earlier summary, carry forward its important
   substance instead of merely mentioning that it existed.
 - Set `summary_fidelity` like this:
