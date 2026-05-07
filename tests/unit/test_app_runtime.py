@@ -58,6 +58,16 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     assert isinstance(client, RoutingChatCompletionClient)
 
 
+def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
+    with pytest.raises(ValueError, match="tokenizer_revision requires tokenizer_hf_repo"):
+        RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_revision="main")
+
+
+def test_runtime_actor_config_rejects_trust_remote_code_without_repo() -> None:
+    with pytest.raises(ValueError, match="tokenizer_trust_remote_code requires tokenizer_hf_repo"):
+        RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_trust_remote_code=True)
+
+
 def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
@@ -68,7 +78,12 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp-mini"]
-    _assert_profile_model_prefixes(profile, main_prefix="openrouter/", reviewer_prefix="openrouter/")
+    _assert_profile_model_prefixes(
+        profile,
+        main_prefix="openrouter/",
+        compactor_prefix="openrouter/",
+        reviewer_prefix="openrouter/",
+    )
     assert profile.compact_max_rounds > 0
     assert profile.debate_max_rounds > 0
     assert profile.model_info.mode == "responses"
@@ -88,7 +103,12 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp"]
-    _assert_profile_model_prefixes(profile, main_prefix="crof/", reviewer_prefix="openrouter/")
+    _assert_profile_model_prefixes(
+        profile,
+        main_prefix="crof/",
+        compactor_prefix="openrouter/",
+        reviewer_prefix="openrouter/",
+    )
     assert profile.model_info.mode == "responses"
     assert profile.model_info.provider == "plap"
     assert not profile.model_info.deprecated
@@ -187,9 +207,7 @@ def test_app_runtime_builds_mcp_providers_from_config_list() -> None:
 
 
 def test_app_runtime_builds_mcp_provider_from_url() -> None:
-    providers = _create_mcp_tool_providers(
-        _settings(mcp_servers=[MCPServerConfig(name="remote", url="http://localhost:8765/mcp")])
-    )
+    providers = _create_mcp_tool_providers(_settings(mcp_servers=[MCPServerConfig(name="remote", url="http://localhost:8765/mcp")]))
 
     assert len(providers) == 1
     assert isinstance(providers[0], MCPToolProvider)
@@ -280,9 +298,7 @@ def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
                 by_service_tier={
-                    "priority": RuntimeProfileOverride(
-                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
-                    )
+                    "priority": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))
                 },
             )
         },
@@ -502,21 +518,15 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
                 reasoning_summarizer_model="crof/qwen3.5-9b",
                 default_reasoning_effort="medium",
                 by_reasoning_effort={
-                    "medium": RuntimeProfileOverride(
-                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
-                    ),
-                    "high": RuntimeProfileOverride(
-                        main=RuntimeActorOverride(model="openrouter/deepseek/deepseek-v4-flash:nitro")
-                    ),
+                    "medium": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")),
+                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="openrouter/deepseek/deepseek-v4-flash:nitro")),
                 },
             )
         },
     )
 
     default_profile = settings.resolve_runtime_model_profile("plap/standard")
-    high_profile = settings.resolve_runtime_model_profile(
-        "plap/standard", selector=RuntimeSelector(reasoning_effort="high")
-    )
+    high_profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
 
     assert default_profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
     assert high_profile.main.model == "openrouter/deepseek/deepseek-v4-flash:nitro"
@@ -533,9 +543,7 @@ def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:
                 reasoning_summarizer_model="crof/qwen3.5-9b",
                 default_reasoning_effort="medium",
                 by_reasoning_effort={
-                    "medium": RuntimeProfileOverride(
-                        main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")
-                    )
+                    "medium": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))
                 },
             )
         },
@@ -608,12 +616,8 @@ def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
-            by_service_tier={
-                "priority": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))
-            },
-            by_reasoning_effort={
-                "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="crof/glm-4.7-flash"))
-            },
+            by_service_tier={"priority": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))},
+            by_reasoning_effort={"high": RuntimeProfileOverride(main=RuntimeActorOverride(model="crof/glm-4.7-flash"))},
         )
 
 
@@ -711,10 +715,11 @@ def _assert_profile_model_prefixes(
     profile: RuntimeModelProfileConfig,
     *,
     main_prefix: str,
+    compactor_prefix: str,
     reviewer_prefix: str,
 ) -> None:
     assert profile.main.model.startswith(main_prefix)
-    assert profile.compactor.model.startswith(main_prefix)
+    assert profile.compactor.model.startswith(compactor_prefix)
     assert profile.main_debate.model.startswith(main_prefix)
     assert profile.reviewer.model.startswith(reviewer_prefix)
     assert profile.arbitrator.model.startswith(reviewer_prefix)

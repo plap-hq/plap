@@ -21,7 +21,12 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.logging import bound_context, log_debug, log_payload
-from plap.responses.compact import CompactionOutcome, Compactor
+from plap.responses.compact import (
+    CompactionOutcome,
+    Compactor,
+    compaction_level_for_token_count,
+    resolve_compaction_settings,
+)
 from plap.responses.contracts import (
     FunctionTool,
     OutputTextContent,
@@ -56,6 +61,7 @@ from plap.responses.models import (
     StateMessage,
     StateToolCall,
     UsageLedger,
+    measure_request_tokens,
 )
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
@@ -92,6 +98,7 @@ Behavior:
 - When you make a mistake, correct it plainly.
 - Be concise and direct.
 - Avoid unnecessary preamble and postamble."""
+
 
 def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary | None:
     if request.reasoning is None:
@@ -462,11 +469,14 @@ async def run_response(
     await out.in_progress()
 
     usage_ledger = UsageLedger(budget=request.max_output_tokens)
+    compaction_settings = resolve_compaction_settings(profile, request)
+
     compactor = Compactor(
         state=state,
         out=out,
         request=request,
         profile=profile,
+        settings=compaction_settings,
         sealing_keyring=sealing_keyring,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
@@ -495,21 +505,15 @@ async def run_response(
                 return
             continue
 
-        compaction_result = await compactor.maybe_compact()
-        if compaction_result == CompactionOutcome.INCOMPLETE:
-            return
-        if compaction_result == CompactionOutcome.APPLIED:
-            continue
+        tool_choice = _chat_tool_choice(request)
+        response_format = _chat_response_format(request)
 
         developer_prompt = MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
         if request.instructions:
             developer_prompt = f"{developer_prompt}\n\n[^untrusted] {request.instructions}"
 
         messages: list[ChatMessage] = [ChatMessage(role="developer", content=developer_prompt)]
-        effective_main_context = state.effective_main_context()
-        messages.extend(row.render_for_model(include_citation=False) for row in effective_main_context)
-
-        tool_choice = _chat_tool_choice(request)
+        messages.extend(state.render_effective_main_context(include_citation=False))
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
         log_debug(
@@ -530,10 +534,30 @@ async def run_response(
             messages=messages,
             tools=effective_tools,
             tool_choice=tool_choice,
-            response_format=_chat_response_format(request),
+            response_format=response_format,
             prompt_cache_key_base=prompt_cache_key_base,
             max_completion_tokens=main_cap,
         )
+
+        preflight_token_count = measure_request_tokens(model_request, actor_config=profile.main)
+        preflight_level = compaction_level_for_token_count(preflight_token_count, settings=compaction_settings)
+
+        log_debug(
+            logger,
+            "response.compaction.preflight",
+            compact_threshold=compaction_settings.compact_threshold,
+            preflight_level=preflight_level,
+            preflight_token_count=preflight_token_count,
+            soft_compact_threshold=compaction_settings.soft_compact_threshold,
+            token_count=preflight_token_count,
+            triggered_level=preflight_level,
+        )
+
+        compaction_result = await compactor.compact(preflight_level)
+        if compaction_result == CompactionOutcome.INCOMPLETE:
+            return
+        if compaction_result == CompactionOutcome.APPLIED:
+            continue
         log_payload(logger, "response.runtime.main_request.payload", request=asdict(model_request))
 
         result = await chat_completion_client.complete(model_request)
@@ -559,6 +583,7 @@ async def run_response(
             finish_reason=result.finish_reason,
             has_content=result.message.content is not None,
             has_reasoning=bool(result.message.reasoning_content or result.message.reasoning_details),
+            input_tokens=result.usage.input_tokens if result.usage is not None else None,
             tool_call_count=len(tool_calls),
         )
         log_payload(logger, "response.runtime.main_result.payload", result=asdict(result))

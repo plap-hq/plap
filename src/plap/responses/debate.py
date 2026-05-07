@@ -30,10 +30,18 @@ from plap.responses.contracts import (
     ResponseMessageItem,
     ResponseReasoningItem,
 )
-from plap.responses.ingest import SealedCallID, content_hash_prefix, seal_call_id, seal_reasoning_payload
+from plap.responses.ingest import (
+    SealedCallID,
+    compact_transcript,
+    content_hash_prefix,
+    render_budgeted_spans,
+    seal_call_id,
+    seal_reasoning_payload,
+)
 from plap.responses.io import ResponseEventIO
 from plap.responses.models import (
     Actor,
+    ChatMessageSpan,
     MutableQueues,
     ReasoningMessagePatch,
     ReasoningPayload,
@@ -43,6 +51,7 @@ from plap.responses.models import (
     TempMainParts,
     TranscriptMessage,
     UsageLedger,
+    measure_prompt_tokens,
 )
 from plap.responses.tools import ToolPolicy
 from plap.responses.tools.mcp import IMCPToolProvider
@@ -433,6 +442,43 @@ def _transcript_wrapper(transcript: Sequence[TranscriptMessage]) -> ChatMessage:
     return ChatMessage(role="user", content=f"Conversation transcript:\n{_json_text([message.to_primitive() for message in transcript])}")
 
 
+def _measure_budgeted_transcript_tokens(
+    spans: tuple[ChatMessageSpan, ...],
+    *,
+    actor_config: RuntimeActorConfig,
+) -> int:
+    try:
+        transcript = compact_transcript(spans)
+        return measure_prompt_tokens([_transcript_wrapper(transcript)], actor_config=actor_config)
+    except Exception as exc:
+        raise _debate_unavailable_error(
+            reason="debate_transcript_tokenizer_failed",
+            private_message="debate transcript token measurement failed",
+            cause=exc,
+        ) from exc
+
+
+def _budgeted_transcript_message(
+    spans: Sequence[ChatMessageSpan],
+    *,
+    actor_config: RuntimeActorConfig,
+    recount_margin: int,
+    token_budget: int,
+) -> ChatMessage:
+    measure = None
+    if actor_config.tokenizer_hf_repo is not None:
+        measure = lambda rendered: _measure_budgeted_transcript_tokens(rendered, actor_config=actor_config)
+    transcript = compact_transcript(
+        render_budgeted_spans(
+            tuple(spans),
+            measure=measure,
+            recount_margin=recount_margin,
+            token_budget=token_budget,
+        )
+    )
+    return _transcript_wrapper(transcript)
+
+
 def _reviewer_initial_turn(
     parts: TempMainParts,
     *,
@@ -667,7 +713,12 @@ async def run_reviewer_turn(
     thread = _thread_messages(state.reviewer)
     header_messages = [
         ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
-        _transcript_wrapper(state.compact_transcript(token_budget=profile.reviewer_transcript_token_budget)),
+        _budgeted_transcript_message(
+            state.main_context,
+            actor_config=profile.reviewer,
+            recount_margin=profile.transcript_recount_margin,
+            token_budget=profile.reviewer_transcript_token_budget,
+        ),
         *(message.to_chat_message() for message in thread),
     ]
     if _thread_waiting_after_tool_output(thread):
@@ -725,7 +776,7 @@ async def run_main_debate_turn(
     thread = [row.message for row in parts.remaining_temp_rows]
     header_messages = [
         ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
-        *(row.render_for_model(include_citation=False) for row in state.effective_main_context()),
+        *state.render_effective_main_context(include_citation=False),
     ]
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
@@ -776,7 +827,12 @@ async def run_arbitrator_turn(
     thread = _thread_messages(state.arbitrator)
     header_messages = [
         ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
-        _transcript_wrapper(state.compact_transcript(token_budget=profile.arbitrator_transcript_token_budget)),
+        _budgeted_transcript_message(
+            state.main_context,
+            actor_config=profile.arbitrator,
+            recount_margin=profile.transcript_recount_margin,
+            token_budget=profile.arbitrator_transcript_token_budget,
+        ),
         *(message.to_chat_message() for message in thread),
     ]
     if _thread_waiting_after_tool_output(thread):
@@ -1025,6 +1081,7 @@ async def continue_debate(
         log_debug(logger, "debate.turn", actor=actor, held_anchor_index=held_anchor_index)
 
         if actor == Actor.REVIEWER:
+
             async def reviewer_step(parts=parts):
                 outcome = await run_reviewer_turn(
                     state=state,
@@ -1094,6 +1151,7 @@ async def continue_debate(
             continue
 
         if actor == Actor.MAIN_DEBATE:
+
             async def main_debate_step(parts=parts):
                 return await run_main_debate_turn(
                     state=state,
@@ -1147,6 +1205,7 @@ async def continue_debate(
             continue
 
         if actor == Actor.ARBITRATOR:
+
             async def arbitrator_step(parts=parts):
                 outcome = await run_arbitrator_turn(
                     state=state,

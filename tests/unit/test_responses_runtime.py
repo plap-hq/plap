@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+import plap.responses.compact as compact_module
 from plap.auth import AuthContext
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
@@ -30,6 +31,7 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     WebSearchTool,
 )
+from plap.responses.debate import _budgeted_transcript_message
 from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
@@ -495,9 +497,7 @@ async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -
             ChatMessage(role="assistant", content="hello back"),
             _assistant_json({"action": "accept", "note": None}),
         ),
-        usages=(
-            ChatUsage(input_tokens=100, output_tokens=10, total_tokens=110, cached_tokens=20, reasoning_tokens=3),
-        ),
+        usages=(ChatUsage(input_tokens=100, output_tokens=10, total_tokens=110, cached_tokens=20, reasoning_tokens=3),),
     )
 
     events = [
@@ -1226,7 +1226,7 @@ async def test_stream_response_events_executes_batched_compaction() -> None:
                                         "summary": "gamma delta summary",
                                         "summary_fidelity": 3,
                                     },
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -1277,6 +1277,47 @@ async def test_stream_response_events_executes_batched_compaction() -> None:
     assert [message.content for message in client.requests[1].messages[1:]] == ["alpha beta summary", "gamma delta summary"]
 
 
+async def test_stream_response_events_skips_compaction_when_recount_drops_below_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _profile_config(
+        soft_compact_threshold=50,
+        compact_threshold=100,
+    )
+    profile = profile.model_copy(update={"main": profile.main.model_copy(update={"tokenizer_hf_repo": "main-tokenizer"})})
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    def fake_measure_request_tokens(request, *, actor_config):
+        assert actor_config == profile.main
+        assert request.messages[0].role == "developer"
+        assert request.messages[1].content == "alpha " * 40
+        return 40
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", fake_measure_request_tokens)
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(_span(0, "alpha " * 40, token_count=75))],
+            ),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["message"]
+    assert completed.output[0].content[0].text == "done"
+    assert len(client.requests) == 1
+    assert client.requests[0].tools == []
+
+
 async def test_stream_response_events_accepts_stringified_compaction_ranges() -> None:
     client = _StaticChatClient(
         [
@@ -1298,7 +1339,7 @@ async def test_stream_response_events_accepts_stringified_compaction_ranges() ->
                                             "summary_fidelity": 4,
                                         }
                                     ]
-                                )
+                                ),
                             }
                         ),
                     )
@@ -1347,7 +1388,7 @@ async def test_stream_response_events_accepts_bracketless_compact_citations() ->
                                         "summary": "alpha beta summary",
                                         "summary_fidelity": 4,
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -1399,7 +1440,7 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                                         "summary": "earlier duplicate search attempt",
                                         "summary_fidelity": 4,
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -1464,7 +1505,7 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                                         "summary": "later duplicate search attempt",
                                         "summary_fidelity": 4,
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -1504,6 +1545,68 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
     assert [(row.start, row.end) for row in payload.active] == [(0, 0), (1, 1), (2, 4)]
     assert payload.active[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
     assert payload.active[2].children[2].message.content == "new result"
+
+
+async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_inside_summary_by_ordinal_cutoff() -> None:
+    old_arguments = '{"query":"cats","limit":1}'
+    new_arguments = '{"limit":1,"query":"cats"}'
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "prune_before": {"duplicate_tool_calls": "[~3]"},
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~4]",
+                                        "summary": "search history summary",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, old_arguments, content="first search"),
+                        _tool_output_span(1, "call_search_1", "old result"),
+                        _span(2, "other note"),
+                        _assistant_tool_call_span(3, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
+                        _tool_output_span(4, "call_search_2", "new result"),
+                    )
+                ],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
+    assert [(row.start, row.end) for row in payload.active] == [(0, 4)]
+    assert payload.active[0].children[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
+    assert payload.active[0].children[4].message.content == "new result"
 
 
 async def test_stream_response_events_compaction_can_preserve_duplicate_tool_outputs() -> None:
@@ -1872,6 +1975,84 @@ async def test_stream_response_events_prunes_reasoning_before_cutoff_recursively
     assert payload.active[2].message.reasoning_content == "keep this reasoning"
 
 
+async def test_stream_response_events_prunes_reasoning_inside_summary_by_ordinal_cutoff() -> None:
+    leaf_zero = ChatMessageSpan(
+        start=0,
+        end=0,
+        message=StateMessage(role="assistant", content="alpha", reasoning_content="old thinking zero"),
+        token_count=StateMessage(role="assistant", content="alpha", reasoning_content="old thinking zero").estimated_token_count(),
+    )
+    leaf_one = ChatMessageSpan(
+        start=1,
+        end=1,
+        message=StateMessage(role="assistant", content="beta", reasoning_content="old thinking one"),
+        token_count=StateMessage(role="assistant", content="beta", reasoning_content="old thinking one").estimated_token_count(),
+    )
+    leaf_two = ChatMessageSpan(
+        start=2,
+        end=2,
+        message=StateMessage(role="assistant", content="gamma", reasoning_content="keep thinking two"),
+        token_count=StateMessage(role="assistant", content="gamma", reasoning_content="keep thinking two").estimated_token_count(),
+    )
+    leaf_three = ChatMessageSpan(
+        start=3,
+        end=3,
+        message=StateMessage(role="assistant", content="delta", reasoning_content="keep thinking three"),
+        token_count=StateMessage(role="assistant", content="delta", reasoning_content="keep thinking three").estimated_token_count(),
+    )
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "prune_before": {"reasoning": "[~2]"},
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~3]",
+                                        "summary": "conversation summary",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(leaf_zero, leaf_one, leaf_two, leaf_three)],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
+    assert [(row.start, row.end) for row in payload.active] == [(0, 3)]
+    assert payload.active[0].children[0].message.reasoning_content is None
+    assert payload.active[0].children[1].message.reasoning_content is None
+    assert payload.active[0].children[2].message.reasoning_content == "keep thinking two"
+    assert payload.active[0].children[3].message.reasoning_content == "keep thinking three"
+
+
 async def test_stream_response_events_bails_out_on_missing_compaction_fidelity() -> None:
     client = _StaticChatClient(
         [
@@ -1890,7 +2071,7 @@ async def test_stream_response_events_bails_out_on_missing_compaction_fidelity()
                                         "end": "[~1]",
                                         "summary": "alpha beta summary",
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -1946,7 +2127,7 @@ async def test_stream_response_events_bails_out_on_overlapping_compaction_ranges
                                         "summary": "second",
                                         "summary_fidelity": 3,
                                     },
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -2029,7 +2210,7 @@ async def test_stream_response_events_bails_out_on_hidden_compaction_citation() 
                                         "summary": "invalid partial cut",
                                         "summary_fidelity": 2,
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -2091,7 +2272,7 @@ async def test_stream_response_events_bails_out_on_non_reducing_compaction() -> 
                                         "summary": summary,
                                         "summary_fidelity": 4,
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -2130,6 +2311,136 @@ async def test_stream_response_events_bails_out_on_non_reducing_compaction() -> 
     assert len(client.requests) == 2
 
 
+async def test_stream_response_events_compaction_keeps_reductive_subset_of_ranges() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~0]",
+                                        "summary": "same size",
+                                        "summary_fidelity": 4,
+                                    },
+                                    {
+                                        "start": "[~1]",
+                                        "end": "[~1]",
+                                        "summary": "beta",
+                                        "summary_fidelity": 4,
+                                    },
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        _span(
+                            0,
+                            "same size",
+                            token_count=StateMessage(role="assistant", content="same size").estimated_token_count(),
+                        ),
+                        _span(1, "beta " * 40, token_count=80),
+                    )
+                ],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
+    assert [(row.start, row.end, row.message.content) for row in payload.active] == [
+        (0, 0, "same size"),
+        (1, 1, "beta"),
+    ]
+    assert len(payload.active[0].children) == 0
+    assert len(payload.active[1].children) == 1
+
+
+async def test_stream_response_events_compaction_can_succeed_from_pruning_when_summary_is_skipped() -> None:
+    assistant = StateMessage(role="assistant", content="alpha", reasoning_content="thinking " * 40)
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "prune_before": {"reasoning": "[~1]"},
+                                "ranges": [
+                                    {
+                                        "start": "[~1]",
+                                        "end": "[~1]",
+                                        "summary": "beta",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _compaction_item(
+                        ChatMessageSpan(start=0, end=0, message=assistant, token_count=assistant.estimated_token_count()),
+                        _span(
+                            1,
+                            "beta",
+                            token_count=StateMessage(role="assistant", content="beta").estimated_token_count(),
+                        ),
+                    )
+                ],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
+    assert [row.message.reasoning_content for row in payload.active] == [None, None]
+    assert [row.message.content for row in payload.active] == ["alpha", "beta"]
+
+
 async def test_stream_response_events_rejects_missing_compaction_fidelity_at_hard_budget() -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
@@ -2151,7 +2462,7 @@ async def test_stream_response_events_rejects_missing_compaction_fidelity_at_har
                                     "end": "[~1]",
                                     "summary": "alpha beta summary",
                                 }
-                            ]
+                            ],
                         }
                     ),
                 )
@@ -2194,9 +2505,7 @@ async def test_stream_response_events_accepts_empty_compaction_bailout() -> None
                     ChatToolCall(
                         id="compact_call_1",
                         name="compact",
-                        arguments=json.dumps(
-                            {"action": "bailout", "bailout_reason": "another normal step should happen first"}
-                        ),
+                        arguments=json.dumps({"action": "bailout", "bailout_reason": "another normal step should happen first"}),
                     )
                 ],
             ),
@@ -2227,7 +2536,7 @@ async def test_stream_response_events_accepts_empty_compaction_bailout() -> None
     assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
 
 
-async def test_stream_response_events_starts_soft_compaction_run() -> None:
+async def test_stream_response_events_starts_soft_compaction_run(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
         compact_threshold=100,
@@ -2259,13 +2568,16 @@ async def test_stream_response_events_starts_soft_compaction_run() -> None:
             ChatMessage(role="assistant", content="done"),
         ]
     )
+    measured = iter((75, 40))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
 
     events = [
         event
         async for event in stream_response_events(
             ResponseCreateRequest(
                 model="plap/test",
-                input=[_compaction_item(_span(0, "alpha", token_count=75))],
+                input=[_compaction_item(_span(0, "alpha " * 40, token_count=75))],
             ),
             settings=_settings(profile=profile),
             sealing_keyring=_keyring(),
@@ -2285,7 +2597,7 @@ async def test_stream_response_events_starts_soft_compaction_run() -> None:
     assert events[-1].response.output[-1].content[0].text == "done"
 
 
-async def test_stream_response_events_context_management_overrides_compaction_thresholds() -> None:
+async def test_stream_response_events_context_management_overrides_compaction_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile_config(
         soft_compact_threshold=None,
         compact_threshold=None,
@@ -2317,13 +2629,16 @@ async def test_stream_response_events_context_management_overrides_compaction_th
             ChatMessage(role="assistant", content="done"),
         ]
     )
+    measured = iter((75, 40))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
 
     events = [
         event
         async for event in stream_response_events(
             ResponseCreateRequest(
                 model="plap/test",
-                input=[_compaction_item(_span(0, "alpha", token_count=75))],
+                input=[_compaction_item(_span(0, "alpha " * 40, token_count=75))],
                 context_management=[{"type": "compaction", "soft_compact_threshold": 50, "compact_threshold": 100}],
             ),
             settings=_settings(profile=profile),
@@ -2365,7 +2680,7 @@ async def test_stream_response_events_context_management_max_rounds_can_disable_
     assert events[-1].response.output[0].content[0].text == "done"
 
 
-async def test_stream_response_events_forces_compact_at_hard_budget() -> None:
+async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
         compact_threshold=100,
@@ -2397,13 +2712,16 @@ async def test_stream_response_events_forces_compact_at_hard_budget() -> None:
             ChatMessage(role="assistant", content="done"),
         ]
     )
+    measured = iter((125, 40))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
 
     _ = [
         event
         async for event in stream_response_events(
             ResponseCreateRequest(
                 model="plap/test",
-                input=[_compaction_item(_span(0, "alpha", token_count=125))],
+                input=[_compaction_item(_span(0, "alpha " * 60, token_count=125))],
             ),
             settings=_settings(profile=profile),
             sealing_keyring=_keyring(),
@@ -2487,7 +2805,7 @@ async def test_stream_response_events_rejects_hard_budget_without_compact() -> N
             async for event in stream_response_events(
                 ResponseCreateRequest(
                     model="plap/test",
-                    input=[_compaction_item(_span(0, "alpha", token_count=125))],
+                    input=[_compaction_item(_span(0, "alpha " * 60, token_count=125))],
                 ),
                 settings=_settings(profile=profile),
                 sealing_keyring=_keyring(),
@@ -2547,9 +2865,7 @@ async def test_stream_response_events_hidden_compaction_retry_usage_is_normalize
                     ChatToolCall(
                         id="compact_1",
                         name=COMPACT_TOOL_NAME,
-                        arguments=(
-                            '{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary"}]}'
-                        ),
+                        arguments=('{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary"}]}'),
                     )
                 ],
             ),
@@ -2596,22 +2912,21 @@ async def test_run_explicit_compaction_retry_usage_is_normalized() -> None:
                     ChatToolCall(
                         id="compact_1",
                         name=COMPACT_TOOL_NAME,
-                        arguments=(
-                            '{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary"}]}'
-                        ),
+                        arguments=('{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"brief summary"}]}'),
                     )
                 ],
             ),
-            ChatMessage(role="assistant", content="", tool_calls=[
-                ChatToolCall(
-                    id="compact_2",
-                    name=COMPACT_TOOL_NAME,
-                    arguments=(
-                        '{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"tiny",'
-                        '"summary_fidelity":5}]}'
-                    ),
-                )
-            ]),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_2",
+                        name=COMPACT_TOOL_NAME,
+                        arguments=('{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"tiny","summary_fidelity":5}]}'),
+                    )
+                ],
+            ),
         ),
         usages=(
             ChatUsage(input_tokens=80, output_tokens=15, total_tokens=95, cached_tokens=0, reasoning_tokens=0),
@@ -2635,6 +2950,113 @@ async def test_run_explicit_compaction_retry_usage_is_normalized() -> None:
     assert response.usage.output_tokens == 40
     assert response.usage.output_tokens_details.reasoning_tokens == 36
     assert response.usage.total_tokens == 50
+
+
+async def test_run_explicit_compaction_validates_with_main_tokenizer_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_tokenizer_repos: list[str | None] = []
+    profile = _profile_config(soft_compact_threshold=1, compact_max_rounds=1)
+    profile = profile.model_copy(
+        update={
+            "main": profile.main.model_copy(update={"tokenizer_hf_repo": "main-tokenizer"}),
+            "compactor": profile.compactor.model_copy(update={"tokenizer_hf_repo": "compactor-tokenizer"}),
+        }
+    )
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="compact_call_1",
+                    name="compact",
+                    arguments=json.dumps(
+                        {
+                            "action": "apply",
+                            "ranges": [
+                                {
+                                    "start": "[~0]",
+                                    "end": "[~1]",
+                                    "summary": "alpha beta summary",
+                                    "summary_fidelity": 5,
+                                }
+                            ],
+                        }
+                    ),
+                )
+            ],
+        )
+    )
+
+    def fake_measure_prompt_tokens(messages, *, actor_config):
+        seen_tokenizer_repos.append(actor_config.tokenizer_hf_repo)
+        return 10 * len(messages)
+
+    monkeypatch.setattr(compact_module, "measure_prompt_tokens", fake_measure_prompt_tokens)
+
+    response = await run_explicit_compaction(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[_message("user", "alpha"), _message("assistant", "beta")],
+        ),
+        profile=profile,
+        sealing_keyring=_keyring(),
+        chat_completion_client=client,
+        prompt_cache_key_base=None,
+    )
+
+    payload = open_compaction_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert [row.message.content for row in payload.active] == ["alpha beta summary"]
+    assert seen_tokenizer_repos
+    assert set(seen_tokenizer_repos) == {"main-tokenizer"}
+
+
+def test_budgeted_transcript_message_uses_actor_tokenizer_near_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_leaf = ChatMessageSpan(start=0, end=0, message=StateMessage(role="user", content="alpha"), token_count=3)
+    second_leaf = ChatMessageSpan(start=1, end=1, message=StateMessage(role="assistant", content="beta"), token_count=3)
+    third_leaf = ChatMessageSpan(start=2, end=2, message=StateMessage(role="user", content="gamma"), token_count=2)
+    fourth_leaf = ChatMessageSpan(start=3, end=3, message=StateMessage(role="assistant", content="delta"), token_count=2)
+    spans = (
+        ChatMessageSpan(
+            start=0,
+            end=1,
+            message=StateMessage(role="assistant", content="alpha beta"),
+            token_count=3,
+            children=(first_leaf, second_leaf),
+            summary_fidelity=1,
+        ),
+        ChatMessageSpan(
+            start=2,
+            end=3,
+            message=StateMessage(role="assistant", content="gamma delta"),
+            token_count=3,
+            children=(third_leaf, fourth_leaf),
+            summary_fidelity=5,
+        ),
+    )
+    actor_config = RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="reviewer-tokenizer")
+    seen_tokenizer_repos: list[str | None] = []
+
+    def fake_measure_prompt_tokens(messages, *, actor_config):
+        seen_tokenizer_repos.append(actor_config.tokenizer_hf_repo)
+        transcript = json.loads((messages[0].content or "").removeprefix("Conversation transcript:\n"))
+        return 10 if transcript[0]["content"] == "alpha" else 9
+
+    monkeypatch.setattr("plap.responses.debate.measure_prompt_tokens", fake_measure_prompt_tokens)
+
+    message = _budgeted_transcript_message(
+        spans,
+        actor_config=actor_config,
+        recount_margin=3,
+        token_budget=9,
+    )
+
+    transcript = json.loads((message.content or "").removeprefix("Conversation transcript:\n"))
+    assert [item["content"] for item in transcript] == ["alpha beta", "gamma", "delta"]
+    assert seen_tokenizer_repos
+    assert set(seen_tokenizer_repos) == {"reviewer-tokenizer"}
 
 
 async def test_stream_response_events_hidden_server_loopback_usage_is_normalized() -> None:
@@ -3087,6 +3509,7 @@ def _profile_config(
     compact_max_rounds: int = 3,
     debate_max_rounds: int = 0,
     supported_parameters: list[str] | None = None,
+    transcript_recount_margin: int = 4096,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Test Model",
@@ -3127,6 +3550,7 @@ def _profile_config(
         compact_threshold=compact_threshold,
         compact_max_rounds=compact_max_rounds,
         debate_max_rounds=debate_max_rounds,
+        transcript_recount_margin=transcript_recount_margin,
     )
 
 

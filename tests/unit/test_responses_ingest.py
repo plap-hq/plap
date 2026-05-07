@@ -122,11 +122,15 @@ def test_mutable_queues_append_helpers() -> None:
 
     stable = queues.append_main_stable(StateMessage(role="user", content="stable"), content_hash="stable-hash")
     temp = queues.append_main_temp(StateMessage(role="assistant", content="temp"))
+    hidden_tool = queues.append_main_temp(StateMessage(role="tool", tool_call_id="call_1", content="tool output"))
+    next_stable = queues.append_main_stable(StateMessage(role="assistant", content="after temp"), content_hash="after-temp-hash")
     reviewer = queues.append_side("reviewer", StateMessage(role="assistant", content="review"), content_hash="review-hash")
     arbitrator = queues.append_side("arbitrator", StateMessage(role="assistant", content="decide"))
 
     assert (stable.start, stable.end, stable.content_hash) == (0, 0, "stable-hash")
-    assert (temp.start, temp.end, temp.message.content) == (1, 1, "temp")
+    assert temp.message.content == "temp"
+    assert hidden_tool.message.tool_call_id == "call_1"
+    assert (next_stable.start, next_stable.end, next_stable.content_hash) == (1, 1, "after-temp-hash")
     assert reviewer.content_hash == "review-hash"
     assert reviewer.message.content == "review"
     assert arbitrator.message.content == "decide"
@@ -1044,8 +1048,18 @@ def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None
                     "children_token_count": 2,
                     "expanded_token_count": 2,
                     "children": [
-                        {"start": 0, "end": 0, "message": {"role": "user", "content": "a"}, "token_count": 1},
-                        {"start": 1, "end": 1, "message": {"role": "user", "content": "b"}, "token_count": 1},
+                        {
+                            "start": 0,
+                            "end": 0,
+                            "message": {"role": "user", "content": "a"},
+                            "token_count": 1,
+                        },
+                        {
+                            "start": 1,
+                            "end": 1,
+                            "message": {"role": "user", "content": "b"},
+                            "token_count": 1,
+                        },
                     ],
                 }
             ],
@@ -1167,8 +1181,18 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
         token_count=1,
         summary_fidelity=3,
         children=(
-            ChatMessageSpan(start=0, end=0, message=_state_message({"role": "user", "content": "m0"}), token_count=2),
-            ChatMessageSpan(start=1, end=1, message=_state_message({"role": "assistant", "content": "m1"}), token_count=3),
+            ChatMessageSpan(
+                start=0,
+                end=0,
+                message=_state_message({"role": "user", "content": "m0"}),
+                token_count=2,
+            ),
+            ChatMessageSpan(
+                start=1,
+                end=1,
+                message=_state_message({"role": "assistant", "content": "m1"}),
+                token_count=3,
+            ),
         ),
     )
     second_summary = ChatMessageSpan(
@@ -1178,8 +1202,18 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
         token_count=1,
         summary_fidelity=3,
         children=(
-            ChatMessageSpan(start=2, end=2, message=_state_message({"role": "user", "content": "m2"}), token_count=2),
-            ChatMessageSpan(start=3, end=3, message=_state_message({"role": "assistant", "content": "m3"}), token_count=3),
+            ChatMessageSpan(
+                start=2,
+                end=2,
+                message=_state_message({"role": "user", "content": "m2"}),
+                token_count=2,
+            ),
+            ChatMessageSpan(
+                start=3,
+                end=3,
+                message=_state_message({"role": "assistant", "content": "m3"}),
+                token_count=3,
+            ),
         ),
     )
     compaction = RequestCompactionItem(

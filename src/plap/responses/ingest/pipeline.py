@@ -380,14 +380,14 @@ class _MainQueue(_QueueBase):
         self._cursors = cursors
         self._seed_rows: list[ChatMessageSpan] = []
         self._stable_rows: list[ChatMessageSpan] = []
-        self._temp_rows: list[ChatMessageSpan] = []
+        self._temp_rows: list[SideMessage] = []
 
     @property
     def context_rows(self) -> list[ChatMessageSpan]:
         return [*self._seed_rows, *self._stable_rows]
 
     @property
-    def context_temp_rows(self) -> list[ChatMessageSpan]:
+    def context_temp_rows(self) -> list[SideMessage]:
         return self._temp_rows
 
     @property
@@ -395,7 +395,7 @@ class _MainQueue(_QueueBase):
         return self._stable_rows
 
     @property
-    def temp_rows(self) -> list[ChatMessageSpan]:
+    def temp_rows(self) -> list[SideMessage]:
         return self._temp_rows
 
     def add_existing_row(self, row: ChatMessageSpan) -> None:
@@ -439,20 +439,21 @@ class _MainQueue(_QueueBase):
         *,
         allow_pending: bool = False,
         temp: bool = False,
-    ) -> ChatMessageSpan:
+    ) -> ChatMessageSpan | SideMessage:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
-        ordinal = self._cursors.get("m", 0)
-        row = ChatMessageSpan(
-            start=ordinal,
-            end=ordinal,
-            message=message,
-            token_count=message.estimated_token_count(),
-        )
-        self._cursors["m"] = ordinal + 1
         if temp:
+            row = SideMessage(message=message)
             self._temp_rows.append(row)
         else:
+            ordinal = self._cursors.get("m", 0)
+            row = ChatMessageSpan(
+                start=ordinal,
+                end=ordinal,
+                message=message,
+                token_count=message.estimated_token_count(),
+            )
+            self._cursors["m"] = ordinal + 1
             self._stable_rows.append(row)
         self._entries.append(row)
         self._resolve_pending_reasoning_patches(row.content_hash, row.message)

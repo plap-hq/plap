@@ -22,8 +22,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 mode="responses",
                 input_modalities=["text"],
                 output_modalities=["text"],
-                max_input_tokens=200_000,
-                max_output_tokens=32_768,
+                max_input_tokens=262_144,
+                max_output_tokens=262_144,
                 supported_parameters=[
                     "context_management",
                     "temperature",
@@ -51,8 +51,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
-            soft_compact_threshold=150_000,
-            compact_threshold=200_000,
+            soft_compact_threshold=200_000,
+            compact_threshold=250_000,
             compact_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
@@ -98,7 +98,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 input_modalities=["text"],
                 output_modalities=["text"],
                 max_input_tokens=1000_000,
-                max_output_tokens=262_144,
+                max_output_tokens=1000_000,
                 supported_parameters=[
                     "context_management",
                     "temperature",
@@ -126,8 +126,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
-            soft_compact_threshold=150_000,
-            compact_threshold=200_000,
+            soft_compact_threshold=200_000,
+            compact_threshold=250_000,
             compact_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
@@ -273,6 +273,8 @@ def _unsupported_reasoning_effort_error(model: str, effort: ReasoningEffort, *, 
             context={"model": model, "reasoning_effort": effort},
         ),
     )
+
+
 class RuntimeSelector(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
@@ -420,9 +422,21 @@ class RuntimeActorConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     model: str
+    tokenizer_hf_repo: str | None = None
+    tokenizer_revision: str | None = None
+    tokenizer_trust_remote_code: bool = False
     reasoning_effort: ReasoningEffort | None = None
     service_tier: ServiceTier | None = None
     public_usage: PublicUsageConfig = Field(default_factory=PublicUsageConfig)
+
+    @model_validator(mode="after")
+    def validate_tokenizer(self) -> RuntimeActorConfig:
+        if self.tokenizer_hf_repo is None:
+            if self.tokenizer_revision is not None:
+                raise ValueError("tokenizer_revision requires tokenizer_hf_repo")
+            if self.tokenizer_trust_remote_code:
+                raise ValueError("tokenizer_trust_remote_code requires tokenizer_hf_repo")
+        return self
 
     def apply_override(self, override: RuntimeActorOverride | None) -> RuntimeActorConfig:
         if override is None:
@@ -559,6 +573,7 @@ class RuntimeModelProfileConfig(BaseModel):
     reasoning_summarizer: RuntimeActorConfig
     reviewer_transcript_token_budget: int = Field(default=0, ge=0)
     arbitrator_transcript_token_budget: int = Field(default=0, ge=0)
+    transcript_recount_margin: int = Field(default=16384, ge=0)
     soft_compact_threshold: int | None = Field(default=None, ge=0)
     compact_threshold: int | None = Field(default=None, ge=0)
     compact_max_rounds: int = Field(default=3, ge=0)

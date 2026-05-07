@@ -34,7 +34,14 @@ from plap.responses.contracts import (
 from plap.responses.ingest import ChatMessageSpan, CompactionPayload, ingest_response_request
 from plap.responses.ingest.sealing import seal_compaction_payload
 from plap.responses.io import ResponseEventIO
-from plap.responses.models import MutableQueues, StateMessage, StateToolCall, UsageLedger, strip_leading_internal_citations
+from plap.responses.models import (
+    MutableQueues,
+    StateMessage,
+    StateToolCall,
+    UsageLedger,
+    measure_prompt_tokens,
+    strip_leading_internal_citations,
+)
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 logger = structlog.get_logger(__name__)
@@ -137,6 +144,14 @@ class CompactionSettings:
     compact_max_rounds: int
 
 
+def compaction_level_for_token_count(token_count: int, *, settings: CompactionSettings) -> CompactionLevel:
+    if settings.compact_threshold is not None and token_count >= settings.compact_threshold:
+        return CompactionLevel.HARD
+    if settings.soft_compact_threshold is not None and token_count >= settings.soft_compact_threshold:
+        return CompactionLevel.SOFT
+    return CompactionLevel.NONE
+
+
 def compact_tool() -> FunctionTool:
     return FunctionTool(
         description=(
@@ -151,9 +166,7 @@ def compact_tool() -> FunctionTool:
                 "action": {
                     "type": "string",
                     "enum": ["apply", "bailout"],
-                    "description": (
-                        "apply to compact the visible context, or bailout only when the run explicitly allows it."
-                    ),
+                    "description": ("apply to compact the visible context, or bailout only when the run explicitly allows it."),
                 },
                 "bailout_reason": {
                     "type": "string",
@@ -210,8 +223,7 @@ def compact_tool() -> FunctionTool:
                             "summary": {
                                 "type": "string",
                                 "description": (
-                                    "Replacement summary for the selected range. Do not include citation markers or "
-                                    "meta-commentary."
+                                    "Replacement summary for the selected range. Do not include citation markers or meta-commentary."
                                 ),
                             },
                             "summary_fidelity": {
@@ -452,6 +464,15 @@ def _strip_reasoning_from_span(span: ChatMessageSpan) -> ChatMessageSpan:
     )
 
 
+def _strip_reasoning_before_start(span: ChatMessageSpan, *, before_start: int) -> ChatMessageSpan:
+    if span.end < before_start:
+        return _strip_reasoning_from_span(span)
+    if span.start >= before_start or not span.children:
+        return span
+    children = tuple(_strip_reasoning_before_start(child, before_start=before_start) for child in span.children)
+    return span.with_children(children)
+
+
 def _collect_descendant_tool_calls(
     span: ChatMessageSpan,
     seen: set[str],
@@ -467,10 +488,37 @@ def _collect_descendant_tool_calls(
         _collect_descendant_tool_calls(child, seen, collected, surviving_output_ids)
 
 
+def _measure_compaction_messages(
+    messages: Sequence[ChatMessage],
+    *,
+    actor_config: RuntimeActorConfig,
+) -> int:
+    try:
+        return measure_prompt_tokens(messages, actor_config=actor_config)
+    except Exception as exc:
+        raise _compaction_unavailable_error(
+            reason="compact_tokenizer_failed",
+            private_message="compaction prompt token measurement failed",
+            cause=exc,
+        ) from exc
+
+
+def _context_prompt_token_count(
+    spans: Sequence[ChatMessageSpan],
+    *,
+    actor_config: RuntimeActorConfig,
+) -> int:
+    return _measure_compaction_messages(
+        [span.render_for_model(include_citation=False) for span in spans],
+        actor_config=actor_config,
+    )
+
+
 def apply_compaction_call(
     main_context: Sequence[ChatMessageSpan],
     arguments: str,
     *,
+    actor_config: RuntimeActorConfig,
     allow_bailout: bool,
 ) -> tuple[CompactionOutcome, list[ChatMessageSpan]]:
     try:
@@ -554,9 +602,8 @@ def apply_compaction_call(
             private_message="compact ranges are required for action=apply",
         )
 
-    before_token_count = sum(row.context_token_count(include_citation=False) for row in main_context)
     index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
-    duplicate_tool_calls_before_index = None
+    duplicate_tool_calls_before_start = None
     if duplicate_tool_calls_before is not None:
         duplicate_tool_calls_before_index = index_by_citation.get(_normalize_citation(duplicate_tool_calls_before))
         if duplicate_tool_calls_before_index is None:
@@ -564,8 +611,9 @@ def apply_compaction_call(
                 reason="compact_prune_before_duplicate_tool_calls_not_visible",
                 private_message="compact prune_before.duplicate_tool_calls citation is not visible",
             )
+        duplicate_tool_calls_before_start = main_context[duplicate_tool_calls_before_index].start
 
-    reasoning_before_index = None
+    reasoning_before_start = None
     if reasoning_before is not None:
         reasoning_before_index = index_by_citation.get(_normalize_citation(reasoning_before))
         if reasoning_before_index is None:
@@ -573,6 +621,7 @@ def apply_compaction_call(
                 reason="compact_prune_before_reasoning_not_visible",
                 private_message="compact prune_before.reasoning citation is not visible",
             )
+        reasoning_before_start = main_context[reasoning_before_index].start
 
     parsed_ranges: list[tuple[int, int, str, int]] = []
     for item in ranges:
@@ -630,18 +679,21 @@ def apply_compaction_call(
 
     compacted: list[ChatMessageSpan] = []
     created_summary_indexes: list[int] = []
+    exact_before_token_count = _context_prompt_token_count(main_context, actor_config=actor_config)
     cursor = 0
     for start_index, end_index, summary, summary_fidelity in parsed_ranges:
-        compacted.extend(main_context[cursor:start_index])
         selected = tuple(main_context[start_index : end_index + 1])
         summary_message = StateMessage(role="assistant", content=summary)
         summary_token_count = summary_message.estimated_token_count()
-        selected_token_count = sum(row.token_count for row in selected)
-        if summary_token_count >= selected_token_count:
-            raise _compaction_unavailable_error(
-                reason="compact_summary_not_reductive",
-                private_message="compact summary must reduce token count",
-            )
+        exact_selected_token_count = _context_prompt_token_count(selected, actor_config=actor_config)
+        exact_summary_token_count = _measure_compaction_messages(
+            [summary_message.to_chat_message(untrusted=True)],
+            actor_config=actor_config,
+        )
+        if exact_summary_token_count >= exact_selected_token_count:
+            continue
+
+        compacted.extend(main_context[cursor:start_index])
 
         created_summary_indexes.append(len(compacted))
         compacted.append(
@@ -657,23 +709,18 @@ def apply_compaction_call(
         cursor = end_index + 1
 
     compacted.extend(main_context[cursor:])
-    if duplicate_tool_calls_before_index is not None:
+    if duplicate_tool_calls_before_start is not None:
         compacted = ChatMessageSpan.deduplicate_tool_call_outputs(
             compacted,
             tombstone=DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
-            before_top_level_index=duplicate_tool_calls_before_index,
+            before_start=duplicate_tool_calls_before_start,
         )
 
-    if reasoning_before_index is not None:
-        compacted = [
-            _strip_reasoning_from_span(span) if index < reasoning_before_index else span
-            for index, span in enumerate(compacted)
-        ]
+    if reasoning_before_start is not None:
+        compacted = [_strip_reasoning_before_start(span, before_start=reasoning_before_start) for span in compacted]
 
     surviving_output_ids = {
-        span.message.tool_call_id
-        for span in compacted
-        if span.message.is_tool() and span.message.tool_call_id is not None
+        span.message.tool_call_id for span in compacted if span.message.is_tool() and span.message.tool_call_id is not None
     }
     for index in created_summary_indexes:
         seen: set[str] = set()
@@ -684,11 +731,11 @@ def apply_compaction_call(
                 StateMessage(role="assistant", content=compacted[index].message.content, tool_calls=list(tool_calls))
             )
 
-    after_token_count = sum(row.context_token_count(include_citation=False) for row in compacted)
-    if after_token_count >= before_token_count:
+    exact_after_token_count = _context_prompt_token_count(compacted, actor_config=actor_config)
+    if exact_after_token_count >= exact_before_token_count:
         raise _compaction_unavailable_error(
             reason="compact_no_effect",
-            private_message="compact apply must reduce token count",
+            private_message="compact apply must reduce prompt token count",
         )
 
     return CompactionOutcome.APPLIED, compacted
@@ -731,6 +778,7 @@ async def run_explicit_compaction(
             _, state.main_context = apply_compaction_call(
                 state.main_context,
                 _compaction_arguments(result),
+                actor_config=profile.main,
                 allow_bailout=False,
             )
         except PlapError as exc:
@@ -783,6 +831,7 @@ class Compactor:
         out: ResponseEventIO,
         request: ResponseCreateRequest,
         profile: RuntimeModelProfileConfig,
+        settings: CompactionSettings,
         sealing_keyring: SealingKeyring,
         chat_completion_client: IChatCompletionClient,
         prompt_cache_key_base: str | None,
@@ -792,33 +841,14 @@ class Compactor:
         self._out = out
         self._request = request
         self._profile = profile
+        self._settings = settings
         self._sealing_keyring = sealing_keyring
         self._chat_completion_client = chat_completion_client
         self._prompt_cache_key_base = prompt_cache_key_base
         self._usage_ledger = usage_ledger
-        self._settings = resolve_compaction_settings(profile, request)
         self._rounds_used = 0
 
-    async def maybe_compact(self) -> CompactionOutcome:
-        effective_main_context = self._state.effective_main_context()
-        token_count = sum(row.context_token_count(include_citation=False) for row in effective_main_context)
-        level = CompactionLevel.NONE
-        if self._settings.compact_threshold is not None and token_count >= self._settings.compact_threshold:
-            level = CompactionLevel.HARD
-        elif self._settings.soft_compact_threshold is not None and token_count >= self._settings.soft_compact_threshold:
-            level = CompactionLevel.SOFT
-
-        log_debug(
-            logger,
-            "response.compaction.maybe",
-            compact_max_rounds=self._settings.compact_max_rounds,
-            compact_threshold=self._settings.compact_threshold,
-            level=level,
-            rounds_used=self._rounds_used,
-            soft_compact_threshold=self._settings.soft_compact_threshold,
-            token_count=token_count,
-        )
-
+    async def compact(self, level: CompactionLevel) -> CompactionOutcome:
         if level == CompactionLevel.NONE:
             return CompactionOutcome.NOT_NEEDED
         if self._rounds_used >= self._settings.compact_max_rounds:
@@ -864,6 +894,7 @@ class Compactor:
                 outcome, compacted = apply_compaction_call(
                     self._state.main_context,
                     _compaction_arguments(result),
+                    actor_config=self._profile.main,
                     allow_bailout=level == CompactionLevel.SOFT,
                 )
             except PlapError as exc:
