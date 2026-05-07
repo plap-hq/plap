@@ -52,6 +52,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 model="openrouter/deepseek/deepseek-v4-flash:nitro",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
+                reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
                 model="openrouter/stepfun/step-3.5-flash:nitro",
@@ -147,6 +148,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 model="openrouter/deepseek/deepseek-v4-flash:nitro",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
+                reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
                 model="crof/mimo-v2.5-pro",
