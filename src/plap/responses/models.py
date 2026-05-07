@@ -1,255 +1,25 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from functools import lru_cache
-from typing import Any
 
 import blake3
 import msgspec
-import tiktoken
 
-from plap.llms.chat import ChatCompletionRequest
 from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.chat import ChatRole, ChatUsage
-from plap.llms.chat import ChatTool
 from plap.llms.chat import ChatToolCall as LLMChatToolCall
 from plap.responses.contracts import (
     ResponseUsage,
     ResponseUsageInputTokensDetails,
     ResponseUsageOutputTokensDetails,
 )
-from plap.settings import PublicUsageConfig, RuntimeActorConfig
+from plap.responses.tokens import estimate_text_tokens
+from plap.settings import PublicUsageConfig
 
-_DEFAULT_ENCODING = "o200k_base"
 _LEADING_INTERNAL_CITATION_RE = re.compile(r"^\s*(?:(?:\[~\d+(?:_\d+)?\])\s+)+")
-
-
-@lru_cache(maxsize=1)
-def _encoding() -> tiktoken.Encoding:
-    return tiktoken.get_encoding(_DEFAULT_ENCODING)
-
-
-def _estimate_text_tokens(text: str | None) -> int:
-    if not text:
-        return 1
-    return max(1, len(_encoding().encode(text)))
-
-
-def _canonical_text(value: str) -> str:
-    try:
-        decoded = msgspec.json.decode(value.encode())
-    except msgspec.DecodeError:
-        return value
-    return msgspec.json.encode(decoded, order="deterministic").decode()
-
-
-def _append_labeled_text(lines: list[str], label: str, value: str | None) -> None:
-    if value is None:
-        return
-    lines.append(f"{label}:")
-    lines.append(value)
-
-
-def _append_labeled_json(lines: list[str], label: str, value: object | None) -> None:
-    if value is None:
-        return
-    lines.append(f"{label}:")
-    lines.append(msgspec.json.encode(value, order="deterministic").decode())
-
-
-def _tool_call_budget_text(tool_call: LLMChatToolCall) -> str:
-    lines = [f"id: {tool_call.id}", f"name: {tool_call.name}"]
-    _append_labeled_text(lines, "arguments", _canonical_text(tool_call.arguments))
-    return "\n".join(lines)
-
-
-def _tool_budget_text(tool: ChatTool, *, index: int) -> str:
-    return "\n".join(
-        [
-            f"tool[{index}]",
-            f"name: {tool.function.name}",
-            f"description: {tool.function.description}" if tool.function.description is not None else "",
-            "parameters:",
-            msgspec.json.encode(tool.function.parameters or {}, order="deterministic").decode(),
-            f"strict: {tool.function.strict}" if tool.function.strict is not None else "",
-        ]
-    ).strip()
-
-
-def _message_budget_text(message: LLMChatMessage) -> str:
-    lines = [f"role: {message.role}"]
-    if message.name is not None:
-        lines.append(f"name: {message.name}")
-    if message.tool_call_id is not None:
-        lines.append(f"tool_call_id: {message.tool_call_id}")
-    _append_labeled_text(lines, "content", message.content)
-    _append_labeled_text(lines, "refusal", message.refusal)
-    _append_labeled_text(lines, "reasoning_content", message.reasoning_content)
-    _append_labeled_json(lines, "reasoning_details", message.reasoning_details)
-    if message.tool_calls:
-        lines.append("tool_calls:")
-        for index, tool_call in enumerate(message.tool_calls):
-            lines.append(f"[{index}]")
-            lines.append(_tool_call_budget_text(tool_call))
-    return "\n".join(lines)
-
-
-def _prompt_messages_payload(messages: Sequence[LLMChatMessage]) -> str:
-    parts: list[str] = []
-    for index, message in enumerate(messages):
-        parts.append(f"message[{index}]")
-        parts.append(_message_budget_text(message))
-    return "\n\n".join(parts)
-
-
-def _request_budget_text(request: ChatCompletionRequest) -> str:
-    parts = [_prompt_messages_payload(request.messages)]
-    if request.tools:
-        parts.append("tools:")
-        parts.extend(_tool_budget_text(tool, index=index) for index, tool in enumerate(request.tools))
-    return "\n\n".join(part for part in parts if part)
-
-
-def _template_tool_call(tool_call: LLMChatToolCall) -> dict[str, object]:
-    try:
-        arguments: object = msgspec.json.decode(tool_call.arguments.encode())
-    except msgspec.DecodeError:
-        arguments = tool_call.arguments
-    return {
-        "id": tool_call.id,
-        "type": "function",
-        "function": {
-            "name": tool_call.name,
-            "arguments": arguments,
-        },
-    }
-
-
-def _template_message(message: LLMChatMessage) -> dict[str, object]:
-    value: dict[str, object] = {
-        "role": "system" if message.role == ChatRole.DEVELOPER else message.role,
-    }
-    if message.content is not None:
-        value["content"] = message.content
-    if message.name is not None:
-        value["name"] = message.name
-    if message.tool_call_id is not None:
-        value["tool_call_id"] = message.tool_call_id
-    if message.tool_calls:
-        value["tool_calls"] = [_template_tool_call(tool_call) for tool_call in message.tool_calls]
-    if message.refusal is not None:
-        value["refusal"] = message.refusal
-    return value
-
-
-def _template_tools(tools: Sequence[ChatTool]) -> list[dict[str, object]]:
-    return [
-        {
-            "type": tool.type,
-            "function": {
-                "name": tool.function.name,
-                "description": tool.function.description,
-                "parameters": tool.function.parameters or {},
-                "strict": tool.function.strict,
-            },
-        }
-        for tool in tools
-    ]
-
-
-def _reasoning_budget_text(message: LLMChatMessage) -> str | None:
-    lines: list[str] = []
-    _append_labeled_text(lines, "reasoning_content", message.reasoning_content)
-    _append_labeled_json(lines, "reasoning_details", message.reasoning_details)
-    if not lines:
-        return None
-    return "\n".join(lines)
-
-
-def _tokenize_text_with_actor(text: str, *, actor_config: RuntimeActorConfig) -> int:
-    if actor_config.tokenizer_hf_repo is None:
-        return _estimate_text_tokens(text)
-    tokenizer = _hf_tokenizer(
-        actor_config.tokenizer_hf_repo,
-        actor_config.tokenizer_revision,
-        actor_config.tokenizer_trust_remote_code,
-    )
-    return max(1, len(tokenizer.encode(text, add_special_tokens=False)))
-
-
-def _tokenizer_chat_template_supported(tokenizer: Any) -> bool:
-    chat_template = getattr(tokenizer, "chat_template", None)
-    return callable(getattr(tokenizer, "apply_chat_template", None)) and bool(chat_template)
-
-
-def _template_request_token_count(
-    request: ChatCompletionRequest,
-    *,
-    actor_config: RuntimeActorConfig,
-) -> int | None:
-    if actor_config.tokenizer_hf_repo is None:
-        return None
-    tokenizer = _hf_tokenizer(
-        actor_config.tokenizer_hf_repo,
-        actor_config.tokenizer_revision,
-        actor_config.tokenizer_trust_remote_code,
-    )
-    if not _tokenizer_chat_template_supported(tokenizer):
-        return None
-    token_ids = tokenizer.apply_chat_template(
-        [_template_message(message) for message in request.messages],
-        tools=_template_tools(request.tools) or None,
-        add_generation_prompt=False,
-        tokenize=True,
-    )
-    count = max(1, len(token_ids))
-    for message in request.messages:
-        reasoning_text = _reasoning_budget_text(message)
-        if reasoning_text is None:
-            continue
-        count += _tokenize_text_with_actor(reasoning_text, actor_config=actor_config)
-    return count
-
-
-@lru_cache(maxsize=32)
-def _hf_tokenizer(
-    repo: str,
-    revision: str | None,
-    trust_remote_code: bool,
-):
-    from transformers import AutoTokenizer
-
-    return AutoTokenizer.from_pretrained(
-        repo,
-        revision=revision,
-        trust_remote_code=trust_remote_code,
-        use_fast=True,
-    )
-
-
-def measure_prompt_tokens(
-    messages: Sequence[LLMChatMessage],
-    *,
-    actor_config: RuntimeActorConfig,
-) -> int:
-    return measure_request_tokens(
-        ChatCompletionRequest(model=actor_config.model, messages=list(messages)),
-        actor_config=actor_config,
-    )
-
-
-def measure_request_tokens(
-    request: ChatCompletionRequest,
-    *,
-    actor_config: RuntimeActorConfig,
-) -> int:
-    template_count = _template_request_token_count(request, actor_config=actor_config)
-    if template_count is not None:
-        return template_count
-    return _tokenize_text_with_actor(_request_budget_text(request), actor_config=actor_config)
 
 
 def strip_leading_internal_citations(text: str | None) -> str | None:
@@ -341,7 +111,7 @@ class StateMessage:
 
     def estimated_token_count(self) -> int:
         encoded = msgspec.json.encode(self.to_primitive(include_reasoning=False), order="deterministic").decode()
-        return _estimate_text_tokens(encoded)
+        return estimate_text_tokens(encoded)
 
     def content_text(self) -> str | None:
         return self.content
@@ -667,7 +437,7 @@ class ChatMessageSpan:
         return f"[~{self.start}_{self.end}]"
 
     def citation_token_count(self) -> int:
-        return _estimate_text_tokens(f"{self.citation}\n")
+        return estimate_text_tokens(f"{self.citation}\n")
 
     def render_for_model(self, *, include_citation: bool) -> object:
         return self.message.to_chat_message(

@@ -61,10 +61,10 @@ from plap.responses.models import (
     StateMessage,
     StateToolCall,
     UsageLedger,
-    measure_request_tokens,
 )
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
+from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
@@ -553,7 +553,12 @@ async def run_response(
             triggered_level=preflight_level,
         )
 
-        compaction_result = await compactor.compact(preflight_level)
+        compaction_result = await compactor.compact(
+            preflight_level,
+            tools=model_request.tools,
+            response_format=model_request.response_format,
+            reasoning_effort=model_request.reasoning_effort,
+        )
         if compaction_result == CompactionOutcome.INCOMPLETE:
             return
         if compaction_result == CompactionOutcome.APPLIED:

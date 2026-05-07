@@ -51,8 +51,8 @@ from plap.responses.models import (
     TempMainParts,
     TranscriptMessage,
     UsageLedger,
-    measure_prompt_tokens,
 )
+from plap.responses.tokens import measure_prompt_tokens
 from plap.responses.tools import ToolPolicy
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig

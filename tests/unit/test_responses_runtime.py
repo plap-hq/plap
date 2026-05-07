@@ -29,6 +29,8 @@ from plap.responses.contracts import (
     RequestMessageItem,
     ResponseCompletedEvent,
     ResponseCreateRequest,
+    ResponseTextConfig,
+    TextFormatJSONObject,
     WebSearchTool,
 )
 from plap.responses.debate import _budgeted_transcript_message
@@ -1367,6 +1369,76 @@ async def test_stream_response_events_accepts_stringified_compaction_ranges() ->
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["compaction", "message"]
+
+
+async def test_stream_response_events_compaction_recount_uses_main_request_measurement_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_calls: list[tuple[tuple[str, ...], str | None, str | None]] = []
+    profile = _profile_config(soft_compact_threshold=1, compact_max_rounds=1)
+    profile = profile.model_copy(update={"main": profile.main.model_copy(update={"reasoning_effort": "high"})})
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~1]",
+                                        "summary": "alpha beta summary",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    def fake_measure_prompt_tokens(messages, *, actor_config, tools=(), response_format=None, reasoning_effort=None):
+        seen_calls.append(
+            (
+                tuple(tool.function.name for tool in tools),
+                None if response_format is None else str(response_format.type),
+                None if reasoning_effort is None else str(reasoning_effort),
+            )
+        )
+        return 10 * len(messages)
+
+    monkeypatch.setattr(compact_module, "measure_prompt_tokens", fake_measure_prompt_tokens)
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_message("user", "alpha"), _message("assistant", "beta")],
+                text=ResponseTextConfig(format=TextFormatJSONObject(type="json_object")),
+                tools=[_read_file_tool()],
+            ),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["compaction", "message"]
+    assert seen_calls
+    assert set(seen_calls) == {(("read_file",), "json_object", "high")}
 
 
 async def test_stream_response_events_accepts_bracketless_compact_citations() -> None:
@@ -2988,7 +3060,10 @@ async def test_run_explicit_compaction_validates_with_main_tokenizer_config(
         )
     )
 
-    def fake_measure_prompt_tokens(messages, *, actor_config):
+    def fake_measure_prompt_tokens(messages, *, actor_config, tools=(), response_format=None, reasoning_effort=None):
+        assert tools == ()
+        assert response_format is None
+        assert reasoning_effort is None
         seen_tokenizer_repos.append(actor_config.tokenizer_hf_repo)
         return 10 * len(messages)
 

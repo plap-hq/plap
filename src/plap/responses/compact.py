@@ -17,9 +17,11 @@ from plap.llms.chat import (
     ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
+    ChatResponseFormat,
     ChatTool,
     ChatToolChoiceMode,
     IChatCompletionClient,
+    ReasoningEffort,
 )
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
@@ -39,9 +41,9 @@ from plap.responses.models import (
     StateMessage,
     StateToolCall,
     UsageLedger,
-    measure_prompt_tokens,
     strip_leading_internal_citations,
 )
+from plap.responses.tokens import measure_prompt_tokens
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 logger = structlog.get_logger(__name__)
@@ -492,9 +494,18 @@ def _measure_compaction_messages(
     messages: Sequence[ChatMessage],
     *,
     actor_config: RuntimeActorConfig,
+    tools: Sequence[ChatTool] = (),
+    response_format: ChatResponseFormat | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
     try:
-        return measure_prompt_tokens(messages, actor_config=actor_config)
+        return measure_prompt_tokens(
+            messages,
+            actor_config=actor_config,
+            tools=tools,
+            response_format=response_format,
+            reasoning_effort=reasoning_effort,
+        )
     except Exception as exc:
         raise _compaction_unavailable_error(
             reason="compact_tokenizer_failed",
@@ -507,10 +518,16 @@ def _context_prompt_token_count(
     spans: Sequence[ChatMessageSpan],
     *,
     actor_config: RuntimeActorConfig,
+    tools: Sequence[ChatTool] = (),
+    response_format: ChatResponseFormat | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
     return _measure_compaction_messages(
         [span.render_for_model(include_citation=False) for span in spans],
         actor_config=actor_config,
+        tools=tools,
+        response_format=response_format,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -520,6 +537,9 @@ def apply_compaction_call(
     *,
     actor_config: RuntimeActorConfig,
     allow_bailout: bool,
+    tools: Sequence[ChatTool] = (),
+    response_format: ChatResponseFormat | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> tuple[CompactionOutcome, list[ChatMessageSpan]]:
     try:
         payload = msgspec.json.decode(arguments.encode())
@@ -679,16 +699,31 @@ def apply_compaction_call(
 
     compacted: list[ChatMessageSpan] = []
     created_summary_indexes: list[int] = []
-    exact_before_token_count = _context_prompt_token_count(main_context, actor_config=actor_config)
+    exact_before_token_count = _context_prompt_token_count(
+        main_context,
+        actor_config=actor_config,
+        tools=tools,
+        response_format=response_format,
+        reasoning_effort=reasoning_effort,
+    )
     cursor = 0
     for start_index, end_index, summary, summary_fidelity in parsed_ranges:
         selected = tuple(main_context[start_index : end_index + 1])
         summary_message = StateMessage(role="assistant", content=summary)
         summary_token_count = summary_message.estimated_token_count()
-        exact_selected_token_count = _context_prompt_token_count(selected, actor_config=actor_config)
+        exact_selected_token_count = _context_prompt_token_count(
+            selected,
+            actor_config=actor_config,
+            tools=tools,
+            response_format=response_format,
+            reasoning_effort=reasoning_effort,
+        )
         exact_summary_token_count = _measure_compaction_messages(
             [summary_message.to_chat_message(untrusted=True)],
             actor_config=actor_config,
+            tools=tools,
+            response_format=response_format,
+            reasoning_effort=reasoning_effort,
         )
         if exact_summary_token_count >= exact_selected_token_count:
             continue
@@ -731,7 +766,13 @@ def apply_compaction_call(
                 StateMessage(role="assistant", content=compacted[index].message.content, tool_calls=list(tool_calls))
             )
 
-    exact_after_token_count = _context_prompt_token_count(compacted, actor_config=actor_config)
+    exact_after_token_count = _context_prompt_token_count(
+        compacted,
+        actor_config=actor_config,
+        tools=tools,
+        response_format=response_format,
+        reasoning_effort=reasoning_effort,
+    )
     if exact_after_token_count >= exact_before_token_count:
         raise _compaction_unavailable_error(
             reason="compact_no_effect",
@@ -848,7 +889,14 @@ class Compactor:
         self._usage_ledger = usage_ledger
         self._rounds_used = 0
 
-    async def compact(self, level: CompactionLevel) -> CompactionOutcome:
+    async def compact(
+        self,
+        level: CompactionLevel,
+        *,
+        tools: Sequence[ChatTool],
+        response_format: ChatResponseFormat | None,
+        reasoning_effort: ReasoningEffort | None,
+    ) -> CompactionOutcome:
         if level == CompactionLevel.NONE:
             return CompactionOutcome.NOT_NEEDED
         if self._rounds_used >= self._settings.compact_max_rounds:
@@ -896,6 +944,9 @@ class Compactor:
                     _compaction_arguments(result),
                     actor_config=self._profile.main,
                     allow_bailout=level == CompactionLevel.SOFT,
+                    tools=tools,
+                    response_format=response_format,
+                    reasoning_effort=reasoning_effort,
                 )
             except PlapError as exc:
                 if not exc.private.reason.startswith("compact_"):
