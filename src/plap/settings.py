@@ -44,15 +44,16 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 deprecated=False,
             ),
             main=RuntimeActorConfig(model="openrouter/stepfun/step-3.5-flash:nitro"),
+            compactor=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             main_debate=RuntimeActorConfig(model="openrouter/stepfun/step-3.5-flash:nitro"),
             reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
-            compaction_soft_token_budget=150_000,
-            compaction_hard_token_budget=200_000,
-            compaction_max_rounds=3,
+            soft_compact_threshold=150_000,
+            compact_threshold=200_000,
+            compact_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort={
@@ -65,8 +66,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 ReasoningEffort.LOW: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
                     main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
-                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
-                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                 ),
                 ReasoningEffort.MEDIUM: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
@@ -118,15 +119,16 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 deprecated=False,
             ),
             main=RuntimeActorConfig(model="crof/mimo-v2.5-pro"),
+            compactor=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             main_debate=RuntimeActorConfig(model="crof/mimo-v2.5-pro"),
             reviewer=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             arbitrator=RuntimeActorConfig(model="openrouter/deepseek/deepseek-v4-flash:nitro"),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
-            compaction_soft_token_budget=150_000,
-            compaction_hard_token_budget=200_000,
-            compaction_max_rounds=3,
+            soft_compact_threshold=150_000,
+            compact_threshold=200_000,
+            compact_max_rounds=3,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort={
@@ -165,9 +167,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
     }
 
 
-def _validate_compaction_budgets(soft_budget: int | None, hard_budget: int | None) -> None:
-    if soft_budget is not None and hard_budget is not None and hard_budget <= soft_budget:
-        raise ValueError("compaction hard token budget must exceed the soft token budget")
+def _validate_compact_thresholds(soft_threshold: int | None, threshold: int | None) -> None:
+    if soft_threshold is not None and threshold is not None and threshold <= soft_threshold:
+        raise ValueError("compact threshold must exceed the soft compact threshold")
 
 
 def _missing_model_error() -> PlapError:
@@ -452,20 +454,21 @@ class RuntimeProfileOverride(BaseModel):
     display_name: str | None = None
     model_info: RuntimeModelInfoOverride | None = None
     main: RuntimeActorOverride | None = None
+    compactor: RuntimeActorOverride | None = None
     main_debate: RuntimeActorOverride | None = None
     reviewer: RuntimeActorOverride | None = None
     arbitrator: RuntimeActorOverride | None = None
     reasoning_summarizer: RuntimeActorOverride | None = None
     reviewer_transcript_token_budget: int | None = Field(default=None, ge=0)
     arbitrator_transcript_token_budget: int | None = Field(default=None, ge=0)
-    compaction_soft_token_budget: int | None = Field(default=None, ge=0)
-    compaction_hard_token_budget: int | None = Field(default=None, ge=0)
-    compaction_max_rounds: int | None = Field(default=None, ge=0)
+    soft_compact_threshold: int | None = Field(default=None, ge=0)
+    compact_threshold: int | None = Field(default=None, ge=0)
+    compact_max_rounds: int | None = Field(default=None, ge=0)
     debate_max_rounds: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_compaction_config(self) -> RuntimeProfileOverride:
-        _validate_compaction_budgets(self.compaction_soft_token_budget, self.compaction_hard_token_budget)
+        _validate_compact_thresholds(self.soft_compact_threshold, self.compact_threshold)
         return self
 
     def apply_to(self, profile: RuntimeModelProfileConfig) -> RuntimeModelProfileConfig:
@@ -476,6 +479,8 @@ class RuntimeProfileOverride(BaseModel):
             updates["model_info"] = profile.model_info.apply_override(self.model_info)
         if self.main is not None:
             updates["main"] = profile.main.apply_override(self.main)
+        if self.compactor is not None:
+            updates["compactor"] = profile.compactor.apply_override(self.compactor)
         if self.main_debate is not None:
             updates["main_debate"] = profile.main_debate.apply_override(self.main_debate)
         if self.reviewer is not None:
@@ -488,12 +493,12 @@ class RuntimeProfileOverride(BaseModel):
             updates["reviewer_transcript_token_budget"] = self.reviewer_transcript_token_budget
         if self.arbitrator_transcript_token_budget is not None:
             updates["arbitrator_transcript_token_budget"] = self.arbitrator_transcript_token_budget
-        if self.compaction_soft_token_budget is not None:
-            updates["compaction_soft_token_budget"] = self.compaction_soft_token_budget
-        if self.compaction_hard_token_budget is not None:
-            updates["compaction_hard_token_budget"] = self.compaction_hard_token_budget
-        if self.compaction_max_rounds is not None:
-            updates["compaction_max_rounds"] = self.compaction_max_rounds
+        if self.soft_compact_threshold is not None:
+            updates["soft_compact_threshold"] = self.soft_compact_threshold
+        if self.compact_threshold is not None:
+            updates["compact_threshold"] = self.compact_threshold
+        if self.compact_max_rounds is not None:
+            updates["compact_max_rounds"] = self.compact_max_rounds
         if self.debate_max_rounds is not None:
             updates["debate_max_rounds"] = self.debate_max_rounds
         return profile.model_copy(update=updates)
@@ -506,6 +511,8 @@ class RuntimeProfileOverride(BaseModel):
             fields.update(self.model_info.overridden_fields("model_info"))
         if self.main is not None:
             fields.update(self.main.overridden_fields("main"))
+        if self.compactor is not None:
+            fields.update(self.compactor.overridden_fields("compactor"))
         if self.main_debate is not None:
             fields.update(self.main_debate.overridden_fields("main_debate"))
         if self.reviewer is not None:
@@ -518,12 +525,12 @@ class RuntimeProfileOverride(BaseModel):
             fields.add("reviewer_transcript_token_budget")
         if self.arbitrator_transcript_token_budget is not None:
             fields.add("arbitrator_transcript_token_budget")
-        if self.compaction_soft_token_budget is not None:
-            fields.add("compaction_soft_token_budget")
-        if self.compaction_hard_token_budget is not None:
-            fields.add("compaction_hard_token_budget")
-        if self.compaction_max_rounds is not None:
-            fields.add("compaction_max_rounds")
+        if self.soft_compact_threshold is not None:
+            fields.add("soft_compact_threshold")
+        if self.compact_threshold is not None:
+            fields.add("compact_threshold")
+        if self.compact_max_rounds is not None:
+            fields.add("compact_max_rounds")
         if self.debate_max_rounds is not None:
             fields.add("debate_max_rounds")
         return fields
@@ -534,7 +541,7 @@ class RuntimeProfileOverride(BaseModel):
     def all_models(self) -> tuple[str, ...]:
         return tuple(
             actor.model
-            for actor in (self.main, self.main_debate, self.reviewer, self.arbitrator, self.reasoning_summarizer)
+            for actor in (self.main, self.compactor, self.main_debate, self.reviewer, self.arbitrator, self.reasoning_summarizer)
             if actor is not None and actor.model is not None
         )
 
@@ -545,15 +552,16 @@ class RuntimeModelProfileConfig(BaseModel):
     display_name: str
     model_info: RuntimeModelInfoConfig
     main: RuntimeActorConfig
+    compactor: RuntimeActorConfig
     main_debate: RuntimeActorConfig
     reviewer: RuntimeActorConfig
     arbitrator: RuntimeActorConfig
     reasoning_summarizer: RuntimeActorConfig
     reviewer_transcript_token_budget: int = Field(default=0, ge=0)
     arbitrator_transcript_token_budget: int = Field(default=0, ge=0)
-    compaction_soft_token_budget: int | None = Field(default=None, ge=0)
-    compaction_hard_token_budget: int | None = Field(default=None, ge=0)
-    compaction_max_rounds: int = Field(default=3, ge=0)
+    soft_compact_threshold: int | None = Field(default=None, ge=0)
+    compact_threshold: int | None = Field(default=None, ge=0)
+    compact_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
     default_reasoning_effort: ReasoningEffort | None = None
     by_service_tier: dict[ServiceTier, RuntimeProfileOverride] = Field(default_factory=dict)
@@ -569,7 +577,7 @@ class RuntimeModelProfileConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_profile(self) -> RuntimeModelProfileConfig:
-        _validate_compaction_budgets(self.compaction_soft_token_budget, self.compaction_hard_token_budget)
+        _validate_compact_thresholds(self.soft_compact_threshold, self.compact_threshold)
 
         if self.by_service_tier and not self.supports_parameter("service_tier"):
             raise ValueError("service_tier overrides require model_info.supported_parameters to include service_tier")
@@ -583,11 +591,11 @@ class RuntimeModelProfileConfig(BaseModel):
 
         for override in self.by_service_tier.values():
             resolved = override.apply_to(self)
-            _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
+            _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
 
         for override in self.by_reasoning_effort.values():
             resolved = override.apply_to(self)
-            _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
+            _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
 
         for service_override in self.by_service_tier.values():
             for reasoning_override in self.by_reasoning_effort.values():
@@ -596,7 +604,7 @@ class RuntimeModelProfileConfig(BaseModel):
                     fields = ", ".join(sorted(conflicts))
                     raise ValueError(f"service_tier and reasoning_effort overrides both set: {fields}")
                 resolved = reasoning_override.apply_to(service_override.apply_to(self))
-                _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
+                _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
 
         return self
 
@@ -649,12 +657,13 @@ class RuntimeModelProfileConfig(BaseModel):
                 )
             resolved = override.apply_to(resolved)
 
-        _validate_compaction_budgets(resolved.compaction_soft_token_budget, resolved.compaction_hard_token_budget)
+        _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
         return resolved
 
     def all_models(self) -> tuple[str, ...]:
         models = [
             self.main.model,
+            self.compactor.model,
             self.main_debate.model,
             self.reviewer.model,
             self.arbitrator.model,

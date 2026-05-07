@@ -15,6 +15,7 @@ from plap.llms.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
     ChatMessage,
+    ChatToolCall,
     IChatCompletionClient,
 )
 from plap.settings import Settings
@@ -75,6 +76,27 @@ class _StaticChatCompletionClient(IChatCompletionClient):
         self,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResult:
+        if len(request.tools) == 1 and request.tools[0].function.name == "compact":
+            return ChatCompletionResult(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                message=ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        ChatToolCall(
+                            id="compact_call_1",
+                            name="compact",
+                            arguments=(
+                                '{"action":"apply","ranges":[{"start":"[~0]","end":"[~0]","summary":"brief",'
+                                '"summary_fidelity":5}]}'
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
         return ChatCompletionResult(
             id="chatcmpl_test",
             model=request.model,

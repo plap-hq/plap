@@ -22,7 +22,7 @@ from plap.responses.tools import (
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
     return {
-        "context_management": [{"soft_token_budget": 128, "type": "compaction"}],
+        "context_management": [{"soft_compact_threshold": 128, "type": "compaction"}],
         "input": [
             {
                 "content": "hello from the client",
@@ -133,11 +133,6 @@ async def test_unimplemented_response_routes_return_honest_errors(
     async with AsyncTestClient(app=test_app) as client:
         retrieved = await client.get("/v1/responses/resp_test", headers=headers)
         deleted = await client.delete("/v1/responses/resp_test", headers=headers)
-        compacted = await client.post(
-            "/v1/responses/compact",
-            json={"input": "compact me", "model": "plap/test"},
-            headers=headers,
-        )
         input_items = await client.get("/v1/responses/resp_test/input_items", headers=headers)
         input_tokens = await client.post(
             "/v1/responses/input_tokens",
@@ -151,8 +146,27 @@ async def test_unimplemented_response_routes_return_honest_errors(
     assert deleted.json()["error"]["code"] == "response_not_found"
     assert input_items.status_code == 404
     assert input_items.json()["error"]["code"] == "response_not_found"
-    assert _error_code(compacted) == (400, "unsupported_operation", "Response compaction is not supported.")
     assert _error_code(input_tokens) == (400, "unsupported_operation", "Response input token counting is not supported.")
+
+
+async def test_compact_route_returns_compaction_output(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        compacted = await client.post(
+            "/v1/responses/compact",
+            json={"input": "compact me", "model": "plap/test"},
+            headers=headers,
+        )
+
+    body = compacted.json()
+    assert compacted.status_code == 200, compacted.text
+    assert body["object"] == "response.compaction"
+    assert body["id"].startswith("cmpresp_")
+    assert body["output"][0]["type"] == "compaction"
 
 
 async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(

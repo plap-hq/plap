@@ -251,6 +251,19 @@ class StateMessage:
             reasoning_details=list(self.reasoning_details),
         )
 
+    def without_reasoning(self) -> StateMessage:
+        if self.reasoning_content is None and not self.reasoning_details:
+            return self
+        return StateMessage(
+            role=self.role,
+            content=self.content,
+            name=self.name,
+            tool_call_id=self.tool_call_id,
+            tool_calls=list(self.tool_calls),
+            reasoning_content=None,
+            reasoning_details=[],
+        )
+
     def with_duplicate_tool_output_tombstone(
         self,
         duplicate_call_ids: set[str],

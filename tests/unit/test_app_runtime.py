@@ -69,7 +69,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
 
     profile = settings.runtime_model_profiles["plap-ai/wisp-mini"]
     _assert_profile_model_prefixes(profile, main_prefix="openrouter/", reviewer_prefix="openrouter/")
-    assert profile.compaction_max_rounds > 0
+    assert profile.compact_max_rounds > 0
     assert profile.debate_max_rounds > 0
     assert profile.model_info.mode == "responses"
     assert profile.model_info.provider == "plap"
@@ -256,9 +256,9 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer_transcript_token_budget=4096,
                         arbitrator_transcript_token_budget=2048,
-                        compaction_soft_token_budget=4096,
-                        compaction_hard_token_budget=8192,
-                        compaction_max_rounds=1,
+                        soft_compact_threshold=4096,
+                        compact_threshold=8192,
+                        compact_max_rounds=1,
                         debate_max_rounds=1,
                     )
                 },
@@ -417,9 +417,9 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                compaction_soft_token_budget=2000,
-                compaction_hard_token_budget=3000,
-                compaction_max_rounds=2,
+                soft_compact_threshold=2000,
+                compact_threshold=3000,
+                compact_max_rounds=2,
                 debate_max_rounds=2,
                 by_service_tier={
                     "priority": RuntimeProfileOverride(
@@ -427,9 +427,9 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer_transcript_token_budget=8192,
                         arbitrator_transcript_token_budget=4096,
-                        compaction_soft_token_budget=5000,
-                        compaction_hard_token_budget=6000,
-                        compaction_max_rounds=1,
+                        soft_compact_threshold=5000,
+                        compact_threshold=6000,
+                        compact_max_rounds=1,
                         debate_max_rounds=1,
                     )
                 },
@@ -444,17 +444,18 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
     assert priority.display_name == "Test Model"
     assert priority.main.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.reviewer.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert priority.compactor.model == "crof/qwen3.5-9b"
     assert priority.main_debate.model == "crof/qwen3.5-9b"
     assert priority.arbitrator.model == "crof/qwen3.5-9b"
     assert priority.reviewer_transcript_token_budget == 8192
     assert priority.arbitrator_transcript_token_budget == 4096
-    assert priority.compaction_soft_token_budget == 5000
-    assert priority.compaction_hard_token_budget == 6000
-    assert priority.compaction_max_rounds == 1
+    assert priority.soft_compact_threshold == 5000
+    assert priority.compact_threshold == 6000
+    assert priority.compact_max_rounds == 1
     assert priority.debate_max_rounds == 1
-    assert base.compaction_soft_token_budget == 2000
-    assert base.compaction_hard_token_budget == 3000
-    assert base.compaction_max_rounds == 2
+    assert base.soft_compact_threshold == 2000
+    assert base.compact_threshold == 3000
+    assert base.compact_max_rounds == 2
     assert base.debate_max_rounds == 2
     with pytest.raises(PlapError) as exc_info:
         settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="flex"))
@@ -616,16 +617,16 @@ def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -
         )
 
 
-def test_runtime_profile_rejects_invalid_compaction_budgets() -> None:
-    with pytest.raises(ValueError, match="hard token budget"):
+def test_runtime_profile_rejects_invalid_compaction_thresholds() -> None:
+    with pytest.raises(ValueError, match="compact threshold"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
             main_debate_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
-            compaction_soft_token_budget=1000,
-            compaction_hard_token_budget=1000,
+            soft_compact_threshold=1000,
+            compact_threshold=1000,
         )
 
 
@@ -643,15 +644,16 @@ def _profile_config(
     *,
     display_name: str = "Test Model",
     main_model: str,
+    compactor_model: str | None = None,
     main_debate_model: str,
     reviewer_model: str,
     arbitrator_model: str,
     reasoning_summarizer_model: str,
     reviewer_transcript_token_budget: int = 0,
     arbitrator_transcript_token_budget: int = 0,
-    compaction_soft_token_budget: int | None = None,
-    compaction_hard_token_budget: int | None = None,
-    compaction_max_rounds: int = 3,
+    soft_compact_threshold: int | None = None,
+    compact_threshold: int | None = None,
+    compact_max_rounds: int = 3,
     debate_max_rounds: int = 2,
     default_reasoning_effort: str | None = None,
     by_service_tier: dict[str, RuntimeProfileOverride] | None = None,
@@ -688,15 +690,16 @@ def _profile_config(
             deprecated=False,
         ),
         main=RuntimeActorConfig(model=main_model),
+        compactor=RuntimeActorConfig(model=compactor_model or main_model),
         main_debate=RuntimeActorConfig(model=main_debate_model),
         reviewer=RuntimeActorConfig(model=reviewer_model),
         arbitrator=RuntimeActorConfig(model=arbitrator_model),
         reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
         reviewer_transcript_token_budget=reviewer_transcript_token_budget,
         arbitrator_transcript_token_budget=arbitrator_transcript_token_budget,
-        compaction_soft_token_budget=compaction_soft_token_budget,
-        compaction_hard_token_budget=compaction_hard_token_budget,
-        compaction_max_rounds=compaction_max_rounds,
+        soft_compact_threshold=soft_compact_threshold,
+        compact_threshold=compact_threshold,
+        compact_max_rounds=compact_max_rounds,
         debate_max_rounds=debate_max_rounds,
         default_reasoning_effort=default_reasoning_effort,
         by_service_tier=by_service_tier or {},
@@ -711,6 +714,7 @@ def _assert_profile_model_prefixes(
     reviewer_prefix: str,
 ) -> None:
     assert profile.main.model.startswith(main_prefix)
+    assert profile.compactor.model.startswith(main_prefix)
     assert profile.main_debate.model.startswith(main_prefix)
     assert profile.reviewer.model.startswith(reviewer_prefix)
     assert profile.arbitrator.model.startswith(reviewer_prefix)

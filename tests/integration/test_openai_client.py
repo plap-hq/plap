@@ -18,7 +18,7 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     created = await openai_client.responses.create(
         model="plap/test",
         input="hello world",
-        context_management=[{"type": "compaction", "soft_token_budget": 128}],
+        context_management=[{"type": "compaction", "soft_compact_threshold": 128}],
         tool_choice="auto",
         tools=[
             {
@@ -69,8 +69,6 @@ async def test_async_openai_client_unsupported_methods(
 ) -> None:
     with pytest.raises(APIStatusError) as retrieved:
         await openai_client.responses.retrieve("resp_missing")
-    with pytest.raises(APIStatusError) as compacted:
-        await openai_client.responses.compact(model="plap/test", input="compact me")
     with pytest.raises(APIStatusError) as input_items:
         await openai_client.responses.input_items.list("resp_missing")
     with pytest.raises(APIStatusError) as token_count:
@@ -84,8 +82,15 @@ async def test_async_openai_client_unsupported_methods(
     assert retrieved.value.status_code == 404
     assert input_items.value.status_code == 404
     assert deleted.value.status_code == 404
-    assert compacted.value.status_code == 501
-    assert token_count.value.status_code == 501
+    assert token_count.value.status_code == 400
+
+
+async def test_async_openai_client_compact_method(openai_client: AsyncOpenAI) -> None:
+    compacted = await openai_client.responses.compact(model="plap/test", input="compact me")
+
+    assert compacted.object == "response.compaction"
+    assert compacted.id.startswith("cmpresp_")
+    assert compacted.output[0].type == "compaction"
 
 
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:

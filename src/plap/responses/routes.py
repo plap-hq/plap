@@ -13,7 +13,9 @@ from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import IChatCompletionClient
 from plap.logging import log_debug, log_payload
+from plap.responses.compact import run_explicit_compaction
 from plap.responses.contracts import (
+    CompactedResponseObject,
     CompactRequest,
     InputItemsPage,
     InputTokensCountRequest,
@@ -34,7 +36,7 @@ from plap.responses.dependencies import (
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
 from plap.responses.reasoning import IReasoningSummarizer
-from plap.responses.runtime import stream_response_events
+from plap.responses.runtime import _base_prompt_cache_key, _requested_parameters, _runtime_selector, stream_response_events
 from plap.responses.store import ResponseStore
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.responses.tools.mcp import IMCPToolProvider
@@ -247,14 +249,47 @@ async def delete_response(
 async def compact_response(
     data: CompactRequest,
     auth_context: AuthContext,
-) -> object:
-    _ = auth_context
-    _ = data
-    raise _unsupported_operation_error(
-        code="unsupported_operation",
-        message="Response compaction is not supported.",
-        reason="response_compaction_unsupported",
-        private_message="response compaction route is not supported",
+    settings: Settings,
+    sealing_keyring: SealingKeyring,
+    chat_completion_client: IChatCompletionClient,
+    response_store: ResponseStore,
+) -> CompactedResponseObject:
+    log_debug(
+        logger,
+        "response.compact_request.received",
+        model=data.model,
+        previous_response_id=data.previous_response_id,
+    )
+    log_payload(logger, "response.compact_request.payload", payload=data.model_dump(mode="json", exclude_none=True))
+    request = ResponseCreateRequest(
+        input=data.input,
+        instructions=data.instructions,
+        model=data.model,
+        previous_response_id=data.previous_response_id,
+        prompt_cache_key=data.prompt_cache_key,
+        store=False,
+    )
+    prepared = await response_store.prepare_request(auth_context, request)
+    profile = settings.resolve_runtime_model_profile(
+        prepared.response_request.model,
+        selector=_runtime_selector(prepared.response_request),
+    )
+    profile.validate_requested_parameters(
+        _requested_parameters(prepared.response_request),
+        model=prepared.response_request.model,
+    )
+    prompt_cache_key_base = _base_prompt_cache_key(
+        settings=settings,
+        auth_context=auth_context,
+        prompt_cache_key=prepared.response_request.prompt_cache_key,
+        user=prepared.response_request.user,
+    )
+    return await run_explicit_compaction(
+        prepared.execution_request,
+        profile=profile,
+        sealing_keyring=sealing_keyring,
+        chat_completion_client=chat_completion_client,
+        prompt_cache_key_base=prompt_cache_key_base,
     )
 
 

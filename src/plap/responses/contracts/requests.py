@@ -88,17 +88,17 @@ class StreamOptions(StrictModel):
 
 
 class ContextManagementCompaction(StrictModel):
-    soft_token_budget: int | None = Field(
+    soft_compact_threshold: int | None = Field(
         default=None,
         ge=0,
-        description="Soft token budget at which context compaction should be nudged.",
+        description="Soft token threshold at which dedicated context compaction should be attempted.",
     )
-    hard_token_budget: int | None = Field(
+    compact_threshold: int | None = Field(
         default=None,
         ge=0,
-        description="Hard token budget at which context compaction must run before continuing.",
+        description="Hard token threshold at which context compaction must run before continuing.",
     )
-    max_rounds: int | None = Field(
+    compact_max_rounds: int | None = Field(
         default=None,
         ge=0,
         description="Maximum compaction rounds allowed for this request.",
@@ -107,14 +107,14 @@ class ContextManagementCompaction(StrictModel):
 
     @model_validator(mode="after")
     def validate_override(self) -> ContextManagementCompaction:
-        if self.soft_token_budget is None and self.hard_token_budget is None and self.max_rounds is None:
-            raise ValueError("compaction context_management requires at least one budget override")
+        if self.soft_compact_threshold is None and self.compact_threshold is None and self.compact_max_rounds is None:
+            raise ValueError("compaction context_management requires at least one threshold or round override")
         if (
-            self.soft_token_budget is not None
-            and self.hard_token_budget is not None
-            and self.hard_token_budget <= self.soft_token_budget
+            self.soft_compact_threshold is not None
+            and self.compact_threshold is not None
+            and self.compact_threshold <= self.soft_compact_threshold
         ):
-            raise ValueError("compaction hard_token_budget must exceed soft_token_budget")
+            raise ValueError("compact_threshold must exceed soft_compact_threshold")
         return self
 
 

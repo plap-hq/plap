@@ -118,6 +118,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
                     deprecated=False,
                 ),
                 main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                compactor=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),

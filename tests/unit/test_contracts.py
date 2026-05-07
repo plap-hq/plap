@@ -134,7 +134,7 @@ def test_rejects_empty_compaction_context_management() -> None:
             }
         )
     except ValidationError as exc:
-        assert "at least one budget override" in str(exc)
+        assert "at least one threshold or round override" in str(exc)
     else:
         raise AssertionError("expected validation error")
 
@@ -143,12 +143,12 @@ def test_rejects_invalid_compaction_budget_order() -> None:
     try:
         ResponseCreateRequest.model_validate(
             {
-                "context_management": [{"type": "compaction", "soft_token_budget": 100, "hard_token_budget": 100}],
+                "context_management": [{"type": "compaction", "soft_compact_threshold": 100, "compact_threshold": 100}],
                 "model": "gpt-4.1",
             }
         )
     except ValidationError as exc:
-        assert "hard_token_budget" in str(exc)
+        assert "compact_threshold" in str(exc)
     else:
         raise AssertionError("expected validation error")
 

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import re
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict
-from enum import StrEnum
 from typing import NoReturn
 
 import anyio
 import blake3
-import msgspec
 import structlog
 
 from plap.auth import AuthContext
@@ -17,21 +14,18 @@ from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
     ChatFinishReason,
-    ChatFunctionTool,
     ChatMessage,
     ChatResponseFormat,
-    ChatTool,
     ChatToolCall,
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
 from plap.logging import bound_context, log_debug, log_payload
+from plap.responses.compact import CompactionOutcome, Compactor
 from plap.responses.contracts import (
-    ContextManagementCompaction,
     FunctionTool,
     OutputTextContent,
     ReasoningSummary,
-    ResponseCompactionItem,
     ResponseCreateRequest,
     ResponseFunctionCallItem,
     ResponseFunctionCallOutputItem,
@@ -49,17 +43,10 @@ from plap.responses.debate import (
     continue_debate,
     start_debate_from_candidate,
 )
-from plap.responses.ingest import (
-    ChatMessageSpan,
-    CompactionPayload,
-    ReasoningPayload,
-    SealedCallID,
-    ingest_response_request,
-)
+from plap.responses.ingest import ReasoningPayload, SealedCallID, ingest_response_request
 from plap.responses.ingest.sealing import (
     content_hash_prefix,
     seal_call_id,
-    seal_compaction_payload,
     seal_reasoning_payload,
 )
 from plap.responses.io import ResponseEventIO
@@ -69,7 +56,6 @@ from plap.responses.models import (
     StateMessage,
     StateToolCall,
     UsageLedger,
-    strip_leading_internal_citations,
 )
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
@@ -80,44 +66,12 @@ from plap.responses.tools import (
     ToolPolicy,
     canonical_tool_arguments,
 )
-from plap.responses.tools.compact import (
-    COMPACT_DEVELOPER_PROMPT,
-    COMPACT_TOOL_NAME,
-    DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
-    compact_policy,
-    compact_tool,
-)
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.responses.tools.web_search import web_search_policy
 from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
-SERVER_TOOL_NAMES = frozenset({COMPACT_TOOL_NAME})
-_CITATION_RE = re.compile(r"^~(\d+)(?:_(\d+))?$")
+SERVER_TOOL_NAMES = frozenset()
 logger = structlog.get_logger(__name__)
-
-
-class _CompactionBailout(StrEnum):
-    NONE = "none"
-    SOFT = "soft"
-    HARD = "hard"
-
-
-class _CompactionReminderLevel(StrEnum):
-    NONE = "none"
-    SOFT = "soft"
-    HARD = "hard"
-
-
-SOFT_COMPACTION_REMINDER = (
-    "Context is getting long. If a closed, stale, or repetitive cited range can be replaced by a useful summary, call "
-    "`compact` before answering. If compaction would lose important active detail or another tool is needed first, "
-    "continue with the best next action."
-)
-HARD_COMPACTION_REMINDER = (
-    "Context is at the hard compaction limit. You must call `compact` before continuing. Summarize any safe cited ranges. "
-    'If no useful safe compaction is possible, call `compact` with {"ranges": []}.'
-)
-COMPACT_VALIDATION_MAX_ATTEMPTS = 3
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
 
@@ -138,9 +92,6 @@ Behavior:
 - When you make a mistake, correct it plainly.
 - Be concise and direct.
 - Avoid unnecessary preamble and postamble."""
-
-APPLICATION_INSTRUCTIONS_TEMPLATE = "[^untrusted] {instructions}"
-
 
 def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary | None:
     if request.reasoning is None:
@@ -302,10 +253,6 @@ def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private
     )
 
 
-def _is_retryable_compaction_error(exc: PlapError) -> bool:
-    return exc.private.reason.startswith("compact_")
-
-
 def _missing_auth_context_error() -> PlapError:
     return _runtime_internal_error(
         reason="missing_auth_context",
@@ -323,77 +270,6 @@ def _is_tool_handoff(finish_reason: ChatFinishReason) -> bool:
 
 def _is_user_return(finish_reason: ChatFinishReason) -> bool:
     return finish_reason == ChatFinishReason.STOP
-
-
-def _context_token_count(spans: Sequence[ChatMessageSpan], *, include_citations: bool) -> int:
-    return sum(span.context_token_count(include_citation=include_citations) for span in spans)
-
-
-def _compaction_reminder(
-    soft_token_budget: int | None,
-    hard_token_budget: int | None,
-    token_count: int,
-    bailout: _CompactionBailout,
-) -> tuple[_CompactionReminderLevel, str | None]:
-    if _hard_compaction_budget_crossed(hard_token_budget, token_count):
-        if bailout != _CompactionBailout.HARD:
-            return _CompactionReminderLevel.HARD, HARD_COMPACTION_REMINDER
-        return _CompactionReminderLevel.NONE, None
-    if soft_token_budget is not None and token_count >= soft_token_budget and bailout == _CompactionBailout.NONE:
-        return _CompactionReminderLevel.SOFT, SOFT_COMPACTION_REMINDER
-    return _CompactionReminderLevel.NONE, None
-
-
-def _hard_compaction_budget_crossed(hard_token_budget: int | None, token_count: int) -> bool:
-    return hard_token_budget is not None and token_count >= hard_token_budget
-
-
-def _context_management_compaction(request: ResponseCreateRequest) -> ContextManagementCompaction | None:
-    if not request.context_management:
-        return None
-    if len(request.context_management) > 1:
-        raise PlapError(
-            public=PublicError(
-                status_code=400,
-                type="invalid_request_error",
-                code="invalid_context_management",
-                message="At most one compaction context management entry is supported.",
-                param="context_management",
-            ),
-            private=PrivateError(
-                event="response.invalid_request",
-                reason="multiple_compaction_entries",
-                message="at most one compaction context_management entry is supported",
-                level=ErrorLevel.WARNING,
-            ),
-        )
-    return request.context_management[0]
-
-
-def _effective_compaction_settings(
-    profile: RuntimeModelProfileConfig,
-    request: ResponseCreateRequest,
-) -> tuple[int | None, int | None, int]:
-    soft_token_budget = profile.compaction_soft_token_budget
-    hard_token_budget = profile.compaction_hard_token_budget
-    max_rounds = profile.compaction_max_rounds
-    override = _context_management_compaction(request)
-    if override is not None:
-        if override.soft_token_budget is not None:
-            soft_token_budget = override.soft_token_budget
-        if override.hard_token_budget is not None:
-            hard_token_budget = override.hard_token_budget
-        if override.max_rounds is not None:
-            max_rounds = override.max_rounds
-    if soft_token_budget is not None and hard_token_budget is not None and hard_token_budget <= soft_token_budget:
-        raise _runtime_invalid_request_error(
-            code="invalid_context_management",
-            message="Compaction hard token budget must exceed soft token budget.",
-            reason="invalid_compaction_budget_order",
-            private_message="compaction hard_token_budget must exceed soft_token_budget",
-            param="context_management",
-        )
-    return soft_token_budget, hard_token_budget, max_rounds
 
 
 async def prepare_tools(
@@ -480,173 +356,6 @@ async def resolve_tool_calls(
     return tuple(policy for policy in resolved if policy is not None)
 
 
-def _apply_compaction(
-    main_context: list[ChatMessageSpan],
-    arguments: str,
-) -> tuple[list[ChatMessageSpan], bool]:
-    try:
-        payload = msgspec.json.decode(arguments.encode())
-    except msgspec.DecodeError as exc:
-        raise _runtime_unavailable_error(
-            reason="compact_arguments_invalid_json",
-            private_message="compact arguments must be valid JSON",
-            cause=exc,
-        ) from exc
-    if not isinstance(payload, dict):
-        raise _runtime_unavailable_error(
-            reason="compact_arguments_not_object",
-            private_message="compact arguments must be an object",
-        )
-    prune_duplicate_tool_calls = payload.get("prune_duplicate_tool_calls", True)
-    if not isinstance(prune_duplicate_tool_calls, bool):
-        raise _runtime_unavailable_error(
-            reason="compact_prune_duplicate_tool_calls_invalid",
-            private_message="compact prune_duplicate_tool_calls must be a boolean",
-        )
-    prune_duplicate_tool_calls_before = payload.get("prune_duplicate_tool_calls_before")
-    if prune_duplicate_tool_calls_before is not None and not isinstance(prune_duplicate_tool_calls_before, str):
-        raise _runtime_unavailable_error(
-            reason="compact_prune_duplicate_tool_calls_before_invalid",
-            private_message="compact prune_duplicate_tool_calls_before must be a citation string",
-        )
-    ranges = payload.get("ranges")
-    if isinstance(ranges, str):
-        try:
-            ranges = msgspec.json.decode(ranges.encode())
-        except msgspec.DecodeError as exc:
-            raise _runtime_unavailable_error(
-                reason="compact_ranges_invalid_json",
-                private_message="compact ranges must be valid JSON",
-                cause=exc,
-            ) from exc
-    if not isinstance(ranges, list):
-        raise _runtime_unavailable_error(
-            reason="compact_ranges_missing",
-            private_message="compact ranges are required",
-        )
-    if not ranges:
-        return main_context, False
-
-    index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
-    prune_duplicate_tool_calls_before_index = None
-    if prune_duplicate_tool_calls and prune_duplicate_tool_calls_before is not None:
-        normalized_before = _normalize_citation(prune_duplicate_tool_calls_before)
-        prune_duplicate_tool_calls_before_index = index_by_citation.get(normalized_before)
-        if prune_duplicate_tool_calls_before_index is None:
-            raise _runtime_unavailable_error(
-                reason="compact_prune_duplicate_tool_calls_before_not_visible",
-                private_message="compact prune_duplicate_tool_calls_before citation is not visible",
-            )
-    parsed_ranges: list[tuple[int, int, str, int]] = []
-    for item in ranges:
-        if not isinstance(item, dict):
-            raise _runtime_unavailable_error(reason="compact_range_not_object", private_message="compact range must be an object")
-        start = item.get("start")
-        end = item.get("end")
-        summary = item.get("summary")
-        summary_fidelity = item.get("summary_fidelity")
-        if not isinstance(start, str) or not isinstance(end, str):
-            raise _runtime_unavailable_error(
-                reason="compact_range_citations_missing", private_message="compact range citations are required"
-            )
-        if not isinstance(summary, str) or not summary.strip():
-            raise _runtime_unavailable_error(reason="compact_range_summary_missing", private_message="compact range summary is required")
-        if not isinstance(summary_fidelity, int) or isinstance(summary_fidelity, bool) or not 1 <= summary_fidelity <= 5:
-            raise _runtime_unavailable_error(
-                reason="compact_range_summary_fidelity_invalid",
-                private_message="compact range summary_fidelity must be an integer from 1 to 5",
-            )
-        start = _normalize_citation(start)
-        end = _normalize_citation(end)
-        start_index = index_by_citation.get(start)
-        end_index = index_by_citation.get(end)
-        if start_index is None or end_index is None:
-            raise _runtime_unavailable_error(
-                reason="compact_range_citation_not_visible", private_message="compact range citation is not visible"
-            )
-        if start_index > end_index:
-            raise _runtime_unavailable_error(
-                reason="compact_range_start_after_end", private_message="compact range start must not follow end"
-            )
-        parsed_ranges.append((start_index, end_index, summary.strip(), summary_fidelity))
-
-    parsed_ranges.sort(key=lambda item: (item[0], item[1]))
-    previous_end = -1
-    for start_index, end_index, _, _ in parsed_ranges:
-        if start_index <= previous_end:
-            raise _runtime_unavailable_error(reason="compact_ranges_overlap", private_message="compact ranges must not overlap")
-        previous_end = end_index
-
-    compacted: list[ChatMessageSpan] = []
-    cursor = 0
-    for start_index, end_index, summary, summary_fidelity in parsed_ranges:
-        compacted.extend(main_context[cursor:start_index])
-        selected = tuple(main_context[start_index : end_index + 1])
-        summary_message = StateMessage(role="assistant", content=summary)
-        summary_token_count = summary_message.estimated_token_count()
-        selected_token_count = sum(row.token_count for row in selected)
-        if summary_token_count >= selected_token_count:
-            raise _runtime_unavailable_error(
-                reason="compact_summary_not_reductive", private_message="compact summary must reduce token count"
-            )
-        compacted.append(
-            ChatMessageSpan(
-                start=selected[0].start,
-                end=selected[-1].end,
-                message=summary_message,
-                token_count=summary_token_count,
-                children=selected,
-                summary_fidelity=summary_fidelity,
-            )
-        )
-        cursor = end_index + 1
-    compacted.extend(main_context[cursor:])
-    if prune_duplicate_tool_calls:
-        compacted = ChatMessageSpan.deduplicate_tool_call_outputs(
-            compacted,
-            tombstone=DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
-            before_top_level_index=prune_duplicate_tool_calls_before_index,
-        )
-    return compacted, True
-
-
-def _normalize_citation(value: str) -> str:
-    if value.startswith("[") or value.endswith("]"):
-        if not (value.startswith("[") and value.endswith("]")):
-            raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
-        value = value[1:-1]
-
-    match = _CITATION_RE.fullmatch(value)
-    if match is None:
-        raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
-    start = int(match.group(1))
-    end = int(match.group(2) or start)
-    if start > end:
-        raise _runtime_unavailable_error(reason="compact_citation_invalid", private_message="compact range citation is invalid")
-    suffix = f"_{end}" if match.group(2) is not None else ""
-    return f"[~{start}{suffix}]"
-
-
-def _downgraded_control_message(role: object, content: str | None) -> str:
-    role_name = "system" if role == "system" else "developer"
-    return f"{role_name.capitalize()}-role message:\n{content or ''}"
-
-
-def _chat_message_from_span(row: ChatMessageSpan, *, include_citation: bool) -> ChatMessage:
-    return row.render_for_model(include_citation=include_citation)
-
-
-def _chat_tool(tool: FunctionTool) -> ChatTool:
-    return ChatTool(
-        function=ChatFunctionTool(
-            description=tool.description,
-            name=tool.name,
-            parameters=tool.parameters,
-            strict=tool.strict,
-        )
-    )
-
-
 def _chat_tool_choice(request: ResponseCreateRequest):
     choice = request.tool_choice
     if isinstance(choice, ToolChoiceFunction):
@@ -707,8 +416,6 @@ def _validate_tool_call_batch(
     for call in calls:
         if call.name not in tool_policies:
             raise _runtime_internal_error(reason="unknown_tool_call", private_message=f"unknown tool call: {call.name}")
-    if any(call.name == COMPACT_TOOL_NAME for call in calls) and len(calls) != 1:
-        raise _runtime_unavailable_error(reason="compact_must_be_called_alone", private_message="compact must be called alone")
 
 
 async def run_response(
@@ -727,10 +434,6 @@ async def run_response(
         request,
         keyring=sealing_keyring,
     )
-    compaction_soft_token_budget, compaction_hard_token_budget, compaction_max_rounds = _effective_compaction_settings(
-        profile,
-        request,
-    )
 
     state = MutableQueues.from_ingested(ingested)
 
@@ -742,14 +445,15 @@ async def run_response(
     log_debug(
         logger,
         "response.runtime.start",
-        compaction_hard_token_budget=compaction_hard_token_budget,
-        compaction_max_rounds=compaction_max_rounds,
-        compaction_soft_token_budget=compaction_soft_token_budget,
+        compact_max_rounds=profile.compact_max_rounds,
+        compact_threshold=profile.compact_threshold,
+        compactor_model=profile.compactor.model,
         effective_reasoning_effort=profile.main.reasoning_effort,
         input_context_items=len(ingested.main_context),
         model=request.model,
         requested_reasoning_effort=request.reasoning.effort if request.reasoning else None,
         reasoning_summary_mode=_reasoning_summary_mode(request),
+        soft_compact_threshold=profile.soft_compact_threshold,
         tool_count=len(base_tools),
     )
     log_payload(logger, "response.runtime.start.payload", request=request.model_dump(mode="json", exclude_none=True))
@@ -757,11 +461,17 @@ async def run_response(
     await out.created()
     await out.in_progress()
 
-    compaction_rounds = 0
-    compaction_bailout = _CompactionBailout.NONE
-    compaction_validation_attempts = 0
-    soft_compaction_failure: PlapError | None = None
     usage_ledger = UsageLedger(budget=request.max_output_tokens)
+    compactor = Compactor(
+        state=state,
+        out=out,
+        request=request,
+        profile=profile,
+        sealing_keyring=sealing_keyring,
+        chat_completion_client=chat_completion_client,
+        prompt_cache_key_base=prompt_cache_key_base,
+        usage_ledger=usage_ledger,
+    )
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
@@ -784,56 +494,30 @@ async def run_response(
             if debate_result == DebateResult.COMPLETED:
                 return
             continue
-        if compaction_rounds < compaction_max_rounds:
-            effective_tools.append(compact_tool())
-            effective_tool_policies[COMPACT_TOOL_NAME] = compact_policy()
 
-        developer_prompt_parts = [MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)]
-        if COMPACT_TOOL_NAME in effective_tool_policies:
-            developer_prompt_parts.append(COMPACT_DEVELOPER_PROMPT)
+        compaction_result = await compactor.maybe_compact()
+        if compaction_result == CompactionOutcome.INCOMPLETE:
+            return
+        if compaction_result == CompactionOutcome.APPLIED:
+            continue
+
+        developer_prompt = MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
         if request.instructions:
-            developer_prompt_parts.append(APPLICATION_INSTRUCTIONS_TEMPLATE.format(instructions=request.instructions))
+            developer_prompt = f"{developer_prompt}\n\n[^untrusted] {request.instructions}"
 
-        messages: list[ChatMessage] = [
-            ChatMessage(
-                role="developer",
-                content="\n\n".join(developer_prompt_parts),
-            )
-        ]
+        messages: list[ChatMessage] = [ChatMessage(role="developer", content=developer_prompt)]
         effective_main_context = state.effective_main_context()
-        include_citations = COMPACT_TOOL_NAME in effective_tool_policies
-        messages.extend(_chat_message_from_span(row, include_citation=include_citations) for row in effective_main_context)
-        token_count = _context_token_count(
-            effective_main_context,
-            include_citations=include_citations,
-        )
-        compaction_reminder_level = _CompactionReminderLevel.NONE
-        compaction_reminder = None
-        if COMPACT_TOOL_NAME in effective_tool_policies:
-            compaction_reminder_level, compaction_reminder = _compaction_reminder(
-                compaction_soft_token_budget,
-                compaction_hard_token_budget,
-                token_count,
-                compaction_bailout,
-            )
-        if compaction_reminder is not None:
-            messages.append(ChatMessage(role="user", content=compaction_reminder))
+        messages.extend(row.render_for_model(include_citation=False) for row in effective_main_context)
 
         tool_choice = _chat_tool_choice(request)
-        forced_compaction = False
-        if compaction_reminder_level == _CompactionReminderLevel.HARD:
-            tool_choice = ChatToolChoiceFunction(name=COMPACT_TOOL_NAME)
-            forced_compaction = True
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
         log_debug(
             logger,
             "response.runtime.turn",
-            compaction_reminder_level=compaction_reminder_level,
-            forced_compaction=forced_compaction,
             in_temp_debate=state.in_temp_debate,
             main_cap=main_cap,
-            token_count=token_count,
+            tool_count=len(effective_tools),
         )
         if main_cap == 0:
             await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
@@ -879,11 +563,6 @@ async def run_response(
         )
         log_payload(logger, "response.runtime.main_result.payload", result=asdict(result))
 
-        if forced_compaction and not any(call.name == COMPACT_TOOL_NAME for call in tool_calls):
-            raise _runtime_unavailable_error(
-                reason="hard_compaction_requires_compact", private_message="hard compaction budget requires compact"
-            )
-
         if user_return and profile.debate_max_rounds > 0:
             held_anchor_index = usage_ledger.record_hidden(profile.main.public_usage, result.usage)
             await start_debate_from_candidate(
@@ -892,7 +571,7 @@ async def run_response(
                 keyring=sealing_keyring,
                 assistant=StateMessage(
                     role=result.message.role,
-                    content=strip_leading_internal_citations(result.message.content),
+                    content=result.message.content,
                     name=result.message.name,
                     tool_call_id=result.message.tool_call_id,
                     tool_calls=[
@@ -929,66 +608,6 @@ async def run_response(
                 tool_policies=effective_tool_policies,
                 resolver=tool_call_policy_resolver,
             )
-            if len(tool_calls) == 1 and tool_calls[0].name == COMPACT_TOOL_NAME:
-                if compaction_reminder_level != _CompactionReminderLevel.HARD and soft_compaction_failure is not None:
-                    raise soft_compaction_failure
-                try:
-                    state.main_context, compacted = _apply_compaction(
-                        state.main_context,
-                        tool_calls[0].arguments,
-                    )
-                except PlapError as exc:
-                    if not _is_retryable_compaction_error(exc):
-                        raise
-                    if compaction_reminder_level != _CompactionReminderLevel.HARD:
-                        soft_compaction_failure = exc
-                        compaction_bailout = _CompactionBailout.SOFT
-                        compaction_rounds += 1
-                        usage_ledger.record_hidden(profile.main.public_usage, result.usage)
-                        continue
-                    compaction_validation_attempts += 1
-                    log_debug(
-                        logger,
-                        "response.runtime.compaction_retry",
-                        attempt=compaction_validation_attempts,
-                        max_attempts=COMPACT_VALIDATION_MAX_ATTEMPTS,
-                        reason=exc.private.reason,
-                        reminder_level=compaction_reminder_level,
-                    )
-                    if compaction_validation_attempts >= COMPACT_VALIDATION_MAX_ATTEMPTS:
-                        compaction_validation_attempts = 0
-                        raise
-                    usage_ledger.record_hidden(profile.main.public_usage, result.usage)
-                    continue
-                compaction_validation_attempts = 0
-                soft_compaction_failure = None
-                if compacted:
-                    compaction_bailout = _CompactionBailout.NONE
-                    compaction_payload = CompactionPayload(
-                        active=tuple(state.main_context),
-                        cursors=state.cursors,
-                    )
-                    await out.output(
-                        ResponseCompactionItem(
-                            created_by="assistant",
-                            encrypted_content=seal_compaction_payload(
-                                compaction_payload,
-                                keyring=sealing_keyring,
-                            ),
-                            id=f"cmp_{secrets.token_urlsafe(18)}",
-                            type="compaction",
-                        )
-                    )
-                elif compaction_reminder_level == _CompactionReminderLevel.HARD:
-                    compaction_bailout = _CompactionBailout.HARD
-                elif compaction_reminder_level == _CompactionReminderLevel.SOFT:
-                    compaction_bailout = _CompactionBailout.SOFT
-                compaction_rounds += 1
-                usage_ledger.record_hidden(profile.main.public_usage, result.usage)
-                continue
-
-            if compaction_reminder_level == _CompactionReminderLevel.SOFT:
-                compaction_bailout = _CompactionBailout.SOFT
 
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
@@ -1020,7 +639,7 @@ async def run_response(
                         keyring=sealing_keyring,
                         assistant=StateMessage(
                             role=result.message.role,
-                            content=strip_leading_internal_citations(result.message.content),
+                            content=result.message.content,
                             name=result.message.name,
                             tool_call_id=result.message.tool_call_id,
                             tool_calls=[
@@ -1059,7 +678,7 @@ async def run_response(
         public_assistant_message = StateMessage(
             role="assistant",
             content=(
-                strip_leading_internal_citations(result.message.content)
+                result.message.content
                 if result.message.content is not None
                 else ""
                 if result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
