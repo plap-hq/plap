@@ -54,7 +54,7 @@ from plap.responses.models import (
 )
 from plap.responses.tokens import measure_prompt_tokens
 from plap.responses.tools import ToolPolicy
-from plap.responses.tools.mcp import IMCPToolProvider
+from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
@@ -314,11 +314,11 @@ class DebateResult(StrEnum):
 def debate_safe_surface(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
-) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy], dict[str, IMCPToolProvider]]:
+    server_executors: Mapping[str, IServerToolExecutor],
+) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy], dict[str, IServerToolExecutor]]:
     safe_tools: list[FunctionTool] = []
     safe_policies: dict[str, ToolPolicy] = {}
-    safe_executors: dict[str, IMCPToolProvider] = {}
+    safe_executors: dict[str, IServerToolExecutor] = {}
     for tool in tools:
         policy = tool_policies.get(tool.name)
         if policy is None or policy.effect_class != "safe":
@@ -622,7 +622,7 @@ async def _execute_actor_turn(
     turn_messages: list[StateMessage],
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
+    server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -705,7 +705,7 @@ async def run_reviewer_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     normal_tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
+    server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -768,7 +768,7 @@ async def run_main_debate_turn(
     request,
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
+    server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -812,7 +812,7 @@ async def run_arbitrator_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     normal_tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
+    server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -1058,7 +1058,7 @@ async def continue_debate(
     keyring: SealingKeyring,
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IMCPToolProvider],
+    server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,

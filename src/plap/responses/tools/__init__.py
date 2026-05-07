@@ -8,7 +8,7 @@ from plap.responses.tools.classify import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.mcp import IMCPToolProvider, MCPToolProvider
+from plap.responses.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPToolExecutor, MCPToolProvider
 from plap.responses.tools.policy import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
@@ -37,7 +37,6 @@ from plap.responses.tools.policy import (
     tool_arguments_hash,
 )
 from plap.responses.tools.repository import ToolClassificationRepository, ToolClassificationStore
-from plap.responses.tools.web_search import web_search_policy
 
 __all__ = [
     "TOOL_CALL_EFFECT_CLASSIFIER_MODEL",
@@ -51,12 +50,14 @@ __all__ = [
     "ClassificationL1Cache",
     "EffectClass",
     "IMCPToolProvider",
+    "IServerToolExecutor",
     "IToolCallClassifier",
     "IToolCallPolicyResolver",
     "IToolClassifier",
     "IToolPolicyResolver",
     "LLMToolCallClassifier",
     "LLMToolClassifier",
+    "MCPToolExecutor",
     "MCPToolProvider",
     "StaticToolCallPolicyResolver",
     "StaticToolPolicyResolver",
@@ -77,5 +78,4 @@ __all__ = [
     "normalize_function_tool",
     "signature_hash_hex",
     "tool_arguments_hash",
-    "web_search_policy",
 ]

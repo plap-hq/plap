@@ -288,7 +288,7 @@ def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
                 context={"server_name": server.name},
             ),
         )
-    return MCPToolProvider(transport, tool_names=server.tool_names)
+    return MCPToolProvider(server.name, transport, tools=server.tools)
 
 
 def _validate_runtime_model_profiles(settings: Settings) -> None:

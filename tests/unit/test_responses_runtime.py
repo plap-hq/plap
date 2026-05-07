@@ -61,6 +61,7 @@ from plap.responses.tools import (
 )
 from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import (
+    MCPToolConfig,
     RuntimeActorConfig,
     RuntimeModelInfoConfig,
     RuntimeModelPricingConfig,
@@ -135,8 +136,8 @@ async def test_prepare_tools_flattens_mcp_tools_across_servers() -> None:
         ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
         _RecordingResolver(),
         (
-            _FakeMCPToolProvider(tool_names=(MCP_SEARCH_TOOL_NAME,)),
-            _FakeMCPToolProvider(tool_names=("web_lookup",)),
+            _FakeMCPToolProvider(tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME)),
+            _FakeMCPToolProvider(tools=_mcp_tool_configs("web_lookup")),
         ),
     )
 
@@ -151,8 +152,8 @@ async def test_prepare_tools_rejects_duplicate_mcp_tool_names_across_servers() -
             ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
             _RecordingResolver(),
             (
-                _FakeMCPToolProvider(tool_names=(MCP_SEARCH_TOOL_NAME,)),
-                _FakeMCPToolProvider(tool_names=(MCP_SEARCH_TOOL_NAME,)),
+                _FakeMCPToolProvider(tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME)),
+                _FakeMCPToolProvider(tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME)),
             ),
         )
 
@@ -166,7 +167,7 @@ async def test_prepare_tools_rejects_web_search_when_mcp_is_not_configured() -> 
             _RecordingResolver(),
         )
 
-    _assert_public_error(exc_info.value, code="unsupported_tool", param="tools", private_reason="web_search_provider_missing")
+    _assert_public_error(exc_info.value, code="unsupported_tool", param="tools", private_reason="server_tool_provider_missing")
 
 
 async def test_prepare_tools_allows_client_tool_named_compact_and_rejects_mcp_collision() -> None:
@@ -3166,7 +3167,7 @@ async def test_stream_response_events_hidden_server_loopback_usage_is_normalized
             tool_call_policy_resolver=_RecordingCallResolver(),
             chat_completion_client=client,
             reasoning_summarizer=_FakeReasoningSummarizer(),
-            mcp_tool_providers=(_FakeMCPToolProvider(tool_names=(MCP_SEARCH_TOOL_NAME,)),),
+            mcp_tool_providers=(_FakeMCPToolProvider(tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME)),),
         )
     ]
 
@@ -3416,17 +3417,30 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
         )
 
 
+def _mcp_tool_configs(*names: str, type: str = "web_search") -> dict[str, MCPToolConfig]:
+    return {name: MCPToolConfig(type=type) for name in names}
+
+
 class _FakeMCPToolProvider(IMCPToolProvider):
-    def __init__(self, *, output: str = "search result", fail: bool = False, tool_names: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        output: str = "search result",
+        fail: bool = False,
+        tools: dict[str, MCPToolConfig] | None = None,
+        name: str = "mcp",
+    ) -> None:
+        self.name = name
         self.output = output
         self.fail = fail
-        self.tool_names = tuple(tool_names or (MCP_SEARCH_TOOL_NAME, MCP_NEWS_TOOL_NAME))
+        self.tool_configs = dict(tools or _mcp_tool_configs(MCP_SEARCH_TOOL_NAME, MCP_NEWS_TOOL_NAME))
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     async def tools(self) -> tuple[FunctionTool, ...]:
-        return tuple(_tool(name) for name in self.tool_names)
+        return tuple(_tool(name) for name in self.tool_configs)
 
-    async def call_tool(self, name: str, arguments: dict[str, object]) -> str:
+    async def call_tool(self, name: str, arguments: dict[str, object], *, request_tool: object | None = None) -> str:
+        _ = request_tool
         self.calls.append((name, arguments))
         if self.fail:
             raise RuntimeError("mcp failed")

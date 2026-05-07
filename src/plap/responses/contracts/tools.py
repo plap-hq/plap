@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import Field
 
@@ -66,10 +66,23 @@ class WebSearchTool(StrictModel):
     )
 
 
+_SUPPORTED_TOOL_MODELS = (FunctionTool, WebSearchTool)
+
+
 type SupportedTool = Annotated[
     FunctionTool | WebSearchTool,
     Field(discriminator="type"),
 ]
+
+
+def _supported_tool_types() -> frozenset[str]:
+    supported: set[str] = set()
+    for variant in _SUPPORTED_TOOL_MODELS:
+        supported.update(get_args(variant.model_fields["type"].annotation))
+    return frozenset(supported)
+
+
+SUPPORTED_TOOL_TYPES = _supported_tool_types()
 
 
 class ToolChoiceFunction(StrictModel):

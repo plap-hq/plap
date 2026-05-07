@@ -40,7 +40,6 @@ from plap.responses.contracts import (
     TextFormatJSONObject,
     TextFormatJSONSchema,
     ToolChoiceFunction,
-    WebSearchTool,
 )
 from plap.responses.debate import (
     DebateResult,
@@ -72,11 +71,9 @@ from plap.responses.tools import (
     ToolPolicy,
     canonical_tool_arguments,
 )
-from plap.responses.tools.mcp import IMCPToolProvider
-from plap.responses.tools.web_search import web_search_policy
+from plap.responses.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPToolExecutor
 from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
-SERVER_TOOL_NAMES = frozenset()
 logger = structlog.get_logger(__name__)
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
@@ -286,33 +283,42 @@ async def prepare_tools(
 ) -> tuple[
     tuple[FunctionTool, ...],
     dict[str, ToolPolicy],
-    dict[str, IMCPToolProvider],
+    dict[str, IServerToolExecutor],
 ]:
     client_tools = _client_tools(request.tools or ())
+    requested_server_tools = _server_tool_requests(request.tools or ())
 
     server_tools: list[FunctionTool] = []
-    server_executors: dict[str, IMCPToolProvider] = {}
-    if _has_web_search(request.tools or ()):
-        if not mcp_tool_providers:
-            raise _runtime_invalid_request_error(
-                code="unsupported_tool",
-                message="Web search is not available for this model.",
-                reason="web_search_provider_missing",
-                private_message="web_search requested but no MCP provider configured",
-                param="tools",
-            )
-        for provider in mcp_tool_providers:
-            for tool in await provider.tools():
-                server_tools.append(tool)
-                server_executors[tool.name] = provider
+    server_tool_policies: dict[str, ToolPolicy] = {}
+    server_executors: dict[str, IServerToolExecutor] = {}
+    covered_server_tool_types: set[str] = set()
+    for provider in mcp_tool_providers:
+        for tool in await provider.tools():
+            config = provider.tool_configs.get(tool.name)
+            if config is None or config.type not in requested_server_tools:
+                continue
+            server_tools.append(tool)
+            covered_server_tool_types.add(config.type)
+            server_tool_policies[tool.name] = _server_tool_policy(tool.name, effect_class=config.effect_class)
+            server_executors[tool.name] = MCPToolExecutor(provider, request_tool=requested_server_tools[config.type])
+
+    missing_server_tool_types = set(requested_server_tools) - covered_server_tool_types
+    if missing_server_tool_types:
+        missing = sorted(missing_server_tool_types)[0]
+        display_name = missing.replace("_", " ").capitalize()
+        raise _runtime_invalid_request_error(
+            code="unsupported_tool",
+            message=f"{display_name} is not available for this model.",
+            reason="server_tool_provider_missing",
+            private_message=f"requested server tool type is unavailable: {missing}",
+            param="tools",
+        )
 
     _reject_server_name_collisions(client_tools, server_tools)
 
     tools = [*client_tools, *server_tools]
     tool_policies = await resolver.resolve(client_tools)
-
-    for tool in server_tools:
-        tool_policies[tool.name] = web_search_policy(tool.name)
+    tool_policies.update(server_tool_policies)
 
     return tuple(tools), tool_policies, server_executors
 
@@ -391,8 +397,29 @@ def _client_tools(tools: Sequence[object]) -> list[FunctionTool]:
     return [tool for tool in tools if isinstance(tool, FunctionTool)]
 
 
-def _has_web_search(tools: Sequence[object]) -> bool:
-    return any(isinstance(tool, WebSearchTool) for tool in tools)
+def _server_tool_requests(tools: Sequence[object]) -> dict[str, object]:
+    requests: dict[str, object] = {}
+    for tool in tools:
+        if isinstance(tool, FunctionTool):
+            continue
+        tool_type = getattr(tool, "type", None)
+        if not isinstance(tool_type, str):
+            raise _runtime_internal_error(
+                reason="server_tool_type_missing",
+                private_message="server tool request is missing a type discriminator",
+            )
+        if tool_type in requests:
+            raise _runtime_invalid_tool_definition_error(
+                message=f"Tool type '{tool_type}' is defined more than once.",
+                reason="duplicate_server_tool_type",
+                private_message=f"duplicate server tool type: {tool_type}",
+            )
+        requests[tool_type] = tool
+    return requests
+
+
+def _server_tool_policy(name: str, *, effect_class: object) -> ToolPolicy:
+    return ToolPolicy(name=name, source="server", effect_class=effect_class)
 
 
 def _reject_server_name_collisions(
@@ -406,7 +433,7 @@ def _reject_server_name_collisions(
             reason="duplicate_server_tool_name",
             private_message="server tool names must be unique",
         )
-    server_tool_names = set(server_names) | SERVER_TOOL_NAMES
+    server_tool_names = set(server_names)
     for tool in client_tools:
         if tool.name in server_tool_names:
             raise _runtime_invalid_tool_definition_error(

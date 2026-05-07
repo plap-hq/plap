@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from math import ceil, floor
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -738,13 +738,20 @@ class RuntimeModelProfileConfig(BaseModel):
         )
 
 
+class MCPToolConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    type: str
+    effect_class: Literal["safe", "visible", "mutation", "contextual", "unknown"] = "safe"
+
+
 class MCPServerConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     name: str
     url: str | None = None
     config: dict[str, Any] | None = None
-    tool_names: list[str] | None = None
+    tools: dict[str, MCPToolConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_transport(self) -> MCPServerConfig:

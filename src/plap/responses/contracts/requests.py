@@ -12,6 +12,7 @@ from plap.responses.contracts.base import (
 )
 from plap.responses.contracts.items import InputTextContent, RequestInputItem
 from plap.responses.contracts.tools import (
+    SUPPORTED_TOOL_TYPES,
     ResponseIncludable,
     ResponseTextConfig,
     SupportedTool,
@@ -268,7 +269,7 @@ class ResponseCreateRequest(StrictModel):
     def validate_tool_variants(cls, value: object) -> object:
         return _reject_unsupported_type_variants(
             value,
-            allowed={"function", "web_search"},
+            allowed=set(SUPPORTED_TOOL_TYPES),
             label="tool",
         )
 

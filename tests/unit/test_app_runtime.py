@@ -25,6 +25,7 @@ from plap.responses.tools import (
 from plap.responses.tools.mcp import MCPToolProvider
 from plap.settings import (
     MCPServerConfig,
+    MCPToolConfig,
     PublicUsageConfig,
     RuntimeActorConfig,
     RuntimeActorOverride,
@@ -196,7 +197,7 @@ def test_app_runtime_builds_mcp_providers_from_config_list() -> None:
                             }
                         }
                     },
-                    tool_names=["search_web"],
+                    tools={"search_web": MCPToolConfig(type="web_search")},
                 )
             ],
         )

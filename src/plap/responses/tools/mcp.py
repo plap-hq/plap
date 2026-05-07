@@ -1,38 +1,62 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 from fastmcp import Client
 
 from plap.responses.contracts import FunctionTool
+from plap.settings import MCPToolConfig
 
 
 @runtime_checkable
 class IMCPToolProvider(Protocol):
+    name: str
+    tool_configs: Mapping[str, MCPToolConfig]
+
     async def tools(self) -> tuple[FunctionTool, ...]: ...
 
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, request_tool: object | None = None) -> str: ...
+
+
+@runtime_checkable
+class IServerToolExecutor(Protocol):
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MCPToolExecutor(IServerToolExecutor):
+    provider: IMCPToolProvider
+    request_tool: object | None = None
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        return await self.provider.call_tool(name, arguments, request_tool=self.request_tool)
 
 
 class MCPToolProvider(IMCPToolProvider):
     def __init__(
         self,
+        name: str,
         transport: object,
         *,
-        tool_names: Sequence[str] | None = None,
+        tools: Mapping[str, MCPToolConfig] | None = None,
     ) -> None:
+        self.name = name
         self._transport = transport
-        self._tool_names = frozenset(tool_names or ())
+        self.tool_configs = dict(tools or {})
 
     async def tools(self) -> tuple[FunctionTool, ...]:
+        if not self.tool_configs:
+            return ()
         async with Client(self._transport) as client:
             tools = await client.list_tools()
-        return tuple(_mcp_tool_to_function_tool(tool) for tool in tools if not self._tool_names or tool.name in self._tool_names)
+        return tuple(_mcp_tool_to_function_tool(tool) for tool in tools if tool.name in self.tool_configs)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        if self._tool_names and name not in self._tool_names:
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, request_tool: object | None = None) -> str:
+        _ = request_tool
+        if name not in self.tool_configs:
             raise ValueError(f"MCP tool is not enabled: {name}")
         async with Client(self._transport) as client:
             result = await client.call_tool(name, arguments)

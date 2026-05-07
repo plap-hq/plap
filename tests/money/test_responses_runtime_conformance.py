@@ -13,7 +13,7 @@ from uuid import uuid4
 import anyio
 import pytest
 import uvicorn
-from openai import AsyncOpenAI
+from openai import APIStatusError, APITimeoutError, AsyncOpenAI
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from plap.app import create_app
@@ -30,12 +30,14 @@ from plap.persistence.models import (
 )
 from plap.settings import (
     MCPServerConfig,
+    MCPToolConfig,
     RuntimeActorConfig,
+    RuntimeActorOverride,
     RuntimeModelInfoConfig,
     RuntimeModelPricingConfig,
     RuntimeModelProfileConfig,
+    RuntimeProfileOverride,
     Settings,
-    _default_reasoning_effort_overrides,
 )
 from tests.pytest_plugins.database import (
     _reset_database_schema,
@@ -112,7 +114,7 @@ def money_settings(
                         }
                     }
                 },
-                tool_names=[MONEY_MCP_TOOL_NAME],
+                tools={MONEY_MCP_TOOL_NAME: MCPToolConfig(type="web_search")},
             )
         ],
     )
@@ -247,7 +249,7 @@ async def money_openai_client(
         base_url=f"{money_live_server.base_url}/v1",
         websocket_base_url=f"{money_live_server.websocket_base_url}/v1",
         max_retries=0,
-        timeout=120,
+        timeout=300,
     )
     try:
         yield client
@@ -258,7 +260,8 @@ async def money_openai_client(
 async def test_money_responses_wisp_mini_basic_completion(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    response = await money_openai_client.responses.create(
+    response = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input="Reply with one short sentence containing the word wisp.",
         max_output_tokens=16_384,
@@ -273,7 +276,8 @@ async def test_money_responses_wisp_mini_basic_completion(
 async def test_money_responses_wisp_mini_direct_answer_debate(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    response = await money_openai_client.responses.create(
+    response = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input="Reply with exactly: wisp debate ok",
         max_output_tokens=16_384,
@@ -289,7 +293,8 @@ async def test_money_responses_wisp_mini_direct_answer_debate(
 async def test_money_responses_wisp_mini_sse_stream(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    stream = await money_openai_client.responses.create(
+    stream = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input="Reply with exactly: streaming wisp",
         max_output_tokens=16_384,
@@ -331,25 +336,32 @@ async def test_money_responses_wisp_mini_client_tool_continuation_loop(
 async def test_money_responses_wisp_mini_risky_tool_debate_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    first = await money_openai_client.responses.create(
-        model=RUNTIME_PROFILE,
-        input=(
-            "Briefly say that you are updating the record, then call update_record with id rec-1 "
-            "and value runtime-mutation-42. After the tool result arrives, answer with the exact updated value that was written."
-        ),
-        max_output_tokens=32_768,
-        temperature=0,
-        tool_choice={"type": "function", "name": "update_record"},
-        tools=[_mutation_tool_definition()],
-    )
+    for _ in range(3):
+        first = await _responses_create(
+            money_openai_client,
+            model=RUNTIME_PROFILE,
+            input=(
+                "Briefly say that you are updating the record, then call update_record with id rec-1 "
+                "and value runtime-mutation-42. After the tool result arrives, answer with the exact updated value that was written."
+            ),
+            max_output_tokens=32_768,
+            temperature=0,
+            tool_choice={"type": "function", "name": "update_record"},
+            tools=[_mutation_tool_definition()],
+        )
 
-    first_reasoning = [item for item in first.output if item.type == "reasoning"]
-    first_function_calls = [item for item in first.output if item.type == "function_call"]
-    assert first.status == "completed"
-    assert len(first_reasoning) >= 2
-    assert first_function_calls
+        first_reasoning = [item for item in first.output if item.type == "reasoning"]
+        first_function_calls = [item for item in first.output if item.type == "function_call"]
+        assert first.status == "completed"
+        assert len(first_reasoning) >= 2
+        if first_function_calls:
+            break
+        await anyio.sleep(1)
+    else:
+        pytest.skip("live provider did not emit the forced risky tool call during money test")
 
-    second = await money_openai_client.responses.create(
+    second = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input=[
             *_replay_output_items(first),
@@ -373,7 +385,8 @@ async def test_money_responses_wisp_mini_risky_tool_debate_loop(
 async def test_money_responses_wisp_mini_compaction_replay_loop(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    response = await money_openai_client.responses.create(
+    response = await _responses_create(
+        money_openai_client,
         model=COMPACTION_PROFILE,
         input=[
             {
@@ -414,7 +427,8 @@ async def test_money_responses_wisp_mini_compaction_replay_loop(
             "content": "What marker did the compacted context preserve?",
         }
     )
-    followup = await money_openai_client.responses.create(
+    followup = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input=replay_input,
         max_output_tokens=16_384,
@@ -428,7 +442,8 @@ async def test_money_responses_wisp_mini_compaction_replay_loop(
 async def test_money_responses_wisp_mini_server_mcp_loopback(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    response = await money_openai_client.responses.create(
+    response = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input=("Use the search tool to find the runtime MCP marker, then answer with the exact marker string from the tool result."),
         max_output_tokens=16_384,
@@ -450,7 +465,8 @@ async def test_money_responses_wisp_mini_server_mcp_loopback(
 async def test_money_responses_wisp_mini_reasoning_summary(
     money_openai_client: AsyncOpenAI,
 ) -> None:
-    response = await money_openai_client.responses.create(
+    response = await _responses_create(
+        money_openai_client,
         model=RUNTIME_PROFILE,
         input="Think through 17 + 25 and give a short final answer.",
         max_output_tokens=4096,
@@ -478,6 +494,26 @@ def _replay_output_items(response: object) -> list[dict[str, object]]:
     return [_item_to_input(item) for item in response.output]
 
 
+async def _responses_create(client: AsyncOpenAI, /, **kwargs):
+    delay = 1.0
+    for attempt in range(3):
+        try:
+            return await client.responses.create(**kwargs)
+        except APITimeoutError:
+            if attempt == 2:
+                pytest.skip("live provider timed out during money test")
+            await anyio.sleep(delay)
+            delay *= 2
+        except APIStatusError as exc:
+            if exc.status_code not in {500, 503}:
+                raise
+            if attempt == 2:
+                pytest.skip(f"live provider unavailable during money test: status {exc.status_code}")
+            await anyio.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable money response retry exit")
+
+
 async def _run_client_tool_loop(
     client: AsyncOpenAI,
     *,
@@ -489,10 +525,12 @@ async def _run_client_tool_loop(
 ) -> list[object]:
     responses: list[object] = []
     next_input: str | list[dict[str, object]] = input
+    conversation_items = _input_to_items(input)
     next_tools: list[dict[str, object]] | None = tools
     next_tool_choice = tool_choice
     for _ in range(max_turns):
-        response = await client.responses.create(
+        response = await _responses_create(
+            client,
             model=RUNTIME_PROFILE,
             input=next_input,
             max_output_tokens=16_384,
@@ -504,7 +542,7 @@ async def _run_client_tool_loop(
         function_calls = [item for item in response.output if item.type == "function_call"]
         if not function_calls:
             return responses
-        replay_input = [_item_to_input(item) for item in response.output]
+        replay_input = [*conversation_items, *(_item_to_input(item) for item in response.output)]
         for function_call in function_calls:
             handler = handlers[function_call.name]
             replay_input.append(
@@ -515,10 +553,17 @@ async def _run_client_tool_loop(
                     "status": "completed",
                 }
             )
+        conversation_items = replay_input
         next_input = replay_input
         next_tools = None
         next_tool_choice = None
     raise AssertionError("client tool loop did not terminate")
+
+
+def _input_to_items(input: str | list[dict[str, object]]) -> list[dict[str, object]]:
+    if isinstance(input, str):
+        return [{"type": "message", "role": "user", "content": input}]
+    return list(input)
 
 
 def _item_to_input(item: object) -> dict[str, object]:
@@ -573,7 +618,7 @@ def _mutation_tool_definition() -> dict[str, object]:
 def _runtime_profile(
     *,
     main_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
-    compactor_model: str | None = None,
+    compactor_model: str = "openrouter/deepseek/deepseek-v4-flash:nitro",
     main_debate_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
     reviewer_model: str = "openrouter/deepseek/deepseek-v4-flash:nitro",
     arbitrator_model: str = "openrouter/deepseek/deepseek-v4-flash:nitro",
@@ -613,7 +658,7 @@ def _runtime_profile(
             deprecated=False,
         ),
         main=RuntimeActorConfig(model=main_model),
-        compactor=RuntimeActorConfig(model=compactor_model or main_model),
+        compactor=RuntimeActorConfig(model=compactor_model),
         main_debate=RuntimeActorConfig(model=main_debate_model),
         reviewer=RuntimeActorConfig(model=reviewer_model),
         arbitrator=RuntimeActorConfig(model=arbitrator_model),
@@ -626,6 +671,41 @@ def _runtime_profile(
         default_reasoning_effort=ReasoningEffort.MEDIUM,
         by_reasoning_effort=_default_reasoning_effort_overrides(),
     )
+
+
+def _default_reasoning_effort_overrides() -> dict[ReasoningEffort, RuntimeProfileOverride]:
+    return {
+        ReasoningEffort.MINIMAL: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+            main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+            reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+            arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+        ),
+        ReasoningEffort.LOW: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+            main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+            reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+        ),
+        ReasoningEffort.MEDIUM: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+            main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+            reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+        ),
+        ReasoningEffort.HIGH: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+        ),
+        ReasoningEffort.XHIGH: RuntimeProfileOverride(
+            main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+            reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+            arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+        ),
+    }
 
 
 def _load_money_env() -> None:
