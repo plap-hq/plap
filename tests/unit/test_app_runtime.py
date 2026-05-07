@@ -91,7 +91,9 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     assert profile.model_info.provider == "plap"
     assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
-    assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
+    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
+        profile.model_info.supported_parameters
+    )
 
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
@@ -114,7 +116,9 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     assert profile.model_info.provider == "plap"
     assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
-    assert {"tools", "response_format", "max_output_tokens", "stream"}.issubset(profile.model_info.supported_parameters)
+    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
+        profile.model_info.supported_parameters
+    )
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:

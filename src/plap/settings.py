@@ -36,6 +36,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                     "response_format",
                     "max_output_tokens",
                     "reasoning_effort",
+                    "service_tier",
                     "stream",
                 ],
                 pricing=RuntimeModelPricingConfig(
@@ -132,6 +133,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                     "response_format",
                     "max_output_tokens",
                     "reasoning_effort",
+                    "service_tier",
                     "stream",
                 ],
                 pricing=RuntimeModelPricingConfig(
