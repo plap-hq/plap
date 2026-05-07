@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
 Return only JSON matching this schema:
-{"effect_class":"safe|visible|mutation|contextual|unknown","confidence":0.0,"rationale":"short"}
+{"effect_class":"safe|visible|mutation|contextual","confidence":0.0,"rationale":"short"}
 
 Definitions:
 - safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
@@ -39,8 +39,9 @@ Definitions:
 - mutation: writes files, runs mutating commands, changes external state, or has
   irreversible side effects.
 - contextual: can be safe or mutating depending on call arguments, such as shell,
-  SQL, HTTP, or command execution tools.
-- unknown: ambiguous or insufficient information.
+  SQL, HTTP, or command execution tools. If the signature is too ambiguous or
+  incomplete to decide safely from tool-level information alone, classify it as
+  contextual so call-time classification can decide later.
 """
 TOOL_EFFECT_CLASSIFIER_NAME = "llm_tool_effect_classifier"
 TOOL_EFFECT_CLASSIFIER_MODEL = "lightning/lightning-ai/gpt-oss-120b"
@@ -50,7 +51,7 @@ TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "properties": {
         "effect_class": {
             "type": "string",
-            "enum": ["safe", "visible", "mutation", "contextual", "unknown"],
+            "enum": ["safe", "visible", "mutation", "contextual"],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "rationale": {"type": "string"},
@@ -424,7 +425,7 @@ def _unknown_classification(
         classifier=classifier,
         classifier_model=classifier_model,
         prompt_hash=prompt_hash,
-        effect_class="unknown",
+        effect_class="contextual",
         confidence=0.0,
         rationale=rationale,
         raw_output=raw_output,

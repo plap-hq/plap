@@ -106,7 +106,6 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         "visible",
         "mutation",
         "contextual",
-        "unknown",
     ]
     assert "minLength" not in client.requests[0].response_format.schema["properties"]["rationale"]
     assert client.requests[0].max_completion_tokens == TOOL_EFFECT_CLASSIFIER_MAX_TOKENS
@@ -122,7 +121,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
     )
 
 
-async def test_llm_tool_classifier_malformed_json_returns_unknown() -> None:
+async def test_llm_tool_classifier_malformed_json_returns_contextual() -> None:
     classifier = LLMToolClassifier(
         client=_FakeChatClient("not json"),
         classifier="fake",
@@ -131,7 +130,7 @@ async def test_llm_tool_classifier_malformed_json_returns_unknown() -> None:
 
     result = await classifier.classify(function_tool_signature(_read_file_tool()))
 
-    assert result.effect_class == "unknown"
+    assert result.effect_class == "contextual"
     assert result.confidence == 0.0
 
 
@@ -314,11 +313,11 @@ async def test_llm_tool_call_classifier_parses_visible_json() -> None:
     assert result.confidence == 0.85
 
 
-async def test_static_policy_resolver_returns_unknown_client_tools() -> None:
+async def test_static_policy_resolver_returns_contextual_client_tools() -> None:
     policies = await StaticToolPolicyResolver().resolve([_read_file_tool()])
 
     assert policies["read_file"].source == "client"
-    assert policies["read_file"].effect_class == "unknown"
+    assert policies["read_file"].effect_class == "contextual"
 
 
 async def test_policy_resolver_rejects_duplicate_names_with_different_signatures() -> None:

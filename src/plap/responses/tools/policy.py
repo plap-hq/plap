@@ -488,10 +488,10 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
                 ToolPolicy(
                     name=tool.name,
                     source="client",
-                    effect_class="unknown",
+                    effect_class="contextual",
                 ),
             )
-            log_debug(logger, "tool.policy.static", effect_class="unknown", tool_name=tool.name)
+            log_debug(logger, "tool.policy.static", effect_class="contextual", tool_name=tool.name)
             log_payload(logger, "tool.policy.static.payload", signature=signature.signature, tool_name=tool.name)
         return policies
 
