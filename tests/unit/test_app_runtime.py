@@ -190,12 +190,8 @@ def test_app_runtime_builds_mcp_providers_from_config_list() -> None:
                 MCPServerConfig(
                     name="search",
                     config={
-                        "mcpServers": {
-                            "search": {
-                                "command": "search-server",
-                                "args": ["--stdio"],
-                            }
-                        }
+                        "command": "search-server",
+                        "args": ["--stdio"],
                     },
                     tools={"search_web": MCPToolConfig(type="web_search")},
                 )
@@ -207,11 +203,154 @@ def test_app_runtime_builds_mcp_providers_from_config_list() -> None:
     assert isinstance(providers[0], MCPToolProvider)
 
 
-def test_app_runtime_builds_mcp_provider_from_url() -> None:
-    providers = _create_mcp_tool_providers(_settings(mcp_servers=[MCPServerConfig(name="remote", url="http://localhost:8765/mcp")]))
+def test_app_runtime_merges_top_level_mcp_env_into_stdio_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLAP_TEST_REMOTE_TOKEN", "secret-token")
+
+    providers = _create_mcp_tool_providers(
+        _settings(
+            mcp_servers=[
+                MCPServerConfig(
+                    name="search",
+                    config={
+                        "command": "search-server",
+                        "args": ["--token=${MCP_TOKEN}"],
+                        "env": {"MODE": "test"},
+                    },
+                    env={"MCP_TOKEN": "${PLAP_TEST_REMOTE_TOKEN}"},
+                    tools={"search_web": MCPToolConfig(type="web_search")},
+                )
+            ],
+        )
+    )
 
     assert len(providers) == 1
     assert isinstance(providers[0], MCPToolProvider)
+    assert providers[0]._transport == {
+        "mcpServers": {
+            "search": {
+                "command": "search-server",
+                "args": ["--token=secret-token"],
+                "env": {
+                    "MCP_TOKEN": "secret-token",
+                    "MODE": "test",
+                },
+            }
+        }
+    }
+
+
+def test_app_runtime_builds_mcp_provider_from_url() -> None:
+    providers = _create_mcp_tool_providers(
+        _settings(mcp_servers=[MCPServerConfig(name="remote", config={"url": "http://localhost:8765/mcp"})])
+    )
+
+    assert len(providers) == 1
+    assert isinstance(providers[0], MCPToolProvider)
+
+
+def test_app_runtime_builds_mcp_provider_from_url_with_headers_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLAP_TEST_JINA_TOKEN", "jina-secret")
+
+    providers = _create_mcp_tool_providers(
+        _settings(
+            mcp_servers=[
+                MCPServerConfig(
+                    name="jina",
+                    config={
+                        "url": "https://mcp.jina.ai/v1?include_tools=${JINA_TOOLS}",
+                        "headers": {"Authorization": "Bearer ${JINA_TOKEN}"},
+                    },
+                    env={
+                        "JINA_TOKEN": "${PLAP_TEST_JINA_TOKEN}",
+                        "JINA_TOOLS": "read_url,search_web",
+                    },
+                    tools={"search_web": MCPToolConfig(type="web_search")},
+                )
+            ],
+        )
+    )
+
+    assert len(providers) == 1
+    assert isinstance(providers[0], MCPToolProvider)
+    assert providers[0]._transport == {
+        "mcpServers": {
+            "jina": {
+                "url": "https://mcp.jina.ai/v1?include_tools=read_url,search_web",
+                "headers": {"Authorization": "Bearer jina-secret"},
+            }
+        }
+    }
+
+
+def test_app_runtime_rejects_invalid_mcp_provider_config() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        _create_mcp_tool_providers(
+            _settings(
+                mcp_servers=[
+                    MCPServerConfig(
+                        name="remote",
+                        config={"url": "https://example.com/${MISSING_TOKEN}"},
+                    )
+                ],
+            )
+        )
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "mcp_transport_invalid"
+
+
+def test_app_runtime_rejects_nested_mcp_servers_config() -> None:
+    with pytest.raises(ValueError, match="single server"):
+        MCPServerConfig(
+            name="remote",
+            config={
+                "mcpServers": {
+                    "remote": {
+                        "url": "https://example.com/mcp",
+                    }
+                }
+            },
+        )
+
+
+def test_app_runtime_rejects_unknown_mcp_tool_effect_class() -> None:
+    with pytest.raises(ValueError, match="effect_class"):
+        MCPToolConfig(type="web_search", effect_class="unknown")
+
+
+def test_app_runtime_includes_builtin_jina_provider_when_api_key_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JINA_API_KEY", "builtin-jina-key")
+
+    settings = Settings(
+        api_key_pepper="pepper",
+        database_url="postgresql+asyncpg://example/test",
+        sealing_keys=["a" * 43],
+    )
+    providers = _create_mcp_tool_providers(settings)
+
+    assert len(providers) == 1
+    assert isinstance(providers[0], MCPToolProvider)
+    assert providers[0].name == "jina"
+    assert set(providers[0].tool_configs) == {
+        "read_url",
+        "search_web",
+        "search_arxiv",
+        "search_ssrn",
+        "search_bibtex",
+    }
+    assert providers[0].tool_configs["search_web"].argument_adapter == "web_search_user_location"
+    assert providers[0].tool_configs["read_url"].argument_adapter is None
+    assert providers[0]._transport == {
+        "mcpServers": {
+            "jina": {
+                "url": (
+                    "https://mcp.jina.ai/v1?include_tools="
+                    "read_url,search_web,search_arxiv,search_ssrn,search_bibtex"
+                ),
+                "headers": {"Authorization": "Bearer builtin-jina-key"},
+            }
+        }
+    }
 
 
 def test_app_runtime_validates_synthetic_model_profiles() -> None:
@@ -639,6 +778,7 @@ def _settings(**overrides: object) -> Settings:
     values = {
         "api_key_pepper": "pepper",
         "database_url": "postgresql+asyncpg://example/test",
+        "mcp_servers": [],
         "sealing_keys": ["a" * 43],
     }
     values.update(overrides)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from functools import lru_cache
 from math import ceil, floor
 from typing import Any, Literal
@@ -212,6 +214,73 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
 def _validate_compact_thresholds(soft_threshold: int | None, threshold: int | None) -> None:
     if soft_threshold is not None and threshold is not None and threshold <= soft_threshold:
         raise ValueError("compact threshold must exceed the soft compact threshold")
+
+
+_MCP_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _mcp_env_placeholders(value: str) -> set[str]:
+    return {match.group(1) for match in _MCP_ENV_PATTERN.finditer(value)}
+
+
+def _interpolate_mcp_string(value: str, *, variables: dict[str, str], server_name: str) -> str:
+    missing = sorted(name for name in _mcp_env_placeholders(value) if name not in variables)
+    if missing:
+        raise ValueError(f"mcp server {server_name!r} references unset environment variables: {', '.join(missing)}")
+
+    def replace(match: re.Match[str]) -> str:
+        return variables[match.group(1)]
+
+    return _MCP_ENV_PATTERN.sub(replace, value)
+
+
+def _resolved_mcp_env(raw_env: dict[str, str], *, server_name: str) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    pending = dict(raw_env)
+    pending_names = set(pending)
+    while pending:
+        progress = False
+        variables = dict(os.environ)
+        variables.update(resolved)
+        for key, value in tuple(pending.items()):
+            missing = _mcp_env_placeholders(value) - set(variables)
+            if missing & pending_names:
+                continue
+            resolved[key] = _interpolate_mcp_string(value, variables=variables, server_name=server_name)
+            del pending[key]
+            pending_names.remove(key)
+            progress = True
+        if progress:
+            continue
+        raise ValueError(f"mcp server {server_name!r} has circular environment references: {', '.join(sorted(pending))}")
+    return resolved
+
+
+def _interpolate_mcp_value(value: Any, *, variables: dict[str, str], server_name: str) -> Any:
+    if isinstance(value, str):
+        return _interpolate_mcp_string(value, variables=variables, server_name=server_name)
+    if isinstance(value, list):
+        return [_interpolate_mcp_value(item, variables=variables, server_name=server_name) for item in value]
+    if isinstance(value, dict):
+        return {key: _interpolate_mcp_value(item, variables=variables, server_name=server_name) for key, item in value.items()}
+    return value
+
+
+def _merged_mcp_stdio_env(config: dict[str, Any], *, env: dict[str, str], server_name: str) -> dict[str, Any]:
+    if not env:
+        return config
+    if (
+        "command" not in config
+        and config.get("transport") != "stdio"
+        and config.get("type") != "stdio"
+    ):
+        return config
+    existing_env = config.get("env")
+    if existing_env is None:
+        return {**config, "env": dict(env)}
+    if not isinstance(existing_env, dict):
+        raise TypeError(f"mcp server {server_name!r} has a non-object stdio env")
+    return {**config, "env": {**env, **existing_env}}
 
 
 def _missing_model_error() -> PlapError:
@@ -743,23 +812,70 @@ class RuntimeModelProfileConfig(BaseModel):
 class MCPToolConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
+    argument_adapter: Literal["web_search_user_location"] | None = None
     type: str
-    effect_class: Literal["safe", "visible", "mutation", "contextual", "unknown"] = "safe"
+    effect_class: Literal["safe", "visible", "mutation", "contextual"] = "safe"
 
 
 class MCPServerConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     name: str
-    url: str | None = None
-    config: dict[str, Any] | None = None
+    config: dict[str, Any]
+    env: dict[str, str] = Field(default_factory=dict)
     tools: dict[str, MCPToolConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_transport(self) -> MCPServerConfig:
-        if bool(self.url) == bool(self.config):
-            raise ValueError("mcp server config requires exactly one of url or config")
+    def validate_config(self) -> MCPServerConfig:
+        if not self.config:
+            raise ValueError("mcp server config is required")
+        if "mcpServers" in self.config:
+            raise ValueError("mcp server config must describe a single server, not an mcpServers mapping")
         return self
+
+    def mcp_config(self) -> dict[str, Any]:
+        env = _resolved_mcp_env(self.env, server_name=self.name)
+        variables = dict(os.environ)
+        variables.update(env)
+        config = _merged_mcp_stdio_env(self.config, env=env, server_name=self.name)
+        return {
+            "mcpServers": {
+                self.name: _interpolate_mcp_value(config, variables=variables, server_name=self.name),
+            }
+        }
+
+
+def _default_jina_mcp_server() -> MCPServerConfig | None:
+    if not os.environ.get("JINA_API_KEY"):
+        return None
+    tool_names = (
+        "read_url",
+        "search_web",
+        "search_arxiv",
+        "search_ssrn",
+        "search_bibtex",
+    )
+    return MCPServerConfig(
+        name="jina",
+        config={
+            "url": f"https://mcp.jina.ai/v1?include_tools={','.join(tool_names)}",
+            "headers": {"Authorization": "Bearer ${JINA_API_KEY}"},
+        },
+        tools={
+            tool_name: MCPToolConfig(
+                type="web_search",
+                argument_adapter="web_search_user_location" if tool_name == "search_web" else None,
+            )
+            for tool_name in tool_names
+        },
+    )
+
+
+def _default_mcp_servers() -> list[MCPServerConfig]:
+    jina_server = _default_jina_mcp_server()
+    if jina_server is None:
+        return []
+    return [jina_server]
 
 
 class Settings(BaseSettings):
@@ -781,7 +897,7 @@ class Settings(BaseSettings):
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096
     runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(default_factory=_default_runtime_model_profiles)
-    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=_default_mcp_servers)
 
     @field_validator("sealing_keys", mode="before")
     @classmethod

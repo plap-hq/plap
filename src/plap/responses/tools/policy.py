@@ -60,7 +60,6 @@ class EffectClass(StrEnum):
     VISIBLE = "visible"
     MUTATION = "mutation"
     CONTEXTUAL = "contextual"
-    UNKNOWN = "unknown"
 
 
 class ToolCallEffectClass(StrEnum):

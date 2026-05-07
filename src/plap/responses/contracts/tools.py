@@ -25,13 +25,6 @@ class FunctionTool(StrictModel):
     type: Literal["function"] = Field(description="Tool discriminator.")
 
 
-class WebSearchFilters(StrictModel):
-    allowed_domains: list[str] | None = Field(
-        default=None,
-        description="Allowed domains; subdomains are allowed when a domain is listed.",
-    )
-
-
 class WebSearchUserLocation(StrictModel):
     city: str | None = Field(default=None, description="Free-text city.")
     country: str | None = Field(
@@ -50,19 +43,10 @@ class WebSearchUserLocation(StrictModel):
 
 
 class WebSearchTool(StrictModel):
-    filters: WebSearchFilters | None = Field(
-        default=None,
-        description="Domain filters for the search.",
-    )
-    search_context_size: Literal["low", "medium", "high"] | None = Field(
-        default=None,
-        description="Guidance for how much context to spend on search results.",
-    )
-    # OpenAI also defines web_search_2025_08_26; plap does not expose that literal.
-    type: Literal["web_search"] = Field(description="Tool discriminator.")
+    type: Literal["web_search"] = Field(description="Enable configured server-backed web search tools.")
     user_location: WebSearchUserLocation | None = Field(
         default=None,
-        description="Approximate user location to localize results.",
+        description="Approximate user location used to localize configured server-backed search tools.",
     )
 
 

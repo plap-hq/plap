@@ -224,7 +224,7 @@ class ResponseCreateRequest(StrictModel):
     )
     tools: list[SupportedTool] | None = Field(
         default=None,
-        description="Supported tools: function tools and hardcoded web_search.",
+        description="Supported tools: function tools and the server-backed web_search enablement flag with optional user_location.",
     )
     top_logprobs: int | None = Field(
         default=None,

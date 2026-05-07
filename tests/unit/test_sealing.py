@@ -50,6 +50,7 @@ def test_settings_splits_comma_separated_sealing_keys() -> None:
     settings = Settings(
         api_key_pepper="pepper",
         database_url="postgresql+asyncpg://example/test",
+        mcp_servers=[],
         sealing_keys=f"{first}, {second}",
     )
 

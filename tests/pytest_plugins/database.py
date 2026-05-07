@@ -88,6 +88,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
         llm_crof_api_key="test-crof-key",
         llm_lightning_api_key="test-lightning-key",
+        mcp_servers=[],
         runtime_model_profiles={
             "plap/test": RuntimeModelProfileConfig(
                 display_name="Test Model",

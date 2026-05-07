@@ -7,8 +7,58 @@ from typing import Any, Protocol, runtime_checkable
 import msgspec
 from fastmcp import Client
 
-from plap.responses.contracts import FunctionTool
+from plap.responses.contracts import FunctionTool, WebSearchTool, WebSearchUserLocation
 from plap.settings import MCPToolConfig
+
+
+def _normalized_location_part(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped
+
+
+def _search_location_string(location: WebSearchUserLocation) -> str | None:
+    parts = [
+        _normalized_location_part(location.city),
+        _normalized_location_part(location.region),
+        _normalized_location_part(location.country),
+    ]
+    joined = ", ".join(part for part in parts if part is not None)
+    if not joined:
+        return None
+    return joined
+
+
+def _search_country_code(location: WebSearchUserLocation) -> str | None:
+    country = _normalized_location_part(location.country)
+    if country is None or len(country) != 2:
+        return None
+    return country.lower()
+
+
+def _missing_or_null_argument(arguments: dict[str, Any], name: str) -> bool:
+    return name not in arguments or arguments[name] is None
+
+
+def _adapt_mcp_tool_arguments(arguments: dict[str, Any], *, tool_config: MCPToolConfig, request_tool: object | None) -> dict[str, Any]:
+    if tool_config.argument_adapter != "web_search_user_location":
+        return arguments
+    if not isinstance(request_tool, WebSearchTool) or request_tool.user_location is None:
+        return arguments
+
+    adapted = dict(arguments)
+    if _missing_or_null_argument(adapted, "location"):
+        location = _search_location_string(request_tool.user_location)
+        if location is not None:
+            adapted["location"] = location
+    if _missing_or_null_argument(adapted, "gl"):
+        country_code = _search_country_code(request_tool.user_location)
+        if country_code is not None:
+            adapted["gl"] = country_code
+    return adapted
 
 
 @runtime_checkable
@@ -18,7 +68,7 @@ class IMCPToolProvider(Protocol):
 
     async def tools(self) -> tuple[FunctionTool, ...]: ...
 
-    async def call_tool(self, name: str, arguments: dict[str, Any], *, request_tool: object | None = None) -> str: ...
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
 
 
 @runtime_checkable
@@ -30,9 +80,15 @@ class IServerToolExecutor(Protocol):
 class MCPToolExecutor(IServerToolExecutor):
     provider: IMCPToolProvider
     request_tool: object | None = None
+    tool_config: MCPToolConfig | None = None
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        return await self.provider.call_tool(name, arguments, request_tool=self.request_tool)
+        if self.tool_config is None:
+            return await self.provider.call_tool(name, arguments)
+        return await self.provider.call_tool(
+            name,
+            _adapt_mcp_tool_arguments(arguments, tool_config=self.tool_config, request_tool=self.request_tool),
+        )
 
 
 class MCPToolProvider(IMCPToolProvider):
@@ -54,8 +110,7 @@ class MCPToolProvider(IMCPToolProvider):
             tools = await client.list_tools()
         return tuple(_mcp_tool_to_function_tool(tool) for tool in tools if tool.name in self.tool_configs)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any], *, request_tool: object | None = None) -> str:
-        _ = request_tool
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name not in self.tool_configs:
             raise ValueError(f"MCP tool is not enabled: {name}")
         async with Client(self._transport) as client:

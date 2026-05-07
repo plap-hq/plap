@@ -300,7 +300,11 @@ async def prepare_tools(
             server_tools.append(tool)
             covered_server_tool_types.add(config.type)
             server_tool_policies[tool.name] = _server_tool_policy(tool.name, effect_class=config.effect_class)
-            server_executors[tool.name] = MCPToolExecutor(provider, request_tool=requested_server_tools[config.type])
+            server_executors[tool.name] = MCPToolExecutor(
+                provider,
+                request_tool=requested_server_tools[config.type],
+                tool_config=config,
+            )
 
     missing_server_tool_types = set(requested_server_tools) - covered_server_tool_types
     if missing_server_tool_types:

@@ -1069,6 +1069,100 @@ async def test_stream_response_events_executes_server_tool_and_loops_back() -> N
     assert loop_messages[-1].content == "search result for cats"
 
 
+async def test_stream_response_events_applies_web_search_user_location_defaults() -> None:
+    provider = _FakeMCPToolProvider(
+        output="search result for cats",
+        tools={MCP_SEARCH_TOOL_NAME: MCPToolConfig(type="web_search", argument_adapter="web_search_user_location")},
+    )
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="upstream_search_1",
+                        name=MCP_SEARCH_TOOL_NAME,
+                        arguments='{"query":"cats"}',
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="cats found"),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="search for cats",
+                tools=[
+                    WebSearchTool(
+                        type="web_search",
+                        user_location={"type": "approximate", "city": "Paris", "country": "FR"},
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_providers=(provider,),
+        )
+    ]
+
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats", "location": "Paris, FR", "gl": "fr"})]
+
+
+async def test_stream_response_events_preserves_explicit_web_search_location_arguments() -> None:
+    provider = _FakeMCPToolProvider(
+        output="search result for cats",
+        tools={MCP_SEARCH_TOOL_NAME: MCPToolConfig(type="web_search", argument_adapter="web_search_user_location")},
+    )
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="upstream_search_1",
+                        name=MCP_SEARCH_TOOL_NAME,
+                        arguments='{"query":"cats","location":"Berlin","gl":"de"}',
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="cats found"),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="search for cats",
+                tools=[
+                    WebSearchTool(
+                        type="web_search",
+                        user_location={"type": "approximate", "city": "Paris", "country": "FR"},
+                    )
+                ],
+            ),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+            mcp_tool_providers=(provider,),
+        )
+    ]
+
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats", "location": "Berlin", "gl": "de"})]
+
+
 async def test_stream_response_events_soft_bailout_allows_normal_main_to_continue() -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
@@ -3439,8 +3533,7 @@ class _FakeMCPToolProvider(IMCPToolProvider):
     async def tools(self) -> tuple[FunctionTool, ...]:
         return tuple(_tool(name) for name in self.tool_configs)
 
-    async def call_tool(self, name: str, arguments: dict[str, object], *, request_tool: object | None = None) -> str:
-        _ = request_tool
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> str:
         self.calls.append((name, arguments))
         if self.fail:
             raise RuntimeError("mcp failed")
@@ -3578,6 +3671,7 @@ def _settings(*, profile: RuntimeModelProfileConfig | None = None) -> Settings:
         api_key_pepper="test-pepper",
         database_url="postgresql+asyncpg://test:test@localhost/test",
         llm_crof_api_key="test-crof-key",
+        mcp_servers=[],
         runtime_model_profiles={"plap/test": profile or _profile_config()},
         sealing_keys=["a" * 43],
     )

@@ -276,18 +276,19 @@ def _create_mcp_tool_providers(settings: Settings) -> tuple[IMCPToolProvider, ..
 
 
 def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
-    transport = server.url if server.url is not None else server.config
-    if transport is None:
+    try:
+        transport = server.mcp_config()
+    except (TypeError, ValueError) as exc:
         raise PlapError(
             public=None,
             private=PrivateError(
                 event="app.startup_invalid",
-                reason="mcp_transport_missing",
-                message="mcp server config requires a transport",
+                reason="mcp_transport_invalid",
+                message=f"invalid MCP server config for {server.name!r}: {exc}",
                 level=ErrorLevel.ERROR,
                 context={"server_name": server.name},
             ),
-        )
+        ) from exc
     return MCPToolProvider(server.name, transport, tools=server.tools)
 
 

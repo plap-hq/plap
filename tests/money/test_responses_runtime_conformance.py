@@ -16,7 +16,7 @@ import uvicorn
 from openai import APIStatusError, APITimeoutError, AsyncOpenAI
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from plap.app import create_app
+from plap.app import _create_mcp_tool_providers, create_app
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
 from plap.llms.chat import ReasoningEffort
 from plap.persistence import create_database_engine, create_session_maker
@@ -107,12 +107,8 @@ def money_settings(
             MCPServerConfig(
                 name="money",
                 config={
-                    "mcpServers": {
-                        "money": {
-                            "command": sys.executable,
-                            "args": [str(Path(__file__).with_name("_money_mcp_server.py"))],
-                        }
-                    }
+                    "command": sys.executable,
+                    "args": [str(Path(__file__).with_name("_money_mcp_server.py"))],
                 },
                 tools={MONEY_MCP_TOOL_NAME: MCPToolConfig(type="web_search")},
             )
@@ -729,3 +725,40 @@ def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+@pytest.fixture(scope="session")
+def jina_api_key() -> str:
+    _load_money_env()
+    api_key = os.getenv("JINA_API_KEY")
+    if not api_key:
+        pytest.skip("missing JINA_API_KEY")
+    return api_key
+
+
+async def test_money_builtin_jina_mcp_provider_smoke(jina_api_key: str) -> None:
+    _ = jina_api_key
+    settings = Settings(
+        api_key_pepper="money-test-pepper",
+        database_url="postgresql+asyncpg://example/test",
+        sealing_keys=["a" * 43],
+    )
+
+    providers = _create_mcp_tool_providers(settings)
+
+    assert len(providers) == 1
+    provider = providers[0]
+    assert provider.name == "jina"
+    assert set(provider.tool_configs) == {
+        "read_url",
+        "search_web",
+        "search_arxiv",
+        "search_ssrn",
+        "search_bibtex",
+    }
+
+    tools = await provider.tools()
+    assert {tool.name for tool in tools} == set(provider.tool_configs)
+
+    result = await provider.call_tool("search_web", {"query": "Jina AI", "num": 1})
+    assert result.strip()

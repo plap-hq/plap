@@ -97,7 +97,6 @@ from plap.responses.contracts.tools import (
     TextFormatText,
     ToolChoice,
     ToolChoiceFunction,
-    WebSearchFilters,
     WebSearchTool,
     WebSearchUserLocation,
 )
@@ -192,7 +191,6 @@ __all__ = [
     "ToolChoiceFunction",
     "ToolOutputContentPart",
     "UrlCitationAnnotation",
-    "WebSearchFilters",
     "WebSearchTool",
     "WebSearchUserLocation",
 ]

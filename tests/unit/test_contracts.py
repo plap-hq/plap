@@ -90,6 +90,50 @@ def test_accepts_function_tool_without_strict() -> None:
     assert request.tools[0].strict is None
 
 
+def test_rejects_web_search_configuration_fields() -> None:
+    try:
+        ResponseCreateRequest.model_validate(
+            {
+                "model": "gpt-4.1",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_context_size": "high",
+                    }
+                ],
+            }
+        )
+    except ValidationError as exc:
+        assert "search_context_size" in str(exc)
+    else:
+        raise AssertionError("expected validation error")
+
+
+def test_accepts_web_search_user_location() -> None:
+    request = ResponseCreateRequest.model_validate(
+        {
+            "model": "gpt-4.1",
+            "tools": [
+                {
+                    "type": "web_search",
+                    "user_location": {
+                        "type": "approximate",
+                        "city": "Paris",
+                        "country": "FR",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert request.tools is not None
+    assert len(request.tools) == 1
+    assert request.tools[0].type == "web_search"
+    assert request.tools[0].user_location is not None
+    assert request.tools[0].user_location.city == "Paris"
+    assert request.tools[0].user_location.country == "FR"
+
+
 def test_accepts_reasoning_input_without_id() -> None:
     request = ResponseCreateRequest.model_validate(
         {
