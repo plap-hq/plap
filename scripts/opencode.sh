@@ -58,5 +58,4 @@ print(
 PY
 )"
 
-cd "$repo_root"
 exec opencode "$@"
