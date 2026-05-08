@@ -78,7 +78,14 @@ class ResponseTextEventLogprob(StrictModel):
     )
 
 
-class ResponseTextDeltaEvent(StrictModel):
+class _ObfuscatableDeltaEvent(StrictModel):
+    obfuscation: str | None = Field(
+        default=None,
+        description="Optional random padding used to normalize streamed delta payload sizes.",
+    )
+
+
+class ResponseTextDeltaEvent(_ObfuscatableDeltaEvent):
     content_index: int = Field(description="Index within the message content array.")
     delta: str = Field(description="Incremental output text chunk.")
     item_id: str = Field(description="Message item ID receiving this delta.")
@@ -114,7 +121,7 @@ class ResponseOutputTextAnnotationAddedEvent(StrictModel):
     type: Literal["response.output_text.annotation.added"] = Field(description="Stream event discriminator.")
 
 
-class ResponseFunctionCallArgumentsDeltaEvent(StrictModel):
+class ResponseFunctionCallArgumentsDeltaEvent(_ObfuscatableDeltaEvent):
     delta: str = Field(description="Incremental JSON argument string chunk.")
     item_id: str = Field(description="Function call item ID receiving this delta.")
     output_index: int = Field(description="Index of the function call in response.output.")
@@ -149,7 +156,7 @@ class ResponseReasoningSummaryPartDoneEvent(StrictModel):
     type: Literal["response.reasoning_summary_part.done"] = Field(description="Stream event discriminator.")
 
 
-class ResponseReasoningSummaryTextDeltaEvent(StrictModel):
+class ResponseReasoningSummaryTextDeltaEvent(_ObfuscatableDeltaEvent):
     delta: str = Field(description="Incremental reasoning summary text chunk.")
     item_id: str = Field(description="Reasoning item ID receiving this delta.")
     output_index: int = Field(description="Index of the reasoning item in response.output.")
@@ -167,7 +174,7 @@ class ResponseReasoningSummaryTextDoneEvent(StrictModel):
     type: Literal["response.reasoning_summary_text.done"] = Field(description="Stream event discriminator.")
 
 
-class ResponseReasoningTextDeltaEvent(StrictModel):
+class ResponseReasoningTextDeltaEvent(_ObfuscatableDeltaEvent):
     content_index: int = Field(description="Index within the reasoning content array.")
     delta: str = Field(description="Incremental reasoning text chunk.")
     item_id: str = Field(description="Reasoning item ID receiving this delta.")

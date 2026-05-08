@@ -174,6 +174,7 @@ async def create_response(
         tool_policy_resolver=tool_policy_resolver,
         tool_call_policy_resolver=tool_call_policy_resolver,
         mcp_tool_providers=mcp_tool_providers,
+        transport="stream" if data.stream else "snapshot",
     )
     if data.stream:
         return ServerSentEvent(
@@ -396,6 +397,7 @@ async def responses_socket(
                 tool_policy_resolver=tool_policy_resolver,
                 tool_call_policy_resolver=tool_call_policy_resolver,
                 mcp_tool_providers=mcp_tool_providers,
+                transport="stream",
             )
             async for event in events:
                 await socket.send_json(event.model_dump(mode="json", exclude_none=True))

@@ -192,7 +192,7 @@ class ResponseEventIO:
                     await self._response_store.finish_response(self._prepared, response)
                     await self._send_event(
                         ResponseCompletedEvent(
-                            response=self._projection.response(response),
+                            response=response,
                             sequence_number=0,
                             type="response.completed",
                         )
@@ -200,8 +200,7 @@ class ResponseEventIO:
 
     async def _send_event(self, event: ResponseStreamEvent) -> None:
         self._sequence_number += 1
-        payload = event.model_dump(mode="json")
-        payload["sequence_number"] = self._sequence_number
+        payload = self._projection.stream_payload(event, sequence_number=self._sequence_number)
         log_debug(logger, "response.io.event.sent", event_type=payload.get("type"), sequence_number=self._sequence_number)
         log_payload(logger, "response.io.event.payload", payload=payload)
         await self._send.send(type(event).model_validate(payload))
@@ -235,22 +234,21 @@ class ResponseEventIO:
         *,
         output_index: int,
     ) -> None:
-        public_item = self._projection.output_item(item)
         await self._send_event(
             ResponseOutputItemAddedEvent(
-                item=public_item,
+                item=item,
                 output_index=output_index,
                 sequence_number=0,
                 type="response.output_item.added",
             )
         )
-        if isinstance(public_item, ResponseReasoningItem):
-            await self._emit_reasoning_events(public_item, output_index=output_index)
-        if isinstance(public_item, ResponseFunctionCallItem):
+        if isinstance(item, ResponseReasoningItem):
+            await self._emit_reasoning_events(item, output_index=output_index)
+        if isinstance(item, ResponseFunctionCallItem):
             await self._send_event(
                 ResponseFunctionCallArgumentsDeltaEvent(
-                    delta=public_item.arguments,
-                    item_id=public_item.id,
+                    delta=item.arguments,
+                    item_id=item.id,
                     output_index=output_index,
                     sequence_number=0,
                     type="response.function_call_arguments.delta",
@@ -258,19 +256,19 @@ class ResponseEventIO:
             )
             await self._send_event(
                 ResponseFunctionCallArgumentsDoneEvent(
-                    arguments=public_item.arguments,
-                    item_id=public_item.id,
-                    name=public_item.name,
+                    arguments=item.arguments,
+                    item_id=item.id,
+                    name=item.name,
                     output_index=output_index,
                     sequence_number=0,
                     type="response.function_call_arguments.done",
                 )
             )
-        if isinstance(public_item, ResponseMessageItem):
-            await self._emit_message_events(public_item, output_index=output_index)
+        if isinstance(item, ResponseMessageItem):
+            await self._emit_message_events(item, output_index=output_index)
         await self._send_event(
             ResponseOutputItemDoneEvent(
-                item=public_item,
+                item=item,
                 output_index=output_index,
                 sequence_number=0,
                 type="response.output_item.done",
@@ -288,7 +286,7 @@ class ResponseEventIO:
         added_item = item.model_copy(update={"status": "in_progress", "summary": []})
         await self._send_event(
             ResponseOutputItemAddedEvent(
-                item=self._projection.output_item(added_item),
+                item=added_item,
                 output_index=output_index,
                 sequence_number=0,
                 type="response.output_item.added",
@@ -372,7 +370,7 @@ class ResponseEventIO:
         )
         await self._send_event(
             ResponseOutputItemDoneEvent(
-                item=self._projection.output_item(completed_item),
+                item=completed_item,
                 output_index=output_index,
                 sequence_number=0,
                 type="response.output_item.done",

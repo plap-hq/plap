@@ -85,6 +85,44 @@ async def test_authenticated_create_routes_return_model_output(
     assert "test response" in streamed.text
 
 
+async def test_sse_stream_includes_obfuscation_by_default(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        streamed = await client.post(
+            "/v1/responses",
+            json=_request_payload(stream=True),
+            headers=headers,
+        )
+
+    assert streamed.status_code == 200
+    assert '"type":"response.output_text.delta"' in streamed.text
+    assert '"obfuscation":"' in streamed.text
+
+
+async def test_sse_stream_can_disable_obfuscation(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+    payload = _request_payload(stream=True)
+    payload["stream_options"] = {"include_obfuscation": False}
+
+    async with AsyncTestClient(app=test_app) as client:
+        streamed = await client.post(
+            "/v1/responses",
+            json=payload,
+            headers=headers,
+        )
+
+    assert streamed.status_code == 200
+    assert '"type":"response.output_text.delta"' in streamed.text
+    assert '"obfuscation":"' not in streamed.text
+
+
 async def test_model_routes_return_public_synthetic_metadata(
     test_app,
     seeded_auth_data,
