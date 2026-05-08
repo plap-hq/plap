@@ -903,11 +903,6 @@ class Compactor:
         if level == CompactionLevel.NONE:
             return CompactionOutcome.NOT_NEEDED
         if self._rounds_used >= self._settings.compact_max_rounds:
-            if level == CompactionLevel.HARD:
-                raise _compaction_unavailable_error(
-                    reason="compact_round_limit_exhausted",
-                    private_message="hard compaction threshold reached after compact_max_rounds was exhausted",
-                )
             return CompactionOutcome.NOT_NEEDED
 
         max_completion_tokens = self._usage_ledger.cap_for(self._profile.compactor.public_usage)

@@ -97,7 +97,7 @@ class ContextManagementCompaction(StrictModel):
     compact_threshold: int | None = Field(
         default=None,
         ge=0,
-        description="Hard token threshold at which context compaction must run before continuing.",
+        description="Hard token threshold at which dedicated context compaction should be attempted.",
     )
     compact_max_rounds: int | None = Field(
         default=None,

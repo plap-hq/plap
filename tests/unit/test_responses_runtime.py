@@ -2872,6 +2872,88 @@ async def test_stream_response_events_context_management_max_rounds_can_disable_
     assert events[-1].response.output[0].content[0].text == "done"
 
 
+async def test_stream_response_events_hard_budget_continues_when_compaction_rounds_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 125)
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=50, compact_threshold=100, compact_max_rounds=0)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].tools == []
+    assert events[-1].response.output[0].content[0].text == "done"
+
+
+async def test_stream_response_events_hard_budget_continues_after_compaction_round_budget_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~0]",
+                                        "summary": "short summary",
+                                        "summary_fidelity": 5,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+    measured = iter((125, 110))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_compaction_item(_span(0, "alpha " * 60, token_count=125))],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=50, compact_threshold=100, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
+    assert client.requests[0].tool_choice == "required"
+    assert client.requests[1].tools == []
+    assert client.requests[1].messages[1].content == "short summary"
+    assert [item.type for item in events[-1].response.output] == ["compaction", "message"]
+    assert events[-1].response.output[-1].content[0].text == "done"
+
+
 async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
