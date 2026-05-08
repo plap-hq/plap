@@ -20,6 +20,7 @@ from plap.llms.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
+from plap.llms.errors import ChatCompletionContextLengthExceededError
 from plap.responses.compact import COMPACT_TOOL_NAME, DUPLICATE_TOOL_OUTPUT_TOMBSTONE, run_explicit_compaction
 from plap.responses.contracts import (
     FunctionTool,
@@ -2954,6 +2955,180 @@ async def test_stream_response_events_hard_budget_continues_after_compaction_rou
     assert events[-1].response.output[-1].content[0].text == "done"
 
 
+async def test_stream_response_events_upstream_oversize_triggers_hard_compaction_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _StaticChatClient(
+        [
+            ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~0]",
+                                        "summary": "alpha summary",
+                                        "summary_fidelity": 5,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_2",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~1]",
+                                        "end": "[~1]",
+                                        "summary": "beta summary",
+                                        "summary_fidelity": 5,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="done"),
+        ]
+    )
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_message("user", "alpha " * 60), _message("assistant", "beta " * 60)],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=50, compact_threshold=100, compact_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert client.requests[0].tools == []
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPACT_TOOL_NAME]
+    assert client.requests[2].tools == []
+    assert [tool.function.name for tool in client.requests[3].tools] == [COMPACT_TOOL_NAME]
+    assert client.requests[4].tools == []
+    assert [item.type for item in completed.output] == ["compaction", "compaction", "message"]
+    assert completed.output[-1].content[0].text == "done"
+
+
+async def test_stream_response_events_rejects_upstream_oversize_when_compaction_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _StaticChatClient(ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."))
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+
+    with pytest.raises(PlapError) as exc_info:
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello"),
+                settings=_settings(profile=_profile_config(soft_compact_threshold=50, compact_threshold=100, compact_max_rounds=0)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+    _assert_public_error(
+        exc_info.value,
+        code="context_length_exceeded",
+        private_reason="context_length_exceeded_after_compaction_exhausted",
+    )
+    assert len(client.requests) == 1
+    assert client.requests[0].tools == []
+
+
+async def test_stream_response_events_rejects_upstream_oversize_after_compaction_rounds_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _StaticChatClient(
+        [
+            ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "[~0]",
+                                        "end": "[~0]",
+                                        "summary": "alpha summary",
+                                        "summary_fidelity": 5,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."),
+        ]
+    )
+
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+
+    with pytest.raises(PlapError) as exc_info:
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input=[_message("user", "alpha " * 60), _message("assistant", "beta " * 60)],
+                ),
+                settings=_settings(profile=_profile_config(soft_compact_threshold=50, compact_threshold=100, compact_max_rounds=1)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+    _assert_public_error(
+        exc_info.value,
+        code="context_length_exceeded",
+        private_reason="context_length_exceeded_after_compaction_exhausted",
+    )
+    assert client.requests[0].tools == []
+    assert [tool.function.name for tool in client.requests[1].tools] == [COMPACT_TOOL_NAME]
+    assert client.requests[2].tools == []
+
+
 async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile_config(
         soft_compact_threshold=50,
@@ -3752,12 +3927,12 @@ class _FakeReasoningSummarizer(IReasoningSummarizer):
 class _StaticChatClient(IChatCompletionClient):
     def __init__(
         self,
-        message: ChatMessage | Sequence[ChatMessage],
+        message: ChatMessage | Exception | Sequence[ChatMessage | Exception],
         *,
         finish_reasons: ChatFinishReason | str | Sequence[ChatFinishReason | str] | None = None,
         usages: ChatUsage | Sequence[ChatUsage] | None = None,
     ) -> None:
-        if isinstance(message, ChatMessage):
+        if isinstance(message, (ChatMessage, Exception)):
             self.messages = (message,)
         else:
             self.messages = tuple(message)
@@ -3771,7 +3946,8 @@ class _StaticChatClient(IChatCompletionClient):
             self.finish_reasons = (finish_reasons,)
         elif finish_reasons is None:
             self.finish_reasons = tuple(
-                ChatFinishReason.TOOL_CALLS if message.tool_calls else ChatFinishReason.STOP for message in self.messages
+                ChatFinishReason.TOOL_CALLS if isinstance(message, ChatMessage) and message.tool_calls else ChatFinishReason.STOP
+                for message in self.messages
             )
         else:
             self.finish_reasons = tuple(finish_reasons)
@@ -3788,6 +3964,8 @@ class _StaticChatClient(IChatCompletionClient):
         usage = self.usages[min(self._index, len(self.usages) - 1)] if self.usages else None
         finish_reason = self.finish_reasons[min(self._index, len(self.finish_reasons) - 1)]
         self._index += 1
+        if isinstance(message, Exception):
+            raise message
         return ChatCompletionResult(
             id="chatcmpl_test",
             model=request.model,

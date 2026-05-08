@@ -24,6 +24,7 @@ from plap.llms.chat import (
 from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
+    ChatCompletionContextLengthExceededError,
     ChatCompletionError,
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
@@ -40,6 +41,7 @@ from plap.llms.router import (
 
 __all__ = [
     "ChatCompletionAuthenticationError",
+    "ChatCompletionContextLengthExceededError",
     "ChatCompletionDelta",
     "ChatCompletionError",
     "ChatCompletionInvalidRequestError",

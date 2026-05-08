@@ -32,9 +32,12 @@ from plap.llms.chat import (
 )
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
+    ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
     ChatCompletionRateLimitError,
+    is_context_length_exceeded_code,
+    is_context_length_exceeded_error,
 )
 
 COMMON_CHAT_FIELDS = (
@@ -357,12 +360,32 @@ def _usage_from_provider(usage: Any) -> ChatUsage | None:
     )
 
 
+def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletionContextLengthExceededError | None:
+    body = exc.body if isinstance(exc.body, dict) else None
+    error = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else None
+    code_candidates = (
+        error.get("code") if isinstance(error, dict) else None,
+        error.get("type") if isinstance(error, dict) else None,
+        body.get("code") if isinstance(body, dict) else None,
+        body.get("type") if isinstance(body, dict) else None,
+    )
+    if any(isinstance(code, str) and is_context_length_exceeded_code(code) for code in code_candidates):
+        return ChatCompletionContextLengthExceededError(str(exc))
+
+    if is_context_length_exceeded_error(exc):
+        return ChatCompletionContextLengthExceededError(str(exc))
+    return None
+
+
 def _normalize_openai_error(exc: Exception) -> ChatCompletionProviderError:
     if isinstance(exc, AuthenticationError):
         return ChatCompletionAuthenticationError(str(exc))
     if isinstance(exc, RateLimitError):
         return ChatCompletionRateLimitError(str(exc))
     if isinstance(exc, BadRequestError):
+        context_length_error = _openai_context_length_exceeded_error(exc)
+        if context_length_error is not None:
+            return context_length_error
         return ChatCompletionInvalidRequestError(str(exc))
     if isinstance(exc, APIStatusError):
         return ChatCompletionProviderError(str(exc))

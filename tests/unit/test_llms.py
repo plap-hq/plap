@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from fireworks.client.error import InvalidRequestError
+from openai import BadRequestError
 
 from plap.llms.chat import (
     ChatCompletionDelta,
@@ -20,8 +23,10 @@ from plap.llms.chat import (
 )
 from plap.llms.crof import CrofChatCompletionClient, to_crof_chat_params
 from plap.llms.errors import (
+    ChatCompletionContextLengthExceededError,
     ChatCompletionProviderError,
     ChatCompletionUnsupportedRequestError,
+    is_context_length_exceeded_error,
 )
 from plap.llms.fireworks import FireworksChatCompletionClient, to_fireworks_chat_params
 from plap.llms.lightning import (
@@ -570,6 +575,61 @@ async def test_openai_client_reads_top_level_reasoning_tokens() -> None:
     assert result.usage.reasoning_tokens == 4
 
 
+async def test_openai_client_normalizes_context_length_exceeded_errors() -> None:
+    error = BadRequestError(
+        "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
+        response=httpx.Response(
+            400,
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        ),
+        body={
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
+                "type": "invalid_request_error",
+            }
+        },
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(error)))
+
+    with pytest.raises(ChatCompletionContextLengthExceededError, match="maximum context length"):
+        await client.complete(_request())
+
+
+async def test_openai_client_normalizes_context_length_exceeded_type_aliases() -> None:
+    error = BadRequestError(
+        "Request rejected.",
+        response=httpx.Response(
+            400,
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        ),
+        body={
+            "error": {
+                "type": "max-context-length-exceeded",
+                "detail": "Requested 128001 tokens; maximum context length is 128000 tokens.",
+            }
+        },
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(error)))
+
+    with pytest.raises(ChatCompletionContextLengthExceededError, match="Request rejected"):
+        await client.complete(_request())
+
+
+def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
+    assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
+    assert is_context_length_exceeded_error(
+        {"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."}
+    )
+    assert is_context_length_exceeded_error(
+        {"response": {"body": {"message": "Input token count exceeds the maximum allowed token limit."}}}
+    )
+
+
+def test_context_length_classifier_does_not_treat_generic_payload_size_as_context_overflow() -> None:
+    assert not is_context_length_exceeded_error({"error": {"code": "payload_too_large", "message": "Payload too large."}})
+
+
 async def test_openai_client_normalizes_stream_chunks() -> None:
     reasoning_details = [
         {
@@ -674,6 +734,16 @@ async def test_fireworks_client_uses_acreate_and_normalizes_response() -> None:
     assert result.message.content == "ok"
     assert fireworks.chat.completions.calls[0]["stream"] is False
     assert fireworks.chat.completions.calls[0]["max_completion_tokens"] == 128
+
+
+async def test_fireworks_client_normalizes_context_length_exceeded_errors() -> None:
+    fireworks = _FakeFireworksClient(
+        InvalidRequestError("This prompt is too long for the model context window."),
+    )
+    client = FireworksChatCompletionClient(client=fireworks)
+
+    with pytest.raises(ChatCompletionContextLengthExceededError, match="context window"):
+        await client.complete(_request())
 
 
 async def test_lightning_client_maps_developer_role_to_system() -> None:
@@ -1172,9 +1242,10 @@ class _FakeOpenAICompletion:
 
     async def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
-        if len(self.responses) == 1:
-            return self.responses[0]
-        return self.responses.pop(0)
+        response = self.responses[0] if len(self.responses) == 1 else self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class _RecordingChatCompletionClient:
@@ -1221,6 +1292,8 @@ class _FakeFireworksCompletions:
         return self._complete()
 
     async def _complete(self) -> object:
+        if isinstance(self.response, Exception):
+            raise self.response
         return self.response
 
 

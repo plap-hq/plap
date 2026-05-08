@@ -20,8 +20,10 @@ from plap.llms.chat import (
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
+from plap.llms.errors import ChatCompletionContextLengthExceededError
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.compact import (
+    CompactionLevel,
     CompactionOutcome,
     Compactor,
     compaction_level_for_token_count,
@@ -180,21 +182,6 @@ def _actor_prompt_cache_key(base_prompt_cache_key: str | None, actor: str) -> st
     return f"{base_prompt_cache_key}|{actor}"
 
 
-def _response_error(exc: Exception) -> PlapError:
-    if isinstance(exc, PlapError):
-        return exc
-    return PlapError(
-        public=None,
-        private=PrivateError(
-            event="response.internal_error",
-            reason="unexpected_runtime_exception",
-            message=str(exc),
-            level=ErrorLevel.ERROR,
-            cause=exc,
-        ),
-    )
-
-
 def _runtime_invalid_request_error(
     *, code: str, message: str, reason: str, private_message: str, param: str | None = None, cause: BaseException | None = None
 ) -> PlapError:
@@ -213,6 +200,37 @@ def _runtime_invalid_request_error(
             level=ErrorLevel.WARNING,
             cause=cause,
             context={"param": param} if param is not None else {},
+        ),
+    )
+
+
+def _runtime_context_length_exceeded_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return _runtime_invalid_request_error(
+        code="context_length_exceeded",
+        message="This request exceeds the model's context window.",
+        reason=reason,
+        private_message=private_message,
+        cause=cause,
+    )
+
+
+def _response_error(exc: Exception) -> PlapError:
+    if isinstance(exc, PlapError):
+        return exc
+    if isinstance(exc, ChatCompletionContextLengthExceededError):
+        return _runtime_context_length_exceeded_error(
+            reason="upstream_context_length_exceeded",
+            private_message=str(exc),
+            cause=exc,
+        )
+    return PlapError(
+        public=None,
+        private=PrivateError(
+            event="response.internal_error",
+            reason="unexpected_runtime_exception",
+            message=str(exc),
+            level=ErrorLevel.ERROR,
+            cause=exc,
         ),
     )
 
@@ -514,6 +532,7 @@ async def run_response(
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
     )
+    authoritative_context_length_error: ChatCompletionContextLengthExceededError | None = None
     while True:
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
@@ -573,31 +592,53 @@ async def run_response(
 
         preflight_token_count = measure_request_tokens(model_request, actor_config=profile.main)
         preflight_level = compaction_level_for_token_count(preflight_token_count, settings=compaction_settings)
+        compaction_level = CompactionLevel.HARD if authoritative_context_length_error is not None else preflight_level
 
         log_debug(
             logger,
             "response.compaction.preflight",
+            authoritative_context_length_exceeded=authoritative_context_length_error is not None,
             compact_threshold=compaction_settings.compact_threshold,
             preflight_level=preflight_level,
             preflight_token_count=preflight_token_count,
             soft_compact_threshold=compaction_settings.soft_compact_threshold,
             token_count=preflight_token_count,
-            triggered_level=preflight_level,
+            triggered_level=compaction_level,
         )
 
         compaction_result = await compactor.compact(
-            preflight_level,
+            compaction_level,
             tools=model_request.tools,
             response_format=model_request.response_format,
             reasoning_effort=model_request.reasoning_effort,
         )
         if compaction_result == CompactionOutcome.INCOMPLETE:
             return
+        if authoritative_context_length_error is not None:
+            if compaction_result == CompactionOutcome.NOT_NEEDED:
+                raise _runtime_context_length_exceeded_error(
+                    reason="context_length_exceeded_after_compaction_exhausted",
+                    private_message=(
+                        "upstream rejected main request as oversized and hard compaction was unavailable after "
+                        "compact_max_rounds was exhausted"
+                    ),
+                    cause=authoritative_context_length_error,
+                )
+            authoritative_context_length_error = None
         if compaction_result == CompactionOutcome.APPLIED:
             continue
         log_payload(logger, "response.runtime.main_request.payload", request=asdict(model_request))
 
-        result = await chat_completion_client.complete(model_request)
+        try:
+            result = await chat_completion_client.complete(model_request)
+        except ChatCompletionContextLengthExceededError as exc:
+            log_debug(
+                logger,
+                "response.runtime.context_length_exceeded",
+                compact_max_rounds=compaction_settings.compact_max_rounds,
+            )
+            authoritative_context_length_error = exc
+            continue
         if result.finish_reason is None:
             raise _runtime_internal_error(reason="completion_finish_reason_missing", private_message="completion finish_reason is missing")
 

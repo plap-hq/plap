@@ -20,9 +20,11 @@ from plap.llms.chat import (
 )
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
+    ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
     ChatCompletionRateLimitError,
+    is_context_length_exceeded_error,
 )
 from plap.llms.openai import (
     COMMON_CHAT_FIELDS,
@@ -90,12 +92,21 @@ def to_fireworks_chat_params(
     )
 
 
+def _fireworks_context_length_exceeded_error(exc: InvalidRequestError) -> ChatCompletionContextLengthExceededError | None:
+    if is_context_length_exceeded_error(exc):
+        return ChatCompletionContextLengthExceededError(str(exc))
+    return None
+
+
 def _normalize_fireworks_error(exc: Exception) -> ChatCompletionProviderError:
     if isinstance(exc, (AuthenticationError, PermissionError)):
         return ChatCompletionAuthenticationError(str(exc))
     if isinstance(exc, RateLimitError):
         return ChatCompletionRateLimitError(str(exc))
     if isinstance(exc, InvalidRequestError):
+        context_length_error = _fireworks_context_length_exceeded_error(exc)
+        if context_length_error is not None:
+            return context_length_error
         return ChatCompletionInvalidRequestError(str(exc))
     if isinstance(exc, FireworksError):
         return ChatCompletionProviderError(str(exc))
