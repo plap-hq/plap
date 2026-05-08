@@ -61,6 +61,7 @@ from plap.responses.models import (
     StateToolCall,
     UsageLedger,
 )
+from plap.responses.projection import ResponseProjection
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
 from plap.responses.tokens import measure_request_tokens
@@ -900,6 +901,8 @@ async def stream_response_events(
             try:
                 if auth_context is None:
                     _raise_missing_auth_context_error()
+                projection = ResponseProjection.from_create_request(request)
+                projection.validate_create_request(request)
                 prepared = await response_store.prepare_request(auth_context, request)
                 profile = settings.resolve_runtime_model_profile(
                     prepared.response_request.model,
@@ -930,6 +933,7 @@ async def stream_response_events(
                 )
                 out = ResponseEventIO(
                     request=prepared.response_request,
+                    projection=projection,
                     prepared=prepared,
                     response_store=response_store,
                     reasoning_summarizer=reasoning_summarizer,

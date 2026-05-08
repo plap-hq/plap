@@ -35,6 +35,7 @@ from plap.responses.dependencies import (
     HTTP_ROUTE_DEPENDENCIES,
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
+from plap.responses.projection import ResponseProjection
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import _base_prompt_cache_key, _requested_parameters, _runtime_selector, stream_response_events
 from plap.responses.store import ResponseStore
@@ -222,11 +223,12 @@ async def retrieve_response(
     starting_after: int | None = None,
     stream: bool | None = None,
 ) -> ResponseObject:
-    _ = include, include_obfuscation, starting_after, stream
+    _ = starting_after, stream
     response = await response_store.get_response(auth_context, response_id)
     if response is None:
         raise _response_not_found_error(response_id, action="retrieve")
-    return response
+    projection = ResponseProjection.from_query(include, include_obfuscation=include_obfuscation)
+    return projection.response(response)
 
 
 @delete(
@@ -306,14 +308,15 @@ async def list_input_items(
     limit: int | None = None,
     order: str | None = None,
 ) -> InputItemsPage:
-    _ = include
-    return await response_store.list_input_items(
+    page = await response_store.list_input_items(
         auth_context,
         response_id,
         after=after,
         limit=limit,
         order=order,
     )
+    projection = ResponseProjection.from_query(include)
+    return projection.input_items_page(page)
 
 
 @post(

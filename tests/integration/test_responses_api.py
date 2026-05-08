@@ -7,7 +7,7 @@ from sqlalchemy import text
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.chat import ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
-from plap.responses.contracts import ResponseCreateRequest
+from plap.responses.contracts import OutputTextContent, ResponseCreateRequest, ResponseMessageItem, ResponseObject, ResponseReasoningItem
 from plap.responses.contracts.events import ResponseTextDoneEvent
 from plap.responses.ingest import content_hash, seal_reasoning_payload
 from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, StateMessage
@@ -72,8 +72,8 @@ async def test_authenticated_create_routes_return_model_output(
     assert response.status_code == 200, response.text
     assert body["object"] == "response"
     assert body["status"] == "completed"
-    assert body["output"][0]["type"] == "message"
-    assert body["output"][0]["content"][0]["text"] == "test response"
+    message_item = next(item for item in body["output"] if item["type"] == "message")
+    assert message_item["content"][0]["text"] == "test response"
     assert body["usage"] is None
 
     assert streamed.status_code == 200
@@ -188,7 +188,8 @@ async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(
     assert created.status_code == 200
     assert retrieved.status_code == 200
     assert retrieved.json()["id"] == response_id
-    assert retrieved.json()["output"][0]["content"][0]["text"] == "test response"
+    retrieved_message = next(item for item in retrieved.json()["output"] if item["type"] == "message")
+    assert retrieved_message["content"][0]["text"] == "test response"
 
     input_items_body = input_items.json()
     assert input_items.status_code == 200
@@ -202,6 +203,26 @@ async def test_stateful_response_routes_persist_retrieve_input_items_and_delete(
     assert deleted.json() == {"deleted": True, "id": response_id, "object": "response"}
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "response_not_found"
+
+
+async def test_create_response_requires_reasoning_encrypted_content_include_when_store_is_false(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "plap/test", "input": "hello", "store": False},
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "missing_reasoning_encrypted_content_include"
+    assert body["error"]["param"] == "include"
 
 
 async def test_previous_response_id_replays_persisted_history(
@@ -360,6 +381,171 @@ async def test_item_reference_inputs_expand_for_execution_and_persist_raw_refere
     assert second_input_items.data[2].content == "follow up"
 
 
+async def test_retrieve_response_redacts_reasoning_encrypted_content_but_item_reference_replay_still_works(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    response_store = ResponseStore(test_app.state.database)
+    auth_context = AuthContext(
+        api_key_id=seeded_auth_data.api_key_id,
+        organization_id=seeded_auth_data.organization_id,
+        user_id=seeded_auth_data.user_id,
+    )
+    prepared = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="hello"),
+    )
+    first_message = StateMessage(role="assistant", content="first reply")
+    sealed_reasoning = seal_reasoning_payload(
+        ReasoningPayload(
+            side="main",
+            temp=False,
+            messages=(
+                ReasoningMessagePatch(
+                    content_hash=content_hash(first_message),
+                    reasoning_content="first thinking",
+                ),
+            ),
+        ),
+        keyring=test_app.state.sealing_keyring,
+    )
+    response = ResponseObject(
+        created_at=0,
+        id="resp_retrieve_reasoning",
+        model="plap/test",
+        output=[],
+        status="in_progress",
+    )
+    reasoning_item = ResponseReasoningItem(
+        encrypted_content=sealed_reasoning,
+        id="rs_retrieve_reasoning",
+        status="completed",
+        summary=[],
+        type="reasoning",
+    )
+    message_item = ResponseMessageItem(
+        content=[OutputTextContent(text="first reply", type="output_text")],
+        id="msg_retrieve_reasoning",
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    await response_store.begin_response(prepared, response)
+    await response_store.append_output_item(
+        prepared,
+        response.id,
+        0,
+        reasoning_item.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.append_output_item(
+        prepared,
+        response.id,
+        1,
+        message_item.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.finish_response(
+        prepared,
+        response.model_copy(
+            update={
+                "completed_at": 1,
+                "output": [reasoning_item, message_item],
+                "status": "completed",
+            }
+        ),
+    )
+
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+    async with AsyncTestClient(app=test_app) as client:
+        retrieved = await client.get(f"/v1/responses/{response.id}", headers=headers)
+        retrieved_with_include = await client.get(
+            f"/v1/responses/{response.id}",
+            params=[("include", "reasoning.encrypted_content")],
+            headers=headers,
+        )
+
+    assert retrieved.status_code == 200
+    assert next(item for item in retrieved.json()["output"] if item["type"] == "reasoning").get("encrypted_content") is None
+    assert retrieved_with_include.status_code == 200
+    sealed_reasoning = next(
+        item["encrypted_content"]
+        for item in retrieved_with_include.json()["output"]
+        if item["type"] == "reasoning"
+    )
+
+    prepared = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[{"type": "item_reference", "id": reasoning_item.id}],
+        ),
+    )
+
+    assert prepared.execution_request.input is not None
+    assert prepared.execution_request.input[0].type == "reasoning"
+    assert prepared.execution_request.input[0].encrypted_content == sealed_reasoning
+
+
+async def test_input_items_route_redacts_reasoning_encrypted_content_unless_included(
+    test_app,
+    seeded_auth_data,
+    db_session_maker,
+) -> None:
+    sealed_reasoning = seal_reasoning_payload(
+        ReasoningPayload(
+            side="main",
+            temp=False,
+            messages=(
+                ReasoningMessagePatch(
+                    content_hash=content_hash(StateMessage(role="assistant", content="reply")),
+                    reasoning_content="stored thinking",
+                ),
+            ),
+        ),
+        keyring=test_app.state.sealing_keyring,
+    )
+
+    async with db_session_maker() as session:
+        await _append_response(
+            session,
+            seeded_auth_data.organization_id,
+            "resp_input_reasoning",
+            input_items=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_input_reasoning",
+                    "status": "completed",
+                    "summary": [],
+                    "encrypted_content": sealed_reasoning,
+                },
+                {"type": "message", "id": "in_resp_input_reasoning_1", "role": "user", "content": "hello"},
+            ],
+            output_items=[
+                {
+                    "type": "message",
+                    "id": "msg_input_reasoning",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "reply"}],
+                }
+            ],
+        )
+        await session.commit()
+
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+    async with AsyncTestClient(app=test_app) as client:
+        input_items = await client.get("/v1/responses/resp_input_reasoning/input_items", headers=headers)
+        input_items_with_include = await client.get(
+            "/v1/responses/resp_input_reasoning/input_items",
+            params=[("include", "reasoning.encrypted_content")],
+            headers=headers,
+        )
+
+    assert input_items.status_code == 200
+    assert input_items.json()["data"][0].get("encrypted_content") is None
+    assert input_items_with_include.status_code == 200
+    assert input_items_with_include.json()["data"][0]["encrypted_content"] == sealed_reasoning
+
+
 async def test_create_response_rejects_missing_item_reference(
     test_app,
     seeded_auth_data,
@@ -419,11 +605,11 @@ async def test_sse_payload_emits_error_event_on_late_stream_failure() -> None:
 
 
 async def test_create_response_prepares_runtime_tools_without_changing_behavior(
-    test_app,
+    test_app_factory,
     seeded_auth_data,
 ) -> None:
     classifier = _RecordingToolClassifier()
-    test_app.state.tool_classifier = classifier
+    test_app = test_app_factory(tool_classifier=classifier)
     test_app.state.tool_policy_l1_cache.clear()
     headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
 
@@ -432,7 +618,7 @@ async def test_create_response_prepares_runtime_tools_without_changing_behavior(
 
     assert response.status_code == 200, response.text
     assert response.json()["object"] == "response"
-    assert response.json()["output"][0]["type"] == "message"
+    assert any(item["type"] == "message" for item in response.json()["output"])
     assert classifier.tool_names == [["lookup_record"]]
 
 

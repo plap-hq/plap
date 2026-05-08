@@ -595,7 +595,12 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     events = [
         event
         async for event in stream_response_events(
-            ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record")]),
+            ResponseCreateRequest(
+                model="plap/test",
+                input="update the record",
+                include=["reasoning.encrypted_content"],
+                tools=[_tool("mutate_record")],
+            ),
             settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
@@ -642,7 +647,12 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     first_events = [
         event
         async for event in stream_response_events(
-            ResponseCreateRequest(model="plap/test", input="update the record", tools=[_tool("mutate_record"), _read_file_tool()]),
+            ResponseCreateRequest(
+                model="plap/test",
+                input="update the record",
+                include=["reasoning.encrypted_content"],
+                tools=[_tool("mutate_record"), _read_file_tool()],
+            ),
             settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
@@ -724,7 +734,12 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
         [
             event
             async for event in stream_response_events(
-                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="original question",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record")],
+                ),
                 settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
@@ -842,7 +857,12 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
         [
             event
             async for event in stream_response_events(
-                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="original question",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record")],
+                ),
                 settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
@@ -927,7 +947,12 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
         [
             event
             async for event in stream_response_events(
-                ResponseCreateRequest(model="plap/test", input="original question", tools=[_tool("mutate_record")]),
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="original question",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record")],
+                ),
                 settings=_settings(profile=_profile_config(debate_max_rounds=2)),
                 sealing_keyring=_keyring(),
                 tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
@@ -2990,7 +3015,7 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
     events = [
         event
         async for event in stream_response_events(
-            ResponseCreateRequest(model="plap/test", input="hello"),
+            ResponseCreateRequest(model="plap/test", include=["reasoning.encrypted_content"], input="hello"),
             settings=_settings(),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver(),
@@ -3020,6 +3045,57 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
             "reasoning_content": "thinking",
         }
     ]
+
+
+async def test_stream_response_events_redacts_reasoning_encrypted_content_by_default() -> None:
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=_StaticChatClient(
+                ChatMessage(
+                    role="assistant",
+                    content="answer",
+                    reasoning_content="thinking",
+                )
+            ),
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["reasoning", "message"]
+    assert completed.output[0].encrypted_content is None
+    output_item_events = [event for event in events if event.type == "response.output_item.added"]
+    assert output_item_events[0].item.type == "reasoning"
+    assert output_item_events[0].item.encrypted_content is None
+
+
+async def test_stream_response_events_rejects_store_false_without_reasoning_encrypted_content_include() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        _ = [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello", store=False),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=_StaticChatClient(ChatMessage(role="assistant", content="answer")),
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+
+    _assert_public_error(
+        exc_info.value,
+        code="missing_reasoning_encrypted_content_include",
+        param="include",
+        private_reason="store_false_requires_reasoning_encrypted_content_include",
+    )
 
 
 async def test_stream_response_events_hidden_compaction_retry_usage_is_normalized() -> None:
@@ -3436,7 +3512,7 @@ async def test_stream_response_events_patches_reasoning_and_emits_tool_call() ->
     events = [
         event
         async for event in stream_response_events(
-            ResponseCreateRequest(model="plap/test", tools=[_read_file_tool()]),
+            ResponseCreateRequest(model="plap/test", include=["reasoning.encrypted_content"], tools=[_read_file_tool()]),
             settings=_settings(),
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver(),

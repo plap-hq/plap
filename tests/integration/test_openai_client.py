@@ -31,8 +31,8 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
     )
     assert created.object == "response"
     assert created.id.startswith("resp_")
-    assert created.output[0].type == "message"
-    assert created.output[0].content[0].text == "test response"
+    message_item = next(item for item in created.output if item.type == "message")
+    assert message_item.content[0].text == "test response"
 
 
 async def test_async_openai_client_stateful_methods(openai_client: AsyncOpenAI) -> None:
@@ -42,7 +42,9 @@ async def test_async_openai_client_stateful_methods(openai_client: AsyncOpenAI) 
     await openai_client.responses.delete(created.id)
 
     assert retrieved.id == created.id
-    assert retrieved.output[0].content[0].text == created.output[0].content[0].text
+    retrieved_message = next(item for item in retrieved.output if item.type == "message")
+    created_message = next(item for item in created.output if item.type == "message")
+    assert retrieved_message.content[0].text == created_message.content[0].text
     assert input_items.object == "list"
     assert len(input_items.data) == 1
     assert input_items.data[0].type == "message"
