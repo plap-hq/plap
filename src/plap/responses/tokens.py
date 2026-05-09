@@ -15,6 +15,7 @@ from plap.settings import RuntimeActorConfig
 
 _DEFAULT_ENCODING = "o200k_base"
 _DSV4_TOKENIZER_REPOS = frozenset({"deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro"})
+_DIRECT_FAST_TOKENIZER_REPOS = frozenset({"stepfun-ai/Step-3.5-Flash"})
 
 
 @lru_cache(maxsize=1)
@@ -300,6 +301,13 @@ def _hf_tokenizer(
     revision: str | None,
     trust_remote_code: bool,
 ):
+    if repo in _DIRECT_FAST_TOKENIZER_REPOS:
+        from transformers import PreTrainedTokenizerFast  # noqa: PLC0415
+
+        # Step-3.5 publishes a working fast tokenizer and chat template, but the
+        # pinned model config fails HF config validation before AutoTokenizer can
+        # reach it. Loading the tokenizer directly avoids that broken config path.
+        return PreTrainedTokenizerFast.from_pretrained(repo, revision=revision)
     from transformers import AutoTokenizer  # noqa: PLC0415
 
     return AutoTokenizer.from_pretrained(

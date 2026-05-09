@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
+import transformers
+
 from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatMessage, ChatResponseFormat, ChatTool, ChatToolCall
+from plap.responses import tokens as tokens_module
 from plap.responses.ingest.render import compact_transcript, render_budgeted_spans
 from plap.responses.models import ChatMessageSpan, StateMessage, StateToolCall
 from plap.responses.tokens import measure_prompt_tokens, measure_request_tokens
@@ -149,6 +152,43 @@ def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch
         }
     ]
     assert [json.loads(text) for text in encoded_reasoning] == [{"reasoning_content": "kept thinking"}]
+
+
+def test_hf_tokenizer_uses_direct_fast_loader_for_step3p5(monkeypatch) -> None:
+    tokens_module._hf_tokenizer.cache_clear()
+    calls: list[tuple[str, str | None]] = []
+
+    class _FakeTokenizer:
+        pass
+
+    def fake_fast_from_pretrained(cls, repo, revision=None, **kwargs):
+        calls.append((repo, revision))
+        assert kwargs == {}
+        return _FakeTokenizer()
+
+    def fake_auto_from_pretrained(cls, *args, **kwargs):
+        raise AssertionError("AutoTokenizer should not be used for Step-3.5")
+
+    monkeypatch.setattr(
+        transformers.PreTrainedTokenizerFast,
+        "from_pretrained",
+        classmethod(fake_fast_from_pretrained),
+    )
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        classmethod(fake_auto_from_pretrained),
+    )
+
+    tokenizer = tokens_module._hf_tokenizer(
+        "stepfun-ai/Step-3.5-Flash",
+        "ab446a3de5e171ea341227e24bb1f090e1b771f7",
+        False,
+    )
+
+    assert isinstance(tokenizer, _FakeTokenizer)
+    assert calls == [("stepfun-ai/Step-3.5-Flash", "ab446a3de5e171ea341227e24bb1f090e1b771f7")]
+    tokens_module._hf_tokenizer.cache_clear()
 
 
 def test_measure_request_tokens_uses_dsv4_encoder_for_flash(monkeypatch) -> None:

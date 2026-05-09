@@ -8,6 +8,7 @@ from plap.app import (
     _create_tool_call_classifier,
     _create_tool_classifier,
     _validate_runtime_model_profiles,
+    _validate_runtime_profile_tokenizers,
 )
 from plap.errors import PlapError
 from plap.llms.router import (
@@ -119,6 +120,51 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
         profile.model_info.supported_parameters
     )
+
+
+def test_app_runtime_validates_runtime_profile_tokenizers(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings()
+    seen: list[tuple[str, str | None, bool]] = []
+
+    def fake_measure_request_tokens(request, *, actor_config):
+        assert request.messages[0].role == "developer"
+        assert request.messages[1].role == "user"
+        seen.append(
+            (
+                actor_config.tokenizer_hf_repo,
+                actor_config.tokenizer_revision,
+                actor_config.tokenizer_trust_remote_code,
+            )
+        )
+        return 1
+
+    monkeypatch.setattr("plap.app.measure_request_tokens", fake_measure_request_tokens)
+
+    _validate_runtime_profile_tokenizers(settings)
+
+    assert set(seen) == {
+        ("stepfun-ai/Step-3.5-Flash", "ab446a3de5e171ea341227e24bb1f090e1b771f7", False),
+        ("deepseek-ai/DeepSeek-V4-Flash", "6976c7ff1b30a1b2cb7805021b8ba4684041f136", False),
+        ("XiaomiMiMo/MiMo-V2.5-Pro", "a75207db63de3c320950fe6fcfa9ff60f341b7a2", False),
+    }
+
+
+def test_app_runtime_rejects_invalid_runtime_profile_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings()
+
+    def fake_measure_request_tokens(request, *, actor_config):
+        _ = request
+        if actor_config.tokenizer_hf_repo == "stepfun-ai/Step-3.5-Flash":
+            raise AttributeError("missing max_position_embeddings")
+        return 1
+
+    monkeypatch.setattr("plap.app.measure_request_tokens", fake_measure_request_tokens)
+
+    with pytest.raises(PlapError) as exc_info:
+        _validate_runtime_profile_tokenizers(settings)
+
+    assert exc_info.value.private.reason == "runtime_profile_tokenizer_invalid"
+    assert "Step-3.5-Flash" in exc_info.value.private.message
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:

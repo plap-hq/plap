@@ -12,7 +12,8 @@ from litestar.exceptions import HTTPException, NotAuthorizedException, Validatio
 from plap.auth import APIKeyManager
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import IChatCompletionClient
+from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
+from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.fireworks import FireworksChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
@@ -27,6 +28,7 @@ from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
 from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
+from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_MODEL,
@@ -308,6 +310,73 @@ def _validate_runtime_model_profiles(settings: Settings) -> None:
                 )
 
 
+def _runtime_profile_actors(settings: Settings) -> Iterable[tuple[str, str, object]]:
+    for profile_name, profile in settings.runtime_model_profiles.items():
+        yield profile_name, "main", profile.main
+        yield profile_name, "compactor", profile.compactor
+        yield profile_name, "main_debate", profile.main_debate
+        yield profile_name, "reviewer", profile.reviewer
+        yield profile_name, "arbitrator", profile.arbitrator
+        yield profile_name, "reasoning_summarizer", profile.reasoning_summarizer
+
+
+def _validate_runtime_profile_tokenizers(settings: Settings) -> None:
+    validated: set[tuple[str, str | None, bool]] = set()
+    probe_request = ChatCompletionRequest(
+        model="tokenizer-probe",
+        messages=[
+            LLMChatMessage(role="developer", content="Tokenization probe."),
+            LLMChatMessage(role="user", content="hello"),
+        ],
+        tools=[
+            ChatTool(
+                function=ChatFunctionTool(
+                    name="probe_tool",
+                    description="Probe tool",
+                    parameters={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                    },
+                )
+            )
+        ],
+    )
+    for profile_name, actor_name, actor_config in _runtime_profile_actors(settings):
+        if actor_config.tokenizer_hf_repo is None:
+            continue
+        tokenizer_key = (
+            actor_config.tokenizer_hf_repo,
+            actor_config.tokenizer_revision,
+            actor_config.tokenizer_trust_remote_code,
+        )
+        if tokenizer_key in validated:
+            continue
+        try:
+            measure_request_tokens(probe_request, actor_config=actor_config)
+        except Exception as exc:
+            raise PlapError(
+                public=None,
+                private=PrivateError(
+                    event="app.startup_invalid",
+                    reason="runtime_profile_tokenizer_invalid",
+                    message=(
+                        "runtime model profile tokenizer validation failed: "
+                        f"{profile_name!r}.{actor_name} -> {actor_config.tokenizer_hf_repo!r}"
+                    ),
+                    level=ErrorLevel.ERROR,
+                    cause=exc,
+                    context={
+                        "actor": actor_name,
+                        "runtime_model_profile": profile_name,
+                        "tokenizer_hf_repo": actor_config.tokenizer_hf_repo,
+                        "tokenizer_revision": actor_config.tokenizer_revision,
+                        "tokenizer_trust_remote_code": actor_config.tokenizer_trust_remote_code,
+                    },
+                ),
+            ) from exc
+        validated.add(tokenizer_key)
+
+
 def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
     return any(model.startswith(prefix) for prefix in _configured_chat_completion_prefixes(settings))
 
@@ -341,6 +410,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         )
         mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
         _validate_runtime_model_profiles(resolved_settings)
+        _validate_runtime_profile_tokenizers(resolved_settings)
     except PlapError as exc:
         exc.log(logger)
         raise
