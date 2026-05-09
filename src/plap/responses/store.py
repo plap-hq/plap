@@ -354,6 +354,75 @@ class ResponseStore:
             )
             insert_result.close()
 
+    async def replace_output_item(
+        self,
+        prepared: PreparedRequest,
+        response_id: str,
+        output_index: int,
+        item: object,
+    ) -> None:
+        if not prepared.persist_response:
+            return
+        log_debug(
+            logger,
+            "response.store.replace_output_item",
+            output_index=output_index,
+            response_id=response_id,
+            type=item.get("type") if isinstance(item, dict) else None,
+        )
+        log_payload(
+            logger,
+            "response.store.replace_output_item.payload",
+            item=item,
+            output_index=output_index,
+            response_id=response_id,
+        )
+        async with self._database.connection_transaction() as connection:
+            delete_result = await connection.execute(
+                text(
+                    """
+                    delete from responses.response_output_items
+                     where scope_id = :scope_id
+                       and response_id = :response_id
+                       and output_index = :output_index
+                     returning output_index
+                    """
+                ),
+                {
+                    "scope_id": prepared.scope_id,
+                    "response_id": response_id,
+                    "output_index": output_index,
+                },
+            )
+            deleted_output_index = delete_result.scalar_one_or_none()
+            delete_result.close()
+            if deleted_output_index is None:
+                raise RuntimeError("response output item to replace was not found")
+            insert_result = await connection.execute(
+                text(
+                    """
+                    with payload as (
+                      select responses.get_or_create_payload(:scope_id, cast(:payload as jsonb)) as payload_id
+                    )
+                    insert into responses.response_output_items (
+                      scope_id,
+                      response_id,
+                      output_index,
+                      payload_id
+                    )
+                    select :scope_id, :response_id, :output_index, payload_id
+                      from payload
+                    """
+                ),
+                {
+                    "scope_id": prepared.scope_id,
+                    "response_id": response_id,
+                    "output_index": output_index,
+                    "payload": self._json_text(item),
+                },
+            )
+            insert_result.close()
+
     async def finish_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
         if not prepared.persist_response:
             return
@@ -402,6 +471,38 @@ class ResponseStore:
                 )
                 move_head_result.scalar_one_or_none()
                 move_head_result.close()
+
+    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
+        if not prepared.persist_response:
+            return False
+        completed_at = datetime.now(UTC)
+        log_debug(
+            logger,
+            "response.store.fail",
+            response_id=response_id,
+        )
+        async with self._database.connection_transaction() as connection:
+            update_result = await connection.execute(
+                text(
+                    """
+                    update responses.response_records
+                       set status = 'failed',
+                           completed_at = :completed_at
+                     where scope_id = :scope_id
+                       and response_id = :response_id
+                       and status in ('queued', 'in_progress')
+                    returning response_id
+                    """
+                ),
+                {
+                    "completed_at": completed_at,
+                    "scope_id": prepared.scope_id,
+                    "response_id": response_id,
+                },
+            )
+            failed_response_id = update_result.scalar_one_or_none()
+            update_result.close()
+            return failed_response_id is not None
 
     async def get_response(self, auth_context: AuthContext, response_id: str) -> ResponseObject | None:
         scope_id = self._scope_id(auth_context)

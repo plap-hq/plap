@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
@@ -63,7 +64,16 @@ class _CommitKind(StrEnum):
 type _ReasoningMessages = tuple[StateMessage | ReasoningMessagePatch, ...]
 type _ReasoningMetadata = tuple[Side, _ReasoningMessages]
 type _OutputMetadata = _ReasoningMetadata | None
-type _Commit = tuple[_CommitKind, ResponseObject | ResponseOutputItem, _OutputMetadata]
+
+
+@dataclass(slots=True)
+class _Commit:
+    kind: _CommitKind
+    value: ResponseObject | ResponseOutputItem
+    metadata: _OutputMetadata
+    ack: anyio.Event | None = None
+    acked: bool = False
+    error: BaseException | None = None
 
 
 class ResponseEventIO:
@@ -105,10 +115,10 @@ class ResponseEventIO:
         return self._response.id
 
     async def created(self) -> None:
-        await self._commit_send.send((_CommitKind.CREATED, self._response, None))
+        await self._enqueue_commit(_CommitKind.CREATED, self._response, None)
 
     async def in_progress(self) -> None:
-        await self._commit_send.send((_CommitKind.IN_PROGRESS, self._response, None))
+        await self._enqueue_commit(_CommitKind.IN_PROGRESS, self._response, None)
 
     async def output(
         self,
@@ -127,7 +137,7 @@ class ResponseEventIO:
                 metadata = (reasoning_side, tuple(reasoning_messages))
         log_debug(logger, "response.io.output.queued", item_type=item.type, reasoning_metadata=metadata is not None)
         log_payload(logger, "response.io.output.payload", item=item.model_dump(mode="json", exclude_none=True))
-        await self._commit_send.send((_CommitKind.OUTPUT, item, metadata))
+        await self._enqueue_commit(_CommitKind.OUTPUT, item, metadata, wait=True)
 
     async def completed(
         self,
@@ -143,7 +153,7 @@ class ResponseEventIO:
                 "usage": usage,
             }
         )
-        await self._commit_send.send((_CommitKind.COMPLETED, response, None))
+        await self._enqueue_commit(_CommitKind.COMPLETED, response, None)
 
     async def incomplete(
         self,
@@ -160,43 +170,73 @@ class ResponseEventIO:
                 "usage": usage,
             }
         )
-        await self._commit_send.send((_CommitKind.COMPLETED, response, None))
+        await self._enqueue_commit(_CommitKind.COMPLETED, response, None)
 
     async def aclose(self) -> None:
         await self._commit_send.aclose()
 
+    async def _enqueue_commit(
+        self,
+        kind: _CommitKind,
+        value: ResponseObject | ResponseOutputItem,
+        metadata: _OutputMetadata,
+        *,
+        wait: bool = False,
+    ) -> None:
+        commit = _Commit(kind=kind, value=value, metadata=metadata, ack=anyio.Event() if wait else None)
+        await self._commit_send.send(commit)
+        if commit.ack is None:
+            return
+        await commit.ack.wait()
+        if commit.error is not None:
+            raise commit.error
+
+    @staticmethod
+    def _ack_commit(commit: _Commit, *, error: BaseException | None = None) -> None:
+        if commit.ack is None or commit.acked:
+            return
+        commit.error = error
+        commit.acked = True
+        commit.ack.set()
+
     async def _emit_commits(self) -> None:
         async with self._commit_receive:
-            async for kind, value, metadata in self._commit_receive:
-                if kind == _CommitKind.CREATED:
-                    await self._response_store.begin_response(self._prepared, cast(ResponseObject, value))
-                    await self._send_event(
-                        ResponseCreatedEvent(
-                            response=cast(ResponseObject, value),
-                            sequence_number=0,
-                            type="response.created",
+            async for commit in self._commit_receive:
+                try:
+                    if commit.kind == _CommitKind.CREATED:
+                        await self._response_store.begin_response(self._prepared, cast(ResponseObject, commit.value))
+                        await self._send_event(
+                            ResponseCreatedEvent(
+                                response=cast(ResponseObject, commit.value),
+                                sequence_number=0,
+                                type="response.created",
+                            )
                         )
-                    )
-                elif kind == _CommitKind.IN_PROGRESS:
-                    await self._send_event(
-                        ResponseInProgressEvent(
-                            response=cast(ResponseObject, value),
-                            sequence_number=0,
-                            type="response.in_progress",
+                    elif commit.kind == _CommitKind.IN_PROGRESS:
+                        await self._send_event(
+                            ResponseInProgressEvent(
+                                response=cast(ResponseObject, commit.value),
+                                sequence_number=0,
+                                type="response.in_progress",
+                            )
                         )
-                    )
-                elif kind == _CommitKind.OUTPUT:
-                    await self._emit_output(cast(ResponseOutputItem, value), metadata)
+                    elif commit.kind == _CommitKind.OUTPUT:
+                        await self._emit_output(commit)
+                    else:
+                        response = cast(ResponseObject, commit.value).model_copy(update={"output": self._output_items})
+                        await self._response_store.finish_response(self._prepared, response)
+                        await self._send_event(
+                            ResponseCompletedEvent(
+                                response=response,
+                                sequence_number=0,
+                                type="response.completed",
+                            )
+                        )
+                except BaseException as exc:
+                    self._ack_commit(commit, error=exc)
+                    raise
                 else:
-                    response = cast(ResponseObject, value).model_copy(update={"output": self._output_items})
-                    await self._response_store.finish_response(self._prepared, response)
-                    await self._send_event(
-                        ResponseCompletedEvent(
-                            response=response,
-                            sequence_number=0,
-                            type="response.completed",
-                        )
-                    )
+                    self._ack_commit(commit)
 
     async def _send_event(self, event: ResponseStreamEvent) -> None:
         self._sequence_number += 1
@@ -207,10 +247,18 @@ class ResponseEventIO:
 
     async def _emit_output(
         self,
-        item: ResponseOutputItem,
-        metadata: _OutputMetadata,
+        commit: _Commit,
     ) -> None:
+        item = cast(ResponseOutputItem, commit.value)
+        metadata = commit.metadata
         output_index = len(self._output_items)
+        await self._response_store.append_output_item(
+            self._prepared,
+            self._response.id,
+            output_index,
+            item.model_dump(mode="json", exclude_none=True),
+        )
+        self._ack_commit(commit)
         if isinstance(item, ResponseReasoningItem) and metadata is not None:
             completed_item = await self._emit_reasoning_with_summary(
                 item,
@@ -221,12 +269,6 @@ class ResponseEventIO:
             completed_item = item
             await self._emit_output_item_events(item, output_index=output_index)
         self._output_items.append(completed_item)
-        await self._response_store.append_output_item(
-            self._prepared,
-            self._response.id,
-            output_index,
-            completed_item.model_dump(mode="json", exclude_none=True),
-        )
 
     async def _emit_output_item_events(
         self,
@@ -361,6 +403,12 @@ class ResponseEventIO:
         )
 
         completed_item = item.model_copy(update={"summary": [summary_part]})
+        await self._response_store.replace_output_item(
+            self._prepared,
+            self._response.id,
+            output_index,
+            completed_item.model_dump(mode="json", exclude_none=True),
+        )
         log_debug(
             logger,
             "response.io.reasoning_summary.done",

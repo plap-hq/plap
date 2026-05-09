@@ -65,7 +65,7 @@ from plap.responses.models import (
 )
 from plap.responses.projection import ResponseProjection, ResponseTransport
 from plap.responses.reasoning import IReasoningSummarizer
-from plap.responses.store import ResponseStore
+from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     IToolCallPolicyResolver,
@@ -950,6 +950,8 @@ async def stream_response_events(
 
     async def produce() -> None:
         nonlocal producer_error
+        prepared: PreparedRequest | None = None
+        out: ResponseEventIO | None = None
         async with send:
             try:
                 if auth_context is None:
@@ -1022,6 +1024,8 @@ async def stream_response_events(
                             await out.aclose()
             except Exception as exc:
                 root = exc.exceptions[0] if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1 else exc
+                if prepared is not None and out is not None:
+                    await response_store.fail_response(prepared, out.response_id)
                 producer_error = _response_error(root)
 
     async with anyio.create_task_group() as task_group:

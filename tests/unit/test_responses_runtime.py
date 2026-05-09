@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from uuid import UUID
 
+import anyio
 import pytest
 
 import plap.responses.compact as compact_module
@@ -30,6 +31,7 @@ from plap.responses.contracts import (
     RequestMessageItem,
     ResponseCompletedEvent,
     ResponseCreateRequest,
+    ResponseObject,
     ResponseTextConfig,
     TextFormatJSONObject,
     WebSearchTool,
@@ -1379,6 +1381,31 @@ async def test_stream_response_events_server_tool_failure_raises_early() -> None
     _assert_public_error(exc_info.value, private_reason="unexpected_runtime_exception")
     assert exc_info.value.public is None
     assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
+
+
+async def test_stream_response_events_marks_persisted_response_failed_on_runtime_error() -> None:
+    response_store = _RecordingResponseStore()
+    client = _YieldThenRaiseChatClient(RuntimeError("provider failed"))
+
+    with pytest.raises(PlapError) as exc_info:
+        _ = [
+            event
+            async for event in _stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello"),
+                settings=_settings(),
+                auth_context=_auth_context(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                response_store=response_store,
+            )
+        ]
+
+    _assert_public_error(exc_info.value, private_reason="unexpected_runtime_exception")
+    assert len(response_store.begin_response_ids) == 1
+    assert response_store.failed_response_ids == response_store.begin_response_ids
 
 
 async def test_stream_response_events_executes_batched_compaction() -> None:
@@ -3965,8 +3992,73 @@ class _NoopResponseStore:
     async def append_output_item(self, *args, **kwargs) -> None:
         return None
 
+    async def replace_output_item(self, *args, **kwargs) -> None:
+        return None
+
     async def finish_response(self, *args, **kwargs) -> None:
         return None
+
+    async def fail_response(self, *args, **kwargs) -> bool:
+        return False
+
+
+class _RecordingResponseStore(_NoopResponseStore):
+    def __init__(self) -> None:
+        self.begin_response_ids: list[str] = []
+        self.failed_response_ids: list[str] = []
+
+    async def prepare_request(
+        self,
+        auth_context: AuthContext,
+        request: ResponseCreateRequest,
+        *,
+        session=None,
+    ) -> PreparedRequest:
+        prepared = await super().prepare_request(auth_context, request, session=session)
+        return PreparedRequest(
+            scope_id=prepared.scope_id,
+            response_request=prepared.response_request,
+            execution_request=prepared.execution_request,
+            current_input_items=prepared.current_input_items,
+            parent_response_id=prepared.parent_response_id,
+            conversation_id=prepared.conversation_id,
+            persist_response=True,
+        )
+
+    async def begin_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
+        _ = prepared
+        self.begin_response_ids.append(response.id)
+
+    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
+        _ = prepared
+        self.failed_response_ids.append(response_id)
+        return True
+
+
+class _YieldThenRaiseChatClient(IChatCompletionClient):
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def complete(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResult:
+        _ = request
+        await anyio.sleep(0)
+        raise self.exc
+
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        _ = request
+        if False:
+            yield ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=None,
+                created_at=None,
+                choice_index=0,
+            )
 
 
 class _FakeReasoningSummarizer(IReasoningSummarizer):

@@ -1,16 +1,28 @@
 import json
 from collections.abc import AsyncIterator
 
+import anyio
 from litestar.testing import AsyncTestClient
 from sqlalchemy import text
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.chat import ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
-from plap.responses.contracts import OutputTextContent, ResponseCreateRequest, ResponseMessageItem, ResponseObject, ResponseReasoningItem
+from plap.responses.contracts import (
+    ConversationReference,
+    OutputTextContent,
+    ReasoningConfig,
+    ResponseCreateRequest,
+    ResponseMessageItem,
+    ResponseObject,
+    ResponseReasoningItem,
+)
 from plap.responses.contracts.events import ResponseTextDoneEvent
 from plap.responses.ingest import content_hash, seal_reasoning_payload
+from plap.responses.io import ResponseEventIO
 from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, StateMessage
+from plap.responses.projection import ResponseProjection
+from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.routes import _sse_payload
 from plap.responses.store import ResponseStore
 from plap.responses.tools import (
@@ -523,6 +535,181 @@ async def test_retrieve_response_redacts_reasoning_encrypted_content_but_item_re
     assert prepared.execution_request.input[0].encrypted_content == sealed_reasoning
 
 
+async def test_reasoning_item_reference_resolves_before_summary_finishes(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    response_store = ResponseStore(test_app.state.database)
+    auth_context = AuthContext(
+        api_key_id=seeded_auth_data.api_key_id,
+        organization_id=seeded_auth_data.organization_id,
+        user_id=seeded_auth_data.user_id,
+    )
+    request = ResponseCreateRequest(
+        model="plap/test",
+        input="hello",
+        include=["reasoning.encrypted_content"],
+        reasoning=ReasoningConfig(summary="auto"),
+    )
+    prepared = await response_store.prepare_request(auth_context, request)
+    projection = ResponseProjection.from_create_request(request, transport="stream")
+    send, receive = anyio.create_memory_object_stream(16)
+    summarizer = _BlockingReasoningSummarizer()
+    assistant_message = StateMessage(role="assistant", content="reply")
+    reasoning_patch = ReasoningMessagePatch(
+        content_hash=content_hash(assistant_message),
+        reasoning_content="private thinking",
+    )
+    reasoning_item = ResponseReasoningItem(
+        encrypted_content=seal_reasoning_payload(
+            ReasoningPayload(side="main", temp=False, messages=(reasoning_patch,)),
+            keyring=test_app.state.sealing_keyring,
+        ),
+        id="rs_blocked_summary",
+        status="completed",
+        summary=[],
+        type="reasoning",
+    )
+    out = ResponseEventIO(
+        request=prepared.response_request,
+        projection=projection,
+        prepared=prepared,
+        response_store=response_store,
+        send=send,
+        reasoning_summarizer=summarizer,
+        reasoning_summarizer_model="plap/test-summarizer",
+        reasoning_summarizer_prompt_cache_key_base=None,
+        reasoning_summarizer_reasoning_effort=None,
+        reasoning_summarizer_service_tier=None,
+        reasoning_summary_mode="auto",
+    )
+
+    async with send, receive, anyio.create_task_group() as task_group:
+        out.start(task_group)
+        await out.created()
+        await out.in_progress()
+        await out.output(
+            reasoning_item,
+            reasoning_side="main",
+            reasoning_messages=(reasoning_patch,),
+        )
+        await summarizer.entered.wait()
+
+        replay = await response_store.prepare_request(
+            auth_context,
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[{"type": "item_reference", "id": reasoning_item.id}],
+            ),
+        )
+
+        assert replay.execution_request.input is not None
+        assert replay.execution_request.input[0].type == "reasoning"
+        assert replay.execution_request.input[0].id == reasoning_item.id
+
+        summarizer.release.set()
+        await out.aclose()
+
+
+async def test_fail_response_does_not_advance_conversation_head_and_remains_explicitly_replayable(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    response_store = ResponseStore(test_app.state.database)
+    auth_context = AuthContext(
+        api_key_id=seeded_auth_data.api_key_id,
+        organization_id=seeded_auth_data.organization_id,
+        user_id=seeded_auth_data.user_id,
+    )
+    conversation_id = "conv_failed"
+
+    first_prepared = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="first turn", conversation=conversation_id),
+    )
+    first_response = ResponseObject(
+        conversation=ConversationReference(id=conversation_id),
+        created_at=0,
+        id="resp_conv_first",
+        model="plap/test",
+        output=[],
+        previous_response_id=first_prepared.parent_response_id,
+        status="in_progress",
+    )
+    first_message = ResponseMessageItem(
+        content=[OutputTextContent(text="first reply", type="output_text")],
+        id="msg_conv_first",
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    await response_store.begin_response(first_prepared, first_response)
+    await response_store.append_output_item(
+        first_prepared,
+        first_response.id,
+        0,
+        first_message.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.finish_response(
+        first_prepared,
+        first_response.model_copy(
+            update={
+                "completed_at": 1,
+                "output": [first_message],
+                "status": "completed",
+            }
+        ),
+    )
+
+    failed_prepared = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="second turn", conversation=conversation_id),
+    )
+    assert failed_prepared.parent_response_id == first_response.id
+
+    failed_response = ResponseObject(
+        conversation=ConversationReference(id=conversation_id),
+        created_at=0,
+        id="resp_conv_failed",
+        model="plap/test",
+        output=[],
+        previous_response_id=failed_prepared.parent_response_id,
+        status="in_progress",
+    )
+    failed_message = ResponseMessageItem(
+        content=[OutputTextContent(text="partial reply", type="output_text")],
+        id="msg_conv_failed",
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    await response_store.begin_response(failed_prepared, failed_response)
+    await response_store.append_output_item(
+        failed_prepared,
+        failed_response.id,
+        0,
+        failed_message.model_dump(mode="json", exclude_none=True),
+    )
+
+    assert await response_store.fail_response(failed_prepared, failed_response.id) is True
+
+    retrieved_failed = await response_store.get_response(auth_context, failed_response.id)
+    continued = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="third turn", conversation=conversation_id),
+    )
+    explicit = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="fourth turn", previous_response_id=failed_response.id),
+    )
+
+    assert retrieved_failed is not None
+    assert retrieved_failed.status == "failed"
+    assert [item.id for item in retrieved_failed.output] == [failed_message.id]
+    assert continued.parent_response_id == first_response.id
+    assert explicit.parent_response_id == failed_response.id
+
+
 async def test_input_items_route_redacts_reasoning_encrypted_content_unless_included(
     test_app,
     seeded_auth_data,
@@ -782,6 +969,29 @@ async def test_websocket_create_uses_runtime_validation(
     assert event["code"] == "model_not_found"
     assert event["message"] == "Model 'unknown/model' not found."
     assert event["param"] == "model"
+
+
+class _BlockingReasoningSummarizer(IReasoningSummarizer):
+    def __init__(self) -> None:
+        self.entered = anyio.Event()
+        self.release = anyio.Event()
+
+    async def stream(
+        self,
+        *,
+        model: str,
+        prompt_cache_key: str | None,
+        reasoning_effort: object,
+        service_tier: object,
+        mode: str,
+        side: str,
+        messages,
+    ) -> AsyncIterator[str]:
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, side, messages
+        self.entered.set()
+        await self.release.wait()
+        if False:
+            yield ""
 
 
 class _RecordingToolClassifier(IToolClassifier):
