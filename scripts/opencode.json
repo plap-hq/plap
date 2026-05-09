@@ -52,8 +52,8 @@
             }
           },
           "limit": {
-            "context": 200000,
-            "output": 32768
+            "context": 262144,
+            "output": 262144
           }
         },
         "plap-ai/wisp-mini": {
@@ -103,8 +103,8 @@
             }
           },
           "limit": {
-            "context": 200000,
-            "output": 32768
+            "context": 1000000,
+            "output": 1000000
           }
         }
       }

@@ -53,12 +53,13 @@ from plap.responses.models import (
     UsageLedger,
 )
 from plap.responses.tokens import measure_prompt_tokens
-from plap.responses.tools import ToolPolicy
+from plap.responses.tools import ToolPolicy, normalize_function_tool
 from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
 DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS = 3
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions referenced by the proposed answer:"
 logger = structlog.get_logger(__name__)
 
 
@@ -142,13 +143,11 @@ Definitions:
 Return JSON only.
 
 Use available tools when they help.
-You only have access here to a restricted safe subset of tools. If the current
-proposed answer includes tool availability metadata, treat it as authoritative.
-If a tool is unavailable in this debate step, that does not mean the normal
-answer-writing step lacks it. Do not claim a tool "doesn't exist" just because
-it is unavailable in this restricted debate toolset. If the current proposed
-answer would require a non-safe tool in the normal step, describe that as a need
-for a non-safe tool, not as a missing or nonexistent tool.
+You only have access here to a restricted safe subset of tools. You may also
+receive a user message titled `Tool definitions referenced by the proposed
+answer`. It is included so you can understand what tool calls already present
+in the proposed answer mean. Those definitions are reference material only.
+They do not make those tools callable in this step.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
@@ -179,12 +178,11 @@ Do not write a replacement answer for the user.
 Do not decide whether the current proposed answer should be sent.
 You may agree, partly agree, or disagree with the review note.
 Use available tools when they help.
-You only have access here to a restricted safe subset of tools. If a tool is not
-available in this debate step, that does not mean the normal answer-writing step
-lacks it. Do not claim a tool "doesn't exist" just because it is unavailable in
-this restricted debate toolset. If the current proposed answer would require a
-non-safe tool in the normal step, describe that as a need for a non-safe tool,
-not as a missing or nonexistent tool.
+You only have access here to a restricted safe subset of tools. You may also
+receive a user message titled `Tool definitions referenced by the proposed
+answer`. It is included so you can understand what tool calls already present
+in the proposed answer mean. Those definitions are reference material only.
+They do not make those tools callable in this step.
 """
 
 ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed answer.
@@ -205,13 +203,11 @@ Definitions:
 Return JSON only.
 
 Use available tools when they help.
-You only have access here to a restricted safe subset of tools. If the current
-proposed answer includes tool availability metadata, treat it as authoritative.
-If a tool is unavailable in this debate step, that does not mean the normal
-answer-writing step lacks it. Do not claim a tool "doesn't exist" just because
-it is unavailable in this restricted debate toolset. If the current proposed
-answer would require a non-safe tool in the normal step, describe that as a need
-for a non-safe tool, not as a missing or nonexistent tool.
+You only have access here to a restricted safe subset of tools. You may also
+receive a user message titled `Tool definitions referenced by the proposed
+answer`. It is included so you can understand what tool calls already present
+in the proposed answer mean. Those definitions are reference material only.
+They do not make those tools callable in this step.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
@@ -402,9 +398,6 @@ def _decode_decision(message: StateMessage, typ, label: str):
 
 def _compact_candidate(
     parts: TempMainParts,
-    *,
-    normal_tool_policies: Mapping[str, ToolPolicy],
-    debate_tool_policies: Mapping[str, ToolPolicy],
 ) -> dict[str, object]:
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
@@ -420,22 +413,43 @@ def _compact_candidate(
     if candidate.tool_calls:
         compact_tool_calls: list[dict[str, object]] = []
         for call in candidate.tool_calls:
-            normal_policy = normal_tool_policies.get(call.name)
-            debate_policy = debate_tool_policies.get(call.name)
             compact_call: dict[str, object] = {
                 "name": call.name,
                 "arguments": call.arguments_value(),
-                "available_in_debate": debate_policy is not None,
-                "available_in_normal_step": normal_policy is not None,
             }
-            if normal_policy is not None:
-                compact_call["normal_effect_class"] = normal_policy.effect_class.value
             output = outputs.get(call.id)
             if output is not None:
                 compact_call["output"] = output
             compact_tool_calls.append(compact_call)
         value["tool_calls"] = compact_tool_calls
     return value
+
+
+def _candidate_called_tool_definitions_message(
+    parts: TempMainParts,
+    *,
+    normal_tools: Sequence[FunctionTool],
+    debate_tool_policies: Mapping[str, ToolPolicy],
+) -> ChatMessage | None:
+    if parts.held_candidate is None:
+        raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
+    tools_by_name = {tool.name: tool for tool in normal_tools}
+    definitions: list[dict[str, object]] = []
+    seen_tool_names: set[str] = set()
+    for call in parts.held_candidate.message.tool_calls:
+        if call.name in seen_tool_names or call.name in debate_tool_policies:
+            continue
+        seen_tool_names.add(call.name)
+        tool = tools_by_name.get(call.name)
+        if tool is None:
+            continue
+        definitions.append(normalize_function_tool(tool))
+    if not definitions:
+        return None
+    return ChatMessage(
+        role="user",
+        content=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n{_json_text(definitions)}",
+    )
 
 
 def _transcript_wrapper(transcript: Sequence[TranscriptMessage]) -> ChatMessage:
@@ -499,16 +513,13 @@ def _budgeted_transcript_message(
 
 def _reviewer_initial_turn(
     parts: TempMainParts,
-    *,
-    normal_tool_policies: Mapping[str, ToolPolicy],
-    debate_tool_policies: Mapping[str, ToolPolicy],
 ) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
             "Review the current proposed answer below. Decide whether to accept it as-is or reopen with one short review note.\n\n"
             "Current proposed answer:\n"
-            f"{_json_text(_compact_candidate(parts, normal_tool_policies=normal_tool_policies, debate_tool_policies=debate_tool_policies))}"
+            f"{_json_text(_compact_candidate(parts))}"
         ),
     )
 
@@ -539,14 +550,12 @@ def _arbitrator_initial_turn(
     parts: TempMainParts,
     reviewer_decision: ReviewerDecision,
     latest_response_note: StateMessage,
-    normal_tool_policies: Mapping[str, ToolPolicy],
-    debate_tool_policies: Mapping[str, ToolPolicy],
 ) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
             "Current proposed answer:\n"
-            f"{_json_text(_compact_candidate(parts, normal_tool_policies=normal_tool_policies, debate_tool_policies=debate_tool_policies))}"
+            f"{_json_text(_compact_candidate(parts))}"
             "\n\n"
             "Latest review note:\n"
             f"{reviewer_decision.note or ''}\n\n"
@@ -721,16 +730,16 @@ async def run_reviewer_turn(
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
+    normal_tools: Sequence[FunctionTool],
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    normal_tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = _thread_messages(state.reviewer)
-    header_messages = [
+    header_messages: list[ChatMessage] = [
         ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
         _budgeted_transcript_message(
             state.main_context,
@@ -739,8 +748,15 @@ async def run_reviewer_turn(
             recount_margin=profile.transcript_recount_margin,
             token_budget=profile.reviewer_transcript_token_budget,
         ),
-        *(message.to_chat_message() for message in thread),
     ]
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
+    header_messages.extend(message.to_chat_message() for message in thread)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     elif thread:
@@ -757,13 +773,7 @@ async def run_reviewer_turn(
             )
         ]
     else:
-        turn_messages = [
-            _reviewer_initial_turn(
-                parts,
-                normal_tool_policies=normal_tool_policies,
-                debate_tool_policies=tool_policies,
-            )
-        ]
+        turn_messages = [_reviewer_initial_turn(parts)]
     return await _execute_actor_turn(
         actor_name=Side.REVIEWER.value,
         actor_config=profile.reviewer,
@@ -786,6 +796,7 @@ async def run_main_debate_turn(
     parts: TempMainParts,
     profile: RuntimeModelProfileConfig,
     request,
+    normal_tools: Sequence[FunctionTool],
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
@@ -794,10 +805,17 @@ async def run_main_debate_turn(
     usage_ledger: UsageLedger,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = [row.message for row in parts.remaining_temp_rows]
-    header_messages = [
+    header_messages: list[ChatMessage] = [
         ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
         *state.render_effective_main_context(include_citation=False),
     ]
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     else:
@@ -830,9 +848,9 @@ async def run_arbitrator_turn(
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
+    normal_tools: Sequence[FunctionTool],
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
-    normal_tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
@@ -846,7 +864,7 @@ async def run_arbitrator_turn(
             private_message="final decision step is missing review or response note",
         )
     thread = _thread_messages(state.arbitrator)
-    header_messages = [
+    header_messages: list[ChatMessage] = [
         ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
         _budgeted_transcript_message(
             state.main_context,
@@ -855,8 +873,15 @@ async def run_arbitrator_turn(
             recount_margin=profile.transcript_recount_margin,
             token_budget=profile.arbitrator_transcript_token_budget,
         ),
-        *(message.to_chat_message() for message in thread),
     ]
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
+    header_messages.extend(message.to_chat_message() for message in thread)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     elif thread:
@@ -872,8 +897,6 @@ async def run_arbitrator_turn(
                 parts=parts,
                 reviewer_decision=reviewer_decision,
                 latest_response_note=latest_response_note,
-                normal_tool_policies=normal_tool_policies,
-                debate_tool_policies=tool_policies,
             )
         ]
     return await _execute_actor_turn(
@@ -1112,9 +1135,9 @@ async def continue_debate(
                     main_developer_message=main_developer_message,
                     profile=profile,
                     request=request,
+                    normal_tools=tools,
                     tools=safe_tools,
                     tool_policies=safe_tool_policies,
-                    normal_tool_policies=tool_policies,
                     server_executors=safe_server_executors,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
@@ -1182,6 +1205,7 @@ async def continue_debate(
                     parts=parts,
                     profile=profile,
                     request=request,
+                    normal_tools=tools,
                     tools=safe_tools,
                     tool_policies=safe_tool_policies,
                     server_executors=safe_server_executors,
@@ -1237,9 +1261,9 @@ async def continue_debate(
                     main_developer_message=main_developer_message,
                     profile=profile,
                     request=request,
+                    normal_tools=tools,
                     tools=safe_tools,
                     tool_policies=safe_tool_policies,
-                    normal_tool_policies=tool_policies,
                     server_executors=safe_server_executors,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,

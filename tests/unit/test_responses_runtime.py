@@ -72,6 +72,7 @@ from plap.settings import (
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions referenced by the proposed answer:"
 
 
 def _assert_public_error(
@@ -650,9 +651,12 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert reviewer_payload.messages[0].role == "user"
     assert "original question" not in (reviewer_payload.messages[0].content or "")
     assert "draft answer" in (reviewer_payload.messages[0].content or "")
-    assert '"available_in_debate":false' in (reviewer_payload.messages[0].content or "")
-    assert '"available_in_normal_step":true' in (reviewer_payload.messages[0].content or "")
-    assert '"normal_effect_class":"mutation"' in (reviewer_payload.messages[0].content or "")
+    assert '"available_in_debate"' not in (reviewer_payload.messages[0].content or "")
+    assert '"available_in_normal_step"' not in (reviewer_payload.messages[0].content or "")
+    reviewer_request_contents = "\n".join(message.content or "" for message in client.requests[1].messages)
+    assert CALLED_TOOL_DEFINITIONS_HEADER in reviewer_request_contents
+    assert '"name":"mutate_record"' in reviewer_request_contents
+    assert '"description":"test tool"' in reviewer_request_contents
     assert completed.output[-1].name == "mutate_record"
     assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
     assert len(client.requests) == 2
@@ -680,7 +684,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
                 input="update the record",
                 include=["reasoning.encrypted_content"],
                 instructions="Instruction A.",
-                tools=[_tool("mutate_record"), _read_file_tool()],
+                tools=[_tool("mutate_record", description="initial mutation tool"), _read_file_tool()],
             ),
             settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
@@ -700,6 +704,8 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     )
     assert first_transcript[0]["role"] == "developer"
     assert "Instruction A." in first_transcript[0]["content"]
+    first_request_contents = "\n".join(message.content or "" for message in first_client.requests[1].messages)
+    assert '"description":"initial mutation tool"' in first_request_contents
 
     second_client = _StaticChatClient(
         _assistant_json(
@@ -723,6 +729,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
                     ),
                 ],
                 instructions="Instruction B.",
+                tools=[_tool("mutate_record", description="updated mutation tool"), _read_file_tool()],
             ),
             settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
@@ -745,6 +752,9 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert second_transcript[0]["role"] == "developer"
     assert "Instruction B." in second_transcript[0]["content"]
     assert "Instruction A." not in second_transcript[0]["content"]
+    second_request_contents = "\n".join(message.content or "" for message in second_client.requests[0].messages)
+    assert '"description":"updated mutation tool"' in second_request_contents
+    assert '"description":"initial mutation tool"' not in second_request_contents
 
 
 async def test_stream_response_events_main_debate_uses_effective_main_context() -> None:
@@ -802,6 +812,11 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
     assert any(content == "original question" for content in contents)
     assert any(content == "draft answer" for content in contents)
     assert any(content == "This tool call was not executed." for content in contents)
+    assert any(
+        CALLED_TOOL_DEFINITIONS_HEADER in content
+        for content in contents
+    )
+    assert any('"name":"mutate_record"' in content for content in contents)
     assert "Check ids." in (debate_request.messages[-1].content or "")
 
 
@@ -929,9 +944,12 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert "original question" not in (arbitrator_payload.messages[0].content or "")
     assert "draft answer" in (arbitrator_payload.messages[0].content or "")
     assert "after review" in (arbitrator_payload.messages[0].content or "")
-    assert '"available_in_debate":false' in (arbitrator_payload.messages[0].content or "")
-    assert '"available_in_normal_step":true' in (arbitrator_payload.messages[0].content or "")
-    assert '"normal_effect_class":"mutation"' in (arbitrator_payload.messages[0].content or "")
+    assert '"available_in_debate"' not in (arbitrator_payload.messages[0].content or "")
+    assert '"available_in_normal_step"' not in (arbitrator_payload.messages[0].content or "")
+    arbitrator_request_contents = "\n".join(message.content or "" for message in client.requests[3].messages)
+    assert CALLED_TOOL_DEFINITIONS_HEADER in arbitrator_request_contents
+    assert '"name":"mutate_record"' in arbitrator_request_contents
+    assert '"description":"test tool"' in arbitrator_request_contents
     stable_guidance = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert stable_guidance.temp is False
     assert stable_guidance.messages[0].role == "assistant"
@@ -4200,11 +4218,16 @@ def _compaction_item(*active: ChatMessageSpan) -> RequestCompactionItem:
     )
 
 
-def _tool(name: str) -> FunctionTool:
+def _tool(
+    name: str,
+    *,
+    description: str = "test tool",
+    parameters: dict[str, object] | None = None,
+) -> FunctionTool:
     return FunctionTool(
-        description="test tool",
+        description=description,
         name=name,
-        parameters={"type": "object"},
+        parameters={"type": "object"} if parameters is None else parameters,
         strict=True,
         type="function",
     )
