@@ -72,7 +72,7 @@ from plap.settings import (
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
-CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions referenced by the proposed answer:"
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
 
 
 def _assert_public_error(

@@ -59,7 +59,7 @@ from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
 DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS = 3
-CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions referenced by the proposed answer:"
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
 logger = structlog.get_logger(__name__)
 
 
@@ -144,10 +144,14 @@ Return JSON only.
 
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions referenced by the proposed
-answer`. It is included so you can understand what tool calls already present
-in the proposed answer mean. Those definitions are reference material only.
-They do not make those tools callable in this step.
+receive a user message titled `Tool definitions for tools used by the proposed
+answer`. If present, it contains tool definitions for tools that are available
+to the normal answer-writing step for this request and that are already used in
+the proposed answer. Use it to understand what those proposed tool calls mean
+and whether they are appropriate. The fact that one of those tools is not
+callable in this debate step does not mean the normal answer-writing step lacks
+it. Do not reject or criticize a proposed answer merely because one of those
+tools is not callable in this debate step.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
@@ -179,10 +183,14 @@ Do not decide whether the current proposed answer should be sent.
 You may agree, partly agree, or disagree with the review note.
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions referenced by the proposed
-answer`. It is included so you can understand what tool calls already present
-in the proposed answer mean. Those definitions are reference material only.
-They do not make those tools callable in this step.
+receive a user message titled `Tool definitions for tools used by the proposed
+answer`. If present, it contains tool definitions for tools that are available
+to the normal answer-writing step for this request and that are already used in
+the proposed answer. Use it to understand what those proposed tool calls mean
+and whether they are appropriate. The fact that one of those tools is not
+callable in this debate step does not mean the normal answer-writing step lacks
+it. Do not reject or criticize a proposed answer merely because one of those
+tools is not callable in this debate step.
 """
 
 ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed answer.
@@ -204,10 +212,14 @@ Return JSON only.
 
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions referenced by the proposed
-answer`. It is included so you can understand what tool calls already present
-in the proposed answer mean. Those definitions are reference material only.
-They do not make those tools callable in this step.
+receive a user message titled `Tool definitions for tools used by the proposed
+answer`. If present, it contains tool definitions for tools that are available
+to the normal answer-writing step for this request and that are already used in
+the proposed answer. Use it to understand what those proposed tool calls mean
+and whether they are appropriate. The fact that one of those tools is not
+callable in this debate step does not mean the normal answer-writing step lacks
+it. Do not reject or criticize a proposed answer merely because one of those
+tools is not callable in this debate step.
 
 Use:
 - `accept` if the current proposed answer is the correct next thing to return exactly as-is
