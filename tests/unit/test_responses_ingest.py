@@ -492,12 +492,12 @@ async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> 
             },
         ),
         (
-            1,
-            1,
+            0,
+            0,
             {"role": "tool", "tool_call_id": "up_main_0", "content": "main output"},
         ),
     ]
-    assert result.cursors == {"m": 2}
+    assert result.cursors == {"m": 1}
     assert result.main_context == _main_transcript(result)
     assert result.continuation_side == "main"
 
@@ -530,8 +530,8 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
             },
         ),
         (
-            1,
-            1,
+            0,
+            0,
             {
                 "role": "tool",
                 "tool_call_id": "client_call_0",
@@ -1103,6 +1103,45 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
         open_compaction_payload(token, keyring=_keyring())
 
     _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_active_spans_overlap")
+
+
+def test_sealed_compaction_rejects_tool_output_starting_new_segment() -> None:
+    token = seal_compaction_payload(
+        CompactionPayload(
+            active=(
+                ChatMessageSpan(
+                    start=0,
+                    end=0,
+                    message=_state_message(
+                        {
+                            "role": "assistant",
+                            "content": "first search",
+                            "tool_calls": [_tool_call("call_1")],
+                        }
+                    ),
+                    token_count=1,
+                ),
+                ChatMessageSpan(
+                    start=1,
+                    end=1,
+                    message=_state_message({"role": "tool", "tool_call_id": "call_1", "content": "old result"}),
+                    token_count=1,
+                ),
+            ),
+            cursors={"m": 2},
+        ),
+        keyring=_keyring(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        open_compaction_payload(token, keyring=_keyring())
+
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_compaction_replay",
+        param="input",
+        private_reason="compaction_tool_output_starts_new_segment",
+    )
 
 
 async def test_ingestion_main_context_active_transcript_budgeted() -> None:

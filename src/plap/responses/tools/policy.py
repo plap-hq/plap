@@ -74,8 +74,17 @@ class ToolSource(StrEnum):
     SERVER = "server"
 
 
+type ResolvedEffectClass = EffectClass | ToolCallEffectClass
+
+
 type _ClassificationL1Key = tuple[bytes, str, str, bytes]
 type _ToolCallClassificationL1Key = tuple[bytes, bytes, str, str, bytes]
+
+
+def _resolved_effect_class(value: object) -> ResolvedEffectClass:
+    if value == ToolCallEffectClass.UNKNOWN:
+        return ToolCallEffectClass.UNKNOWN
+    return EffectClass(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,12 +165,12 @@ class ToolCallSignature:
 class ToolPolicy:
     name: str
     source: ToolSource
-    effect_class: EffectClass
+    effect_class: ResolvedEffectClass
     classification: ToolClassification | ToolCallClassification | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source", ToolSource(self.source))
-        object.__setattr__(self, "effect_class", EffectClass(self.effect_class))
+        object.__setattr__(self, "effect_class", _resolved_effect_class(self.effect_class))
 
 
 @runtime_checkable

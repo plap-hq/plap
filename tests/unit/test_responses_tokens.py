@@ -524,7 +524,7 @@ def test_render_budgeted_spans_tries_other_candidates_when_recount_rejects_best_
     assert [(span.start, span.end) for span in rendered] == [(0, 1), (2, 2), (3, 3)]
 
 
-def test_render_budgeted_spans_expands_dependent_tool_output_summary() -> None:
+def test_render_budgeted_spans_expands_tool_output_summary_with_shared_segment_ordinal() -> None:
     prep_leaf = ChatMessageSpan(
         start=0,
         end=0,
@@ -542,14 +542,14 @@ def test_render_budgeted_spans_expands_dependent_tool_output_summary() -> None:
         token_count=1,
     )
     tool_leaf = ChatMessageSpan(
-        start=2,
-        end=2,
+        start=1,
+        end=1,
         message=StateMessage(role="tool", tool_call_id="call_1", content="cats found"),
         token_count=1,
     )
     after_leaf = ChatMessageSpan(
-        start=3,
-        end=3,
+        start=2,
+        end=2,
         message=StateMessage(role="user", content="after"),
         token_count=1,
     )
@@ -562,8 +562,8 @@ def test_render_budgeted_spans_expands_dependent_tool_output_summary() -> None:
         summary_fidelity=1,
     )
     output_summary = ChatMessageSpan(
-        start=2,
-        end=3,
+        start=1,
+        end=2,
         message=StateMessage(role="assistant", content="tool output and after"),
         token_count=1,
         children=(tool_leaf, after_leaf),
@@ -573,7 +573,7 @@ def test_render_budgeted_spans_expands_dependent_tool_output_summary() -> None:
     rendered = render_budgeted_spans((call_summary, output_summary), token_budget=4)
     transcript = compact_transcript(rendered)
 
-    assert [(span.start, span.end) for span in rendered] == [(0, 0), (1, 1), (2, 2), (3, 3)]
+    assert [(span.start, span.end) for span in rendered] == [(0, 0), (1, 1), (1, 1), (2, 2)]
     assert [message.to_primitive() for message in transcript] == [
         {"role": "user", "content": "prep"},
         {

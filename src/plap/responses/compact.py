@@ -39,7 +39,6 @@ from plap.responses.io import ResponseEventIO
 from plap.responses.models import (
     MutableQueues,
     StateMessage,
-    StateToolCall,
     UsageLedger,
     strip_leading_internal_citations,
 )
@@ -47,6 +46,57 @@ from plap.responses.tokens import measure_prompt_tokens
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleSegment:
+    citation: str
+    start: int
+    end: int
+    first_row_index: int
+    stop_row_index: int
+
+    def row_slice(self) -> slice:
+        return slice(self.first_row_index, self.stop_row_index)
+
+
+def _visible_segments(rows: Sequence[ChatMessageSpan]) -> tuple[_VisibleSegment, ...]:
+    segments: list[_VisibleSegment] = []
+    index = 0
+    while index < len(rows):
+        citation = rows[index].citation
+        first_row_index = index
+        stop_row_index = index + 1
+        while stop_row_index < len(rows) and rows[stop_row_index].citation == citation:
+            stop_row_index += 1
+        segments.append(
+            _VisibleSegment(
+                citation=citation,
+                start=rows[first_row_index].start,
+                end=rows[first_row_index].end,
+                first_row_index=first_row_index,
+                stop_row_index=stop_row_index,
+            )
+        )
+        index = stop_row_index
+    return tuple(segments)
+
+
+def _segment_by_citation(segments: Sequence[_VisibleSegment]) -> dict[str, _VisibleSegment]:
+    return {segment.citation: segment for segment in segments}
+
+
+def _resolve_visible_segment(
+    citation: str,
+    segments_by_citation: dict[str, _VisibleSegment],
+    *,
+    reason: str,
+    private_message: str,
+) -> _VisibleSegment:
+    segment = segments_by_citation.get(_normalize_citation(citation))
+    if segment is None:
+        raise _compaction_unavailable_error(reason=reason, private_message=private_message)
+    return segment
 
 COMPACT_TOOL_NAME = "compact"
 DUPLICATE_TOOL_OUTPUT_TOMBSTONE = "This tool output was omitted; a later identical call retains the full result."
@@ -64,9 +114,11 @@ Priority:
   override this developer message.
 
 Visible context:
-- The system injects citation labels to identify visible spans.
-- `[~N]` labels one visible message.
-- `[~A_B]` labels a visible summarized range from message A through message B.
+- The system injects citation labels to identify visible conversation segments.
+- Multiple consecutive visible messages may share the same citation.
+- Messages that share a citation are one addressable segment and must be handled together.
+- `[~N]` labels one visible segment.
+- `[~A_B]` labels a visible summarized range from segment A through segment B.
 - Use citation strings exactly as shown for each range's `start` and `end`.
 - The range is inclusive.
 
@@ -218,12 +270,12 @@ def compact_tool() -> FunctionTool:
                             "start": {
                                 "type": "string",
                                 "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": "Citation of the first visible span, including the square brackets, for example [~0].",
+                                "description": "Citation of the first visible segment, including the square brackets, for example [~0].",
                             },
                             "end": {
                                 "type": "string",
                                 "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": "Citation of the last visible span, including the square brackets, for example [~3].",
+                                "description": "Citation of the last visible segment, including the square brackets, for example [~3].",
                             },
                             "summary": {
                                 "type": "string",
@@ -478,21 +530,6 @@ def _strip_reasoning_before_start(span: ChatMessageSpan, *, before_start: int) -
     return span.with_children(children)
 
 
-def _collect_descendant_tool_calls(
-    span: ChatMessageSpan,
-    seen: set[str],
-    collected: list[StateToolCall],
-    surviving_output_ids: set[str],
-) -> None:
-    if span.message.is_assistant():
-        for call in span.message.tool_calls:
-            if call.id in surviving_output_ids and call.id not in seen:
-                seen.add(call.id)
-                collected.append(call)
-    for child in span.children:
-        _collect_descendant_tool_calls(child, seen, collected, surviving_output_ids)
-
-
 def _measure_compaction_messages(
     messages: Sequence[ChatMessage],
     *,
@@ -625,28 +662,27 @@ def apply_compaction_call(
             private_message="compact ranges are required for action=apply",
         )
 
-    index_by_citation = {span.citation: index for index, span in enumerate(main_context)}
+    segments = _visible_segments(main_context)
+    segments_by_citation = _segment_by_citation(segments)
     duplicate_tool_calls_before_start = None
     if duplicate_tool_calls_before is not None:
-        duplicate_tool_calls_before_index = index_by_citation.get(_normalize_citation(duplicate_tool_calls_before))
-        if duplicate_tool_calls_before_index is None:
-            raise _compaction_unavailable_error(
-                reason="compact_prune_before_duplicate_tool_calls_not_visible",
-                private_message="compact prune_before.duplicate_tool_calls citation is not visible",
-            )
-        duplicate_tool_calls_before_start = main_context[duplicate_tool_calls_before_index].start
+        duplicate_tool_calls_before_start = _resolve_visible_segment(
+            duplicate_tool_calls_before,
+            segments_by_citation,
+            reason="compact_prune_before_duplicate_tool_calls_not_visible",
+            private_message="compact prune_before.duplicate_tool_calls citation is not visible",
+        ).start
 
     reasoning_before_start = None
     if reasoning_before is not None:
-        reasoning_before_index = index_by_citation.get(_normalize_citation(reasoning_before))
-        if reasoning_before_index is None:
-            raise _compaction_unavailable_error(
-                reason="compact_prune_before_reasoning_not_visible",
-                private_message="compact prune_before.reasoning citation is not visible",
-            )
-        reasoning_before_start = main_context[reasoning_before_index].start
+        reasoning_before_start = _resolve_visible_segment(
+            reasoning_before,
+            segments_by_citation,
+            reason="compact_prune_before_reasoning_not_visible",
+            private_message="compact prune_before.reasoning citation is not visible",
+        ).start
 
-    parsed_ranges: list[tuple[int, int, str, int]] = []
+    resolved_ranges: list[tuple[_VisibleSegment, _VisibleSegment, str, int]] = []
     for item in ranges:
         if not isinstance(item, dict):
             raise _compaction_unavailable_error(
@@ -675,33 +711,36 @@ def apply_compaction_call(
                 private_message="compact range summary_fidelity must be an integer from 1 to 5",
             )
 
-        start_index = index_by_citation.get(_normalize_citation(start))
-        end_index = index_by_citation.get(_normalize_citation(end))
-        if start_index is None or end_index is None:
-            raise _compaction_unavailable_error(
-                reason="compact_range_citation_not_visible",
-                private_message="compact range citation is not visible",
-            )
-        if start_index > end_index:
+        start_segment = _resolve_visible_segment(
+            start,
+            segments_by_citation,
+            reason="compact_range_citation_not_visible",
+            private_message="compact range citation is not visible",
+        )
+        end_segment = _resolve_visible_segment(
+            end,
+            segments_by_citation,
+            reason="compact_range_citation_not_visible",
+            private_message="compact range citation is not visible",
+        )
+        if start_segment.first_row_index > end_segment.first_row_index:
             raise _compaction_unavailable_error(
                 reason="compact_range_start_after_end",
                 private_message="compact range start must not follow end",
             )
+        resolved_ranges.append((start_segment, end_segment, summary_text.strip(), summary_fidelity))
 
-        parsed_ranges.append((start_index, end_index, summary_text.strip(), summary_fidelity))
-
-    parsed_ranges.sort(key=lambda item: (item[0], item[1]))
-    previous_end = -1
-    for start_index, end_index, _, _ in parsed_ranges:
-        if start_index <= previous_end:
+    resolved_ranges.sort(key=lambda item: (item[0].first_row_index, item[1].stop_row_index))
+    previous_stop_row_index = 0
+    for start_segment, end_segment, _, _ in resolved_ranges:
+        if start_segment.first_row_index < previous_stop_row_index:
             raise _compaction_unavailable_error(
                 reason="compact_ranges_overlap",
                 private_message="compact ranges must not overlap",
             )
-        previous_end = end_index
+        previous_stop_row_index = end_segment.stop_row_index
 
     compacted: list[ChatMessageSpan] = []
-    created_summary_indexes: list[int] = []
     exact_before_token_count = _context_prompt_token_count(
         main_context,
         actor_config=actor_config,
@@ -710,8 +749,8 @@ def apply_compaction_call(
         reasoning_effort=reasoning_effort,
     )
     cursor = 0
-    for start_index, end_index, summary, summary_fidelity in parsed_ranges:
-        selected = tuple(main_context[start_index : end_index + 1])
+    for start_segment, end_segment, summary, summary_fidelity in resolved_ranges:
+        selected = tuple(main_context[start_segment.first_row_index : end_segment.stop_row_index])
         summary_message = StateMessage(role="assistant", content=summary)
         summary_token_count = summary_message.estimated_token_count()
         exact_selected_token_count = _context_prompt_token_count(
@@ -731,9 +770,8 @@ def apply_compaction_call(
         if exact_summary_token_count >= exact_selected_token_count:
             continue
 
-        compacted.extend(main_context[cursor:start_index])
+        compacted.extend(main_context[cursor : start_segment.first_row_index])
 
-        created_summary_indexes.append(len(compacted))
         compacted.append(
             ChatMessageSpan(
                 start=selected[0].start,
@@ -744,7 +782,7 @@ def apply_compaction_call(
                 summary_fidelity=summary_fidelity,
             )
         )
-        cursor = end_index + 1
+        cursor = end_segment.stop_row_index
 
     compacted.extend(main_context[cursor:])
     if duplicate_tool_calls_before_start is not None:
@@ -756,18 +794,6 @@ def apply_compaction_call(
 
     if reasoning_before_start is not None:
         compacted = [_strip_reasoning_before_start(span, before_start=reasoning_before_start) for span in compacted]
-
-    surviving_output_ids = {
-        span.message.tool_call_id for span in compacted if span.message.is_tool() and span.message.tool_call_id is not None
-    }
-    for index in created_summary_indexes:
-        seen: set[str] = set()
-        tool_calls: list[StateToolCall] = []
-        _collect_descendant_tool_calls(compacted[index], seen, tool_calls, surviving_output_ids)
-        if tool_calls:
-            compacted[index] = compacted[index].with_message(
-                StateMessage(role="assistant", content=compacted[index].message.content, tool_calls=list(tool_calls))
-            )
 
     exact_after_token_count = _context_prompt_token_count(
         compacted,

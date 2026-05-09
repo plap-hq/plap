@@ -50,59 +50,6 @@ def _expansion_candidates(
     return candidates
 
 
-def _visible_tool_call_ids(span: ChatMessageSpan) -> set[str]:
-    if not span.message.is_assistant():
-        return set()
-    return {tool_call.id for tool_call in span.message.tool_calls}
-
-
-def _visible_tool_output_ids(span: ChatMessageSpan) -> set[str]:
-    if not span.message.is_tool() or span.message.tool_call_id is None:
-        return set()
-    return {span.message.tool_call_id}
-
-
-def _descendant_tool_call_ids(span: ChatMessageSpan) -> set[str]:
-    tool_call_ids = _visible_tool_call_ids(span)
-    for child in span.children:
-        tool_call_ids.update(_descendant_tool_call_ids(child))
-    return tool_call_ids
-
-
-def _descendant_tool_output_ids(span: ChatMessageSpan) -> set[str]:
-    tool_output_ids = _visible_tool_output_ids(span)
-    for child in span.children:
-        tool_output_ids.update(_descendant_tool_output_ids(child))
-    return tool_output_ids
-
-
-def _expand_dependency_closure(spans: list[ChatMessageSpan]) -> list[ChatMessageSpan]:
-    rendered = [*spans]
-    while True:
-        visible_tool_call_ids: set[str] = set()
-        visible_tool_output_ids: set[str] = set()
-        for span in rendered:
-            visible_tool_call_ids.update(_visible_tool_call_ids(span))
-            visible_tool_output_ids.update(_visible_tool_output_ids(span))
-        missing_tool_output_ids = visible_tool_call_ids - visible_tool_output_ids
-        missing_tool_call_ids = visible_tool_output_ids - visible_tool_call_ids
-        if not missing_tool_output_ids and not missing_tool_call_ids:
-            return rendered
-        indexes_to_expand: list[int] = []
-        for index, span in enumerate(rendered):
-            if not span.children:
-                continue
-            if missing_tool_output_ids & _descendant_tool_output_ids(span):
-                indexes_to_expand.append(index)
-                continue
-            if missing_tool_call_ids & _descendant_tool_call_ids(span):
-                indexes_to_expand.append(index)
-        if not indexes_to_expand:
-            return rendered
-        for index in reversed(indexes_to_expand):
-            rendered[index : index + 1] = rendered[index].children
-
-
 def _expanded_candidate_render(
     spans: list[ChatMessageSpan],
     *,
@@ -110,7 +57,7 @@ def _expanded_candidate_render(
 ) -> list[ChatMessageSpan]:
     rendered = [*spans]
     rendered[candidate.index : candidate.index + 1] = rendered[candidate.index].children
-    return _expand_dependency_closure(rendered)
+    return rendered
 
 
 def render_main_transcript(

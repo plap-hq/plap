@@ -415,35 +415,92 @@ def _validate_active_rows(rows: tuple[ChatMessageSpan, ...], cursors: dict[str, 
     _validate_span_rows(rows, cursors=cursors, parent=None)
 
 
+def _validate_tool_output_segment_member(row: ChatMessageSpan, segment_anchor: ChatMessageSpan | None) -> None:
+    if not row.message.is_tool() or row.message.tool_call_id is None:
+        raise _compaction_replay_error(
+            reason="compaction_segment_contains_non_tool_sibling",
+            private_message="compaction segment can only repeat a span for tool outputs",
+        )
+    if segment_anchor is None or not segment_anchor.is_leaf:
+        raise _compaction_replay_error(
+            reason="compaction_tool_output_segment_invalid",
+            private_message="compaction tool output segment is invalid",
+        )
+    if not segment_anchor.message.is_assistant() or not segment_anchor.message.tool_calls:
+        raise _compaction_replay_error(
+            reason="compaction_tool_output_segment_invalid",
+            private_message="compaction tool output segment is invalid",
+        )
+    if row.message.tool_call_id not in {tool_call.id for tool_call in segment_anchor.message.tool_calls}:
+        raise _compaction_replay_error(
+            reason="compaction_tool_output_segment_invalid",
+            private_message="compaction tool output segment is invalid",
+        )
+
+
 def _validate_span_rows(
     rows: tuple[ChatMessageSpan, ...],
     *,
     cursors: dict[str, int],
     parent: ChatMessageSpan | None,
 ) -> None:
-    previous_end = -1
-    expected_start = parent.start if parent is not None else None
+    expected_start = 0 if parent is None else parent.start
+    expected_end = cursors["m"] - 1 if parent is None else parent.end
+    segment_anchor: ChatMessageSpan | None = None
+    previous_start: int | None = None
+    previous_end: int | None = None
+    covered_end = expected_start - 1
     for row in rows:
-        if row.start <= previous_end:
-            raise _compaction_replay_error(
-                reason="compaction_active_spans_overlap", private_message="compaction active spans overlap or are out of order"
-            )
-        if expected_start is not None and row.start != expected_start:
-            raise _compaction_replay_error(
-                reason="compaction_child_spans_do_not_cover_parent", private_message="compaction child spans do not cover parent"
-            )
         if row.end >= cursors["m"]:
             raise _compaction_replay_error(
                 reason="compaction_active_span_outside_cursor", private_message="compaction active span is outside cursor"
             )
+        if previous_start is None:
+            if row.message.is_tool():
+                raise _compaction_replay_error(
+                    reason="compaction_tool_output_starts_new_segment",
+                    private_message="compaction tool output cannot start a new segment",
+                )
+            if row.start != expected_start:
+                raise _compaction_replay_error(
+                    reason="compaction_spans_do_not_cover_range",
+                    private_message="compaction spans do not cover the expected range",
+                )
+            covered_end = row.end
+            segment_anchor = row
+        else:
+            if row.start < previous_start or (row.start == previous_start and row.end < previous_end):
+                raise _compaction_replay_error(
+                    reason="compaction_active_spans_overlap",
+                    private_message="compaction active spans overlap or are out of order",
+                )
+            if row.start <= covered_end:
+                if row.start != previous_start or row.end != previous_end:
+                    raise _compaction_replay_error(
+                        reason="compaction_active_spans_overlap",
+                        private_message="compaction active spans overlap or are out of order",
+                    )
+                _validate_tool_output_segment_member(row, segment_anchor)
+            else:
+                if row.message.is_tool():
+                    raise _compaction_replay_error(
+                        reason="compaction_tool_output_starts_new_segment",
+                        private_message="compaction tool output cannot start a new segment",
+                    )
+                if row.start != covered_end + 1:
+                    raise _compaction_replay_error(
+                        reason="compaction_spans_do_not_cover_range",
+                        private_message="compaction spans do not cover the expected range",
+                    )
+                covered_end = row.end
+                segment_anchor = row
         _validate_span_node(row, cursors=cursors)
+        previous_start = row.start
         previous_end = row.end
-        if expected_start is not None:
-            # Spans are inclusive, so the next contiguous child starts at end + 1.
-            expected_start = row.end + 1
-    if parent is not None and previous_end != parent.end:
+    if covered_end != expected_end:
         raise _compaction_replay_error(
-            reason="compaction_child_spans_do_not_cover_parent", private_message="compaction child spans do not cover parent"
+            reason="compaction_spans_do_not_cover_range",
+            private_message="compaction spans do not cover the expected range",
         )
 
 

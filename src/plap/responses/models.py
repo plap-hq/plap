@@ -428,11 +428,11 @@ class ChatMessageSpan:
 
     @property
     def is_leaf(self) -> bool:
-        return self.start == self.end
+        return not self.children and not self.children_pruned and self.summary_fidelity is None
 
     @property
     def citation(self) -> str:
-        if self.is_leaf:
+        if self.start == self.end:
             return f"[~{self.start}]"
         return f"[~{self.start}_{self.end}]"
 
@@ -709,6 +709,31 @@ class TempMainParts:
     remaining_temp_rows: tuple[SideMessage, ...]
 
 
+def append_main_context_row(
+    rows: list[ChatMessageSpan],
+    cursors: dict[str, int],
+    message: StateMessage,
+    *,
+    content_hash: str = "",
+) -> ChatMessageSpan:
+    if message.is_tool():
+        if not rows:
+            raise ValueError("tool output requires a preceding main context segment")
+        ordinal = rows[-1].end
+    else:
+        ordinal = cursors["m"]
+        cursors["m"] = ordinal + 1
+    row = ChatMessageSpan(
+        start=ordinal,
+        end=ordinal,
+        message=message,
+        content_hash=content_hash,
+        token_count=message.estimated_token_count(),
+    )
+    rows.append(row)
+    return row
+
+
 @dataclass(slots=True)
 class MutableQueues:
     main_context: list[ChatMessageSpan]
@@ -742,21 +767,11 @@ class MutableQueues:
 
     def render_effective_main_context(self, *, include_citation: bool) -> tuple[LLMChatMessage, ...]:
         messages = [row.render_for_model(include_citation=include_citation) for row in self.main_context]
-        messages.extend(row.message.to_chat_message(untrusted=True) for row in self.main_context_temp)
+        messages.extend(entry.message.to_chat_message(untrusted=True) for entry in self.main_context_temp)
         return tuple(messages)
 
     def append_main_stable(self, message: StateMessage, *, content_hash: str = "") -> ChatMessageSpan:
-        next_ordinal = self.cursors["m"]
-        self.cursors["m"] += 1
-        row = ChatMessageSpan(
-            start=next_ordinal,
-            end=next_ordinal,
-            message=message,
-            content_hash=content_hash,
-            token_count=message.estimated_token_count(),
-        )
-        self.main_context.append(row)
-        return row
+        return append_main_context_row(self.main_context, self.cursors, message, content_hash=content_hash)
 
     def append_main_temp(self, message: StateMessage, *, content_hash: str = "") -> SideMessage:
         row = SideMessage(message=message, content_hash=content_hash)

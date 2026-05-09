@@ -245,8 +245,8 @@ def test_compact_transcript_folds_tool_outputs() -> None:
                 token_count=1,
             ),
             ChatMessageSpan(
-                start=1,
-                end=1,
+                start=0,
+                end=0,
                 message=StateMessage(role="tool", tool_call_id="upstream_search_1", content="cats found"),
                 token_count=1,
             ),
@@ -1625,11 +1625,11 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                         arguments=json.dumps(
                             {
                                 "action": "apply",
-                                "prune_before": {"duplicate_tool_calls": "[~3]"},
+                                "prune_before": {"duplicate_tool_calls": "[~2]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
-                                        "end": "[~2]",
+                                        "end": "[~1]",
                                         "summary": "earlier duplicate search attempt",
                                         "summary_fidelity": 4,
                                     }
@@ -1651,10 +1651,10 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                 input=[
                     _compaction_item(
                         _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, old_arguments, content="first search"),
-                        _tool_output_span(1, "call_search_1", "old result"),
-                        _span(2, "other note"),
-                        _assistant_tool_call_span(3, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
-                        _tool_output_span(4, "call_search_2", "new result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
+                        _span(1, "other note"),
+                        _assistant_tool_call_span(2, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
+                        _tool_output_span(2, "call_search_2", "new result"),
                     )
                 ],
             ),
@@ -1670,7 +1670,7 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
     completed = events[-1].response
     payload = open_compaction_payload(completed.output[0].encrypted_content, keyring=_keyring())
     assert [item.type for item in completed.output] == ["compaction", "message"]
-    assert [(row.start, row.end) for row in payload.active] == [(0, 2), (3, 3), (4, 4)]
+    assert [(row.start, row.end) for row in payload.active] == [(0, 1), (2, 2), (2, 2)]
     assert payload.active[0].children[0].message.tool_calls[0].id == "call_search_1"
     assert payload.active[0].children[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
     assert payload.active[2].message.content == "new result"
@@ -1690,11 +1690,11 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                         arguments=json.dumps(
                             {
                                 "action": "apply",
-                                "prune_before": {"duplicate_tool_calls": "[~2]"},
+                                "prune_before": {"duplicate_tool_calls": "[~1]"},
                                 "ranges": [
                                     {
-                                        "start": "[~2]",
-                                        "end": "[~4]",
+                                        "start": "[~1]",
+                                        "end": "[~2]",
                                         "summary": "later duplicate search attempt",
                                         "summary_fidelity": 4,
                                     }
@@ -1716,10 +1716,10 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                 input=[
                     _compaction_item(
                         _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, old_arguments, content="first search"),
-                        _tool_output_span(1, "call_search_1", "old result"),
-                        _span(2, "other note"),
-                        _assistant_tool_call_span(3, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
-                        _tool_output_span(4, "call_search_2", "new result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
+                        _span(1, "other note"),
+                        _assistant_tool_call_span(2, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
+                        _tool_output_span(2, "call_search_2", "new result"),
                     )
                 ],
             ),
@@ -1735,7 +1735,7 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
     completed = events[-1].response
     payload = open_compaction_payload(completed.output[0].encrypted_content, keyring=_keyring())
     assert [item.type for item in completed.output] == ["compaction", "message"]
-    assert [(row.start, row.end) for row in payload.active] == [(0, 0), (1, 1), (2, 4)]
+    assert [(row.start, row.end) for row in payload.active] == [(0, 0), (0, 0), (1, 2)]
     assert payload.active[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
     assert payload.active[2].children[2].message.content == "new result"
 
@@ -1754,11 +1754,11 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_i
                         arguments=json.dumps(
                             {
                                 "action": "apply",
-                                "prune_before": {"duplicate_tool_calls": "[~3]"},
+                                "prune_before": {"duplicate_tool_calls": "[~2]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
-                                        "end": "[~4]",
+                                        "end": "[~2]",
                                         "summary": "search history summary",
                                         "summary_fidelity": 4,
                                     }
@@ -1780,10 +1780,10 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_i
                 input=[
                     _compaction_item(
                         _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, old_arguments, content="first search"),
-                        _tool_output_span(1, "call_search_1", "old result"),
-                        _span(2, "other note"),
-                        _assistant_tool_call_span(3, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
-                        _tool_output_span(4, "call_search_2", "new result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
+                        _span(1, "other note"),
+                        _assistant_tool_call_span(2, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
+                        _tool_output_span(2, "call_search_2", "new result"),
                     )
                 ],
             ),
@@ -1797,7 +1797,7 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_i
     ]
 
     payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
-    assert [(row.start, row.end) for row in payload.active] == [(0, 4)]
+    assert [(row.start, row.end) for row in payload.active] == [(0, 2)]
     assert payload.active[0].children[1].message.content == DUPLICATE_TOOL_OUTPUT_TOMBSTONE
     assert payload.active[0].children[4].message.content == "new result"
 
@@ -1819,7 +1819,7 @@ async def test_stream_response_events_compaction_can_preserve_duplicate_tool_out
                                 "ranges": [
                                     {
                                         "start": "[~0]",
-                                        "end": "[~2]",
+                                        "end": "[~1]",
                                         "summary": "earlier duplicate search attempt",
                                         "summary_fidelity": 4,
                                     }
@@ -1841,10 +1841,10 @@ async def test_stream_response_events_compaction_can_preserve_duplicate_tool_out
                 input=[
                     _compaction_item(
                         _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, old_arguments, content="first search"),
-                        _tool_output_span(1, "call_search_1", "old result"),
-                        _span(2, "other note"),
-                        _assistant_tool_call_span(3, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
-                        _tool_output_span(4, "call_search_2", "new result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
+                        _span(1, "other note"),
+                        _assistant_tool_call_span(2, "call_search_2", MCP_SEARCH_TOOL_NAME, new_arguments, content="second search"),
+                        _tool_output_span(2, "call_search_2", "new result"),
                     )
                 ],
             ),
@@ -1877,11 +1877,11 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_o
                         arguments=json.dumps(
                             {
                                 "action": "apply",
-                                "prune_before": {"duplicate_tool_calls": "[~2]"},
+                                "prune_before": {"duplicate_tool_calls": "[~1]"},
                                 "ranges": [
                                     {
-                                        "start": "[~6]",
-                                        "end": "[~8]",
+                                        "start": "[~3]",
+                                        "end": "[~5]",
                                         "summary": "notes",
                                         "summary_fidelity": 4,
                                     }
@@ -1909,26 +1909,26 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_o
                             old_arguments,
                             content="first search",
                         ),
-                        _tool_output_span(1, "call_search_1", "old result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
                         _assistant_tool_call_span(
-                            2,
+                            1,
                             "call_search_2",
                             MCP_SEARCH_TOOL_NAME,
                             old_arguments,
                             content="second search",
                         ),
-                        _tool_output_span(3, "call_search_2", "mid result"),
+                        _tool_output_span(1, "call_search_2", "mid result"),
                         _assistant_tool_call_span(
-                            4,
+                            2,
                             "call_search_3",
                             MCP_SEARCH_TOOL_NAME,
                             new_arguments,
                             content="third search",
                         ),
-                        _tool_output_span(5, "call_search_3", "new result"),
-                        _span(6, "note one with extra redundant detail", token_count=12),
-                        _span(7, "note two with extra redundant detail", token_count=12),
-                        _span(8, "note three with extra redundant detail", token_count=12),
+                        _tool_output_span(2, "call_search_3", "new result"),
+                        _span(3, "note one with extra redundant detail", token_count=12),
+                        _span(4, "note two with extra redundant detail", token_count=12),
+                        _span(5, "note three with extra redundant detail", token_count=12),
                     )
                 ],
             ),
@@ -1962,8 +1962,8 @@ async def test_stream_response_events_leaves_duplicate_tool_outputs_when_duplica
                                 "action": "apply",
                                 "ranges": [
                                     {
-                                        "start": "[~6]",
-                                        "end": "[~8]",
+                                        "start": "[~3]",
+                                        "end": "[~5]",
                                         "summary": "notes",
                                         "summary_fidelity": 4,
                                     }
@@ -1991,26 +1991,26 @@ async def test_stream_response_events_leaves_duplicate_tool_outputs_when_duplica
                             '{"query":"cats","limit":1}',
                             content="first search",
                         ),
-                        _tool_output_span(1, "call_search_1", "old result"),
+                        _tool_output_span(0, "call_search_1", "old result"),
                         _assistant_tool_call_span(
-                            2,
+                            1,
                             "call_search_2",
                             MCP_SEARCH_TOOL_NAME,
                             '{"query":"cats","limit":1}',
                             content="second search",
                         ),
-                        _tool_output_span(3, "call_search_2", "mid result"),
+                        _tool_output_span(1, "call_search_2", "mid result"),
                         _assistant_tool_call_span(
-                            4,
+                            2,
                             "call_search_3",
                             MCP_SEARCH_TOOL_NAME,
                             '{"limit":1,"query":"cats"}',
                             content="third search",
                         ),
-                        _tool_output_span(5, "call_search_3", "new result"),
-                        _span(6, "note one with extra redundant detail", token_count=12),
-                        _span(7, "note two with extra redundant detail", token_count=12),
-                        _span(8, "note three with extra redundant detail", token_count=12),
+                        _tool_output_span(2, "call_search_3", "new result"),
+                        _span(3, "note one with extra redundant detail", token_count=12),
+                        _span(4, "note two with extra redundant detail", token_count=12),
+                        _span(5, "note three with extra redundant detail", token_count=12),
                     )
                 ],
             ),
@@ -2030,7 +2030,7 @@ async def test_stream_response_events_leaves_duplicate_tool_outputs_when_duplica
     assert payload.active[5].message.content == "new result"
 
 
-async def test_stream_response_events_reattaches_tool_calls_to_summary_when_output_survives_outside_range() -> None:
+async def test_stream_response_events_compaction_summarizes_tool_call_and_output_together_with_shared_segment_ordinal() -> None:
     arguments = '{"query":"cats"}'
     client = _StaticChatClient(
         [
@@ -2046,8 +2046,8 @@ async def test_stream_response_events_reattaches_tool_calls_to_summary_when_outp
                                 "ranges": [
                                     {
                                         "start": "[~0]",
-                                        "end": "[~1]",
-                                        "summary": "search kickoff summary",
+                                        "end": "[~0]",
+                                        "summary": "search exchange summary",
                                         "summary_fidelity": 4,
                                     }
                                 ],
@@ -2068,8 +2068,8 @@ async def test_stream_response_events_reattaches_tool_calls_to_summary_when_outp
                 input=[
                     _compaction_item(
                         _assistant_tool_call_span(0, "call_search_1", MCP_SEARCH_TOOL_NAME, arguments, content="first search"),
+                        _tool_output_span(0, "call_search_1", "search result"),
                         _span(1, "follow up note", token_count=40),
-                        _tool_output_span(2, "call_search_1", "search result"),
                     )
                 ],
             ),
@@ -2084,10 +2084,9 @@ async def test_stream_response_events_reattaches_tool_calls_to_summary_when_outp
 
     assert [item.type for item in events[-1].response.output] == ["compaction", "message"]
     payload = open_compaction_payload(events[-1].response.output[0].encrypted_content, keyring=_keyring())
-    assert [(row.start, row.end) for row in payload.active] == [(0, 1), (2, 2)]
-    assert payload.active[0].message.tool_calls[0].id == "call_search_1"
-    compact = compact_transcript(tuple(payload.active))
-    assert compact[0].tool_calls[0].output == "search result"
+    assert [(row.start, row.end) for row in payload.active] == [(0, 0), (1, 1)]
+    assert payload.active[0].children[0].message.tool_calls[0].id == "call_search_1"
+    assert payload.active[0].children[1].message.content == "search result"
 
 
 async def test_stream_response_events_prunes_reasoning_before_cutoff_recursively() -> None:

@@ -30,6 +30,7 @@ from plap.responses.models import (
     SideMessage,
     StateMessage,
     StateToolCall,
+    append_main_context_row,
 )
 
 
@@ -182,17 +183,6 @@ class _AssociatedQueues:
     reviewer: _PrivateSideQueue
     arbitrator: _PrivateSideQueue
     cursors: dict[str, int]
-
-
-@dataclass(frozen=True, slots=True)
-class _ExpansionCandidate:
-    index: int
-    summary_fidelity: int
-    token_delta: int
-    start: int
-    end: int
-
-
 class _QueueBase:
     def __init__(self, side: Side) -> None:
         self.side = side
@@ -443,21 +433,23 @@ class _MainQueue(_QueueBase):
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
         if temp:
-            row = SideMessage(message=message)
-            self._temp_rows.append(row)
+            entry = SideMessage(message=message)
+            self._temp_rows.append(entry)
         else:
-            ordinal = self._cursors.get("m", 0)
-            row = ChatMessageSpan(
-                start=ordinal,
-                end=ordinal,
-                message=message,
-                token_count=message.estimated_token_count(),
-            )
-            self._cursors["m"] = ordinal + 1
-            self._stable_rows.append(row)
-        self._entries.append(row)
-        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
-        return row
+            try:
+                row = append_main_context_row(self._stable_rows, self._cursors, message)
+            except ValueError as exc:
+                raise _tool_replay_error(
+                    reason="function_call_output_without_main_segment",
+                    private_message="function_call_output requires a preceding main segment",
+                    cause=exc,
+                ) from exc
+            self._entries.append(row)
+            self._resolve_pending_reasoning_patches(row.content_hash, row.message)
+            return row
+        self._entries.append(entry)
+        self._resolve_pending_reasoning_patches(entry.content_hash, entry.message)
+        return entry
 
     def _closest_previous_assistant(self) -> StateMessage:
         for entry in reversed(self._entries):
@@ -649,8 +641,8 @@ def _associate_side_queues(
         cursors=cursors,
     )
     if compaction is not None:
-        for row in compaction.active:
-            queues.main.add_existing_row(row)
+        for span in compaction.active:
+            queues.main.add_existing_row(span)
     _apply_side_events(queues.main, routed.main)
     _apply_side_events(queues.reviewer, routed.reviewer)
     _apply_side_events(queues.arbitrator, routed.arbitrator)
