@@ -103,7 +103,11 @@ def render_budgeted_spans(
     return tuple(rendered)
 
 
-def compact_transcript(spans: tuple[ChatMessageSpan, ...]) -> tuple[TranscriptMessage, ...]:
+def compact_transcript(
+    spans: tuple[ChatMessageSpan, ...],
+    *,
+    untrusted: bool = False,
+) -> tuple[TranscriptMessage, ...]:
     compact: list[TranscriptMessage] = []
     pending_tool_calls: dict[str, TranscriptToolCall] = {}
     for span in spans:
@@ -125,7 +129,7 @@ def compact_transcript(spans: tuple[ChatMessageSpan, ...]) -> tuple[TranscriptMe
                     )
             continue
 
-        item = message.to_transcript_message()
+        item = message.to_transcript_message(untrusted=untrusted)
         compact.append(item)
         pending_tool_calls = {call._id or "": call for call in item.tool_calls if call._id is not None}
     return tuple(item.without_ids() for item in compact)

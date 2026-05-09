@@ -100,6 +100,17 @@ Behavior:
 - Avoid unnecessary preamble and postamble."""
 
 
+def _main_developer_message(
+    *,
+    profile: RuntimeModelProfileConfig,
+    request: ResponseCreateRequest,
+) -> StateMessage:
+    developer_prompt = MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
+    if request.instructions:
+        developer_prompt = f"{developer_prompt}\n\n[^untrusted] {request.instructions}"
+    return StateMessage(role="developer", content=developer_prompt)
+
+
 def _reasoning_summary_mode(request: ResponseCreateRequest) -> ReasoningSummary | None:
     if request.reasoning is None:
         return None
@@ -537,11 +548,13 @@ async def run_response(
         effective_tools = [*base_tools]
         effective_tool_policies = dict(base_tool_policies)
         effective_server_executors = dict(base_server_executors)
+        main_developer_message = _main_developer_message(profile=profile, request=request)
 
         if state.in_temp_debate:
             debate_result = await continue_debate(
                 state=state,
                 out=out,
+                main_developer_message=main_developer_message,
                 request=request,
                 profile=profile,
                 keyring=sealing_keyring,
@@ -559,11 +572,7 @@ async def run_response(
         tool_choice = _chat_tool_choice(request)
         response_format = _chat_response_format(request)
 
-        developer_prompt = MAIN_DEVELOPER_PROMPT_TEMPLATE.format(model_name=profile.display_name)
-        if request.instructions:
-            developer_prompt = f"{developer_prompt}\n\n[^untrusted] {request.instructions}"
-
-        messages: list[ChatMessage] = [ChatMessage(role="developer", content=developer_prompt)]
+        messages: list[ChatMessage] = [main_developer_message.to_chat_message()]
         messages.extend(state.render_effective_main_context(include_citation=False))
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
@@ -689,6 +698,7 @@ async def run_response(
             debate_result = await continue_debate(
                 state=state,
                 out=out,
+                main_developer_message=main_developer_message,
                 request=request,
                 profile=profile,
                 keyring=sealing_keyring,
@@ -758,6 +768,7 @@ async def run_response(
                     debate_result = await continue_debate(
                         state=state,
                         out=out,
+                        main_developer_message=main_developer_message,
                         request=request,
                         profile=profile,
                         keyring=sealing_keyring,

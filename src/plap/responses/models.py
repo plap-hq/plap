@@ -196,7 +196,10 @@ class StateMessage:
             reasoning_details=list(self.reasoning_details) or None,
         )
 
-    def to_transcript_message(self) -> TranscriptMessage:
+    def to_transcript_message(self, *, untrusted: bool = False) -> TranscriptMessage:
+        content = self.content_text()
+        if untrusted and self.role in {ChatRole.SYSTEM, ChatRole.DEVELOPER}:
+            content = f"[^untrusted]\n{content or ''}"
         if self.role == ChatRole.ASSISTANT:
             role = ChatRole.ASSISTANT
         elif self.role in {ChatRole.SYSTEM, ChatRole.DEVELOPER}:
@@ -205,7 +208,7 @@ class StateMessage:
             role = ChatRole.USER
         return TranscriptMessage(
             role=role,
-            content=self.content_text(),
+            content=content,
             tool_calls=tuple(
                 TranscriptToolCall(
                     _id=call.id,

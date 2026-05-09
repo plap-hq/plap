@@ -442,13 +442,25 @@ def _transcript_wrapper(transcript: Sequence[TranscriptMessage]) -> ChatMessage:
     return ChatMessage(role="user", content=f"Conversation transcript:\n{_json_text([message.to_primitive() for message in transcript])}")
 
 
+def _transcript_rows(
+    spans: tuple[ChatMessageSpan, ...],
+    *,
+    main_developer_message: StateMessage,
+) -> tuple[TranscriptMessage, ...]:
+    return (
+        main_developer_message.to_transcript_message(),
+        *compact_transcript(spans, untrusted=True),
+    )
+
+
 def _measure_budgeted_transcript_tokens(
     spans: tuple[ChatMessageSpan, ...],
     *,
     actor_config: RuntimeActorConfig,
+    main_developer_message: StateMessage,
 ) -> int:
     try:
-        transcript = compact_transcript(spans)
+        transcript = _transcript_rows(spans, main_developer_message=main_developer_message)
         return measure_prompt_tokens([_transcript_wrapper(transcript)], actor_config=actor_config)
     except Exception as exc:
         raise _debate_unavailable_error(
@@ -462,19 +474,25 @@ def _budgeted_transcript_message(
     spans: Sequence[ChatMessageSpan],
     *,
     actor_config: RuntimeActorConfig,
+    main_developer_message: StateMessage,
     recount_margin: int,
     token_budget: int,
 ) -> ChatMessage:
     measure = None
     if actor_config.tokenizer_hf_repo is not None:
-        measure = lambda rendered: _measure_budgeted_transcript_tokens(rendered, actor_config=actor_config)
-    transcript = compact_transcript(
+        measure = lambda rendered: _measure_budgeted_transcript_tokens(
+            rendered,
+            actor_config=actor_config,
+            main_developer_message=main_developer_message,
+        )
+    transcript = _transcript_rows(
         render_budgeted_spans(
             tuple(spans),
             measure=measure,
             recount_margin=recount_margin,
             token_budget=token_budget,
-        )
+        ),
+        main_developer_message=main_developer_message,
     )
     return _transcript_wrapper(transcript)
 
@@ -700,6 +718,7 @@ async def run_reviewer_turn(
     *,
     state: MutableQueues,
     parts: TempMainParts,
+    main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
     tools: Sequence[FunctionTool],
@@ -716,6 +735,7 @@ async def run_reviewer_turn(
         _budgeted_transcript_message(
             state.main_context,
             actor_config=profile.reviewer,
+            main_developer_message=main_developer_message,
             recount_margin=profile.transcript_recount_margin,
             token_budget=profile.reviewer_transcript_token_budget,
         ),
@@ -807,6 +827,7 @@ async def run_arbitrator_turn(
     *,
     state: MutableQueues,
     parts: TempMainParts,
+    main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
     tools: Sequence[FunctionTool],
@@ -830,6 +851,7 @@ async def run_arbitrator_turn(
         _budgeted_transcript_message(
             state.main_context,
             actor_config=profile.arbitrator,
+            main_developer_message=main_developer_message,
             recount_margin=profile.transcript_recount_margin,
             token_budget=profile.arbitrator_transcript_token_budget,
         ),
@@ -1053,6 +1075,7 @@ async def continue_debate(
     *,
     state: MutableQueues,
     out: ResponseEventIO,
+    main_developer_message: StateMessage,
     request,
     profile: RuntimeModelProfileConfig,
     keyring: SealingKeyring,
@@ -1086,6 +1109,7 @@ async def continue_debate(
                 outcome = await run_reviewer_turn(
                     state=state,
                     parts=parts,
+                    main_developer_message=main_developer_message,
                     profile=profile,
                     request=request,
                     tools=safe_tools,
@@ -1210,6 +1234,7 @@ async def continue_debate(
                 outcome = await run_arbitrator_turn(
                     state=state,
                     parts=parts,
+                    main_developer_message=main_developer_message,
                     profile=profile,
                     request=request,
                     tools=safe_tools,
