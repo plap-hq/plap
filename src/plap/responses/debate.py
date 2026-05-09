@@ -58,7 +58,7 @@ from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
-DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS = 3
+DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
 logger = structlog.get_logger(__name__)
 
@@ -99,14 +99,13 @@ def _is_retryable_debate_error(exc: PlapError) -> bool:
         "reviewer_reopen_requires_note",
         "arbitrator_note_required",
         "decision_missing_content",
-        "decision_invalid_json",
-        "decision_invalid",
+        "decision_invalid_tail_marker",
         "debate_tool_arguments_invalid_json",
         "debate_tool_arguments_not_object",
     }
 
 
-async def _retry_structured_debate_step(actor: str, operation) -> object:
+async def _retry_debate_step(actor: str, operation) -> object:
     attempts = 0
     while True:
         try:
@@ -120,10 +119,10 @@ async def _retry_structured_debate_step(actor: str, operation) -> object:
                 "debate.step.retry",
                 actor=actor,
                 attempt=attempts,
-                max_attempts=DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS,
+                max_attempts=DEBATE_STEP_MAX_ATTEMPTS,
                 reason=exc.private.reason,
             )
-            if attempts >= DEBATE_STRUCTURED_STEP_MAX_ATTEMPTS:
+            if attempts >= DEBATE_STEP_MAX_ATTEMPTS:
                 raise
 
 
@@ -140,7 +139,16 @@ Definitions:
 - response note: another model's reply to the latest review note; it may agree or disagree
 - next-step note: a short note about what the next round should focus on
 
-Return JSON only.
+Do not return JSON.
+
+Decision format:
+- Your final non-empty line is the decision wrapper line.
+- That final line may include a prefix, but its last token must be exactly ACCEPT or REOPEN.
+- Examples of valid final lines:
+  ACCEPT
+  Decision: REOPEN
+  Final decision: ACCEPT
+- Put no review-note text on the final line. Put all review-note text above it.
 
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
@@ -154,10 +162,10 @@ it. Do not reject or criticize a proposed answer merely because one of those
 tools is not callable in this debate step.
 
 Use:
-- `accept` if the current proposed answer is the correct next thing to return exactly as-is
-- `reopen` if another round is needed
+- `ACCEPT` if the current proposed answer is the correct next thing to return exactly as-is
+- `REOPEN` if another round is needed
 
-If you use `reopen`, set `note` to one short review note saying what seems wrong,
+If you use `REOPEN`, you MUST write one short review note above the final line saying what seems wrong,
 missing, unsupported, or risky about the current proposed answer.
 """
 
@@ -208,7 +216,16 @@ Definitions:
 - response note: a short note replying to the review note from independent judgment
 - next-step note: a short note telling the next round what to focus on
 
-Return JSON only.
+Do not return JSON.
+
+Decision format:
+- Your final non-empty line is the decision wrapper line.
+- That final line may include a prefix, but its last token must be exactly ACCEPT, REVISE, or REOPEN.
+- Examples of valid final lines:
+  ACCEPT
+  Decision: REVISE
+  Final decision: REOPEN
+- Put no note text on the final line. Put all note text above it.
 
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
@@ -222,58 +239,22 @@ it. Do not reject or criticize a proposed answer merely because one of those
 tools is not callable in this debate step.
 
 Use:
-- `accept` if the current proposed answer is the correct next thing to return exactly as-is
-- `revise` if the current proposed answer should not be sent and the normal answer-writing step should try again from scratch
-- `reopen` if another review/response round is needed
+- `ACCEPT` if the current proposed answer is the correct next thing to return exactly as-is
+- `REVISE` if the current proposed answer should not be sent and the normal answer-writing step should try again from scratch
+- `REOPEN` if another review/response round is needed
 
-If you use `revise`:
+If you use `REVISE`:
 - the current proposed answer will not be sent
 - the response note will not be sent
-- your `note` will be sent to the normal answer-writing step, which will write a fresh new answer from scratch
+- you MUST write one short next-step note above the final line
+- that next-step note will be sent to the normal answer-writing step, which will write a fresh new answer from scratch
 
-If you use `reopen`:
+If you use `REOPEN`:
 - the current proposed answer will not be sent
 - the response note will not be sent
-- your `note` will be sent into another review/response round
-
-If you use `revise` or `reopen`, set `note` to one short next-step note.
+- you MUST write one short next-step note above the final line
+- that next-step note will be sent into another review/response round
 """
-
-REVIEWER_RESPONSE_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "action": {"type": "string", "enum": ["accept", "reopen"]},
-        "note": {"type": ["string", "null"]},
-    },
-    "required": ["action", "note"],
-}
-
-ARBITRATOR_RESPONSE_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "action": {"type": "string", "enum": ["accept", "revise", "reopen"]},
-        "note": {"type": ["string", "null"]},
-    },
-    "required": ["action", "note"],
-}
-
-REVIEWER_RESPONSE_FORMAT = ChatResponseFormat(
-    type="json_schema",
-    name="reviewer_decision",
-    schema=REVIEWER_RESPONSE_SCHEMA,
-    strict=True,
-    description="Reviewer decision for the current proposed answer.",
-)
-
-ARBITRATOR_RESPONSE_FORMAT = ChatResponseFormat(
-    type="json_schema",
-    name="arbitrator_decision",
-    schema=ARBITRATOR_RESPONSE_SCHEMA,
-    strict=True,
-    description="Final decision for the current proposed answer.",
-)
 
 
 class ReviewerActionType(StrEnum):
@@ -379,33 +360,55 @@ def build_completion_request(
     )
 
 
+_REVIEWER_ACTIONS_BY_TOKEN = {
+    "ACCEPT": ReviewerActionType.ACCEPT,
+    "REOPEN": ReviewerActionType.REOPEN,
+}
+
+_ARBITRATOR_ACTIONS_BY_TOKEN = {
+    "ACCEPT": ArbitratorActionType.ACCEPT,
+    "REVISE": ArbitratorActionType.REVISE,
+    "REOPEN": ArbitratorActionType.REOPEN,
+}
+
+
+def _tail_decision(message: StateMessage, *, label: str, allowed_actions: Mapping[str, object]) -> tuple[object, str | None]:
+    if message.content is None or not message.content.strip():
+        raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
+    lines = message.content.rstrip().splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        decision_line = lines[index].strip()
+        if not decision_line:
+            continue
+        action_token = decision_line.split()[-1]
+        action = allowed_actions.get(action_token)
+        if action is None:
+            expected = ", ".join(allowed_actions)
+            raise _debate_unavailable_error(
+                reason="decision_invalid_tail_marker",
+                private_message=f"{label} final line must end with one of {expected}",
+            )
+        note = "\n".join(lines[:index]).strip() or None
+        return action, note
+    raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
+
+
 def parse_reviewer_decision(message: StateMessage) -> ReviewerDecision:
-    decision = _decode_decision(message, ReviewerDecision, "reviewer decision")
-    if decision.action == ReviewerActionType.REOPEN and not decision.note:
+    action, note = _tail_decision(message, label="reviewer decision", allowed_actions=_REVIEWER_ACTIONS_BY_TOKEN)
+    if action == ReviewerActionType.REOPEN and not note:
         raise _debate_unavailable_error(reason="reviewer_reopen_requires_note", private_message="reviewer reopen requires note")
-    if decision.action == ReviewerActionType.ACCEPT:
+    if action == ReviewerActionType.ACCEPT:
         return ReviewerDecision(action=ReviewerActionType.ACCEPT)
-    return decision
+    return ReviewerDecision(action=ReviewerActionType.REOPEN, note=note)
 
 
 def parse_arbitrator_decision(message: StateMessage) -> ArbitratorDecision:
-    decision = _decode_decision(message, ArbitratorDecision, "arbitrator decision")
-    if decision.action in {ArbitratorActionType.REVISE, ArbitratorActionType.REOPEN} and not decision.note:
+    action, note = _tail_decision(message, label="arbitrator decision", allowed_actions=_ARBITRATOR_ACTIONS_BY_TOKEN)
+    if action in {ArbitratorActionType.REVISE, ArbitratorActionType.REOPEN} and not note:
         raise _debate_unavailable_error(reason="arbitrator_note_required", private_message="arbitrator note is required")
-    if decision.action == ArbitratorActionType.ACCEPT:
+    if action == ArbitratorActionType.ACCEPT:
         return ArbitratorDecision(action=ArbitratorActionType.ACCEPT)
-    return decision
-
-
-def _decode_decision(message: StateMessage, typ, label: str):
-    if message.content is None:
-        raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
-    try:
-        return msgspec.json.decode(message.content.encode(), type=typ)
-    except msgspec.DecodeError as exc:
-        raise _debate_unavailable_error(reason="decision_invalid_json", private_message=f"{label} is invalid JSON", cause=exc) from exc
-    except msgspec.ValidationError as exc:
-        raise _debate_unavailable_error(reason="decision_invalid", private_message=f"{label} is invalid", cause=exc) from exc
+    return ArbitratorDecision(action=action, note=note)
 
 
 def _compact_candidate(
@@ -798,7 +801,7 @@ async def run_reviewer_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        response_format=REVIEWER_RESPONSE_FORMAT,
+        response_format=None,
     )
 
 
@@ -923,7 +926,7 @@ async def run_arbitrator_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        response_format=ARBITRATOR_RESPONSE_FORMAT,
+        response_format=None,
     )
 
 
@@ -1159,7 +1162,7 @@ async def continue_debate(
                     return outcome, None
                 return outcome, parse_reviewer_decision(outcome.assistant)
 
-            outcome, decision = await _retry_structured_debate_step(Actor.REVIEWER.value, reviewer_step)
+            outcome, decision = await _retry_debate_step(Actor.REVIEWER.value, reviewer_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1226,7 +1229,7 @@ async def continue_debate(
                     usage_ledger=usage_ledger,
                 )
 
-            outcome = await _retry_structured_debate_step(Actor.MAIN_DEBATE.value, main_debate_step)
+            outcome = await _retry_debate_step(Actor.MAIN_DEBATE.value, main_debate_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1285,7 +1288,7 @@ async def continue_debate(
                     return outcome, None
                 return outcome, parse_arbitrator_decision(outcome.assistant)
 
-            outcome, decision = await _retry_structured_debate_step(Actor.ARBITRATOR.value, arbitrator_step)
+            outcome, decision = await _retry_debate_step(Actor.ARBITRATOR.value, arbitrator_step)
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)

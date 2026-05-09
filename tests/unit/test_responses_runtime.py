@@ -36,7 +36,13 @@ from plap.responses.contracts import (
     TextFormatJSONObject,
     WebSearchTool,
 )
-from plap.responses.debate import _budgeted_transcript_message
+from plap.responses.debate import (
+    ArbitratorActionType,
+    ReviewerActionType,
+    _budgeted_transcript_message,
+    parse_arbitrator_decision,
+    parse_reviewer_decision,
+)
 from plap.responses.ingest import (
     ChatMessageSpan,
     CompactionPayload,
@@ -498,11 +504,52 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
 
 
+def test_parse_reviewer_decision_extracts_note_from_wrapper_line() -> None:
+    decision = parse_reviewer_decision(
+        StateMessage(role="assistant", content="Need a narrower patch and better failure handling.\n\nDecision: REOPEN")
+    )
+
+    assert decision.action == ReviewerActionType.REOPEN
+    assert decision.note == "Need a narrower patch and better failure handling."
+
+
+def test_parse_arbitrator_decision_extracts_note_from_prefixed_wrapper_line() -> None:
+    decision = parse_arbitrator_decision(
+        StateMessage(role="assistant", content="Use the safer path from scratch.\n\nFinal decision: REVISE")
+    )
+
+    assert decision.action == ArbitratorActionType.REVISE
+    assert decision.note == "Use the safer path from scratch."
+
+
+def test_parse_accept_discards_extracted_note() -> None:
+    decision = parse_arbitrator_decision(
+        StateMessage(role="assistant", content="Looks good overall.\n\nDecision: ACCEPT")
+    )
+
+    assert decision.action == ArbitratorActionType.ACCEPT
+    assert decision.note is None
+
+
+def test_parse_reviewer_decision_requires_tail_marker() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        parse_reviewer_decision(StateMessage(role="assistant", content="Need a narrower patch."))
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="decision_invalid_tail_marker")
+
+
+def test_parse_arbitrator_decision_requires_note_for_revise() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        parse_arbitrator_decision(StateMessage(role="assistant", content="Decision: REVISE"))
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="arbitrator_note_required")
+
+
 async def test_stream_response_events_stop_answer_triggers_debate() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(role="assistant", content="[~6]\nhello back"),
-            _assistant_json({"action": "accept", "note": None}),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -523,13 +570,14 @@ async def test_stream_response_events_stop_answer_triggers_debate() -> None:
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
     assert completed.output[-1].content[0].text == "[~6]\nhello back"
     assert len(client.requests) == 2
+    assert client.requests[1].response_format is None
 
 
 async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -> None:
     client = _StaticChatClient(
         message=(
             ChatMessage(role="assistant", content="hello back"),
-            _assistant_json({"action": "accept", "note": None}),
+            _assistant_text("ACCEPT"),
         ),
         usages=(ChatUsage(input_tokens=100, output_tokens=10, total_tokens=110, cached_tokens=20, reasoning_tokens=3),),
     )
@@ -614,12 +662,7 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
                 content="draft answer",
                 tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
             ),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -710,12 +753,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert '"description":"initial mutation tool"' in first_request_contents
 
     second_client = _StaticChatClient(
-        _assistant_json(
-            {
-                "action": "accept",
-                "note": None,
-            }
-        )
+        _assistant_text("ACCEPT")
     )
     second_events = [
         event
@@ -767,19 +805,9 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
                 content="draft answer",
                 tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
             ),
-            _assistant_json(
-                {
-                    "action": "reopen",
-                    "note": "Check ids.",
-                }
-            ),
+            _assistant_text("Check ids.\n\nDecision: REOPEN"),
             ChatMessage(role="assistant", content="after review"),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -827,19 +855,9 @@ async def test_stream_response_events_main_debate_reasoning_summary_includes_hel
     client = _StaticChatClient(
         [
             ChatMessage(role="assistant", content="draft answer"),
-            _assistant_json(
-                {
-                    "action": "reopen",
-                    "note": "Be shorter.",
-                }
-            ),
+            _assistant_text("Be shorter.\n\nDecision: REOPEN"),
             ChatMessage(role="assistant", content="I can shorten it."),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -888,26 +906,11 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
                 content="draft answer",
                 tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
             ),
-            _assistant_json(
-                {
-                    "action": "reopen",
-                    "note": "Check ids.",
-                }
-            ),
+            _assistant_text("Check ids.\n\nDecision: REOPEN"),
             ChatMessage(role="assistant", content="after review"),
-            _assistant_json(
-                {
-                    "action": "revise",
-                    "note": "Use the safer path.",
-                }
-            ),
+            _assistant_text("Use the safer path.\n\nDecision: REVISE"),
             ChatMessage(role="assistant", content="final public answer"),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -972,6 +975,8 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert "final public answer" in (final_reviewer_payload.messages[0].content or "")
     assert completed.output[-1].content[0].text == "final public answer"
     assert len(client.requests) == 6
+    assert client.requests[1].response_format is None
+    assert client.requests[3].response_format is None
 
 
 async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> None:
@@ -982,25 +987,10 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
                 content="draft answer",
                 tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
             ),
-            _assistant_json(
-                {
-                    "action": "reopen",
-                    "note": "Check ids.",
-                }
-            ),
+            _assistant_text("Check ids.\n\nDecision: REOPEN"),
             ChatMessage(role="assistant", content="after review one"),
-            _assistant_json(
-                {
-                    "action": "reopen",
-                    "note": "Look at edge case.",
-                }
-            ),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("Look at edge case.\n\nDecision: REOPEN"),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -1053,12 +1043,7 @@ async def test_stream_response_events_reviewer_accept_publishes_held_server_outp
                     ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}'),
                 ],
             ),
-            _assistant_json(
-                {
-                    "action": "accept",
-                    "note": None,
-                }
-            ),
+            _assistant_text("ACCEPT"),
         ]
     )
 
@@ -4241,8 +4226,8 @@ def _completed_response(events: Sequence[object]):
     return completed.response
 
 
-def _assistant_json(value: object) -> ChatMessage:
-    return ChatMessage(role="assistant", content=json.dumps(value))
+def _assistant_text(content: str) -> ChatMessage:
+    return ChatMessage(role="assistant", content=content)
 
 
 def _replay_output_items(response) -> list[dict[str, object]]:
