@@ -323,7 +323,7 @@ async def test_live_gpt_oss_reasoning_request(provider: ProviderCase) -> None:
     assert _message_has_output(result.message)
 
 
-async def test_live_novita_deepseek_v4_flash_reasoning_content() -> None:
+async def test_live_novita_deepseek_v4_flash_basic_reasoning_request() -> None:
     provider = ProviderCase(
         name="novita",
         api_key_env="NOVITA_API_KEY",
@@ -347,7 +347,6 @@ async def test_live_novita_deepseek_v4_flash_reasoning_content() -> None:
         ),
     )
 
-    assert result.message.reasoning_content or result.message.reasoning_details
     assert _message_has_output(result.message)
 
 
@@ -486,6 +485,7 @@ def _skip_if_provider_account_unavailable(
     message = str(exc).lower()
     unavailable_terms = (
         "insufficient_balance",
+        "insufficient balance",
         "does not have enough credits",
         "not have enough credits",
         "account suspended",

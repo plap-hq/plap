@@ -1467,6 +1467,8 @@ async def test_stream_response_events_executes_batched_compaction() -> None:
     assert len(client.requests) == 2
     assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
     assert client.requests[0].tool_choice == "required"
+    assert client.requests[0].tools[0].function.parameters["properties"]["action"]["enum"] == ["apply", "bailout"]
+    assert client.requests[0].tools[0].function.parameters["required"] == ["action"]
     assert [message.content for message in client.requests[1].messages[1:]] == ["alpha beta summary", "gamma delta summary"]
 
 
@@ -1560,6 +1562,96 @@ async def test_stream_response_events_accepts_stringified_compaction_ranges() ->
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["compaction", "message"]
+
+
+async def test_stream_response_events_accepts_bare_numeric_compaction_citations() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="compact_call_1",
+                        name="compact",
+                        arguments=json.dumps(
+                            {
+                                "action": "apply",
+                                "ranges": [
+                                    {
+                                        "start": "0",
+                                        "end": "1",
+                                        "summary": "alpha beta summary",
+                                        "summary_fidelity": 4,
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="final answer"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[_message("user", "alpha"), _message("assistant", "beta")],
+            ),
+            settings=_settings(profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["compaction", "message"]
+
+
+def test_apply_compaction_accepts_boundary_citations_for_visible_summary_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    span = ChatMessageSpan(
+        start=0,
+        end=2,
+        message=StateMessage(role="assistant", content="Longer summary that still preserves marker RETAIN-MONEY-314."),
+        token_count=100,
+        summary_fidelity=5,
+    )
+    arguments = json.dumps(
+        {
+            "action": "apply",
+            "ranges": [
+                {
+                    "start": "[~0]",
+                    "end": "[~2]",
+                    "summary": "RETAIN-MONEY-314 summary.",
+                    "summary_fidelity": 5,
+                }
+            ],
+        }
+    )
+
+    monkeypatch.setattr(
+        compact_module,
+        "_context_prompt_token_count",
+        lambda spans, **_: sum(row.token_count for row in spans),
+    )
+    monkeypatch.setattr(compact_module, "_measure_compaction_messages", lambda *_args, **_kwargs: 1)
+
+    outcome, compacted = compact_module.apply_compaction_call(
+        [span],
+        arguments,
+        actor_config=RuntimeActorConfig(model="plap/test"),
+        allow_bailout=False,
+    )
+
+    assert outcome == compact_module.CompactionOutcome.APPLIED
+    assert [(row.start, row.end) for row in compacted] == [(0, 2)]
+    assert compacted[0].message.content == "RETAIN-MONEY-314 summary."
 
 
 async def test_stream_response_events_compaction_recount_uses_main_request_measurement_context(
@@ -2793,6 +2885,9 @@ async def test_stream_response_events_accepts_empty_compaction_bailout() -> None
     assert len(client.requests) == 2
     assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
     assert client.requests[0].tool_choice == "required"
+    assert client.requests[0].tools[0].function.parameters["properties"]["action"]["enum"] == ["apply", "bailout"]
+    assert "bailout_reason" in client.requests[0].tools[0].function.parameters["properties"]
+    assert client.requests[0].tools[0].function.parameters["required"] == ["action"]
     assert client.requests[1].tools == []
     assert sum(1 for message in client.requests[0].messages if message.role == "user") == 1
     assert sum(1 for message in client.requests[1].messages if message.role == "user") == 1
@@ -3253,6 +3348,9 @@ async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch:
     assert [tool.function.name for tool in client.requests[0].tools] == [COMPACT_TOOL_NAME]
     assert client.requests[0].tool_choice == "required"
     assert 'does not allow `action="bailout"`' in (client.requests[0].messages[0].content or "")
+    assert client.requests[0].tools[0].function.parameters["properties"]["action"]["enum"] == ["apply"]
+    assert "bailout_reason" not in client.requests[0].tools[0].function.parameters["properties"]
+    assert client.requests[0].tools[0].function.parameters["required"] == ["action", "ranges"]
     assert client.requests[1].tools == []
 
 

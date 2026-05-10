@@ -52,7 +52,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="ab446a3de5e171ea341227e24bb1f090e1b771f7",
             ),
             compactor=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
@@ -63,12 +63,12 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="ab446a3de5e171ea341227e24bb1f090e1b771f7",
             ),
             reviewer=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
@@ -149,7 +149,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             compactor=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
@@ -160,12 +160,12 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reviewer=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
-                model="openrouter/deepseek/deepseek-v4-flash:nitro",
+                model="novita/deepseek/deepseek-v4-flash",
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
@@ -891,6 +891,7 @@ class Settings(BaseSettings):
     log_json: bool = False
     log_file: str | None = None
     llm_lightning_api_key: str | None = None
+    llm_canopywave_api_key: str | None = None
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None

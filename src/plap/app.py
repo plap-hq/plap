@@ -12,6 +12,7 @@ from litestar.exceptions import HTTPException, NotAuthorizedException, Validatio
 from plap.auth import APIKeyManager
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.canopywave import CanopyWaveChatCompletionClient
 from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
 from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.crof import CrofChatCompletionClient
@@ -206,6 +207,10 @@ def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
         client = LightningChatCompletionClient(api_key=settings.llm_lightning_api_key)
         yield ModelRoute(prefix="lightning/", client=client)
 
+    if settings.llm_canopywave_api_key:
+        client = CanopyWaveChatCompletionClient(api_key=settings.llm_canopywave_api_key)
+        yield ModelRoute(prefix="canopywave/", client=client)
+
     if settings.llm_novita_api_key:
         client = NovitaChatCompletionClient(api_key=settings.llm_novita_api_key)
         yield ModelRoute(prefix="novita/", client=client)
@@ -384,6 +389,8 @@ def _has_configured_chat_completion_route(settings: Settings, model: str) -> boo
 def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
     if settings.llm_lightning_api_key:
         yield "lightning/"
+    if settings.llm_canopywave_api_key:
+        yield "canopywave/"
     if settings.llm_novita_api_key:
         yield "novita/"
     if settings.llm_fireworks_api_key:

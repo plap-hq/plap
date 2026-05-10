@@ -8,6 +8,11 @@ import pytest
 from fireworks.client.error import InvalidRequestError
 from openai import BadRequestError
 
+from plap.llms.canopywave import (
+    CANOPYWAVE_OPENAI_BASE_URL,
+    CanopyWaveChatCompletionClient,
+    to_canopywave_chat_params,
+)
 from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -388,6 +393,59 @@ def test_novita_deepseek_v4_rejects_ambiguous_forced_tool_choice() -> None:
 
     with pytest.raises(ChatCompletionUnsupportedRequestError, match="forced function"):
         to_novita_chat_params(request, stream=False)
+
+
+def test_canopywave_params_preserve_openai_compatible_fields() -> None:
+    params = to_canopywave_chat_params(_request(), stream=True)
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["max_completion_tokens"] == 128
+    assert params["parallel_tool_calls"] is True
+    assert params["reasoning_effort"] == "low"
+    assert params["prompt_cache_key"] == "cache-a"
+    assert params["metadata"] == {"k": "v"}
+    assert params["service_tier"] == "flex"
+    assert params["prediction"] == {"type": "content", "content": "expected"}
+
+
+def test_canopywave_params_strip_tool_schema_patterns_without_mutating_request() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "pattern": "^[a-z]+$",
+            },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                },
+            },
+        },
+    }
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="user", content="hello")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters=schema, strict=True))],
+    )
+
+    params = to_canopywave_chat_params(request, stream=False)
+    parameters = params["tools"][0]["function"]["parameters"]
+
+    assert "pattern" not in parameters["properties"]["id"]
+    assert "pattern" not in parameters["properties"]["items"]["items"]
+    assert schema["properties"]["id"]["pattern"] == "^[a-z]+$"
+    assert schema["properties"]["items"]["items"]["pattern"] == "^[0-9]+$"
+
+
+def test_canopywave_client_defaults_to_canopywave_base_url() -> None:
+    client = CanopyWaveChatCompletionClient(api_key="test-key")
+
+    assert str(client._client.base_url).rstrip("/") == CANOPYWAVE_OPENAI_BASE_URL
 
 
 def test_crof_params_map_supported_provider_fields() -> None:

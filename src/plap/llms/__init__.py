@@ -1,3 +1,4 @@
+from plap.llms.canopywave import CanopyWaveChatCompletionClient
 from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -40,6 +41,7 @@ from plap.llms.router import (
 )
 
 __all__ = [
+    "CanopyWaveChatCompletionClient",
     "ChatCompletionAuthenticationError",
     "ChatCompletionContextLengthExceededError",
     "ChatCompletionDelta",

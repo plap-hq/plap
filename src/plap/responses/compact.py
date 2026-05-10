@@ -178,7 +178,10 @@ Actions:
 SOFT_COMPACTION_PROMPT_SUFFIX = (
     'This run allows `action="bailout"` if another normal step should happen first or compaction would currently be unsafe.'
 )
-HARD_COMPACTION_PROMPT_SUFFIX = 'This run does not allow `action="bailout"`. You must use `action="apply"`.'
+HARD_COMPACTION_PROMPT_SUFFIX = (
+    'This run does not allow `action="bailout"`. You must use `action="apply"` and include the `ranges` field. '
+    'Use `ranges=[]` only when pruning alone makes the context smaller.'
+)
 
 
 class CompactionLevel(StrEnum):
@@ -209,95 +212,125 @@ def compaction_level_for_token_count(token_count: int, *, settings: CompactionSe
     return CompactionLevel.NONE
 
 
-def compact_tool() -> FunctionTool:
-    return FunctionTool(
-        description=(
-            "Make the visible cited conversation context smaller. Use action=apply to "
-            "replace ranges and optionally prune old duplicate tool calls or message reasoning. "
-            "Use action=bailout only when explicitly allowed and compaction should not happen yet."
+def _compact_action_schema(level: CompactionLevel) -> dict[str, object]:
+    if level == CompactionLevel.HARD:
+        return {
+            "type": "string",
+            "enum": ["apply"],
+            "description": "Always apply hard compaction.",
+        }
+    return {
+        "type": "string",
+        "enum": ["apply", "bailout"],
+        "description": "apply to compact the visible context, or bailout only when the run explicitly allows it.",
+    }
+
+
+def _compact_prune_before_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "description": (
+            "Optional pruning cutoffs. Set duplicate_tool_calls whenever repeated tool outputs before a "
+            "citation no longer need to be preserved exactly. Use reasoning to strip attached internal "
+            "reasoning traces from messages strictly before a citation."
         ),
-        name=COMPACT_TOOL_NAME,
-        parameters={
+        "properties": {
+            "duplicate_tool_calls": {
+                "type": "string",
+                "description": (
+                    "Visible citation cutoff. Deduplicate identical tool calls strictly before this citation. "
+                    "Set this unless repeated tool history itself matters, such as investigating retries, "
+                    "timing, or nondeterminism."
+                ),
+            },
+            "reasoning": {
+                "type": "string",
+                "description": (
+                    "Visible citation cutoff. Remove attached internal reasoning traces from messages "
+                    "strictly before this citation."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    }
+
+
+def _compact_ranges_schema() -> dict[str, object]:
+    return {
+        "type": "array",
+        "description": (
+            "Inclusive, non-overlapping visible citation ranges to replace. The start and end values "
+            "must be citations exactly as shown in the conversation context, such as [~0] or [~0_7]. "
+            "Use an empty array when pruning alone is useful."
+        ),
+        "items": {
             "type": "object",
             "properties": {
-                "action": {
+                "start": {
                     "type": "string",
-                    "enum": ["apply", "bailout"],
-                    "description": ("apply to compact the visible context, or bailout only when the run explicitly allows it."),
+                    "description": "Citation of the first visible segment, for example [~0].",
                 },
-                "bailout_reason": {
+                "end": {
                     "type": "string",
-                    "description": "Short reason for an explicit bailout.",
+                    "description": "Citation of the last visible segment, for example [~3].",
                 },
-                "prune_before": {
-                    "type": "object",
-                    "description": (
-                        "Optional pruning cutoffs. Set duplicate_tool_calls whenever repeated tool outputs before a "
-                        "citation no longer need to be preserved exactly. Use reasoning to strip attached internal "
-                        "reasoning traces from messages strictly before a citation."
-                    ),
-                    "properties": {
-                        "duplicate_tool_calls": {
-                            "type": "string",
-                            "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                            "description": (
-                                "Visible citation cutoff. Deduplicate identical tool calls strictly before this citation. "
-                                "Set this unless repeated tool history itself matters, such as investigating retries, "
-                                "timing, or nondeterminism."
-                            ),
-                        },
-                        "reasoning": {
-                            "type": "string",
-                            "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                            "description": (
-                                "Visible citation cutoff. Remove attached internal reasoning traces from messages "
-                                "strictly before this citation."
-                            ),
-                        },
-                    },
-                    "additionalProperties": False,
+                "summary": {
+                    "type": "string",
+                    "description": "Replacement summary for the selected range. Do not include citation markers or meta-commentary.",
                 },
-                "ranges": {
-                    "type": "array",
-                    "description": (
-                        "Inclusive, non-overlapping visible citation ranges to replace. The start and end values "
-                        "must be citations exactly as shown in the conversation context, such as [~0] or [~0_7]. "
-                        "Use an empty array when pruning alone is useful."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "start": {
-                                "type": "string",
-                                "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": "Citation of the first visible segment, including the square brackets, for example [~0].",
-                            },
-                            "end": {
-                                "type": "string",
-                                "pattern": r"^\[~\d+(?:_\d+)?\]$",
-                                "description": "Citation of the last visible segment, including the square brackets, for example [~3].",
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": (
-                                    "Replacement summary for the selected range. Do not include citation markers or meta-commentary."
-                                ),
-                            },
-                            "summary_fidelity": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                                "description": "Anchored 1-5 fidelity score for how well the summary can stand in for the selected range.",
-                            },
-                        },
-                        "required": ["start", "end", "summary", "summary_fidelity"],
-                        "additionalProperties": False,
-                    },
+                "summary_fidelity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": "Anchored 1-5 fidelity score for how well the summary can stand in for the selected range.",
                 },
             },
-            "required": ["action"],
+            "required": ["start", "end", "summary", "summary_fidelity"],
             "additionalProperties": False,
         },
+    }
+
+
+def _compact_parameters(level: CompactionLevel) -> dict[str, object]:
+    properties: dict[str, object] = {
+        "action": _compact_action_schema(level),
+        "prune_before": _compact_prune_before_schema(),
+        "ranges": _compact_ranges_schema(),
+    }
+    required = ["action"]
+    if level == CompactionLevel.SOFT:
+        properties["bailout_reason"] = {
+            "type": "string",
+            "description": "Short reason for an explicit bailout.",
+        }
+    else:
+        required.append("ranges")
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _compact_tool_description(level: CompactionLevel) -> str:
+    if level == CompactionLevel.HARD:
+        return (
+            "Make the visible cited conversation context smaller. Use action=apply to replace ranges and optionally "
+            "prune old duplicate tool calls or message reasoning. Bailout is not available in this hard compaction run."
+        )
+    return (
+        "Make the visible cited conversation context smaller. Use action=apply to "
+        "replace ranges and optionally prune old duplicate tool calls or message reasoning. "
+        "Use action=bailout only when explicitly allowed and compaction should not happen yet."
+    )
+
+
+def compact_tool(level: CompactionLevel) -> FunctionTool:
+    return FunctionTool(
+        description=_compact_tool_description(level),
+        name=COMPACT_TOOL_NAME,
+        parameters=_compact_parameters(level),
         strict=True,
         type="function",
     )
@@ -420,7 +453,7 @@ def build_compaction_request(
 
     messages = [ChatMessage(role="developer", content=developer_prompt)]
     messages.extend(row.render_for_model(include_citation=True) for row in main_context)
-    tool = compact_tool()
+    tool = compact_tool(level)
 
     return ChatCompletionRequest(
         model=actor_config.model,
@@ -481,6 +514,7 @@ def _compaction_arguments(result: ChatCompletionResult) -> str:
 
 
 def _normalize_citation(value: str) -> str:
+    bracketed = value.startswith("[") or value.endswith("]")
     if value.startswith("[") or value.endswith("]"):
         if not (value.startswith("[") and value.endswith("]")):
             raise _compaction_unavailable_error(
@@ -489,13 +523,15 @@ def _normalize_citation(value: str) -> str:
             )
         value = value[1:-1]
 
-    if not value.startswith("~"):
+    if value.startswith("~"):
+        value = value[1:]
+    elif bracketed:
         raise _compaction_unavailable_error(
             reason="compact_citation_invalid",
             private_message="compact range citation is invalid",
         )
 
-    parts = value[1:].split("_", 1)
+    parts = value.split("_", 1)
     if not parts[0].isdigit() or (len(parts) == 2 and not parts[1].isdigit()):
         raise _compaction_unavailable_error(
             reason="compact_citation_invalid",
@@ -511,6 +547,43 @@ def _normalize_citation(value: str) -> str:
         )
 
     return f"[~{start}_{end}]" if len(parts) == 2 else f"[~{start}]"
+
+
+def _citation_bounds(value: str) -> tuple[int, int]:
+    normalized = _normalize_citation(value)
+    bounds = normalized[2:-1].split("_", 1)
+    start = int(bounds[0])
+    end = int(bounds[1]) if len(bounds) == 2 else start
+    return start, end
+
+
+def _citation_from_bounds(start: int, end: int) -> str:
+    return f"[~{start}_{end}]" if start != end else f"[~{start}]"
+
+
+def _resolve_compaction_range(
+    start: str,
+    end: str,
+    segments_by_citation: dict[str, _VisibleSegment],
+) -> tuple[_VisibleSegment, _VisibleSegment]:
+    normalized_start = _normalize_citation(start)
+    normalized_end = _normalize_citation(end)
+    start_segment = segments_by_citation.get(normalized_start)
+    end_segment = segments_by_citation.get(normalized_end)
+    if start_segment is not None and end_segment is not None:
+        return start_segment, end_segment
+
+    start_bounds = _citation_bounds(start)
+    end_bounds = _citation_bounds(end)
+    if start_bounds[0] <= end_bounds[1]:
+        combined_segment = segments_by_citation.get(_citation_from_bounds(start_bounds[0], end_bounds[1]))
+        if combined_segment is not None:
+            return combined_segment, combined_segment
+
+    raise _compaction_unavailable_error(
+        reason="compact_range_citation_not_visible",
+        private_message="compact range citation is not visible",
+    )
 
 
 def _strip_reasoning_from_span(span: ChatMessageSpan) -> ChatMessageSpan:
@@ -711,18 +784,7 @@ def apply_compaction_call(
                 private_message="compact range summary_fidelity must be an integer from 1 to 5",
             )
 
-        start_segment = _resolve_visible_segment(
-            start,
-            segments_by_citation,
-            reason="compact_range_citation_not_visible",
-            private_message="compact range citation is not visible",
-        )
-        end_segment = _resolve_visible_segment(
-            end,
-            segments_by_citation,
-            reason="compact_range_citation_not_visible",
-            private_message="compact range citation is not visible",
-        )
+        start_segment, end_segment = _resolve_compaction_range(start, end, segments_by_citation)
         if start_segment.first_row_index > end_segment.first_row_index:
             raise _compaction_unavailable_error(
                 reason="compact_range_start_after_end",

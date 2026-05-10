@@ -51,6 +51,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     client = _create_chat_completion_client(
         _settings(
             llm_lightning_api_key="lightning-key",
+            llm_canopywave_api_key="canopywave-key",
             llm_novita_api_key="novita-key",
             llm_crof_api_key="crof-key",
             llm_openrouter_api_key="openrouter-key",
@@ -72,8 +73,10 @@ def test_runtime_actor_config_rejects_trust_remote_code_without_repo() -> None:
 
 def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
+        llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
+        llm_novita_api_key="novita-key",
         llm_openrouter_api_key="openrouter-key",
     )
 
@@ -83,8 +86,8 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     _assert_profile_model_prefixes(
         profile,
         main_prefix="openrouter/",
-        compactor_prefix="openrouter/",
-        reviewer_prefix="openrouter/",
+        compactor_prefix="novita/",
+        reviewer_prefix="novita/",
     )
     assert profile.compact_max_rounds > 0
     assert profile.debate_max_rounds > 0
@@ -99,8 +102,10 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
+        llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
         llm_lightning_api_key="lightning-key",
+        llm_novita_api_key="novita-key",
         llm_openrouter_api_key="openrouter-key",
     )
 
@@ -110,8 +115,8 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     _assert_profile_model_prefixes(
         profile,
         main_prefix="crof/",
-        compactor_prefix="openrouter/",
-        reviewer_prefix="openrouter/",
+        compactor_prefix="novita/",
+        reviewer_prefix="novita/",
     )
     assert profile.model_info.mode == "responses"
     assert profile.model_info.provider == "plap"
@@ -177,6 +182,24 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
                 reviewer_model="crof/glm-4.7-flash",
                 arbitrator_model="crof/glm-4.7-flash",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
+            )
+        },
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+
+def test_app_runtime_validates_canopywave_provider_prefix() -> None:
+    settings = _settings(
+        llm_canopywave_api_key="canopywave-key",
+        llm_lightning_api_key="lightning-key",
+        runtime_model_profiles={
+            "plap/deepseek": _profile_config(
+                main_model="canopywave/example-model",
+                main_debate_model="canopywave/example-model",
+                reviewer_model="canopywave/example-model",
+                arbitrator_model="canopywave/example-model",
+                reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
             )
         },
     )
@@ -709,7 +732,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
                 default_reasoning_effort="medium",
                 by_reasoning_effort={
                     "medium": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")),
-                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="openrouter/deepseek/deepseek-v4-flash:nitro")),
+                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="novita/deepseek/deepseek-v4-flash")),
                 },
             )
         },
@@ -719,7 +742,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
     high_profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
 
     assert default_profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert high_profile.main.model == "openrouter/deepseek/deepseek-v4-flash:nitro"
+    assert high_profile.main.model == "novita/deepseek/deepseek-v4-flash"
 
 
 def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:
