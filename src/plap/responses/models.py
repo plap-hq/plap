@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import ceil
 
 import blake3
 import msgspec
@@ -833,9 +834,29 @@ class MutableQueues:
         self.in_temp_debate = False
 
 
+def build_response_usage(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int,
+    reasoning_tokens: int,
+    reasoning_to_output: float,
+) -> ResponseUsage:
+    scaled_reasoning_tokens = ceil(reasoning_tokens * reasoning_to_output)
+    scaled_output_tokens = max(0, output_tokens + scaled_reasoning_tokens - reasoning_tokens)
+    return ResponseUsage(
+        input_tokens=input_tokens,
+        input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
+        output_tokens=scaled_output_tokens,
+        output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=scaled_reasoning_tokens),
+        total_tokens=input_tokens + scaled_output_tokens,
+    )
+
+
 @dataclass(slots=True)
 class UsageLedger:
     budget: int | None
+    reasoning_to_output: float = 1.0
     hidden: list[tuple[PublicUsageConfig, ChatUsage]] = field(default_factory=list)
     anchor: ChatUsage | None = None
 
@@ -874,12 +895,12 @@ class UsageLedger:
         cached_tokens = self.anchor.cached_tokens or 0
         reasoning_tokens = (self.anchor.reasoning_tokens or 0) + hidden_equivalent_output
         output_tokens = self.anchor.output_tokens + hidden_equivalent_output
-        return ResponseUsage(
+        return build_response_usage(
             input_tokens=self.anchor.input_tokens,
-            input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
             output_tokens=output_tokens,
-            output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-            total_tokens=self.anchor.input_tokens + output_tokens,
+            cached_tokens=cached_tokens,
+            reasoning_tokens=reasoning_tokens,
+            reasoning_to_output=self.reasoning_to_output,
         )
 
 

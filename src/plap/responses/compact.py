@@ -29,9 +29,6 @@ from plap.responses.contracts import (
     FunctionTool,
     ResponseCompactionItem,
     ResponseCreateRequest,
-    ResponseUsage,
-    ResponseUsageInputTokensDetails,
-    ResponseUsageOutputTokensDetails,
 )
 from plap.responses.ingest import ChatMessageSpan, CompactionPayload, ingest_response_request
 from plap.responses.ingest.sealing import seal_compaction_payload
@@ -40,6 +37,7 @@ from plap.responses.models import (
     MutableQueues,
     StateMessage,
     UsageLedger,
+    build_response_usage,
     strip_leading_internal_citations,
 )
 from plap.responses.tokens import measure_prompt_tokens
@@ -945,12 +943,12 @@ async def run_explicit_compaction(
             created_at=int(time.time()),
             id=f"cmpresp_{secrets.token_urlsafe(18)}",
             output=[item],
-            usage=ResponseUsage(
+            usage=build_response_usage(
                 input_tokens=input_tokens,
-                input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
-                output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-                total_tokens=input_tokens + output_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
+                reasoning_to_output=profile.reasoning_to_output,
             ),
         )
 

@@ -592,6 +592,7 @@ class RuntimeProfileOverride(BaseModel):
     compact_threshold: int | None = Field(default=None, ge=0)
     compact_max_rounds: int | None = Field(default=None, ge=0)
     debate_max_rounds: int | None = Field(default=None, ge=0)
+    reasoning_to_output: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_compaction_config(self) -> RuntimeProfileOverride:
@@ -628,6 +629,8 @@ class RuntimeProfileOverride(BaseModel):
             updates["compact_max_rounds"] = self.compact_max_rounds
         if self.debate_max_rounds is not None:
             updates["debate_max_rounds"] = self.debate_max_rounds
+        if self.reasoning_to_output is not None:
+            updates["reasoning_to_output"] = self.reasoning_to_output
         return profile.model_copy(update=updates)
 
     def overridden_fields(self) -> set[str]:
@@ -660,6 +663,8 @@ class RuntimeProfileOverride(BaseModel):
             fields.add("compact_max_rounds")
         if self.debate_max_rounds is not None:
             fields.add("debate_max_rounds")
+        if self.reasoning_to_output is not None:
+            fields.add("reasoning_to_output")
         return fields
 
     def conflicts_with(self, other: RuntimeProfileOverride) -> set[str]:
@@ -691,6 +696,7 @@ class RuntimeModelProfileConfig(BaseModel):
     compact_threshold: int | None = Field(default=None, ge=0)
     compact_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
+    reasoning_to_output: float = Field(default=1.0, ge=0)
     default_reasoning_effort: ReasoningEffort | None = None
     by_service_tier: dict[ServiceTier, RuntimeProfileOverride] = Field(default_factory=dict)
     by_reasoning_effort: dict[ReasoningEffort, RuntimeProfileOverride] = Field(default_factory=dict)

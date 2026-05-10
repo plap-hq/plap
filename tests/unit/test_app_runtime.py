@@ -821,6 +821,27 @@ def test_app_runtime_resolves_model_info_overrides() -> None:
     assert priority.model_info.max_input_tokens == 4096
 
 
+def test_app_runtime_resolves_reasoning_to_output_override() -> None:
+    settings = _settings(
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+                by_service_tier={"priority": RuntimeProfileOverride(reasoning_to_output=1.5)},
+            )
+        }
+    )
+
+    base = settings.resolve_runtime_model_profile("plap/standard")
+    priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
+
+    assert base.reasoning_to_output == 1.0
+    assert priority.reasoning_to_output == 1.5
+
+
 def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -> None:
     with pytest.raises(ValueError, match="both set"):
         _profile_config(
@@ -831,6 +852,19 @@ def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -
             reasoning_summarizer_model="crof/qwen3.5-9b",
             by_service_tier={"priority": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"))},
             by_reasoning_effort={"high": RuntimeProfileOverride(main=RuntimeActorOverride(model="crof/glm-4.7-flash"))},
+        )
+
+
+def test_runtime_profile_rejects_conflicting_reasoning_to_output_overrides() -> None:
+    with pytest.raises(ValueError, match="reasoning_to_output"):
+        _profile_config(
+            main_model="crof/qwen3.5-9b",
+            main_debate_model="crof/qwen3.5-9b",
+            reviewer_model="crof/qwen3.5-9b",
+            arbitrator_model="crof/qwen3.5-9b",
+            reasoning_summarizer_model="crof/qwen3.5-9b",
+            by_service_tier={"priority": RuntimeProfileOverride(reasoning_to_output=1.2)},
+            by_reasoning_effort={"high": RuntimeProfileOverride(reasoning_to_output=1.4)},
         )
 
 
@@ -877,6 +911,7 @@ def _profile_config(
     by_service_tier: dict[str, RuntimeProfileOverride] | None = None,
     by_reasoning_effort: dict[str, RuntimeProfileOverride] | None = None,
     supported_parameters: list[str] | None = None,
+    reasoning_to_output: float = 1.0,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name=display_name,
@@ -922,6 +957,7 @@ def _profile_config(
         default_reasoning_effort=default_reasoning_effort,
         by_service_tier=by_service_tier or {},
         by_reasoning_effort=by_reasoning_effort or {},
+        reasoning_to_output=reasoning_to_output,
     )
 
 

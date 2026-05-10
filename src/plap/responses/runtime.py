@@ -529,7 +529,7 @@ async def run_response(
     await out.created()
     await out.in_progress()
 
-    usage_ledger = UsageLedger(budget=request.max_output_tokens)
+    usage_ledger = UsageLedger(budget=request.max_output_tokens, reasoning_to_output=profile.reasoning_to_output)
     compaction_settings = resolve_compaction_settings(profile, request)
 
     compactor = Compactor(

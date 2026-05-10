@@ -607,6 +607,34 @@ async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -
     assert len(client.requests) == 1
 
 
+async def test_stream_response_events_scales_reasoning_to_output_usage() -> None:
+    client = _StaticChatClient(
+        ChatMessage(role="assistant", content="answer"),
+        usages=ChatUsage(input_tokens=10, output_tokens=12, total_tokens=22, cached_tokens=1, reasoning_tokens=5),
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(profile=_profile_config(reasoning_to_output=1.5)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert completed.usage is not None
+    assert completed.usage.input_tokens == 10
+    assert completed.usage.input_tokens_details.cached_tokens == 1
+    assert completed.usage.output_tokens == 15
+    assert completed.usage.output_tokens_details.reasoning_tokens == 8
+    assert completed.usage.total_tokens == 25
+
+
 async def test_stream_response_events_rejects_finish_reason_mismatch_with_tool_calls() -> None:
     with pytest.raises(PlapError) as exc_info:
         _ = [
@@ -3619,6 +3647,40 @@ async def test_run_explicit_compaction_retry_usage_is_normalized() -> None:
     assert response.usage.total_tokens == 50
 
 
+async def test_run_explicit_compaction_scales_reasoning_to_output_usage() -> None:
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ChatToolCall(
+                    id="compact_1",
+                    name=COMPACT_TOOL_NAME,
+                    arguments=('{"action":"apply","ranges":[{"start":"[~0]","end":"[~1]","summary":"tiny","summary_fidelity":5}]}'),
+                )
+            ],
+        ),
+        usages=ChatUsage(input_tokens=10, output_tokens=12, total_tokens=22, cached_tokens=2, reasoning_tokens=5),
+    )
+
+    response = await run_explicit_compaction(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[_message("user", "first long note"), _message("user", "second long note")],
+        ),
+        profile=_profile_config(soft_compact_threshold=1, compact_max_rounds=1, reasoning_to_output=1.5),
+        sealing_keyring=_keyring(),
+        chat_completion_client=client,
+        prompt_cache_key_base=None,
+    )
+
+    assert response.usage.input_tokens == 10
+    assert response.usage.input_tokens_details.cached_tokens == 2
+    assert response.usage.output_tokens == 15
+    assert response.usage.output_tokens_details.reasoning_tokens == 8
+    assert response.usage.total_tokens == 25
+
+
 async def test_run_explicit_compaction_validates_with_main_tokenizer_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4270,6 +4332,7 @@ def _profile_config(
     debate_max_rounds: int = 0,
     supported_parameters: list[str] | None = None,
     transcript_recount_margin: int = 4096,
+    reasoning_to_output: float = 1.0,
 ) -> RuntimeModelProfileConfig:
     return RuntimeModelProfileConfig(
         display_name="Test Model",
@@ -4311,6 +4374,7 @@ def _profile_config(
         compact_max_rounds=compact_max_rounds,
         debate_max_rounds=debate_max_rounds,
         transcript_recount_margin=transcript_recount_margin,
+        reasoning_to_output=reasoning_to_output,
     )
 
 
