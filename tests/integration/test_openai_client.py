@@ -84,7 +84,7 @@ async def test_async_openai_client_unsupported_methods(
     assert retrieved.value.status_code == 404
     assert input_items.value.status_code == 404
     assert deleted.value.status_code == 404
-    assert token_count.value.status_code == 400
+    assert token_count.value.status_code == 405
 
 
 async def test_async_openai_client_compact_method(openai_client: AsyncOpenAI) -> None:

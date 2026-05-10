@@ -174,7 +174,7 @@ async def test_model_routes_return_public_synthetic_metadata(
     assert "reviewer" not in info["data"][0]
 
 
-async def test_unimplemented_response_routes_return_honest_errors(
+async def test_missing_response_routes_and_omitted_input_tokens_route(
     test_app,
     seeded_auth_data,
 ) -> None:
@@ -196,7 +196,7 @@ async def test_unimplemented_response_routes_return_honest_errors(
     assert deleted.json()["error"]["code"] == "response_not_found"
     assert input_items.status_code == 404
     assert input_items.json()["error"]["code"] == "response_not_found"
-    assert _error_code(input_tokens) == (400, "unsupported_operation", "Response input token counting is not supported.")
+    assert input_tokens.status_code == 405
 
 
 async def test_compact_route_returns_compaction_output(

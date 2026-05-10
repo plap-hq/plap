@@ -279,60 +279,6 @@ class ResponseCreateRequest(StrictModel):
         return _validate_metadata(value)
 
 
-class InputTokensCountRequest(StrictModel):
-    conversation: str | ConversationReference | None = Field(
-        default=None,
-        description="Conversation context to count with the input.",
-    )
-    input: str | list[RequestInputItem] | None = Field(
-        default=None,
-        description="Text or supported input items to count.",
-    )
-    instructions: str | None = Field(
-        default=None,
-        description="Instructions to include in the token count.",
-    )
-    model: str | None = Field(default=None, description="Model ID used for counting.")
-    parallel_tool_calls: bool | None = Field(
-        default=None,
-        description="Whether tool-call parallelism should be considered.",
-    )
-    previous_response_id: str | None = Field(
-        default=None,
-        description="Previous response ID used as context for counting.",
-    )
-    reasoning: ReasoningConfig | None = Field(
-        default=None,
-        description="Reasoning configuration to include in the count.",
-    )
-    text: ResponseTextConfig | None = Field(
-        default=None,
-        description="Text response config to include in the count.",
-    )
-    tool_choice: ToolChoice | None = Field(
-        default=None,
-        description="Tool-choice config to include in the count.",
-    )
-    tools: list[SupportedTool] | None = Field(
-        default=None,
-        description="Supported tool definitions to include in the count.",
-    )
-    truncation: Literal["auto", "disabled"] | None = Field(
-        default=None,
-        description="Truncation mode used for count calculation.",
-    )
-
-    @field_validator("input", mode="before")
-    @classmethod
-    def validate_input_variants(cls, value: object) -> object:
-        return ResponseCreateRequest.validate_input_variants(value)
-
-    @field_validator("tools", mode="before")
-    @classmethod
-    def validate_tool_variants(cls, value: object) -> object:
-        return ResponseCreateRequest.validate_tool_variants(value)
-
-
 class CompactRequest(StrictModel):
     input: str | list[RequestInputItem] | None = Field(
         default=None,

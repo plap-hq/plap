@@ -18,7 +18,6 @@ from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
     InputItemsPage,
-    InputTokensCountRequest,
     ModelInfoListObject,
     ModelListObject,
     ReasoningEffort,
@@ -60,23 +59,6 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
             message=f"response not found for {action}: {response_id}",
             level=ErrorLevel.WARNING,
             context={"action": action, "response_id": response_id},
-        ),
-    )
-
-
-def _unsupported_operation_error(*, code: str, message: str, reason: str, private_message: str) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=400,
-            type="invalid_request_error",
-            code=code,
-            message=message,
-        ),
-        private=PrivateError(
-            event="response.unsupported_operation",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
         ),
     )
 
@@ -320,25 +302,6 @@ async def list_input_items(
     return projection.input_items_page(page)
 
 
-@post(
-    "/v1/responses/input_tokens",
-    status_code=200,
-    dependencies=HTTP_ROUTE_DEPENDENCIES,
-)
-async def count_input_tokens(
-    data: InputTokensCountRequest,
-    auth_context: AuthContext,
-) -> object:
-    _ = auth_context
-    _ = data
-    raise _unsupported_operation_error(
-        code="unsupported_operation",
-        message="Response input token counting is not supported.",
-        reason="response_input_token_count_unsupported",
-        private_message="response input token counting route is not supported",
-    )
-
-
 @websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
 async def responses_socket(
     socket: WebSocket,
@@ -466,8 +429,9 @@ RESPONSE_ROUTE_HANDLERS = [
     # OpenAI exposes POST /v1/responses/{response_id}/cancel, but it only
     # applies to background responses. We do not support background execution
     # yet, so there is no detached response job to cancel.
+    # OpenAI also exposes POST /v1/responses/input_tokens. We intentionally do
+    # not route it because provider-compatible token counting is not supported.
     compact_response,
     list_input_items,
-    count_input_tokens,
     responses_socket,
 ]

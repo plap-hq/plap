@@ -219,14 +219,6 @@ class CompactedResponseObject(StrictModel):
     usage: ResponseUsage = Field(description="Token usage for the compaction request.")
 
 
-class InputTokenCountResponse(StrictModel):
-    input_tokens: int = Field(description="Number of input tokens counted.")
-    object: Literal["response.input_tokens"] = Field(
-        default="response.input_tokens",
-        description="Object type discriminator for token-count responses.",
-    )
-
-
 class InputItemsPage(StrictModel):
     data: list[InputItemsPageItem] = Field(description="Page of supported input items.")
     first_id: str | None = Field(default=None, description="First item ID in this page.")
