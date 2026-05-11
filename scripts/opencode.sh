@@ -36,6 +36,11 @@ ensure_provider_deps
 
 export OPENCODE_DISABLE_GLOBAL_CONFIG=1
 export OPENCODE_CONFIG="$repo_root/scripts/opencode.json"
+# Temporary workaround: archive/opencode globally clamps max output tokens to 32k
+# unless this flag is set. The correct fix is external to opencode source: load a
+# local server plugin with a `chat.params` hook that sets `maxOutputTokens = undefined`
+# for the PLAP/opencode provider so PLAP can own the request budget.
+export OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000
 export OPENCODE_CONFIG_CONTENT="$(PLAP_DEV_BASE_URL="$PLAP_DEV_BASE_URL" PLAP_DEV_API_KEY="$PLAP_DEV_API_KEY" PLAP_PROVIDER_MODULE="$provider_module" python3 - <<'PY'
 import json
 import os
