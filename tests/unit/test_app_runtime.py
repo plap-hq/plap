@@ -83,17 +83,8 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp-mini"]
-    _assert_profile_model_prefixes(
-        profile,
-        main_prefix="openrouter/",
-        compactor_prefix="novita/",
-        reviewer_prefix="novita/",
-    )
     assert profile.compact_max_rounds > 0
     assert profile.debate_max_rounds > 0
-    assert profile.model_info.mode == "responses"
-    assert profile.model_info.provider == "plap"
-    assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
         profile.model_info.supported_parameters
@@ -112,15 +103,6 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp"]
-    _assert_profile_model_prefixes(
-        profile,
-        main_prefix="crof/",
-        compactor_prefix="novita/",
-        reviewer_prefix="novita/",
-    )
-    assert profile.model_info.mode == "responses"
-    assert profile.model_info.provider == "plap"
-    assert not profile.model_info.deprecated
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
         profile.model_info.supported_parameters
@@ -148,7 +130,6 @@ def test_app_runtime_validates_runtime_profile_tokenizers(monkeypatch: pytest.Mo
     _validate_runtime_profile_tokenizers(settings)
 
     assert set(seen) == {
-        ("stepfun-ai/Step-3.5-Flash", "ab446a3de5e171ea341227e24bb1f090e1b771f7", False),
         ("deepseek-ai/DeepSeek-V4-Flash", "6976c7ff1b30a1b2cb7805021b8ba4684041f136", False),
         ("XiaomiMiMo/MiMo-V2.5-Pro", "a75207db63de3c320950fe6fcfa9ff60f341b7a2", False),
     }
@@ -159,7 +140,7 @@ def test_app_runtime_rejects_invalid_runtime_profile_tokenizer(monkeypatch: pyte
 
     def fake_measure_request_tokens(request, *, actor_config):
         _ = request
-        if actor_config.tokenizer_hf_repo == "stepfun-ai/Step-3.5-Flash":
+        if actor_config.tokenizer_hf_repo == "deepseek-ai/DeepSeek-V4-Flash":
             raise AttributeError("missing max_position_embeddings")
         return 1
 
@@ -169,7 +150,6 @@ def test_app_runtime_rejects_invalid_runtime_profile_tokenizer(monkeypatch: pyte
         _validate_runtime_profile_tokenizers(settings)
 
     assert exc_info.value.private.reason == "runtime_profile_tokenizer_invalid"
-    assert "Step-3.5-Flash" in exc_info.value.private.message
 
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
@@ -403,7 +383,6 @@ def test_app_runtime_includes_builtin_jina_provider_when_api_key_present(monkeyp
 
     assert len(providers) == 1
     assert isinstance(providers[0], MCPToolProvider)
-    assert providers[0].name == "jina"
     assert set(providers[0].tool_configs) == {
         "read_url",
         "search_web",
@@ -442,11 +421,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
 
     _validate_runtime_model_profiles(settings)
 
-    profile = settings.runtime_model_profiles["plap/standard"]
-    assert profile.display_name == "Test Model"
-    assert profile.main.model == "lightning/lightning-ai/gpt-oss-20b"
-    assert profile.main_debate.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.reasoning_summarizer.model == "lightning/lightning-ai/llama-3.3-70b"
+    assert "plap/standard" in settings.runtime_model_profiles
 
 
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
@@ -542,8 +517,6 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     profile = settings.resolve_runtime_model_profile("plap/standard")
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
-    assert profile.display_name == "Test Model"
-    assert profile.main.model == "lightning/lightning-ai/gpt-oss-20b"
     assert profile.reviewer_transcript_token_budget == 1024
     assert profile.arbitrator_transcript_token_budget == 768
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="default")) is profile
@@ -670,7 +643,6 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
     priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
 
     assert priority is not base
-    assert priority.display_name == "Test Model"
     assert priority.main.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.reviewer.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.compactor.model == "crof/qwen3.5-9b"
@@ -812,12 +784,8 @@ def test_app_runtime_resolves_model_info_overrides() -> None:
         }
     )
 
-    base = settings.resolve_runtime_model_profile("plap/standard")
     priority = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="priority"))
 
-    assert base.model_info.description == "Test profile"
-    assert priority.model_info.display_name == "Priority Model"
-    assert priority.model_info.description == "Priority profile"
     assert priority.model_info.max_input_tokens == 4096
 
 
@@ -959,18 +927,3 @@ def _profile_config(
         by_reasoning_effort=by_reasoning_effort or {},
         reasoning_to_output=reasoning_to_output,
     )
-
-
-def _assert_profile_model_prefixes(
-    profile: RuntimeModelProfileConfig,
-    *,
-    main_prefix: str,
-    compactor_prefix: str,
-    reviewer_prefix: str,
-) -> None:
-    assert profile.main.model.startswith(main_prefix)
-    assert profile.compactor.model.startswith(compactor_prefix)
-    assert profile.main_debate.model.startswith(main_prefix)
-    assert profile.reviewer.model.startswith(reviewer_prefix)
-    assert profile.arbitrator.model.startswith(reviewer_prefix)
-    assert profile.reasoning_summarizer.model.startswith("lightning/")

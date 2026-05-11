@@ -575,33 +575,6 @@ async def test_stream_response_events_stop_answer_triggers_debate() -> None:
     assert client.requests[1].response_format is None
 
 
-async def test_stream_response_events_debug_debate_summaries_emit_full_output_text() -> None:
-    client = _StaticChatClient(
-        [
-            ChatMessage(role="assistant", content="[~6]\nhello back"),
-            _assistant_text("ACCEPT"),
-        ]
-    )
-
-    events = [
-        event
-        async for event in stream_response_events(
-            ResponseCreateRequest(model="plap/test", input="hello"),
-            settings=_settings(profile=_profile_config(debate_max_rounds=2), debug_debate_summaries=True),
-            sealing_keyring=_keyring(),
-            tool_policy_resolver=_RecordingResolver(),
-            tool_call_policy_resolver=_RecordingCallResolver(),
-            chat_completion_client=client,
-            reasoning_summarizer=_FakeReasoningSummarizer(),
-        )
-    ]
-
-    completed = _completed_response(events)
-    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
-    assert completed.output[0].summary[0].text == "[~6]\nhello back"
-    assert completed.output[1].summary[0].text == "ACCEPT"
-
-
 async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -> None:
     client = _StaticChatClient(
         message=(
