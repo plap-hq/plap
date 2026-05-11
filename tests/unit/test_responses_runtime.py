@@ -568,9 +568,38 @@ async def test_stream_response_events_stop_answer_triggers_debate() -> None:
 
     completed = _completed_response(events)
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
+    assert completed.output[0].summary == []
+    assert completed.output[1].summary == []
     assert completed.output[-1].content[0].text == "[~6]\nhello back"
     assert len(client.requests) == 2
     assert client.requests[1].response_format is None
+
+
+async def test_stream_response_events_debug_debate_summaries_emit_full_output_text() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="[~6]\nhello back"),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2), debug_debate_summaries=True),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
+    assert completed.output[0].summary[0].text == "[~6]\nhello back"
+    assert completed.output[1].summary[0].text == "ACCEPT"
 
 
 async def test_stream_response_events_debate_budget_exhaustion_is_incomplete() -> None:
@@ -878,7 +907,7 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
     assert "Check ids." in (debate_request.messages[-1].content or "")
 
 
-async def test_stream_response_events_main_debate_reasoning_summary_includes_held_candidate_context() -> None:
+async def test_stream_response_events_main_debate_reasoning_summary_excludes_debate_turns() -> None:
     summarizer = _FakeReasoningSummarizer(("checked the note",))
     client = _StaticChatClient(
         [
@@ -902,28 +931,13 @@ async def test_stream_response_events_main_debate_reasoning_summary_includes_hel
         )
     ]
 
-    main_debate_call = next(
-        messages
-        for _, _, _, _, _, side, messages in summarizer.calls
-        if side == "main"
-        and any(
+    assert all(
+        not any(
             isinstance(message, StateMessage) and (message.content or "").startswith("Latest review note:\nBe shorter.")
             for message in messages
         )
+        for _, _, _, _, _, _, messages in summarizer.calls
     )
-
-    assert [message.to_primitive() for message in main_debate_call] == [
-        {"role": "assistant", "content": "draft answer"},
-        {
-            "role": "user",
-            "content": (
-                "Latest review note:\nBe shorter.\n\n"
-                "Write one short response note about the current proposed answer. "
-                "You may agree, partly agree, or disagree with the review note."
-            ),
-        },
-        {"role": "assistant", "content": "I can shorten it."},
-    ]
 
 
 async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
@@ -4305,10 +4319,11 @@ def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:
     )
 
 
-def _settings(*, profile: RuntimeModelProfileConfig | None = None) -> Settings:
+def _settings(*, profile: RuntimeModelProfileConfig | None = None, debug_debate_summaries: bool = False) -> Settings:
     return Settings(
         api_key_pepper="test-pepper",
         database_url="postgresql+asyncpg://test:test@localhost/test",
+        debug_debate_summaries=debug_debate_summaries,
         llm_crof_api_key="test-crof-key",
         mcp_servers=[],
         runtime_model_profiles={"plap/test": profile or _profile_config()},

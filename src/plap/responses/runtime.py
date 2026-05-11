@@ -491,6 +491,7 @@ async def run_response(
     request: ResponseCreateRequest,
     *,
     profile: RuntimeModelProfileConfig,
+    debug_debate_summaries: bool,
     sealing_keyring: SealingKeyring,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
@@ -557,6 +558,7 @@ async def run_response(
                 main_developer_message=main_developer_message,
                 request=request,
                 profile=profile,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=sealing_keyring,
                 tools=base_tools,
                 tool_policies=base_tool_policies,
@@ -680,6 +682,7 @@ async def run_response(
             await start_debate_from_candidate(
                 state=state,
                 out=out,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=sealing_keyring,
                 assistant=StateMessage(
                     role=result.message.role,
@@ -701,6 +704,7 @@ async def run_response(
                 main_developer_message=main_developer_message,
                 request=request,
                 profile=profile,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=sealing_keyring,
                 tools=base_tools,
                 tool_policies=base_tool_policies,
@@ -749,6 +753,7 @@ async def run_response(
                     await start_debate_from_candidate(
                         state=state,
                         out=out,
+                        debug_debate_summaries=debug_debate_summaries,
                         keyring=sealing_keyring,
                         assistant=StateMessage(
                             role=result.message.role,
@@ -771,6 +776,7 @@ async def run_response(
                         main_developer_message=main_developer_message,
                         request=request,
                         profile=profile,
+                        debug_debate_summaries=debug_debate_summaries,
                         keyring=sealing_keyring,
                         tools=base_tools,
                         tool_policies=base_tool_policies,
@@ -1013,6 +1019,7 @@ async def stream_response_events(
                                 out,
                                 prepared.execution_request,
                                 profile=profile,
+                                debug_debate_summaries=settings.debug_debate_summaries,
                                 sealing_keyring=sealing_keyring,
                                 tool_policy_resolver=tool_policy_resolver,
                                 tool_call_policy_resolver=tool_call_policy_resolver,

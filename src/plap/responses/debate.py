@@ -29,6 +29,7 @@ from plap.responses.contracts import (
     ResponseFunctionCallOutputItem,
     ResponseMessageItem,
     ResponseReasoningItem,
+    SummaryTextContent,
 )
 from plap.responses.ingest import (
     SealedCallID,
@@ -61,6 +62,23 @@ HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
 logger = structlog.get_logger(__name__)
+
+
+def _debug_reasoning_summary(*, enabled: bool, texts: Sequence[str | None]) -> list[SummaryTextContent]:
+    if not enabled:
+        return []
+    text = "\n\n".join(part for part in texts if part)
+    if not text:
+        return []
+    return [SummaryTextContent(text=text, type="summary_text")]
+
+
+def _assistant_output_text(messages: Sequence[StateMessage]) -> list[str | None]:
+    return [message.content for message in messages if message.role == "assistant"]
+
+
+def _single_text(value: str | None) -> list[str | None]:
+    return [value]
 
 
 def _debate_unavailable_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
@@ -934,6 +952,7 @@ async def start_debate_from_candidate(
     *,
     state: MutableQueues,
     out: ResponseEventIO,
+    debug_debate_summaries: bool,
     keyring: SealingKeyring,
     assistant: StateMessage,
     tool_calls: Sequence[ChatToolCall],
@@ -954,11 +973,18 @@ async def start_debate_from_candidate(
         messages=messages,
         continuation_side=Side.REVIEWER,
         out=out,
+        debug_debate_summaries=debug_debate_summaries,
         keyring=keyring,
     )
 
 
-async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEventIO, keyring: SealingKeyring) -> None:
+async def publish_accepted_candidate(
+    *,
+    state: MutableQueues,
+    out: ResponseEventIO,
+    debug_debate_summaries: bool,
+    keyring: SealingKeyring,
+) -> None:
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
@@ -992,11 +1018,9 @@ async def publish_accepted_candidate(*, state: MutableQueues, out: ResponseEvent
                 encrypted_content=seal_reasoning_payload(reasoning_payload, keyring=keyring),
                 id=f"rs_{secrets.token_urlsafe(18)}",
                 status="completed",
-                summary=[],
+                summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_single_text(candidate.content)),
                 type="reasoning",
-            ),
-            reasoning_side=reasoning_payload.side,
-            reasoning_messages=reasoning_payload.messages,
+            )
         )
 
     if public_assistant.content is not None or candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls:
@@ -1072,6 +1096,7 @@ async def resume_main_with_revise_bundle(
     *,
     state: MutableQueues,
     out: ResponseEventIO,
+    debug_debate_summaries: bool,
     keyring: SealingKeyring,
     note: str,
 ) -> None:
@@ -1096,11 +1121,9 @@ async def resume_main_with_revise_bundle(
             encrypted_content=seal_reasoning_payload(reasoning_payload, keyring=keyring),
             id=f"rs_{secrets.token_urlsafe(18)}",
             status="completed",
-            summary=[],
+            summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_single_text(note)),
             type="reasoning",
-        ),
-        reasoning_side=reasoning_payload.side,
-        reasoning_messages=reasoning_payload.messages,
+        )
     )
     state.append_main_stable(parts.held_candidate.message, content_hash=parts.held_candidate.content_hash)
     for row in parts.held_hidden_tool_rows:
@@ -1116,6 +1139,7 @@ async def continue_debate(
     main_developer_message: StateMessage,
     request,
     profile: RuntimeModelProfileConfig,
+    debug_debate_summaries: bool,
     keyring: SealingKeyring,
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
@@ -1133,7 +1157,12 @@ async def continue_debate(
     if profile.debate_max_rounds == 0:
         if held_anchor_index is not None:
             usage_ledger.use_hidden_as_anchor(held_anchor_index)
-        await publish_accepted_candidate(state=state, out=out, keyring=keyring)
+        await publish_accepted_candidate(
+            state=state,
+            out=out,
+            debug_debate_summaries=debug_debate_summaries,
+            keyring=keyring,
+        )
         await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
         return DebateResult.COMPLETED
 
@@ -1176,6 +1205,7 @@ async def continue_debate(
                     messages=outcome.messages,
                     continuation_side=Side.REVIEWER,
                     out=out,
+                    debug_debate_summaries=debug_debate_summaries,
                     keyring=keyring,
                 )
                 await _emit_debate_function_calls(
@@ -1196,6 +1226,7 @@ async def continue_debate(
                 messages=outcome.messages,
                 continuation_side=Side.MAIN,
                 out=out,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=keyring,
             )
             if decision.action == ReviewerActionType.ACCEPT:
@@ -1204,7 +1235,12 @@ async def continue_debate(
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
                     usage_ledger.set_anchor(outcome.usage)
-                await publish_accepted_candidate(state=state, out=out, keyring=keyring)
+                await publish_accepted_candidate(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                )
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
@@ -1243,6 +1279,7 @@ async def continue_debate(
                     messages=outcome.messages,
                     continuation_side=Side.MAIN,
                     out=out,
+                    debug_debate_summaries=debug_debate_summaries,
                     keyring=keyring,
                 )
                 await _emit_debate_function_calls(
@@ -1262,6 +1299,7 @@ async def continue_debate(
                 messages=outcome.messages,
                 continuation_side=Side.ARBITRATOR,
                 out=out,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=keyring,
             )
             parts = state.temp_main_parts()
@@ -1302,6 +1340,7 @@ async def continue_debate(
                     messages=outcome.messages,
                     continuation_side=Side.ARBITRATOR,
                     out=out,
+                    debug_debate_summaries=debug_debate_summaries,
                     keyring=keyring,
                 )
                 await _emit_debate_function_calls(
@@ -1328,6 +1367,7 @@ async def continue_debate(
                 messages=outcome.messages,
                 continuation_side=continuation,
                 out=out,
+                debug_debate_summaries=debug_debate_summaries,
                 keyring=keyring,
             )
             if decision.action == ArbitratorActionType.ACCEPT:
@@ -1336,13 +1376,24 @@ async def continue_debate(
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
                     usage_ledger.set_anchor(outcome.usage)
-                await publish_accepted_candidate(state=state, out=out, keyring=keyring)
+                await publish_accepted_candidate(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                )
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
             usage_ledger.record_hidden(profile.arbitrator.public_usage, outcome.usage)
             if decision.action == ArbitratorActionType.REVISE:
-                await resume_main_with_revise_bundle(state=state, out=out, keyring=keyring, note=decision.note or "")
+                await resume_main_with_revise_bundle(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    note=decision.note or "",
+                )
                 return DebateResult.CONTINUE_MAIN
 
             parts = state.temp_main_parts()
@@ -1358,6 +1409,7 @@ async def _persist_temp_turn(
     messages: Sequence[StateMessage],
     continuation_side: Side,
     out: ResponseEventIO,
+    debug_debate_summaries: bool,
     keyring: SealingKeyring,
 ) -> None:
     payload = ReasoningPayload(
@@ -1366,17 +1418,14 @@ async def _persist_temp_turn(
         continuation_side=continuation_side,
         messages=tuple(messages),
     )
-    summary_messages = _temp_turn_summary_messages(state=state, side=side, messages=messages)
     await out.output(
         ResponseReasoningItem(
             encrypted_content=seal_reasoning_payload(payload, keyring=keyring),
             id=f"rs_{secrets.token_urlsafe(18)}",
             status="completed",
-            summary=[],
+            summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_assistant_output_text(messages)),
             type="reasoning",
-        ),
-        reasoning_side=payload.side,
-        reasoning_messages=summary_messages,
+        )
     )
     if side == Side.MAIN:
         for message in messages:
@@ -1385,26 +1434,6 @@ async def _persist_temp_turn(
         for message in messages:
             state.append_side(side, message)
     state.set_continuation(continuation_side, in_temp_debate=True)
-
-
-def _temp_turn_summary_messages(
-    *,
-    state: MutableQueues,
-    side: Side,
-    messages: Sequence[StateMessage],
-) -> tuple[StateMessage, ...]:
-    if side == Side.MAIN and not state.main_context_temp:
-        return tuple(messages)
-    parts = state.temp_main_parts()
-    if parts.held_candidate is None:
-        return tuple(messages)
-    return (
-        parts.held_candidate.message,
-        *(row.message for row in parts.held_hidden_tool_rows),
-        *messages,
-    )
-
-
 async def _emit_debate_function_calls(
     *,
     side: Side,

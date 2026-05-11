@@ -35,6 +35,7 @@ STATE_ENV_KEYS = (
     "PLAP_API_KEY_PEPPER",
     "PLAP_DEBUG",
     "PLAP_DEBUG_PAYLOADS",
+    "PLAP_DEBUG_DEBATE_SUMMARIES",
     "PLAP_LOG_FILE",
     "PLAP_LOG_JSON",
     "PLAP_SEALING_KEYS",
@@ -116,6 +117,7 @@ def main() -> int:
         _ensure_managed_postgres(args, managed_state, resources)
         os.environ.setdefault("PLAP_DEBUG", "true")
         os.environ.setdefault("PLAP_DEBUG_PAYLOADS", "true")
+        os.environ.setdefault("PLAP_DEBUG_DEBATE_SUMMARIES", "true")
         os.environ.setdefault("PLAP_LOG_JSON", "true")
         os.environ.setdefault("PLAP_LOG_FILE", str(DEFAULT_LOG_FILE))
         os.environ.setdefault("PLAP_API_KEY_PEPPER", secrets.token_hex(24))
@@ -130,6 +132,7 @@ def main() -> int:
                 "PLAP_API_KEY_PEPPER": os.environ["PLAP_API_KEY_PEPPER"],
                 "PLAP_DEBUG": os.environ["PLAP_DEBUG"],
                 "PLAP_DEBUG_PAYLOADS": os.environ["PLAP_DEBUG_PAYLOADS"],
+                "PLAP_DEBUG_DEBATE_SUMMARIES": os.environ["PLAP_DEBUG_DEBATE_SUMMARIES"],
                 "PLAP_LOG_FILE": os.environ["PLAP_LOG_FILE"],
                 "PLAP_LOG_JSON": os.environ["PLAP_LOG_JSON"],
                 "PLAP_SEALING_KEYS": os.environ["PLAP_SEALING_KEYS"],

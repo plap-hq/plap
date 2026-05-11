@@ -894,6 +894,7 @@ class Settings(BaseSettings):
     sealing_keys: list[str]
     debug: bool = False
     debug_payloads: bool = False
+    debug_debate_summaries: bool = False
     log_json: bool = False
     log_file: str | None = None
     llm_lightning_api_key: str | None = None
