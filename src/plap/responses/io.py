@@ -46,7 +46,7 @@ from plap.responses.contracts import (
     ResponseUsage,
     SummaryTextContent,
 )
-from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
+from plap.responses.models import ReasoningMessagePatch, StateMessage
 from plap.responses.projection import ResponseProjection
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import PreparedRequest, ResponseStore
@@ -62,7 +62,7 @@ class _CommitKind(StrEnum):
 
 
 type _ReasoningMessages = tuple[StateMessage | ReasoningMessagePatch, ...]
-type _ReasoningMetadata = tuple[Side, _ReasoningMessages]
+type _ReasoningMetadata = _ReasoningMessages
 type _OutputMetadata = _ReasoningMetadata | None
 
 
@@ -124,7 +124,6 @@ class ResponseEventIO:
         self,
         item: ResponseOutputItem,
         *,
-        reasoning_side: Side | None = None,
         reasoning_messages: Sequence[StateMessage | ReasoningMessagePatch] | None = None,
     ) -> None:
         metadata: _OutputMetadata = None
@@ -132,9 +131,7 @@ class ResponseEventIO:
             if not isinstance(item, ResponseReasoningItem):
                 raise TypeError("reasoning_messages can only be attached to reasoning items")
             if self._reasoning_summary_mode is not None:
-                if reasoning_side is None:
-                    raise TypeError("reasoning_side is required for reasoning messages")
-                metadata = (reasoning_side, tuple(reasoning_messages))
+                metadata = tuple(reasoning_messages)
         log_debug(logger, "response.io.output.queued", item_type=item.type, reasoning_metadata=metadata is not None)
         log_payload(logger, "response.io.output.payload", item=item.model_dump(mode="json", exclude_none=True))
         await self._enqueue_commit(_CommitKind.OUTPUT, item, metadata, wait=True)
@@ -324,7 +321,7 @@ class ResponseEventIO:
         *,
         output_index: int,
     ) -> ResponseReasoningItem:
-        side, messages = metadata
+        messages = metadata
         added_item = item.model_copy(update={"status": "in_progress", "summary": []})
         await self._send_event(
             ResponseOutputItemAddedEvent(
@@ -343,7 +340,6 @@ class ResponseEventIO:
             item_id=item.id,
             mode=self._reasoning_summary_mode,
             output_index=output_index,
-            side=side,
         )
         await self._send_event(
             ResponseReasoningSummaryPartAddedEvent(
@@ -362,7 +358,6 @@ class ResponseEventIO:
                 reasoning_effort=self._reasoning_summarizer_reasoning_effort,
                 service_tier=self._reasoning_summarizer_service_tier,
                 mode=cast(ReasoningSummary, self._reasoning_summary_mode),
-                side=side,
                 messages=messages,
             ):
                 summary_text += delta

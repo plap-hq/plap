@@ -10,7 +10,7 @@ import structlog
 from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient, ReasoningEffort, ServiceTier
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import ReasoningSummary
-from plap.responses.models import ReasoningMessagePatch, Side, StateMessage
+from plap.responses.models import ReasoningMessagePatch, StateMessage
 
 logger = structlog.get_logger(__name__)
 
@@ -62,7 +62,6 @@ class IReasoningSummarizer(Protocol):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]: ...
 
@@ -79,7 +78,6 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
         summary_request = ChatCompletionRequest(
@@ -91,7 +89,7 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
                 ),
                 ChatMessage(
                     role="user",
-                    content=_summary_request_text(mode, side, messages),
+                    content=_summary_request_text(mode, messages),
                 ),
             ],
             model=model,
@@ -100,7 +98,7 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
             service_tier=service_tier,
             temperature=0,
         )
-        log_debug(logger, "reasoning.summary.start", message_count=len(messages), mode=mode, model=model, side=side)
+        log_debug(logger, "reasoning.summary.start", message_count=len(messages), mode=mode, model=model)
         log_payload(logger, "reasoning.summary.request.payload", request=asdict(summary_request))
         delta_count = 0
         async for delta in self._client.stream(summary_request):
@@ -108,7 +106,7 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
                 delta_count += 1
                 log_payload(logger, "reasoning.summary.delta", delta=delta.content_delta)
                 yield delta.content_delta
-        log_debug(logger, "reasoning.summary.done", delta_count=delta_count, model=model, side=side)
+        log_debug(logger, "reasoning.summary.done", delta_count=delta_count, model=model)
 
 
 class NullReasoningSummarizer(IReasoningSummarizer):
@@ -120,32 +118,22 @@ class NullReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        side: Side,
         messages: Sequence[StateMessage | ReasoningMessagePatch],
     ) -> AsyncIterator[str]:
-        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, side, messages
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, messages
         if False:
             yield ""
 
 
 def _summary_request_text(
     mode: ReasoningSummary,
-    side: Side,
     messages: Sequence[StateMessage | ReasoningMessagePatch],
 ) -> str:
     payload = msgspec.json.encode(
         [message.to_primitive() for message in messages],
         order="deterministic",
     ).decode()
-    return f"Summary mode: {mode}\nTrace perspective hint: {_summary_perspective_hint(side)}\n\nReasoning trace messages:\n{payload}"
-
-
-def _summary_perspective_hint(side: Side) -> str:
-    if side == "main":
-        return "assistant self-check or draft trace"
-    if side == "reviewer":
-        return "critique of the assistant draft"
-    return "private reconciliation of competing notes"
+    return f"Summary mode: {mode}\n\nReasoning trace messages:\n{payload}"
 
 
 def _summary_max_tokens(mode: ReasoningSummary) -> int:

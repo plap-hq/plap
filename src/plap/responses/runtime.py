@@ -831,7 +831,6 @@ async def run_response(
             )
             await out.output(
                 reasoning_item,
-                reasoning_side=reasoning_payload.side,
                 reasoning_messages=reasoning_payload.messages,
             )
 

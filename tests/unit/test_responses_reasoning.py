@@ -26,7 +26,6 @@ async def test_reasoning_summarizer_sends_strict_prompt_and_trace_payload() -> N
             reasoning_effort=None,
             service_tier=None,
             mode="concise",
-            side="reviewer",
             messages=[
                 ReasoningMessagePatch(
                     content_hash="abc123",

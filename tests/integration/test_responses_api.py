@@ -590,7 +590,6 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
         await out.in_progress()
         await out.output(
             reasoning_item,
-            reasoning_side="main",
             reasoning_messages=(reasoning_patch,),
         )
         await summarizer.entered.wait()
@@ -984,10 +983,9 @@ class _BlockingReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: object,
         service_tier: object,
         mode: str,
-        side: str,
         messages,
     ) -> AsyncIterator[str]:
-        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, side, messages
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, messages
         self.entered.set()
         await self.release.wait()
         if False:

@@ -936,7 +936,7 @@ async def test_stream_response_events_main_debate_reasoning_summary_excludes_deb
             isinstance(message, StateMessage) and (message.content or "").startswith("Latest review note:\nBe shorter.")
             for message in messages
         )
-        for _, _, _, _, _, _, messages in summarizer.calls
+        for _, _, _, _, _, messages in summarizer.calls
     )
 
 
@@ -3901,8 +3901,7 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
     assert summarizer.calls[0][2] is None
     assert summarizer.calls[0][3] is None
     assert summarizer.calls[0][4] == "concise"
-    assert summarizer.calls[0][5] == "main"
-    assert [message.to_primitive() for message in summarizer.calls[0][6]] == [
+    assert [message.to_primitive() for message in summarizer.calls[0][5]] == [
         {
             "content_hash": content_hash(StateMessage(role="assistant", content="answer")),
             "reasoning_content": "thinking",
@@ -4223,7 +4222,7 @@ class _YieldThenRaiseChatClient(IChatCompletionClient):
 class _FakeReasoningSummarizer(IReasoningSummarizer):
     def __init__(self, deltas: Sequence[str] = ()) -> None:
         self.deltas = tuple(deltas)
-        self.calls: list[tuple[str, object, object, str, str, tuple[object, ...]]] = []
+        self.calls: list[tuple[str, object, object, object, str, tuple[object, ...]]] = []
 
     async def stream(
         self,
@@ -4233,10 +4232,9 @@ class _FakeReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: object,
         service_tier: object,
         mode: str,
-        side: str,
         messages: Sequence[object],
     ) -> AsyncIterator[str]:
-        self.calls.append((model, prompt_cache_key, reasoning_effort, service_tier, mode, side, tuple(messages)))
+        self.calls.append((model, prompt_cache_key, reasoning_effort, service_tier, mode, tuple(messages)))
         for delta in self.deltas:
             yield delta
 
