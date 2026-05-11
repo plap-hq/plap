@@ -258,25 +258,6 @@ def _runtime_internal_error(*, reason: str, private_message: str, cause: BaseExc
         ),
     )
 
-
-def _runtime_unavailable_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=503,
-            type="server_error",
-            code="temporarily_unavailable",
-            message="Response generation is temporarily unavailable.",
-        ),
-        private=PrivateError(
-            event="response.unavailable",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
-            cause=cause,
-        ),
-    )
-
-
 def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private_message: str) -> PlapError:
     return _runtime_invalid_request_error(
         code="invalid_tool_definition",
@@ -728,7 +709,7 @@ async def run_response(
 
             server_outputs: dict[int, str] = {}
             client_call_indexes: list[int] = []
-            risky_client_indexes: list[int] = []
+            intercepted_client_indexes: list[int] = []
             for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
                 if policy.source == "server":
                     executor = effective_server_executors.get(call.name)
@@ -741,59 +722,51 @@ async def run_response(
                         canonical_tool_arguments(call.arguments),
                     )
                     continue
-                if policy.effect_class in {"safe", "visible"}:
+                if policy.effect_class == "safe" or profile.debate_max_rounds == 0:
                     client_call_indexes.append(index)
                 else:
-                    risky_client_indexes.append(index)
+                    intercepted_client_indexes.append(index)
 
-            if risky_client_indexes:
-                if profile.debate_max_rounds == 0:
-                    risky_client_indexes.clear()
-                else:
-                    await start_debate_from_candidate(
-                        state=state,
-                        out=out,
-                        debug_debate_summaries=debug_debate_summaries,
-                        keyring=sealing_keyring,
-                        assistant=StateMessage(
-                            role=result.message.role,
-                            content=result.message.content,
-                            name=result.message.name,
-                            tool_call_id=result.message.tool_call_id,
-                            tool_calls=[
-                                StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
-                                for call in result.message.tool_calls or ()
-                            ],
-                            reasoning_content=result.message.reasoning_content,
-                            reasoning_details=list(result.message.reasoning_details or ()),
-                        ),
-                        tool_calls=tool_calls,
-                        server_outputs=server_outputs,
-                    )
-                    debate_result = await continue_debate(
-                        state=state,
-                        out=out,
-                        main_developer_message=main_developer_message,
-                        request=request,
-                        profile=profile,
-                        debug_debate_summaries=debug_debate_summaries,
-                        keyring=sealing_keyring,
-                        tools=base_tools,
-                        tool_policies=base_tool_policies,
-                        server_executors=base_server_executors,
-                        chat_completion_client=chat_completion_client,
-                        prompt_cache_key_base=prompt_cache_key_base,
-                        usage_ledger=usage_ledger,
-                        held_anchor_index=usage_ledger.record_hidden(profile.main.public_usage, result.usage),
-                    )
-                    if debate_result == DebateResult.COMPLETED:
-                        return
-                    continue
-
-            if risky_client_indexes:
-                raise _runtime_unavailable_error(
-                    reason="unsupported_tool_policy_path", private_message="tool call requires unsupported policy path"
+            if intercepted_client_indexes:
+                await start_debate_from_candidate(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=sealing_keyring,
+                    assistant=StateMessage(
+                        role=result.message.role,
+                        content=result.message.content,
+                        name=result.message.name,
+                        tool_call_id=result.message.tool_call_id,
+                        tool_calls=[
+                            StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
+                            for call in result.message.tool_calls or ()
+                        ],
+                        reasoning_content=result.message.reasoning_content,
+                        reasoning_details=list(result.message.reasoning_details or ()),
+                    ),
+                    tool_calls=tool_calls,
+                    server_outputs=server_outputs,
                 )
+                debate_result = await continue_debate(
+                    state=state,
+                    out=out,
+                    main_developer_message=main_developer_message,
+                    request=request,
+                    profile=profile,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=sealing_keyring,
+                    tools=base_tools,
+                    tool_policies=base_tool_policies,
+                    server_executors=base_server_executors,
+                    chat_completion_client=chat_completion_client,
+                    prompt_cache_key_base=prompt_cache_key_base,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=usage_ledger.record_hidden(profile.main.public_usage, result.usage),
+                )
+                if debate_result == DebateResult.COMPLETED:
+                    return
+                continue
 
         public_assistant_message = StateMessage(
             role="assistant",

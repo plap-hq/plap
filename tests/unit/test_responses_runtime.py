@@ -474,6 +474,18 @@ async def test_stream_response_events_emits_safe_client_function_call() -> None:
 
 async def test_stream_response_events_emits_visible_client_function_call() -> None:
     call_resolver = _RecordingCallResolver()
+    client = _StaticChatClient(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="upstream_call_1",
+                    name="update_plan",
+                    arguments='{"step":"test"}',
+                )
+            ],
+        )
+    )
     events = [
         event
         async for event in stream_response_events(
@@ -482,18 +494,7 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
             sealing_keyring=_keyring(),
             tool_policy_resolver=_RecordingResolver({"update_plan": "visible"}),
             tool_call_policy_resolver=call_resolver,
-            chat_completion_client=_StaticChatClient(
-                ChatMessage(
-                    role="assistant",
-                    tool_calls=[
-                        ChatToolCall(
-                            id="upstream_call_1",
-                            name="update_plan",
-                            arguments='{"step":"test"}',
-                        )
-                    ],
-                )
-            ),
+            chat_completion_client=client,
             reasoning_summarizer=_FakeReasoningSummarizer(),
         )
     ]
@@ -502,6 +503,57 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     assert [item.type for item in completed.output] == ["message", "function_call"]
     assert completed.output[1].name == "update_plan"
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
+    assert len(client.requests) == 1
+
+
+async def test_stream_response_events_reviews_visible_client_function_call_when_debate_enabled() -> None:
+    call_resolver = _RecordingCallResolver()
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatToolCall(
+                        id="upstream_call_1",
+                        name="update_plan",
+                        arguments='{"step":"test"}',
+                    )
+                ],
+            ),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                include=["reasoning.encrypted_content"],
+                tools=[_tool("update_plan")],
+            ),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"update_plan": "visible"}),
+            tool_call_policy_resolver=call_resolver,
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message", "function_call"]
+    held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert held_payload.temp is True
+    assert held_payload.continuation_side == "reviewer"
+    assert held_payload.messages[0].tool_calls[0].name == "update_plan"
+    assert held_payload.messages[1].tool_call_id == "upstream_call_1"
+    reviewer_request_contents = "\n".join(message.content or "" for message in client.requests[1].messages)
+    assert CALLED_TOOL_DEFINITIONS_HEADER in reviewer_request_contents
+    assert '"name":"update_plan"' in reviewer_request_contents
+    assert completed.output[-1].name == "update_plan"
+    assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
+    assert len(client.requests) == 2
 
 
 def test_parse_reviewer_decision_extracts_note_from_wrapper_line() -> None:
