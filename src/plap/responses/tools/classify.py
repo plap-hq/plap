@@ -44,7 +44,7 @@ Definitions:
   contextual so call-time classification can decide later.
 """
 TOOL_EFFECT_CLASSIFIER_NAME = "llm_tool_effect_classifier"
-TOOL_EFFECT_CLASSIFIER_MODEL = "lightning/lightning-ai/gpt-oss-120b"
+TOOL_EFFECT_CLASSIFIER_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 
 TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -429,6 +429,7 @@ def _unknown_classification(
         confidence=0.0,
         rationale=rationale,
         raw_output=raw_output,
+        persistable=False,
     )
 
 
@@ -479,6 +480,7 @@ def _unknown_tool_call_classification(
         confidence=0.0,
         rationale=rationale,
         raw_output=raw_output,
+        persistable=False,
     )
 
 

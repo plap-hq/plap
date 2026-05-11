@@ -469,7 +469,7 @@ def build_compaction_request(
         tool_choice=ChatToolChoiceMode.REQUIRED,
         parallel_tool_calls=False,
         response_format=None,
-        max_completion_tokens=max_completion_tokens,
+        max_completion_tokens=actor_config.cap_max_completion_tokens(max_completion_tokens),
         temperature=request.temperature,
         top_p=request.top_p,
         top_logprobs=request.top_logprobs,

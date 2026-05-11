@@ -48,31 +48,36 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             ),
             main=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             compactor=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             reviewer=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
@@ -145,31 +150,36 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             ),
             main=RuntimeActorConfig(
                 model="crof/mimo-v2.5-pro",
+                max_completion_tokens=262_144,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             compactor=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
                 model="crof/mimo-v2.5-pro",
+                max_completion_tokens=262_144,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reviewer=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
                 model="novita/deepseek/deepseek-v4-flash",
+                max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-120b"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
@@ -535,6 +545,7 @@ class RuntimeActorConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     model: str
+    max_completion_tokens: int | None = Field(default=None, ge=1)
     tokenizer_hf_repo: str | None = None
     tokenizer_revision: str | None = None
     tokenizer_trust_remote_code: bool = False
@@ -556,11 +567,19 @@ class RuntimeActorConfig(BaseModel):
             return self
         return self.model_copy(update=override.model_dump(exclude_none=True))
 
+    def cap_max_completion_tokens(self, value: int | None) -> int | None:
+        if self.max_completion_tokens is None:
+            return value
+        if value is None:
+            return self.max_completion_tokens
+        return min(value, self.max_completion_tokens)
+
 
 class RuntimeActorOverride(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
     model: str | None = None
+    max_completion_tokens: int | None = Field(default=None, ge=1)
     reasoning_effort: ReasoningEffort | None = None
     service_tier: ServiceTier | None = None
 
@@ -568,6 +587,8 @@ class RuntimeActorOverride(BaseModel):
         fields: set[str] = set()
         if self.model is not None:
             fields.add(f"{prefix}.model")
+        if self.max_completion_tokens is not None:
+            fields.add(f"{prefix}.max_completion_tokens")
         if self.reasoning_effort is not None:
             fields.add(f"{prefix}.reasoning_effort")
         if self.service_tier is not None:
@@ -903,7 +924,7 @@ class Settings(BaseSettings):
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None
     llm_openrouter_api_key: str | None = None
-    tool_classifier_max_concurrency: int = 4
+    tool_classifier_max_concurrency: int = 2
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096
     runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(default_factory=_default_runtime_model_profiles)

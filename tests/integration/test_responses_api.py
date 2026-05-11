@@ -7,7 +7,6 @@ from sqlalchemy import text
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
-from plap.llms.chat import ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
 from plap.responses.contracts import (
     ConversationReference,
     OutputTextContent,
@@ -22,7 +21,7 @@ from plap.responses.ingest import content_hash, seal_reasoning_payload
 from plap.responses.io import ResponseEventIO
 from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, StateMessage
 from plap.responses.projection import ResponseProjection
-from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.routes import _sse_payload
 from plap.responses.store import ResponseStore
 from plap.responses.tools import (
@@ -566,7 +565,7 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
             keyring=test_app.state.sealing_keyring,
         ),
         id="rs_blocked_summary",
-        status="completed",
+        status="in_progress",
         summary=[],
         type="reasoning",
     )
@@ -588,10 +587,18 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
         out.start(task_group)
         await out.created()
         await out.in_progress()
-        await out.output(
-            reasoning_item,
-            reasoning_messages=(reasoning_patch,),
-        )
+        draft = await out.begin_reasoning_draft(reasoning_item)
+
+        async def run_summary() -> None:
+            await out.append_reasoning_draft_summary(
+                draft,
+                ReasoningSummaryPartSource(
+                    prior_summary=None,
+                    reasoning_text="private thinking",
+                ),
+            )
+
+        task_group.start_soon(run_summary)
         await summarizer.entered.wait()
 
         replay = await response_store.prepare_request(
@@ -975,7 +982,7 @@ class _BlockingReasoningSummarizer(IReasoningSummarizer):
         self.entered = anyio.Event()
         self.release = anyio.Event()
 
-    async def stream(
+    async def stream_part(
         self,
         *,
         model: str,
@@ -983,9 +990,9 @@ class _BlockingReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: object,
         service_tier: object,
         mode: str,
-        messages,
+        source,
     ) -> AsyncIterator[str]:
-        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, messages
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, source
         self.entered.set()
         await self.release.wait()
         if False:
@@ -1015,26 +1022,6 @@ class _RecordingToolClassifier(IToolClassifier):
             )
             for signature in signatures
         }
-
-
-class _RecordingChatCompletionClient(IChatCompletionClient):
-    def __init__(self) -> None:
-        self.requests: list[ChatCompletionRequest] = []
-
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        self.requests.append(request)
-        return ChatCompletionResult(
-            id=f"chatcmpl_{len(self.requests)}",
-            model=request.model,
-            created_at=None,
-            message=ChatMessage(role="assistant", content=f"reply {len(self.requests)}"),
-            finish_reason="stop",
-        )
-
-    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
-        _ = request
-        if False:
-            yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
 
 
 async def _append_response(

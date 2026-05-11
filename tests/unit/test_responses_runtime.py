@@ -18,6 +18,7 @@ from plap.llms.chat import (
     ChatFinishReason,
     ChatMessage,
     ChatToolCall,
+    ChatToolCallDelta,
     ChatUsage,
     IChatCompletionClient,
 )
@@ -33,6 +34,7 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     ResponseObject,
     ResponseTextConfig,
+    SummaryTextContent,
     TextFormatJSONObject,
     WebSearchTool,
 )
@@ -340,6 +342,51 @@ async def test_stream_response_events_emits_model_message_output() -> None:
     assert client.requests[0].messages[1].content == "hello"
 
 
+async def test_stream_response_events_uses_upstream_stream_for_snapshot_main() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="hello back"))
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello"),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert len(client.requests) == 1
+    assert client.requests[0].stream_options is not None
+    assert client.requests[0].stream_options.include_usage is True
+
+
+async def test_stream_response_events_caps_main_actor_max_completion_tokens_before_send() -> None:
+    client = _StaticChatClient(ChatMessage(role="assistant", content="hello back"))
+    profile = _profile_config().model_copy(
+        update={
+            "main": _profile_config().main.model_copy(update={"max_completion_tokens": 7}),
+        }
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(model="plap/test", input="hello", max_output_tokens=100),
+            settings=_settings(profile=profile),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    assert client.requests[0].max_completion_tokens == 7
+
+
 async def test_stream_response_events_preserves_leading_internal_citation_like_text_in_public_output() -> None:
     client = _StaticChatClient(ChatMessage(role="assistant", content="[~6]\nhello back"))
 
@@ -465,8 +512,7 @@ async def test_stream_response_events_emits_safe_client_function_call() -> None:
     ]
 
     completed = events[-1].response
-    assert [item.type for item in completed.output] == ["message", "function_call"]
-    assert completed.output[0].content[0].text == ""
+    assert [item.type for item in completed.output] == ["reasoning", "function_call"]
     assert completed.output[1].name == "read_file"
     assert completed.output[1].call_id.startswith("call_")
     assert call_resolver.calls == [[("read_file", '{"path":"README.md"}')]]
@@ -500,7 +546,7 @@ async def test_stream_response_events_emits_visible_client_function_call() -> No
     ]
 
     completed = events[-1].response
-    assert [item.type for item in completed.output] == ["message", "function_call"]
+    assert [item.type for item in completed.output] == ["reasoning", "function_call"]
     assert completed.output[1].name == "update_plan"
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
     assert len(client.requests) == 1
@@ -541,12 +587,17 @@ async def test_stream_response_events_reviews_visible_client_function_call_when_
     ]
 
     completed = _completed_response(events)
-    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message", "function_call"]
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "function_call"]
     held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
     assert held_payload.temp is True
     assert held_payload.continuation_side == "reviewer"
     assert held_payload.messages[0].tool_calls[0].name == "update_plan"
     assert held_payload.messages[1].tool_call_id == "upstream_call_1"
+    accepted_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
+    assert accepted_payload.temp is False
+    assert accepted_payload.messages[0].role == "assistant"
+    assert accepted_payload.messages[0].content is None
+    assert accepted_payload.messages[0].tool_calls[0].name == "update_plan"
     reviewer_request_contents = "\n".join(message.content or "" for message in client.requests[1].messages)
     assert CALLED_TOOL_DEFINITIONS_HEADER in reviewer_request_contents
     assert '"name":"update_plan"' in reviewer_request_contents
@@ -956,13 +1007,7 @@ async def test_stream_response_events_main_debate_reasoning_summary_excludes_deb
         )
     ]
 
-    assert all(
-        not any(
-            isinstance(message, StateMessage) and (message.content or "").startswith("Latest review note:\nBe shorter.")
-            for message in messages
-        )
-        for _, _, _, _, _, messages in summarizer.calls
-    )
+    assert all("Latest review note:\nBe shorter." not in call[5].reasoning_text for call in summarizer.part_calls)
 
 
 async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
@@ -1187,7 +1232,7 @@ async def test_stream_response_events_executes_server_tool_and_loops_back() -> N
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == [
-        "message",
+        "reasoning",
         "function_call",
         "function_call_output",
         "message",
@@ -1385,7 +1430,7 @@ async def test_stream_response_events_mixed_server_client_tools_do_not_loop() ->
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == [
-        "message",
+        "reasoning",
         "function_call",
         "function_call",
         "function_call_output",
@@ -3920,18 +3965,325 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
     assert [item.type for item in events[-1].response.output] == ["reasoning", "message"]
     completed_reasoning = events[-1].response.output[0]
     assert completed_reasoning.summary[0].text == "checked the answer"
-    assert summarizer.calls[0][0] == "crof/qwen3.5-9b"
-    assert summarizer.calls[0][1] is not None
-    assert summarizer.calls[0][1].endswith("|reasoning_summarizer")
-    assert summarizer.calls[0][2] is None
-    assert summarizer.calls[0][3] is None
-    assert summarizer.calls[0][4] == "concise"
-    assert [message.to_primitive() for message in summarizer.calls[0][5]] == [
-        {
-            "content_hash": content_hash(StateMessage(role="assistant", content="answer")),
-            "reasoning_content": "thinking",
-        }
+    assert summarizer.part_calls[0][0] == "crof/qwen3.5-9b"
+    assert summarizer.part_calls[0][1] is not None
+    assert summarizer.part_calls[0][1].endswith("|reasoning_summarizer")
+    assert summarizer.part_calls[0][2] is None
+    assert summarizer.part_calls[0][3] is None
+    assert summarizer.part_calls[0][4] == "concise"
+    assert summarizer.part_calls[0][5].prior_summary is None
+    assert summarizer.part_calls[0][5].reasoning_text == "thinking"
+
+
+async def test_stream_response_events_streams_main_reasoning_parts_from_provider_stream() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked part",))
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(id="chatcmpl_test", model="plap/test", created_at=None, choice_index=0, content_delta="answer"),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=("First hidden reasoning sentence. " * 8),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=("Second hidden reasoning sentence. " * 8),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.STOP,
+                usage=ChatUsage(input_tokens=12, output_tokens=20, total_tokens=32, reasoning_tokens=9),
+            ),
+        )
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                input="hello",
+                model="plap/test",
+                reasoning=ReasoningConfig(summary="concise"),
+                stream=True,
+            ),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=summarizer,
+        )
     ]
+
+    assert client.requests[0].stream_options is not None
+    assert client.requests[0].stream_options.include_usage is True
+    assert [event.type for event in events if "reasoning_summary_part" in event.type] == [
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+    ]
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["reasoning", "message"]
+    assert [part.text for part in completed.output[0].summary] == ["checked part", "checked part"]
+    assert len(summarizer.part_calls) == 2
+
+
+async def test_stream_response_events_stream_draft_stubs_tool_outputs_until_finalized() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked tool",))
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=0,
+                    id="upstream_call_1",
+                    name="read_file",
+                    arguments_delta='{"path":"README.md"}',
+                ),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=("Hidden tool reasoning sentence. " * 8),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=ChatUsage(input_tokens=10, output_tokens=14, total_tokens=24, reasoning_tokens=6),
+            ),
+        )
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                include=["reasoning.encrypted_content"],
+                reasoning=ReasoningConfig(summary="concise"),
+                stream=True,
+                tools=[_read_file_tool()],
+            ),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=summarizer,
+        )
+    ]
+
+    added_reasoning = next(
+        event.item
+        for event in events
+        if event.type == "response.output_item.added" and event.item.type == "reasoning"
+    )
+    added_payload = open_reasoning_payload(added_reasoning.encrypted_content, keyring=_keyring())
+    assert added_payload.temp is False
+    assert added_payload.messages[0].tool_calls[0].name == "read_file"
+    assert added_payload.messages[1].content == "Tool execution aborted"
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["reasoning", "function_call"]
+    final_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert final_payload.temp is False
+    assert [message.role for message in final_payload.messages] == ["assistant"]
+    assert final_payload.messages[0].tool_calls[0].name == "read_file"
+
+
+async def test_stream_response_events_adopts_streamed_candidate_into_debate_without_summary_duplication() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked candidate",))
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=0,
+                    id="upstream_mutate_1",
+                    name="mutate_record",
+                    arguments_delta='{"id":"1"}',
+                ),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=("Hidden debate reasoning sentence. " * 8),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=ChatUsage(input_tokens=11, output_tokens=17, total_tokens=28, reasoning_tokens=7),
+            ),
+        ),
+        message=[_assistant_text("ACCEPT")],
+    )
+
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                include=["reasoning.encrypted_content"],
+                reasoning=ReasoningConfig(summary="concise"),
+                stream=True,
+                tools=[_tool("mutate_record")],
+            ),
+            auth_context=_auth_context(),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=summarizer,
+        )
+    ]
+
+    completed = _completed_response(events)
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "function_call"]
+    assert [part.text for part in completed.output[0].summary] == ["checked candidate"]
+    held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert held_payload.temp is True
+    assert held_payload.messages[1].content == "This tool call was not executed."
+    accepted_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
+    assert accepted_payload.temp is False
+    assert accepted_payload.messages[0].role == "assistant"
+    assert completed.output[2].summary == []
+
+
+async def test_stream_response_events_streamed_debate_adoption_preserves_stream_summary_without_debug_injection() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked candidate",))
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                content_delta="draft answer",
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=0,
+                    id="upstream_mutate_1",
+                    name="mutate_record",
+                    arguments_delta='{"id":"1"}',
+                ),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=("Hidden debate reasoning sentence. " * 8),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=ChatUsage(input_tokens=11, output_tokens=17, total_tokens=28, reasoning_tokens=7),
+            ),
+        ),
+        message=[_assistant_text("ACCEPT")],
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    include=["reasoning.encrypted_content"],
+                    reasoning=ReasoningConfig(summary="concise"),
+                    stream=True,
+                    tools=[_tool("mutate_record")],
+                ),
+                auth_context=_auth_context(),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2), debug_debate_summaries=True),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=summarizer,
+            )
+        ]
+    )
+
+    assert completed.output[0].summary == [SummaryTextContent(text="checked candidate", type="summary_text")]
+    assert completed.output[2].summary == [SummaryTextContent(text="draft answer", type="summary_text")]
+
+
+async def test_stream_response_events_revise_keeps_debug_summary_without_streamed_summary_duplication() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_text("Check ids.\n\nDecision: REOPEN"),
+            ChatMessage(role="assistant", content="after review"),
+            _assistant_text("Use the safer path.\n\nDecision: REVISE"),
+            ChatMessage(role="assistant", content="final public answer"),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="original question",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2), debug_debate_summaries=True),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    stable_guidance = completed.output[4]
+    assert stable_guidance.type == "reasoning"
+    assert stable_guidance.summary == [SummaryTextContent(text="Use the safer path.", type="summary_text")]
 
 
 async def test_stream_response_events_synthesizes_main_prompt_cache_key_by_actor() -> None:
@@ -4235,21 +4587,18 @@ class _YieldThenRaiseChatClient(IChatCompletionClient):
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
         _ = request
+        await anyio.sleep(0)
+        raise self.exc
         if False:
-            yield ChatCompletionDelta(
-                id="chatcmpl_test",
-                model=None,
-                created_at=None,
-                choice_index=0,
-            )
+            yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
 
 
 class _FakeReasoningSummarizer(IReasoningSummarizer):
     def __init__(self, deltas: Sequence[str] = ()) -> None:
         self.deltas = tuple(deltas)
-        self.calls: list[tuple[str, object, object, object, str, tuple[object, ...]]] = []
+        self.part_calls: list[tuple[str, object, object, object, str, object]] = []
 
-    async def stream(
+    async def stream_part(
         self,
         *,
         model: str,
@@ -4257,11 +4606,77 @@ class _FakeReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: object,
         service_tier: object,
         mode: str,
-        messages: Sequence[object],
+        source: object,
     ) -> AsyncIterator[str]:
-        self.calls.append((model, prompt_cache_key, reasoning_effort, service_tier, mode, tuple(messages)))
+        self.part_calls.append((model, prompt_cache_key, reasoning_effort, service_tier, mode, source))
         for delta in self.deltas:
             yield delta
+
+
+def _stream_deltas_from_message(
+    *,
+    request: ChatCompletionRequest,
+    message: ChatMessage,
+    finish_reason: ChatFinishReason | str | None,
+    usage: ChatUsage | None,
+) -> tuple[ChatCompletionDelta, ...]:
+    deltas: list[ChatCompletionDelta] = []
+    if message.content is not None:
+        deltas.append(
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                content_delta=message.content,
+            )
+        )
+    if message.reasoning_content is not None:
+        deltas.append(
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=message.reasoning_content,
+            )
+        )
+    if message.reasoning_details:
+        deltas.append(
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                reasoning_details_delta=message.reasoning_details,
+            )
+        )
+    for index, call in enumerate(message.tool_calls or ()):
+        deltas.append(
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=index,
+                    id=call.id,
+                    name=call.name,
+                    arguments_delta=call.arguments,
+                ),
+            )
+        )
+    deltas.append(
+        ChatCompletionDelta(
+            id="chatcmpl_test",
+            model=request.model,
+            created_at=None,
+            choice_index=0,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+    )
+    return tuple(deltas)
 
 
 class _StaticChatClient(IChatCompletionClient):
@@ -4319,14 +4734,89 @@ class _StaticChatClient(IChatCompletionClient):
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
-        _ = request
-        if False:
-            yield ChatCompletionDelta(
-                id="chatcmpl_test",
-                model=None,
-                created_at=None,
-                choice_index=0,
+        self.requests.append(request)
+        index = min(self._index, len(self.messages) - 1)
+        message = self.messages[index]
+        usage = self.usages[min(self._index, len(self.usages) - 1)] if self.usages else None
+        finish_reason = self.finish_reasons[min(self._index, len(self.finish_reasons) - 1)]
+        self._index += 1
+        if isinstance(message, Exception):
+            raise message
+        for delta in _stream_deltas_from_message(
+            request=request,
+            message=message,
+            finish_reason=finish_reason,
+            usage=usage,
+        ):
+            yield delta
+
+
+class _StreamingStaticChatClient(IChatCompletionClient):
+    def __init__(
+        self,
+        deltas: Sequence[ChatCompletionDelta],
+        *,
+        message: ChatMessage | Exception | Sequence[ChatMessage | Exception] = (),
+        finish_reasons: ChatFinishReason | str | Sequence[ChatFinishReason | str] | None = None,
+        usages: ChatUsage | Sequence[ChatUsage] | None = None,
+    ) -> None:
+        self.deltas = tuple(deltas)
+        if isinstance(message, (ChatMessage, Exception)):
+            self.messages = (message,)
+        else:
+            self.messages = tuple(message)
+        if isinstance(usages, ChatUsage):
+            self.usages = (usages,)
+        elif usages is None:
+            self.usages = ()
+        else:
+            self.usages = tuple(usages)
+        if isinstance(finish_reasons, (str, ChatFinishReason)):
+            self.finish_reasons = (finish_reasons,)
+        elif finish_reasons is None:
+            self.finish_reasons = tuple(
+                ChatFinishReason.TOOL_CALLS if isinstance(item, ChatMessage) and item.tool_calls else ChatFinishReason.STOP
+                for item in self.messages
             )
+        else:
+            self.finish_reasons = tuple(finish_reasons)
+        self.requests: list[ChatCompletionRequest] = []
+        self._complete_index = 0
+        self._stream_calls = 0
+
+    async def complete(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResult:
+        self.requests.append(request)
+        if not self.messages:
+            raise AssertionError("unexpected complete() call")
+        index = min(self._complete_index, len(self.messages) - 1)
+        message = self.messages[index]
+        usage = self.usages[min(self._complete_index, len(self.usages) - 1)] if self.usages else None
+        finish_reason = self.finish_reasons[min(self._complete_index, len(self.finish_reasons) - 1)]
+        self._complete_index += 1
+        if isinstance(message, Exception):
+            raise message
+        return ChatCompletionResult(
+            id="chatcmpl_test",
+            model=request.model,
+            created_at=None,
+            message=message,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        self.requests.append(request)
+        if self._stream_calls:
+            raise AssertionError("unexpected second stream() call")
+        self._stream_calls += 1
+        for delta in self.deltas:
+            yield delta
 
 
 def _ingested(*, in_temp_debate: bool = False) -> IngestedQueues:

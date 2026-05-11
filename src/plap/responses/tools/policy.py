@@ -106,6 +106,7 @@ class ToolClassification:
     confidence: float
     rationale: str
     raw_output: dict[str, Any]
+    persistable: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effect_class", EffectClass(self.effect_class))
@@ -125,6 +126,7 @@ class ToolCallClassification:
     confidence: float
     rationale: str
     raw_output: dict[str, Any]
+    persistable: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effect_class", ToolCallEffectClass(self.effect_class))
@@ -301,11 +303,16 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             missing = [signature for signature in l2_signatures if signature.signature_hash not in l2_cached]
             if missing:
                 new_classifications = await self._classifier.classify_many(missing)
-                stored = await self._repository.store_classifications(list(new_classifications.values()))
+                persistable = [classification for classification in new_classifications.values() if classification.persistable]
+                fallback = [classification for classification in new_classifications.values() if not classification.persistable]
+                stored = await self._repository.store_classifications(persistable) if persistable else {}
                 for classification in stored.values():
                     self._classifications_l1[self._classification_l1_key(classification.signature_hash)] = classification
                     classification_sources[classification.signature_hash] = "fresh"
                 classifications.update(stored)
+                for classification in fallback:
+                    classification_sources[classification.signature_hash] = "fallback"
+                    classifications[classification.signature_hash] = classification
         for tool_name, signature in client_signatures_by_name.items():
             classification = classifications[signature.signature_hash]
             policies[tool_name] = ToolPolicy(
@@ -422,7 +429,9 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             missing = [call_signature for key, call_signature in contextual_by_key.items() if key not in l2_cached]
             if missing:
                 new_classifications = await self._classifier.classify_many(missing)
-                stored = await self._repository.store_tool_call_classifications(list(new_classifications.values()))
+                persistable = [classification for classification in new_classifications.values() if classification.persistable]
+                fallback = [classification for classification in new_classifications.values() if not classification.persistable]
+                stored = await self._repository.store_tool_call_classifications(persistable) if persistable else {}
                 for classification in stored.values():
                     self._classifications_l1[
                         self._classification_l1_key(
@@ -432,6 +441,9 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                     ] = classification
                     classification_sources[(classification.signature_hash, classification.arguments_hash)] = "fresh"
                 classifications.update(stored)
+                for classification in fallback:
+                    classification_sources[(classification.signature_hash, classification.arguments_hash)] = "fallback"
+                    classifications[(classification.signature_hash, classification.arguments_hash)] = classification
 
         for index, call_signature in contextual_by_index.items():
             classification = classifications[call_signature.classification_key]

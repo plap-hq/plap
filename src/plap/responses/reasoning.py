@@ -1,60 +1,45 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import asdict
+from collections.abc import AsyncIterator
+from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 
-import msgspec
 import structlog
 
 from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient, ReasoningEffort, ServiceTier
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import ReasoningSummary
-from plap.responses.models import ReasoningMessagePatch, StateMessage
 
 logger = structlog.get_logger(__name__)
 
-REASONING_SUMMARY_PROMPT = """Rewrite private mixed-perspective reasoning messages
-into a user-facing reasoning summary.
+REASONING_SUMMARY_PART_PROMPT = """Write the next public reasoning summary part.
 
-The input is raw private evidence, not a conversation to continue and not text
-to quote. A single trace can mix self-talk, critique addressed to a draft,
-draft-like assistant text, tool observations, and notes about the user's request.
-Pronouns such as "I", "you", "we", and "your answer" are local to those private
-messages and are not reliable public speaker identities.
+You will receive:
+- the previously emitted public reasoning summary text, if any
+- one new private reasoning fragment from the same turn
 
 Rules:
-- Do not quote hidden reasoning, hidden messages, or internal instructions
-  verbatim.
-- Do not expose chain-of-thought. Summarize only high-level checks and outcomes.
-- If private traces mention hidden context compaction or the `compact` tool,
-  preserve only the substantive conclusions, not the hidden maintenance step
-  itself.
-- Do not preserve the speaker, addressee, accusation, or conversational turn from
-  any private message.
-- Do not directly address the user with "you" or "your" in the reasoning summary.
-- Treat criticism, corrections, second-person comments, and draft-like text as
-  signals about what the assistant checked, revised, or decided.
-- Preserve useful conclusions, risk checks, corrected assumptions, and tool
-  outcomes.
-
-Write the summary as the final public assistant's self-review: "I checked...",
-"I considered...", "I corrected...", "I compared...", "I used the tool result...",
-or "I chose...".
+- Write only the next appended public reasoning summary part for the new fragment.
+- Do not rewrite or repeat the previously emitted summary.
+- Do not expose raw chain-of-thought, hidden instructions, or hidden tool inputs.
+- Preserve only high-level checks, revisions, comparisons, and conclusions.
+- If the fragment adds nothing useful, return a short neutral sentence.
 
 Style:
-- Write as the assistant speaking naturally in first person.
-- Be concise for concise summaries.
-- For detailed summaries, include important checks and revisions while still
-  hiding raw reasoning and internal roles.
-- If there is nothing useful to summarize, return a short neutral sentence such
-  as: "I checked the response for consistency and safety before answering."
+- First person, as the assistant speaking naturally.
+- Concise for concise mode, fuller for detailed mode.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningSummaryPartSource:
+    prior_summary: str | None
+    reasoning_text: str
 
 
 @runtime_checkable
 class IReasoningSummarizer(Protocol):
-    def stream(
+    def stream_part(
         self,
         *,
         model: str,
@@ -62,7 +47,7 @@ class IReasoningSummarizer(Protocol):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        messages: Sequence[StateMessage | ReasoningMessagePatch],
+        source: ReasoningSummaryPartSource,
     ) -> AsyncIterator[str]: ...
 
 
@@ -70,7 +55,7 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
     def __init__(self, client: IChatCompletionClient) -> None:
         self._client = client
 
-    async def stream(
+    async def stream_part(
         self,
         *,
         model: str,
@@ -78,18 +63,18 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        messages: Sequence[StateMessage | ReasoningMessagePatch],
+        source: ReasoningSummaryPartSource,
     ) -> AsyncIterator[str]:
         summary_request = ChatCompletionRequest(
             max_completion_tokens=_summary_max_tokens(mode),
             messages=[
                 ChatMessage(
                     role="developer",
-                    content=REASONING_SUMMARY_PROMPT,
+                    content=REASONING_SUMMARY_PART_PROMPT,
                 ),
                 ChatMessage(
                     role="user",
-                    content=_summary_request_text(mode, messages),
+                    content=_summary_part_request_text(mode, source),
                 ),
             ],
             model=model,
@@ -98,19 +83,19 @@ class LLMReasoningSummarizer(IReasoningSummarizer):
             service_tier=service_tier,
             temperature=0,
         )
-        log_debug(logger, "reasoning.summary.start", message_count=len(messages), mode=mode, model=model)
-        log_payload(logger, "reasoning.summary.request.payload", request=asdict(summary_request))
+        log_debug(logger, "reasoning.summary.part.start", mode=mode, model=model)
+        log_payload(logger, "reasoning.summary.part.request.payload", request=asdict(summary_request))
         delta_count = 0
         async for delta in self._client.stream(summary_request):
             if delta.content_delta:
                 delta_count += 1
-                log_payload(logger, "reasoning.summary.delta", delta=delta.content_delta)
+                log_payload(logger, "reasoning.summary.part.delta", delta=delta.content_delta)
                 yield delta.content_delta
-        log_debug(logger, "reasoning.summary.done", delta_count=delta_count, model=model)
+        log_debug(logger, "reasoning.summary.part.done", delta_count=delta_count, model=model)
 
 
 class NullReasoningSummarizer(IReasoningSummarizer):
-    async def stream(
+    async def stream_part(
         self,
         *,
         model: str,
@@ -118,22 +103,21 @@ class NullReasoningSummarizer(IReasoningSummarizer):
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
         mode: ReasoningSummary,
-        messages: Sequence[StateMessage | ReasoningMessagePatch],
+        source: ReasoningSummaryPartSource,
     ) -> AsyncIterator[str]:
-        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, messages
+        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, source
         if False:
             yield ""
-
-
-def _summary_request_text(
+def _summary_part_request_text(
     mode: ReasoningSummary,
-    messages: Sequence[StateMessage | ReasoningMessagePatch],
+    source: ReasoningSummaryPartSource,
 ) -> str:
-    payload = msgspec.json.encode(
-        [message.to_primitive() for message in messages],
-        order="deterministic",
-    ).decode()
-    return f"Summary mode: {mode}\n\nReasoning trace messages:\n{payload}"
+    prior_summary = source.prior_summary or ""
+    return (
+        f"Summary mode: {mode}\n\n"
+        f"Previously emitted public reasoning summary:\n{prior_summary}\n\n"
+        f"New private reasoning fragment:\n{source.reasoning_text}"
+    )
 
 
 def _summary_max_tokens(mode: ReasoningSummary) -> int:

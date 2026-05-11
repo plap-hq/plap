@@ -622,7 +622,7 @@ def _runtime_profile(
     main_debate_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
     reviewer_model: str = "novita/deepseek/deepseek-v4-flash",
     arbitrator_model: str = "novita/deepseek/deepseek-v4-flash",
-    reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-120b",
+    reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-20b",
     reviewer_transcript_token_budget: int = 500_000,
     arbitrator_transcript_token_budget: int = 500_000,
     soft_compact_threshold: int | None = 150_000,

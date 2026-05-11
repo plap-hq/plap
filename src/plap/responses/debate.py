@@ -24,10 +24,7 @@ from plap.llms.chat import (
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
-    OutputTextContent,
     ResponseFunctionCallItem,
-    ResponseFunctionCallOutputItem,
-    ResponseMessageItem,
     ResponseReasoningItem,
     SummaryTextContent,
 )
@@ -39,12 +36,11 @@ from plap.responses.ingest import (
     seal_call_id,
     seal_reasoning_payload,
 )
-from plap.responses.io import ResponseEventIO
+from plap.responses.io import ReasoningDraft, ResponseEventIO
 from plap.responses.models import (
     Actor,
     ChatMessageSpan,
     MutableQueues,
-    ReasoningMessagePatch,
     ReasoningPayload,
     Side,
     StateMessage,
@@ -367,7 +363,7 @@ def build_completion_request(
         tool_choice=tool_choice,
         parallel_tool_calls=request.parallel_tool_calls,
         response_format=response_format,
-        max_completion_tokens=max_completion_tokens,
+        max_completion_tokens=actor_config.cap_max_completion_tokens(max_completion_tokens),
         temperature=request.temperature,
         top_p=request.top_p,
         top_logprobs=request.top_logprobs,
@@ -948,6 +944,24 @@ async def run_arbitrator_turn(
     )
 
 
+def _held_candidate_messages(
+    *,
+    assistant: StateMessage,
+    tool_calls: Sequence[ChatToolCall],
+    server_outputs: Mapping[int, str],
+) -> list[StateMessage]:
+    messages: list[StateMessage] = [assistant]
+    for index, call in enumerate(tool_calls):
+        messages.append(
+            StateMessage(
+                role="tool",
+                tool_call_id=call.id,
+                content=server_outputs.get(index, HELD_CLIENT_TOOL_PLACEHOLDER),
+            )
+    )
+    return messages
+
+
 async def start_debate_from_candidate(
     *,
     state: MutableQueues,
@@ -957,25 +971,40 @@ async def start_debate_from_candidate(
     assistant: StateMessage,
     tool_calls: Sequence[ChatToolCall],
     server_outputs: Mapping[int, str],
+    draft: ReasoningDraft | None = None,
 ) -> None:
-    messages: list[StateMessage] = [assistant]
-    for index, call in enumerate(tool_calls):
-        messages.append(
-            StateMessage(
-                role="tool",
-                tool_call_id=call.id,
-                content=server_outputs.get(index, HELD_CLIENT_TOOL_PLACEHOLDER),
-            )
+    messages = _held_candidate_messages(assistant=assistant, tool_calls=tool_calls, server_outputs=server_outputs)
+    if draft is None:
+        await _persist_temp_turn(
+            state=state,
+            side=Side.MAIN,
+            messages=messages,
+            continuation_side=Side.REVIEWER,
+            out=out,
+            debug_debate_summaries=debug_debate_summaries,
+            keyring=keyring,
         )
-    await _persist_temp_turn(
-        state=state,
+        return
+
+    payload = ReasoningPayload(
         side=Side.MAIN,
-        messages=messages,
+        temp=True,
         continuation_side=Side.REVIEWER,
-        out=out,
-        debug_debate_summaries=debug_debate_summaries,
-        keyring=keyring,
+        messages=tuple(messages),
     )
+    await out.complete_reasoning_draft(
+        draft,
+        ResponseReasoningItem(
+            encrypted_content=seal_reasoning_payload(payload, keyring=keyring),
+            id=draft.item_id,
+            status="completed",
+            summary=[],
+            type="reasoning",
+        ),
+    )
+    for message in messages:
+        state.append_main_temp(message)
+    state.set_continuation(Side.REVIEWER, in_temp_debate=True)
 
 
 async def publish_accepted_candidate(
@@ -989,99 +1018,20 @@ async def publish_accepted_candidate(
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     candidate = parts.held_candidate.message
-    public_assistant = StateMessage(
-        role="assistant",
-        content=(
-            candidate.content
-            if candidate.content is not None
-            else ""
-            if candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls
-            else None
-        ),
-    )
-    assistant_hash = public_assistant.content_hash()
-
-    if candidate.reasoning_content or candidate.reasoning_details:
-        reasoning_payload = ReasoningPayload(
-            side=Side.MAIN,
-            temp=False,
-            messages=(
-                ReasoningMessagePatch(
-                    content_hash=assistant_hash,
-                    reasoning_content=candidate.reasoning_content,
-                    reasoning_details=tuple(candidate.reasoning_details) or None,
-                ),
-            ),
-        )
-        await out.output(
-            ResponseReasoningItem(
-                encrypted_content=seal_reasoning_payload(reasoning_payload, keyring=keyring),
-                id=f"rs_{secrets.token_urlsafe(18)}",
-                status="completed",
-                summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_single_text(candidate.content)),
-                type="reasoning",
-            )
-        )
-
-    if public_assistant.content is not None or candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls:
-        await out.output(
-            ResponseMessageItem(
-                content=[OutputTextContent(text=public_assistant.content or "", type="output_text")],
-                id=f"msg_{secrets.token_urlsafe(18)}",
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-        )
-
     hidden_outputs = {
         row.message.tool_call_id: row.message.content_text() or ""
         for row in parts.held_hidden_tool_rows
         if row.message.tool_call_id is not None
     }
-    function_call_ids: dict[str, str] = {}
-    for index, call in enumerate(candidate.tool_calls):
-        sealed_call_id = seal_call_id(
-            SealedCallID(
-                side=Side.MAIN,
-                content_hash_prefix=content_hash_prefix(assistant_hash),
-                tool_call_index=index,
-                upstream_tool_call_id=call.id,
-            ),
-            keyring=keyring,
-        )
-        function_call_ids[call.id] = sealed_call_id
-        await out.output(
-            ResponseFunctionCallItem(
-                arguments=call.arguments,
-                call_id=sealed_call_id,
-                id=f"fc_{secrets.token_urlsafe(18)}",
-                name=call.name,
-                status="completed",
-                type="function_call",
-            )
-        )
+    emitted_outputs = {call_id: output for call_id, output in hidden_outputs.items() if output != HELD_CLIENT_TOOL_PLACEHOLDER}
+    published = await out.publish_main_candidate(
+        candidate=candidate,
+        keyring=keyring,
+        server_outputs=emitted_outputs,
+        reasoning_summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_single_text(candidate.content)),
+    )
 
-    for call in candidate.tool_calls:
-        output = hidden_outputs.get(call.id)
-        if output is None or output == HELD_CLIENT_TOOL_PLACEHOLDER:
-            continue
-        await out.output(
-            ResponseFunctionCallOutputItem(
-                call_id=function_call_ids[call.id],
-                created_by="server",
-                id=f"fco_{secrets.token_urlsafe(18)}",
-                output=output,
-                status="completed",
-                type="function_call_output",
-            )
-        )
-
-    if public_assistant.content is not None or candidate.reasoning_content or candidate.reasoning_details or candidate.tool_calls:
-        state.append_main_stable(
-            StateMessage(role="assistant", content=public_assistant.content, tool_calls=list(candidate.tool_calls)),
-            content_hash=assistant_hash,
-        )
+    state.append_main_stable(candidate.without_reasoning(), content_hash=published.assistant_hash)
 
     for call in candidate.tool_calls:
         output = hidden_outputs.get(call.id)

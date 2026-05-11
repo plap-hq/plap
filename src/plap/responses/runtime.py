@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field, replace
 from typing import NoReturn
 
 import anyio
@@ -13,11 +13,15 @@ from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.chat import (
+    ChatCompletionDelta,
+    ChatCompletionResult,
     ChatFinishReason,
     ChatMessage,
     ChatResponseFormat,
+    ChatStreamOptions,
     ChatToolCall,
     ChatToolChoiceFunction,
+    ChatUsage,
     IChatCompletionClient,
 )
 from plap.llms.errors import ChatCompletionContextLengthExceededError
@@ -31,12 +35,8 @@ from plap.responses.compact import (
 )
 from plap.responses.contracts import (
     FunctionTool,
-    OutputTextContent,
     ReasoningSummary,
     ResponseCreateRequest,
-    ResponseFunctionCallItem,
-    ResponseFunctionCallOutputItem,
-    ResponseMessageItem,
     ResponseReasoningItem,
     ResponseStreamEvent,
     TextFormatJSONObject,
@@ -49,22 +49,19 @@ from plap.responses.debate import (
     continue_debate,
     start_debate_from_candidate,
 )
-from plap.responses.ingest import ReasoningPayload, SealedCallID, ingest_response_request
+from plap.responses.ingest import ReasoningPayload, ingest_response_request
 from plap.responses.ingest.sealing import (
-    content_hash_prefix,
-    seal_call_id,
     seal_reasoning_payload,
 )
-from plap.responses.io import ResponseEventIO
+from plap.responses.io import ReasoningDraft, ResponseEventIO
 from plap.responses.models import (
     MutableQueues,
-    ReasoningMessagePatch,
     StateMessage,
     StateToolCall,
     UsageLedger,
 )
 from plap.responses.projection import ResponseProjection, ResponseTransport
-from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
@@ -78,6 +75,7 @@ from plap.responses.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPT
 from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
 
 logger = structlog.get_logger(__name__)
+STREAM_ABORTED_TOOL_PLACEHOLDER = "Tool execution aborted"
 
 MAIN_DEVELOPER_PROMPT_TEMPLATE = """You are {model_name}, a capable AI assistant.
 
@@ -380,7 +378,10 @@ async def resolve_tool_calls(
             resolved[index] = policy
 
     if any(policy is None for policy in resolved):
-        raise RuntimeError("tool call policy resolution did not produce all outputs")
+        raise _runtime_internal_error(
+            reason="tool_call_policy_resolution_incomplete",
+            private_message="tool call policy resolution did not produce all outputs",
+        )
     return tuple(policy for policy in resolved if policy is not None)
 
 
@@ -465,6 +466,267 @@ def _validate_tool_call_batch(
     for call in calls:
         if call.name not in tool_policies:
             raise _runtime_internal_error(reason="unknown_tool_call", private_message=f"unknown tool call: {call.name}")
+
+
+def _state_message_from_chat_message(message: ChatMessage) -> StateMessage:
+    return StateMessage(
+        role=message.role,
+        content=message.content,
+        name=message.name,
+        tool_call_id=message.tool_call_id,
+        tool_calls=[StateToolCall(id=call.id, name=call.name, arguments=call.arguments) for call in message.tool_calls or ()],
+        reasoning_content=message.reasoning_content,
+        reasoning_details=list(message.reasoning_details or ()),
+    )
+
+
+def _stream_stub_tool_output_rows(candidate: StateMessage) -> tuple[StateMessage, ...]:
+    return tuple(
+        StateMessage(role="tool", tool_call_id=call.id, content=STREAM_ABORTED_TOOL_PLACEHOLDER)
+        for call in candidate.tool_calls
+    )
+
+
+def _stream_draft_payload(candidate: StateMessage) -> ReasoningPayload:
+    return ReasoningPayload(
+        side="main",
+        temp=False,
+        messages=(candidate, *_stream_stub_tool_output_rows(candidate)),
+    )
+
+
+def _stream_draft_item(*, payload: ReasoningPayload, keyring: SealingKeyring, item_id: str | None = None) -> ResponseReasoningItem:
+    return ResponseReasoningItem(
+        encrypted_content=seal_reasoning_payload(payload, keyring=keyring),
+        id=item_id or f"rs_{secrets.token_urlsafe(18)}",
+        status="in_progress",
+        summary=[],
+        type="reasoning",
+    )
+
+
+def _summary_flush_index(buffer: str, *, force: bool, tool_boundary: bool = False) -> int | None:
+    if not buffer.strip():
+        return None
+    if force or tool_boundary:
+        return len(buffer)
+    if len(buffer) < 160:
+        return None
+    boundaries = [buffer.rfind("\n"), buffer.rfind(". "), buffer.rfind("? "), buffer.rfind("! ")]
+    boundary = max(boundaries)
+    if boundary >= 80:
+        if buffer[boundary] == "\n":
+            return boundary + 1
+        return boundary + 2
+    if len(buffer) >= 320:
+        return len(buffer)
+    return None
+
+
+def _take_summary_fragment(buffer: str, *, force: bool, tool_boundary: bool = False) -> tuple[str | None, str]:
+    flush_index = _summary_flush_index(buffer, force=force, tool_boundary=tool_boundary)
+    if flush_index is None:
+        return None, buffer
+    fragment = buffer[:flush_index].strip()
+    remainder = buffer[flush_index:]
+    if not fragment:
+        return None, remainder
+    return fragment, remainder
+
+
+@dataclass(slots=True)
+class _StreamingToolCallAccumulator:
+    tool_call_id: str | None = None
+    name: str | None = None
+    argument_parts: list[str] = field(default_factory=list)
+
+    def apply(self, delta) -> None:
+        if delta.id is not None:
+            self.tool_call_id = delta.id
+        if delta.name is not None:
+            self.name = delta.name
+        if delta.arguments_delta is not None:
+            self.argument_parts.append(delta.arguments_delta)
+
+    def to_tool_call(self) -> ChatToolCall:
+        if self.tool_call_id is None:
+            raise _runtime_internal_error(
+                reason="streamed_tool_call_id_missing",
+                private_message="streamed tool call is missing id",
+            )
+        if self.name is None:
+            raise _runtime_internal_error(
+                reason="streamed_tool_call_name_missing",
+                private_message="streamed tool call is missing name",
+            )
+        return ChatToolCall(id=self.tool_call_id, name=self.name, arguments="".join(self.argument_parts))
+
+
+@dataclass(slots=True)
+class _MainStreamAccumulator:
+    request_model: str
+    completion_id: str | None = None
+    completion_model: str | None = None
+    created_at: float | None = None
+    content_parts: list[str] = field(default_factory=list)
+    saw_content: bool = False
+    reasoning_parts: list[str] = field(default_factory=list)
+    reasoning_details: list[object] = field(default_factory=list)
+    tool_calls: dict[int, _StreamingToolCallAccumulator] = field(default_factory=dict)
+    finish_reason: ChatFinishReason | None = None
+    usage: ChatUsage | None = None
+    system_fingerprint: str | None = None
+    service_tier: str | None = None
+
+    def apply(self, delta: ChatCompletionDelta) -> None:
+        if delta.id is not None:
+            self.completion_id = delta.id
+        if delta.model is not None:
+            self.completion_model = delta.model
+        if delta.created_at is not None:
+            self.created_at = delta.created_at
+        if delta.content_delta is not None:
+            self.saw_content = True
+            self.content_parts.append(delta.content_delta)
+        if delta.reasoning_delta is not None:
+            self.reasoning_parts.append(delta.reasoning_delta)
+        if delta.reasoning_details_delta:
+            self.reasoning_details.extend(delta.reasoning_details_delta)
+        if delta.tool_call_delta is not None:
+            call = self.tool_calls.setdefault(delta.tool_call_delta.index, _StreamingToolCallAccumulator())
+            call.apply(delta.tool_call_delta)
+        if delta.finish_reason is not None:
+            self.finish_reason = delta.finish_reason
+        if delta.usage is not None:
+            self.usage = delta.usage
+        if delta.system_fingerprint is not None:
+            self.system_fingerprint = delta.system_fingerprint
+        if delta.service_tier is not None:
+            self.service_tier = delta.service_tier
+
+    def assistant_message(self) -> ChatMessage:
+        content = "".join(self.content_parts) if self.saw_content else None
+        reasoning_content = "".join(self.reasoning_parts) or None
+        tool_calls = [self.tool_calls[index].to_tool_call() for index in sorted(self.tool_calls)] or None
+        return ChatMessage(
+            role="assistant",
+            content=content,
+            tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
+            reasoning_details=list(self.reasoning_details) or None,
+        )
+
+    def candidate(self) -> StateMessage:
+        return _state_message_from_chat_message(self.assistant_message())
+
+    def result(self) -> ChatCompletionResult:
+        if self.finish_reason is None:
+            raise _runtime_internal_error(
+                reason="streamed_completion_finish_reason_missing",
+                private_message="streamed completion finish_reason is missing",
+            )
+        message = self.assistant_message()
+        return ChatCompletionResult(
+            id=self.completion_id,
+            model=self.completion_model or self.request_model,
+            created_at=self.created_at,
+            message=message,
+            finish_reason=self.finish_reason,
+            usage=self.usage,
+            system_fingerprint=self.system_fingerprint,
+            service_tier=self.service_tier,
+        )
+
+
+async def _run_main_completion(
+    *,
+    out: ResponseEventIO,
+    request: ResponseCreateRequest,
+    model_request,
+    chat_completion_client: IChatCompletionClient,
+    sealing_keyring: SealingKeyring,
+) -> tuple[ChatCompletionResult, ReasoningDraft | None]:
+    stream_request = replace(model_request, stream_options=ChatStreamOptions(include_usage=True))
+    accumulator = _MainStreamAccumulator(request_model=stream_request.model)
+    draft: ReasoningDraft | None = None
+    pending_summary = ""
+    summary_parts: list[str] = []
+    enable_summary = _reasoning_summary_mode(request) is not None
+
+    async for delta in chat_completion_client.stream(stream_request):
+        accumulator.apply(delta)
+        candidate = accumulator.candidate()
+
+        if draft is None and enable_summary and (
+            candidate.tool_calls or candidate.reasoning_content is not None or candidate.reasoning_details
+        ):
+            draft = await out.begin_reasoning_draft(
+                _stream_draft_item(payload=_stream_draft_payload(candidate), keyring=sealing_keyring)
+            )
+        elif draft is not None and (delta.tool_call_delta is not None or delta.reasoning_details_delta):
+            await out.replace_reasoning_draft(
+                draft,
+                _stream_draft_item(
+                    payload=_stream_draft_payload(candidate),
+                    keyring=sealing_keyring,
+                    item_id=draft.item_id,
+                ),
+            )
+
+        if delta.reasoning_delta is not None:
+            pending_summary += delta.reasoning_delta
+
+        if draft is None:
+            continue
+
+        fragment, pending_summary = _take_summary_fragment(
+            pending_summary,
+            force=False,
+            tool_boundary=delta.tool_call_delta is not None,
+        )
+        if fragment is None:
+            continue
+        await out.replace_reasoning_draft(
+            draft,
+            _stream_draft_item(
+                payload=_stream_draft_payload(candidate),
+                keyring=sealing_keyring,
+                item_id=draft.item_id,
+            ),
+        )
+        summary_parts.append(
+            await out.append_reasoning_draft_summary(
+                draft,
+                ReasoningSummaryPartSource(
+                    prior_summary="\n\n".join(summary_parts) or None,
+                    reasoning_text=fragment,
+                ),
+            )
+        )
+
+    result = accumulator.result()
+    if draft is not None:
+        candidate = accumulator.candidate()
+        fragment, pending_summary = _take_summary_fragment(pending_summary, force=True)
+        if fragment is not None:
+            await out.replace_reasoning_draft(
+                draft,
+                _stream_draft_item(
+                    payload=_stream_draft_payload(candidate),
+                    keyring=sealing_keyring,
+                    item_id=draft.item_id,
+                ),
+            )
+            summary_parts.append(
+                await out.append_reasoning_draft_summary(
+                    draft,
+                    ReasoningSummaryPartSource(
+                        prior_summary="\n\n".join(summary_parts) or None,
+                        reasoning_text=fragment,
+                    ),
+                )
+            )
+    return result, draft
 
 
 async def run_response(
@@ -621,8 +883,15 @@ async def run_response(
             continue
         log_payload(logger, "response.runtime.main_request.payload", request=asdict(model_request))
 
+        streamed_draft: ReasoningDraft | None = None
         try:
-            result = await chat_completion_client.complete(model_request)
+            result, streamed_draft = await _run_main_completion(
+                out=out,
+                request=request,
+                model_request=model_request,
+                chat_completion_client=chat_completion_client,
+                sealing_keyring=sealing_keyring,
+            )
         except ChatCompletionContextLengthExceededError as exc:
             log_debug(
                 logger,
@@ -647,6 +916,7 @@ async def run_response(
                 reason="tool_handoff_finish_reason_without_tool_calls",
                 private_message="completion returned tool handoff finish_reason without tool calls",
             )
+        candidate = _state_message_from_chat_message(result.message)
         log_debug(
             logger,
             "response.runtime.main_result",
@@ -657,6 +927,8 @@ async def run_response(
             tool_call_count=len(tool_calls),
         )
         log_payload(logger, "response.runtime.main_result.payload", result=asdict(result))
+        server_outputs: dict[int, str] = {}
+        client_call_indexes: list[int] = []
 
         if user_return and profile.debate_max_rounds > 0:
             held_anchor_index = usage_ledger.record_hidden(profile.main.public_usage, result.usage)
@@ -665,19 +937,10 @@ async def run_response(
                 out=out,
                 debug_debate_summaries=debug_debate_summaries,
                 keyring=sealing_keyring,
-                assistant=StateMessage(
-                    role=result.message.role,
-                    content=result.message.content,
-                    name=result.message.name,
-                    tool_call_id=result.message.tool_call_id,
-                    tool_calls=[
-                        StateToolCall(id=call.id, name=call.name, arguments=call.arguments) for call in result.message.tool_calls or ()
-                    ],
-                    reasoning_content=result.message.reasoning_content,
-                    reasoning_details=list(result.message.reasoning_details or ()),
-                ),
+                assistant=candidate,
                 tool_calls=tool_calls,
                 server_outputs={},
+                draft=streamed_draft,
             )
             debate_result = await continue_debate(
                 state=state,
@@ -707,8 +970,6 @@ async def run_response(
                 resolver=tool_call_policy_resolver,
             )
 
-            server_outputs: dict[int, str] = {}
-            client_call_indexes: list[int] = []
             intercepted_client_indexes: list[int] = []
             for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
                 if policy.source == "server":
@@ -733,20 +994,10 @@ async def run_response(
                     out=out,
                     debug_debate_summaries=debug_debate_summaries,
                     keyring=sealing_keyring,
-                    assistant=StateMessage(
-                        role=result.message.role,
-                        content=result.message.content,
-                        name=result.message.name,
-                        tool_call_id=result.message.tool_call_id,
-                        tool_calls=[
-                            StateToolCall(id=call.id, name=call.name, arguments=call.arguments)
-                            for call in result.message.tool_calls or ()
-                        ],
-                        reasoning_content=result.message.reasoning_content,
-                        reasoning_details=list(result.message.reasoning_details or ()),
-                    ),
+                    assistant=candidate,
                     tool_calls=tool_calls,
                     server_outputs=server_outputs,
+                    draft=streamed_draft,
                 )
                 debate_result = await continue_debate(
                     state=state,
@@ -768,125 +1019,19 @@ async def run_response(
                     return
                 continue
 
-        public_assistant_message = StateMessage(
-            role="assistant",
-            content=(
-                result.message.content
-                if result.message.content is not None
-                else ""
-                if result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
-                else None
-            ),
+        published = await out.publish_main_candidate(
+            candidate=candidate,
+            keyring=sealing_keyring,
+            server_outputs={tool_calls[index].id: output for index, output in server_outputs.items()},
+            reasoning_draft=streamed_draft,
         )
-        assistant_hash = public_assistant_message.content_hash()
-
-        if result.message.reasoning_content or result.message.reasoning_details:
-            reasoning_payload = ReasoningPayload(
-                side="main",
-                temp=False,
-                messages=(
-                    ReasoningMessagePatch(
-                        content_hash=assistant_hash,
-                        reasoning_content=result.message.reasoning_content,
-                        reasoning_details=tuple(result.message.reasoning_details or ()) or None,
-                    ),
-                ),
-            )
-            reasoning_item = ResponseReasoningItem(
-                encrypted_content=seal_reasoning_payload(
-                    reasoning_payload,
-                    keyring=sealing_keyring,
-                ),
-                id=f"rs_{secrets.token_urlsafe(18)}",
-                status="completed",
-                summary=[],
-                type="reasoning",
-            )
-            await out.output(
-                reasoning_item,
-                reasoning_messages=reasoning_payload.messages,
-            )
-
-        if result.message.content is not None or (
-            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
-        ):
-            message_item = ResponseMessageItem(
-                content=[
-                    OutputTextContent(
-                        text=public_assistant_message.content or "",
-                        type="output_text",
-                    )
-                ],
-                id=f"msg_{secrets.token_urlsafe(18)}",
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-            await out.output(message_item)
-
-        if result.message.tool_calls:
-            function_call_items: list[ResponseFunctionCallItem] = []
-            function_call_ids: dict[int, str] = {}
-            assistant_tool_calls: list[StateToolCall] = []
-            for index, call in enumerate(result.message.tool_calls):
-                sealed_call_id = seal_call_id(
-                    SealedCallID(
-                        side="main",
-                        content_hash_prefix=content_hash_prefix(assistant_hash),
-                        tool_call_index=index,
-                        upstream_tool_call_id=call.id,
-                    ),
-                    keyring=sealing_keyring,
-                )
-                function_call_ids[index] = sealed_call_id
-                assistant_tool_calls.append(
-                    StateToolCall(
-                        id=call.id,
-                        name=call.name,
-                        arguments=call.arguments,
-                    )
-                )
-                function_call_items.append(
-                    ResponseFunctionCallItem(
-                        arguments=call.arguments,
-                        call_id=sealed_call_id,
-                        id=f"fc_{secrets.token_urlsafe(18)}",
-                        name=call.name,
-                        status="completed",
-                        type="function_call",
-                    )
-                )
-            for function_call_item in function_call_items:
-                await out.output(function_call_item)
-
-            function_output_items: list[ResponseFunctionCallOutputItem] = []
-            for index, output in server_outputs.items():
-                function_output_items.append(
-                    ResponseFunctionCallOutputItem(
-                        call_id=function_call_ids[index],
-                        created_by="server",
-                        id=f"fco_{secrets.token_urlsafe(18)}",
-                        output=output,
-                        status="completed",
-                        type="function_call_output",
-                    )
-                )
-            for function_output_item in function_output_items:
-                await out.output(function_output_item)
-        else:
-            assistant_tool_calls = []
+        if not candidate.tool_calls:
             server_outputs = {}
             client_call_indexes = []
 
-        if result.message.content is not None or (
-            result.message.reasoning_content or result.message.reasoning_details or result.message.tool_calls
-        ):
-            assistant_context_message = StateMessage(
-                role="assistant",
-                content=public_assistant_message.content,
-                tool_calls=list(assistant_tool_calls),
-            )
-            state.append_main_stable(assistant_context_message, content_hash=assistant_hash)
+        if candidate.content is not None or candidate.tool_calls or candidate.reasoning_content or candidate.reasoning_details:
+            assistant_context_message = candidate.without_reasoning()
+            state.append_main_stable(assistant_context_message, content_hash=published.assistant_hash)
 
         for index, output in server_outputs.items():
             tool_message = StateMessage(

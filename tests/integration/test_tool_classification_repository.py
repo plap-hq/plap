@@ -1,3 +1,5 @@
+import pytest
+
 from plap.responses.contracts import FunctionTool
 from plap.responses.tools import (
     CachedToolPolicyResolver,
@@ -107,6 +109,31 @@ async def test_tool_classification_repository_cache_key_uses_prompt_hash(
         )
 
     assert missing is None
+
+
+async def test_tool_classification_repository_rejects_non_persistable_classification(
+    db_session_maker,
+) -> None:
+    signature = function_tool_signature(_read_file_tool())
+
+    async with db_session_maker() as session:
+        repository = ToolClassificationRepository(session)
+        await repository.get_or_create_signature(signature)
+
+        with pytest.raises(ValueError, match="non-persistable classifications must not be stored"):
+            await repository.store_classification(
+                ToolClassification(
+                    signature_hash=signature.signature_hash,
+                    classifier="fake",
+                    classifier_model="fake/model",
+                    prompt_hash=b"p" * 32,
+                    effect_class="contextual",
+                    confidence=0.0,
+                    rationale="classifier failed: ChatCompletionRateLimitError",
+                    raw_output={},
+                    persistable=False,
+                )
+            )
 
 
 async def test_cached_policy_resolver_uses_stored_classification(
@@ -246,6 +273,32 @@ async def test_tool_call_classification_repository_batches_lookup(
         (signature.signature_hash, b"a" * 32): first,
         (signature.signature_hash, b"b" * 32): second,
     }
+
+
+async def test_tool_call_classification_repository_rejects_non_persistable_classification(
+    db_session_maker,
+) -> None:
+    signature = function_tool_signature(_bash_tool())
+
+    async with db_session_maker() as session:
+        repository = ToolClassificationRepository(session)
+        await repository.get_or_create_signature(signature)
+
+        with pytest.raises(ValueError, match="non-persistable tool call classifications must not be stored"):
+            await repository.store_tool_call_classification(
+                ToolCallClassification(
+                    signature_hash=signature.signature_hash,
+                    arguments_hash=b"a" * 32,
+                    classifier="fake",
+                    classifier_model="fake/model",
+                    prompt_hash=b"p" * 32,
+                    effect_class="unknown",
+                    confidence=0.0,
+                    rationale="classifier failed: ChatCompletionRateLimitError",
+                    raw_output={},
+                    persistable=False,
+                )
+            )
 
 
 def _read_file_tool() -> FunctionTool:

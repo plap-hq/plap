@@ -154,11 +154,17 @@ class _StaticChatCompletionClient(IChatCompletionClient):
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
-        _ = request
-        if False:
-            yield ChatCompletionDelta(
-                id="chatcmpl_test",
-                model=None,
-                created_at=None,
-                choice_index=0,
-            )
+        yield ChatCompletionDelta(
+            id="chatcmpl_test",
+            model=request.model,
+            created_at=None,
+            choice_index=0,
+            content_delta="test response",
+        )
+        yield ChatCompletionDelta(
+            id="chatcmpl_test",
+            model=request.model,
+            created_at=None,
+            choice_index=0,
+            finish_reason="stop",
+        )

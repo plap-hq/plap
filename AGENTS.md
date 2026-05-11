@@ -40,6 +40,17 @@ def a():
 - In this project: prioritise clarity over action and ask questions when faced with ambiguity.
 - Always respond with exact, detailed information and choices, do NOT gloss over details using platitudes like "should be" or "if".
 
+## 0.5) This repo is not turn-bounded
+
+- You are not operating in a turn-bounded assistant environment.
+- Agents are often trained with a reflex to compress work into one response. In this repo, that reflex is wrong and must be actively resisted.
+- Do not optimize implementation around assistant turn boundaries.
+- Cross-turn planning, reasoning, and implementation are normal in this repo.
+- Do not treat one-turn feasibility or token-budget concerns as reasons to narrow owned scope, defer known core subsystems, or justify incomplete ownership.
+- If a subsystem cannot be finished in the current turn, keep it open and continue next turn; do not distort architecture to fit a response.
+- Dropping key owned subsystems because they would not fit in one turn, or because they would make the response too large, is a serious failure mode and must not be tolerated.
+- Swapping in nicer words for that same behavior is still the same failure mode. If the real effect is can-kicking or knowingly incomplete ownership, the wording does not matter.
+
 ## 1) Read first, then speak
 - Do not answer from memory.
 - Read the relevant files before proposing, diagnosing, or explaining.

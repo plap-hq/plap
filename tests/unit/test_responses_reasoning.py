@@ -7,43 +7,38 @@ from plap.llms.chat import (
     ChatCompletionRequest,
     IChatCompletionClient,
 )
-from plap.responses.models import ReasoningMessagePatch
 from plap.responses.reasoning import (
-    REASONING_SUMMARY_PROMPT,
+    REASONING_SUMMARY_PART_PROMPT,
     LLMReasoningSummarizer,
+    ReasoningSummaryPartSource,
 )
 
 
-async def test_reasoning_summarizer_sends_strict_prompt_and_trace_payload() -> None:
-    client = _StreamingChatClient(("summary",))
+async def test_reasoning_summarizer_stream_part_uses_append_prompt() -> None:
+    client = _StreamingChatClient(("part",))
     summarizer = LLMReasoningSummarizer(client)
 
     deltas = [
         delta
-        async for delta in summarizer.stream(
+        async for delta in summarizer.stream_part(
             model="model-a",
             prompt_cache_key="cache-a|reasoning_summarizer",
             reasoning_effort=None,
             service_tier=None,
             mode="concise",
-            messages=[
-                ReasoningMessagePatch(
-                    content_hash="abc123",
-                    reasoning_content="critic says side B is better",
-                )
-            ],
+            source=ReasoningSummaryPartSource(
+                prior_summary="I checked the goal.",
+                reasoning_text="I verified the tool choice.",
+            ),
         )
     ]
 
-    assert deltas == ["summary"]
+    assert deltas == ["part"]
     request = client.requests[0]
-    assert request.model == "model-a"
-    assert request.prompt_cache_key == "cache-a|reasoning_summarizer"
-    assert request.temperature == 0
-    assert request.messages[0].role == "developer"
-    assert request.messages[0].content == REASONING_SUMMARY_PROMPT
-    assert request.messages[1].role == "user"
-    assert "critic says side B is better" in (request.messages[1].content or "")
+    assert request.max_completion_tokens == 192
+    assert request.messages[0].content == REASONING_SUMMARY_PART_PROMPT
+    assert "I checked the goal." in (request.messages[1].content or "")
+    assert "I verified the tool choice." in (request.messages[1].content or "")
 
 
 class _StreamingChatClient(IChatCompletionClient):

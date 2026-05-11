@@ -156,6 +156,8 @@ class ToolClassificationRepository:
     async def store_classifications(self, classifications: list[ToolClassification]) -> dict[bytes, ToolClassification]:
         if not classifications:
             return {}
+        if any(not classification.persistable for classification in classifications):
+            raise ValueError("non-persistable classifications must not be stored")
         first = classifications[0]
         if any(
             classification.classifier != first.classifier
@@ -316,6 +318,8 @@ class ToolClassificationRepository:
     ) -> dict[tuple[bytes, bytes], ToolCallClassification]:
         if not classifications:
             return {}
+        if any(not classification.persistable for classification in classifications):
+            raise ValueError("non-persistable tool call classifications must not be stored")
         first = classifications[0]
         if any(
             classification.classifier != first.classifier

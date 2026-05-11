@@ -369,6 +369,22 @@ async def test_cached_policy_resolver_uses_l1_before_repository() -> None:
     assert repository.store_classifications_calls == 1
 
 
+async def test_cached_policy_resolver_does_not_store_non_persistable_fallbacks() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _FallbackClassifier()
+    resolver = CachedToolPolicyResolver(repository, classifier)
+
+    first = await resolver.resolve([_read_file_tool()])
+    second = await resolver.resolve([_read_file_tool()])
+
+    assert first["read_file"].classification is not None
+    assert first["read_file"].classification.persistable is False
+    assert second["read_file"].classification is not None
+    assert second["read_file"].classification.persistable is False
+    assert classifier.calls == 2
+    assert repository.store_classifications_calls == 0
+
+
 async def test_cached_policy_resolver_uses_shared_empty_l1() -> None:
     repository = _MemoryClassificationRepository()
     classifier = _RecordingClassifier()
@@ -470,6 +486,29 @@ async def test_cached_tool_call_policy_resolver_classifies_contextual_calls() ->
     assert classifier.calls == 1
     assert repository.get_tool_call_classifications_calls == 1
     assert repository.store_tool_call_classifications_calls == 1
+
+
+async def test_cached_tool_call_policy_resolver_does_not_store_non_persistable_fallbacks() -> None:
+    repository = _MemoryClassificationRepository()
+    classifier = _FallbackToolCallClassifier()
+    resolver = CachedToolCallPolicyResolver(repository, classifier)
+    calls = [
+        ToolCall(
+            tool=_bash_tool(),
+            policy=ToolPolicy(name="bash", source="client", effect_class="contextual"),
+            arguments='{"command":"ls"}',
+        )
+    ]
+
+    first = await resolver.resolve(calls)
+    second = await resolver.resolve(calls)
+
+    assert first[0].classification is not None
+    assert first[0].classification.persistable is False
+    assert second[0].classification is not None
+    assert second[0].classification.persistable is False
+    assert classifier.calls == 2
+    assert repository.store_tool_call_classifications_calls == 0
 
 
 async def test_cached_tool_call_policy_resolver_preserves_order() -> None:
@@ -652,6 +691,25 @@ class _ContextualClassifier(_RecordingClassifier):
         }
 
 
+class _FallbackClassifier(_RecordingClassifier):
+    async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
+        self.calls += 1
+        return {
+            signature.signature_hash: ToolClassification(
+                signature_hash=signature.signature_hash,
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                prompt_hash=self.prompt_hash,
+                effect_class="contextual",
+                confidence=0.0,
+                rationale="classifier failed: ChatCompletionRateLimitError",
+                raw_output={},
+                persistable=False,
+            )
+            for signature in signatures
+        }
+
+
 @dataclass(slots=True)
 class _RecordingToolCallClassifier(IToolCallClassifier):
     calls: int = 0
@@ -672,6 +730,26 @@ class _RecordingToolCallClassifier(IToolCallClassifier):
                 confidence=1.0,
                 rationale="read-only call",
                 raw_output={"effect_class": "safe"},
+            )
+            for call in calls
+        }
+
+
+class _FallbackToolCallClassifier(_RecordingToolCallClassifier):
+    async def classify_many(self, calls: list[ToolCallSignature]) -> dict[tuple[bytes, bytes], ToolCallClassification]:
+        self.calls += 1
+        return {
+            call.classification_key: ToolCallClassification(
+                signature_hash=call.signature_hash,
+                arguments_hash=call.arguments_hash,
+                classifier=self.classifier,
+                classifier_model=self.classifier_model,
+                prompt_hash=self.prompt_hash,
+                effect_class="unknown",
+                confidence=0.0,
+                rationale="classifier failed: ChatCompletionRateLimitError",
+                raw_output={},
+                persistable=False,
             )
             for call in calls
         }
