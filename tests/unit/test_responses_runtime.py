@@ -47,6 +47,7 @@ from plap.responses.contracts import (
     WebSearchTool,
 )
 from plap.responses.debate import (
+    HELD_CLIENT_TOOL_PLACEHOLDER,
     ArbitratorActionType,
     ReviewerActionType,
     _budgeted_transcript_message,
@@ -984,7 +985,7 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert held_payload.continuation_side == "reviewer"
     assert held_payload.messages[0].tool_calls[0].id == "upstream_mutate_1"
     assert held_payload.messages[1].tool_call_id == "upstream_mutate_1"
-    assert held_payload.messages[1].content == "This tool call was not executed."
+    assert held_payload.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
     reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
     assert reviewer_payload.messages[0].role == "user"
     reviewer_sections = _split_sections(reviewer_payload.messages[0].content or "")
@@ -1281,7 +1282,7 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
         {"name": call.name, "arguments": json.loads(call.arguments)}
         for call in (debate_request.messages[2].tool_calls or [])
     ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
-    assert debate_request.messages[3].content == "This tool call was not executed."
+    assert debate_request.messages[3].content == HELD_CLIENT_TOOL_PLACEHOLDER
     _assert_in_progress_review_context(debate_request.messages[5].content or "")
     tool_definitions = _parse_prefixed_json(
         debate_request.messages[4].content or "",
@@ -1412,7 +1413,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert stable_guidance.messages[0].content == "draft answer"
     assert stable_guidance.messages[0].tool_calls[0].name == "mutate_record"
     assert stable_guidance.messages[1].role == "tool"
-    assert stable_guidance.messages[1].content == "This tool call was not executed."
+    assert stable_guidance.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
     assert stable_guidance.messages[2].role == "assistant"
     assert stable_guidance.messages[2].content == (
         "Internal retry guidance for the next fresh answer only.\n"
@@ -1434,7 +1435,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
         {"name": call.name, "arguments": json.loads(call.arguments)}
         for call in (final_main_request.messages[2].tool_calls or [])
     ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
-    assert final_main_request.messages[3].content == "This tool call was not executed."
+    assert final_main_request.messages[3].content == HELD_CLIENT_TOOL_PLACEHOLDER
     assert final_main_request.messages[4].content == (
         "Internal retry guidance for the next fresh answer only.\n"
         "This is not a user-facing message.\n"
@@ -4566,7 +4567,7 @@ async def test_stream_response_events_adopts_streamed_candidate_into_debate_with
     assert [part.text for part in completed.output[0].summary] == ["checked candidate"]
     held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
     assert held_payload.temp is True
-    assert held_payload.messages[1].content == "This tool call was not executed."
+    assert held_payload.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
     accepted_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
     assert accepted_payload.temp is False
     assert accepted_payload.messages[0].role == "assistant"
