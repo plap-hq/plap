@@ -82,7 +82,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
             compact_threshold=250_000,
-            compact_max_rounds=3,
+            compact_max_rounds=0,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort={
@@ -184,7 +184,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
             compact_threshold=250_000,
-            compact_max_rounds=3,
+            compact_max_rounds=0,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
             by_reasoning_effort={
@@ -541,6 +541,120 @@ class PublicUsageConfig(BaseModel):
         return ceil(debit)
 
 
+def _validate_runtime_transform_bounds(
+    min_value: float | int | None,
+    max_value: float | int | None,
+    *,
+    label: str,
+) -> None:
+    if min_value is not None and max_value is not None and min_value > max_value:
+        raise ValueError(f"{label} min_value cannot exceed max_value")
+
+
+class RuntimeFloatTransform(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    disabled: bool = False
+    fixed: float | None = None
+    default: float | None = None
+    scale: float = 1.0
+    offset: float = 0.0
+    min_value: float | None = None
+    max_value: float | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> RuntimeFloatTransform:
+        _validate_runtime_transform_bounds(self.min_value, self.max_value, label="float transform")
+        return self
+
+    def apply(
+        self,
+        value: float | None,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+    ) -> float | None:
+        if self.disabled:
+            return None
+        if self.fixed is not None:
+            resolved = self.fixed
+        elif value is None:
+            resolved = self.default
+        else:
+            resolved = value * self.scale + self.offset
+        if resolved is None:
+            return None
+        if self.min_value is not None:
+            resolved = max(resolved, self.min_value)
+        if self.max_value is not None:
+            resolved = min(resolved, self.max_value)
+        if minimum is not None:
+            resolved = max(resolved, minimum)
+        if maximum is not None:
+            resolved = min(resolved, maximum)
+        return resolved
+
+
+class RuntimeIntTransform(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    disabled: bool = False
+    fixed: int | None = None
+    default: int | None = None
+    min_value: int | None = None
+    max_value: int | None = None
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> RuntimeIntTransform:
+        _validate_runtime_transform_bounds(self.min_value, self.max_value, label="int transform")
+        return self
+
+    def apply(
+        self,
+        value: int | None,
+        *,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int | None:
+        if self.disabled:
+            return None
+        resolved = self.fixed if self.fixed is not None else self.default if value is None else value
+        if resolved is None:
+            return None
+        if self.min_value is not None:
+            resolved = max(resolved, self.min_value)
+        if self.max_value is not None:
+            resolved = min(resolved, self.max_value)
+        if minimum is not None:
+            resolved = max(resolved, minimum)
+        if maximum is not None:
+            resolved = min(resolved, maximum)
+        return resolved
+
+
+class RuntimeActorSamplingConfig(BaseModel):
+    model_config = SettingsConfigDict(extra="forbid")
+
+    temperature: RuntimeFloatTransform | None = None
+    top_p: RuntimeFloatTransform | None = None
+    top_logprobs: RuntimeIntTransform | None = None
+
+    def apply_temperature(self, value: float | None) -> float | None:
+        if self.temperature is None:
+            return value
+        return self.temperature.apply(value, minimum=0, maximum=2)
+
+    def apply_top_p(self, value: float | None) -> float | None:
+        if self.top_p is None:
+            return value
+        return self.top_p.apply(value, minimum=0, maximum=1)
+
+    def apply_top_logprobs(self, value: int | None) -> int | None:
+        if self.top_logprobs is None:
+            return value
+        return self.top_logprobs.apply(value, minimum=0, maximum=20)
+
+
 class RuntimeActorConfig(BaseModel):
     model_config = SettingsConfigDict(extra="forbid")
 
@@ -551,6 +665,7 @@ class RuntimeActorConfig(BaseModel):
     tokenizer_trust_remote_code: bool = False
     reasoning_effort: ReasoningEffort | None = None
     service_tier: ServiceTier | None = None
+    sampling: RuntimeActorSamplingConfig = Field(default_factory=RuntimeActorSamplingConfig)
     public_usage: PublicUsageConfig = Field(default_factory=PublicUsageConfig)
 
     @model_validator(mode="after")
@@ -573,6 +688,15 @@ class RuntimeActorConfig(BaseModel):
         if value is None:
             return self.max_completion_tokens
         return min(value, self.max_completion_tokens)
+
+    def map_temperature(self, value: float | None) -> float | None:
+        return self.sampling.apply_temperature(value)
+
+    def map_top_p(self, value: float | None) -> float | None:
+        return self.sampling.apply_top_p(value)
+
+    def map_top_logprobs(self, value: int | None) -> int | None:
+        return self.sampling.apply_top_logprobs(value)
 
 
 class RuntimeActorOverride(BaseModel):

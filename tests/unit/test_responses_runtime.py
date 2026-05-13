@@ -23,7 +23,13 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.llms.errors import ChatCompletionContextLengthExceededError
-from plap.responses.compact import COMPACT_TOOL_NAME, DUPLICATE_TOOL_OUTPUT_TOMBSTONE, run_explicit_compaction
+from plap.responses.compact import (
+    COMPACT_TOOL_NAME,
+    DUPLICATE_TOOL_OUTPUT_TOMBSTONE,
+    CompactionLevel,
+    build_compaction_request,
+    run_explicit_compaction,
+)
 from plap.responses.contracts import (
     FunctionTool,
     ReasoningConfig,
@@ -45,6 +51,7 @@ from plap.responses.debate import (
     ReviewerActionType,
     _budgeted_transcript_message,
     _request_constraints_wrapper,
+    build_completion_request,
     parse_arbitrator_decision,
     parse_reviewer_decision,
 )
@@ -77,6 +84,9 @@ from plap.responses.tools.mcp import IMCPToolProvider
 from plap.settings import (
     MCPToolConfig,
     RuntimeActorConfig,
+    RuntimeActorSamplingConfig,
+    RuntimeFloatTransform,
+    RuntimeIntTransform,
     RuntimeModelInfoConfig,
     RuntimeModelPricingConfig,
     RuntimeModelProfileConfig,
@@ -412,6 +422,81 @@ async def test_stream_response_events_caps_main_actor_max_completion_tokens_befo
     ]
 
     assert client.requests[0].max_completion_tokens == 7
+
+
+def test_build_completion_request_maps_sampling_controls_per_actor() -> None:
+    request = ResponseCreateRequest(
+        model="plap/test",
+        input="hello",
+        temperature=1.0,
+        top_p=0.8,
+        top_logprobs=9,
+    )
+    messages = [ChatMessage(role="user", content="hello")]
+    main_actor = RuntimeActorConfig(model="crof/qwen3.5-9b")
+    reviewer_actor = RuntimeActorConfig(
+        model="crof/qwen3.5-9b",
+        sampling=RuntimeActorSamplingConfig(
+            temperature=RuntimeFloatTransform(scale=0.5),
+            top_p=RuntimeFloatTransform(fixed=0.4),
+            top_logprobs=RuntimeIntTransform(disabled=True),
+        ),
+    )
+
+    main_request = build_completion_request(
+        actor="main",
+        actor_config=main_actor,
+        request=request,
+        messages=messages,
+        tools=[],
+        tool_choice=None,
+        response_format=None,
+        prompt_cache_key_base=None,
+        max_completion_tokens=64,
+    )
+    reviewer_request = build_completion_request(
+        actor="reviewer",
+        actor_config=reviewer_actor,
+        request=request,
+        messages=messages,
+        tools=[],
+        tool_choice=None,
+        response_format=None,
+        prompt_cache_key_base=None,
+        max_completion_tokens=64,
+    )
+
+    assert main_request.temperature == 1.0
+    assert main_request.top_p == 0.8
+    assert main_request.top_logprobs == 9
+    assert reviewer_request.temperature == 0.5
+    assert reviewer_request.top_p == 0.4
+    assert reviewer_request.top_logprobs is None
+
+
+def test_build_compaction_request_uses_actor_sampling_defaults() -> None:
+    request = ResponseCreateRequest(model="plap/test", input="hello")
+    actor_config = RuntimeActorConfig(
+        model="crof/qwen3.5-9b",
+        sampling=RuntimeActorSamplingConfig(
+            temperature=RuntimeFloatTransform(default=0.25),
+            top_p=RuntimeFloatTransform(default=0.95),
+            top_logprobs=RuntimeIntTransform(default=3),
+        ),
+    )
+
+    compaction_request = build_compaction_request(
+        actor_config=actor_config,
+        level=CompactionLevel.SOFT,
+        request=request,
+        main_context=(),
+        prompt_cache_key_base=None,
+        max_completion_tokens=64,
+    )
+
+    assert compaction_request.temperature == 0.25
+    assert compaction_request.top_p == 0.95
+    assert compaction_request.top_logprobs == 3
 
 
 async def test_stream_response_events_preserves_leading_internal_citation_like_text_in_public_output() -> None:

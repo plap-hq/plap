@@ -81,6 +81,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
         llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
+        llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
         llm_novita_api_key="novita-key",
         llm_openrouter_api_key="openrouter-key",
@@ -89,7 +90,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp-mini"]
-    assert profile.compact_max_rounds > 0
+    assert profile.compact_max_rounds == 0
     assert profile.debate_max_rounds > 0
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
@@ -101,6 +102,7 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
         llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
+        llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
         llm_novita_api_key="novita-key",
         llm_openrouter_api_key="openrouter-key",
@@ -109,6 +111,7 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     _validate_runtime_model_profiles(settings)
 
     profile = settings.runtime_model_profiles["plap-ai/wisp"]
+    assert profile.compact_max_rounds == 0
     assert profile.main.public_usage == PublicUsageConfig()
     assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
         profile.model_info.supported_parameters
