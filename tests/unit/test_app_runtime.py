@@ -272,8 +272,8 @@ def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
 
 def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
     settings = _settings(
-        llm_novita_api_key="novita-key",
-        tool_call_effect_classifier_model="novita/deepseek/deepseek-v4-flash",
+        llm_gmicloud_api_key="gmicloud-key",
+        tool_call_effect_classifier_model="gmicloud/deepseek-ai/DeepSeek-V4-Flash",
         tool_call_effect_classifier_cache_model="deepseek-v4-flash",
     )
     client = _create_chat_completion_client(settings)
@@ -282,7 +282,7 @@ def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
 
     assert isinstance(classifier, LLMToolCallClassifier)
     assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "novita/deepseek/deepseek-v4-flash"
+    assert classifier.classifier_model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
     assert classifier.classifier_cache_model == "deepseek-v4-flash"
 
 
@@ -491,12 +491,12 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
 def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
-        llm_novita_api_key="novita-key",
+        llm_gmicloud_api_key="gmicloud-key",
         runtime_model_profiles={
             "plap/standard": _profile_config(
-                main_model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                main_model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 main_debate_model="crof/qwen3.5-9b",
-                reviewer_model="novita/deepseek/deepseek-v4-flash",
+                reviewer_model="gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
             )
@@ -807,7 +807,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
                 default_reasoning_effort="medium",
                 by_reasoning_effort={
                     "medium": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")),
-                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="novita/deepseek/deepseek-v4-flash")),
+                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="gmicloud/deepseek-ai/DeepSeek-V4-Flash")),
                 },
             )
         },
@@ -817,7 +817,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
     high_profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
 
     assert default_profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert high_profile.main.model == "novita/deepseek/deepseek-v4-flash"
+    assert high_profile.main.model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
 
 
 def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:

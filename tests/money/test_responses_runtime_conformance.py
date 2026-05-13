@@ -50,12 +50,12 @@ pytestmark = pytest.mark.money
 RUNTIME_PROFILE = "plap-ai/wisp-mini"
 COMPACTION_PROFILE = "plap-ai/wisp-mini-money-compact"
 MONEY_MCP_TOOL_NAME = "money_search"
-REQUIRED_ENV_KEYS = ("OPENROUTER_API_KEY", "LIGHTNING_API_KEY", "NOVITA_API_KEY")
+REQUIRED_ENV_KEYS = ("OPENROUTER_API_KEY", "LIGHTNING_API_KEY", "GMICLOUD_API_KEY")
 
 
 @dataclass(frozen=True, slots=True)
 class _MoneyProviderKeys:
-    novita_api_key: str
+    gmicloud_api_key: str
     openrouter_api_key: str
     lightning_api_key: str
 
@@ -78,7 +78,7 @@ def money_provider_keys() -> _MoneyProviderKeys:
     if missing:
         pytest.skip(f"missing money provider env keys: {', '.join(missing)}")
     return _MoneyProviderKeys(
-        novita_api_key=os.environ["NOVITA_API_KEY"],
+        gmicloud_api_key=os.environ["GMICLOUD_API_KEY"],
         openrouter_api_key=os.environ["OPENROUTER_API_KEY"],
         lightning_api_key=os.environ["LIGHTNING_API_KEY"],
     )
@@ -93,7 +93,7 @@ def money_settings(
         api_key_pepper="money-test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
         llm_lightning_api_key=money_provider_keys.lightning_api_key,
-        llm_novita_api_key=money_provider_keys.novita_api_key,
+        llm_gmicloud_api_key=money_provider_keys.gmicloud_api_key,
         llm_openrouter_api_key=money_provider_keys.openrouter_api_key,
         runtime_model_profiles={
             RUNTIME_PROFILE: _runtime_profile(),
@@ -618,10 +618,10 @@ def _mutation_tool_definition() -> dict[str, object]:
 def _runtime_profile(
     *,
     main_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
-    compactor_model: str = "novita/deepseek/deepseek-v4-flash",
+    compactor_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
     main_debate_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
-    reviewer_model: str = "novita/deepseek/deepseek-v4-flash",
-    arbitrator_model: str = "novita/deepseek/deepseek-v4-flash",
+    reviewer_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+    arbitrator_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-20b",
     reviewer_transcript_token_budget: int = 500_000,
     arbitrator_transcript_token_budget: int = 500_000,

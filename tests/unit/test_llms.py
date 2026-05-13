@@ -206,25 +206,25 @@ async def test_routing_client_falls_back_to_later_model_for_completion() -> None
             raise ChatCompletionProviderError("primary failed")
 
     primary_client = _FailingCompletionClient()
-    fallback_client = _RecordingChatCompletionClient("novita")
+    fallback_client = _RecordingChatCompletionClient("gmicloud")
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=primary_client),
-            ModelRoute(prefix="novita/", client=fallback_client),
+            ModelRoute(prefix="gmicloud/", client=fallback_client),
         ]
     )
 
     result = await router.complete(
         ChatCompletionRequest(
-            model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             messages=[ChatMessage(role="user", content="hello")],
         )
     )
 
-    assert result.model == "novita/deepseek/deepseek-v4-flash"
-    assert result.message.content == "novita"
+    assert result.model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
+    assert result.message.content == "gmicloud"
     assert primary_client.complete_requests[0].model == "qwen3.5-9b"
-    assert fallback_client.complete_requests[0].model == "deepseek/deepseek-v4-flash"
+    assert fallback_client.complete_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
 
 
 async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
@@ -242,11 +242,11 @@ async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
             yield  # pragma: no cover
 
     primary_client = _FailingStreamClient()
-    fallback_client = _RecordingChatCompletionClient("novita")
+    fallback_client = _RecordingChatCompletionClient("gmicloud")
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=primary_client),
-            ModelRoute(prefix="novita/", client=fallback_client),
+            ModelRoute(prefix="gmicloud/", client=fallback_client),
         ]
     )
 
@@ -254,16 +254,16 @@ async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
         delta
         async for delta in router.stream(
             ChatCompletionRequest(
-                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
     ]
 
-    assert deltas[0].model == "novita/deepseek/deepseek-v4-flash"
-    assert deltas[0].content_delta == "novita"
+    assert deltas[0].model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
+    assert deltas[0].content_delta == "gmicloud"
     assert primary_client.stream_requests[0].model == "qwen3.5-9b"
-    assert fallback_client.stream_requests[0].model == "deepseek/deepseek-v4-flash"
+    assert fallback_client.stream_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
 
 
 async def test_routing_client_logs_completion_fallback_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -276,13 +276,13 @@ async def test_routing_client_logs_completion_fallback_attempts(monkeypatch: pyt
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=_FailingCompletionClient()),
-            ModelRoute(prefix="novita/", client=_RecordingChatCompletionClient("novita")),
+            ModelRoute(prefix="gmicloud/", client=_RecordingChatCompletionClient("gmicloud")),
         ]
     )
 
     await router.complete(
         ChatCompletionRequest(
-            model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             messages=[ChatMessage(role="user", content="hello")],
         )
     )
@@ -295,16 +295,16 @@ async def test_routing_client_logs_completion_fallback_attempts(monkeypatch: pyt
             "attempt_model": "crof/qwen3.5-9b",
             "error_message": "primary failed",
             "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": False,
         },
         {
             "event": "llm.router.fallback_succeeded",
             "attempt_count": 2,
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": False,
-            "winner_model": "novita/deepseek/deepseek-v4-flash",
+            "winner_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "winning_attempt_index": 2,
         },
     ]
@@ -325,7 +325,7 @@ async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=_FailingStreamClient()),
-            ModelRoute(prefix="novita/", client=_RecordingChatCompletionClient("novita")),
+            ModelRoute(prefix="gmicloud/", client=_RecordingChatCompletionClient("gmicloud")),
         ]
     )
 
@@ -333,7 +333,7 @@ async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.
         delta
         async for delta in router.stream(
             ChatCompletionRequest(
-                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
@@ -347,16 +347,16 @@ async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.
             "attempt_model": "crof/qwen3.5-9b",
             "error_message": "primary failed",
             "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": True,
         },
         {
             "event": "llm.router.fallback_succeeded",
             "attempt_count": 2,
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": True,
-            "winner_model": "novita/deepseek/deepseek-v4-flash",
+            "winner_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "winning_attempt_index": 2,
         },
     ]
@@ -375,14 +375,14 @@ async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=_FailingCompletionClient("primary failed")),
-            ModelRoute(prefix="novita/", client=_FailingCompletionClient("fallback failed")),
+            ModelRoute(prefix="gmicloud/", client=_FailingCompletionClient("fallback failed")),
         ]
     )
 
     with pytest.raises(ChatCompletionProviderError, match="fallback failed"):
         await router.complete(
             ChatCompletionRequest(
-                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
@@ -395,8 +395,8 @@ async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.
             "attempt_model": "crof/qwen3.5-9b",
             "error_message": "primary failed",
             "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": False,
         },
         {
@@ -404,8 +404,8 @@ async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.
             "attempt_count": 2,
             "error_message": "fallback failed",
             "error_type": "ChatCompletionProviderError",
-            "final_attempt_model": "novita/deepseek/deepseek-v4-flash",
-            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "final_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
             "streaming": False,
         },
     ]
@@ -444,7 +444,7 @@ async def test_routing_client_does_not_switch_providers_after_stream_yields() ->
     with pytest.raises(ChatCompletionProviderError, match="stream failed"):
         async for delta in router.stream(
             ChatCompletionRequest(
-                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         ):

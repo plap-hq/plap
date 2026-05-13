@@ -23,6 +23,7 @@ from plap.llms.chat import (
 from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import ChatCompletionProviderError
 from plap.llms.fireworks import FireworksChatCompletionClient
+from plap.llms.gmicloud import GMICloudChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
 from plap.llms.router import ModelRoute, RoutingChatCompletionClient
@@ -52,6 +53,17 @@ def _novita_client(api_key: str) -> IChatCompletionClient:
     )
 
 
+def _gmicloud_client(api_key: str) -> IChatCompletionClient:
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="gmicloud/",
+                client=GMICloudChatCompletionClient(api_key=api_key),
+            )
+        ]
+    )
+
+
 def _fireworks_client(api_key: str) -> IChatCompletionClient:
     return RoutingChatCompletionClient(
         [
@@ -71,7 +83,7 @@ LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
 LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning/lightning-ai/llama-3.3-70b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
-NOVITA_DEEPSEEK_V4_FLASH_MODEL = "novita/deepseek/deepseek-v4-flash"
+GMICLOUD_DEEPSEEK_V4_FLASH_MODEL = "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
 FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
 CROF_QWEN_3_5_9B_MODEL = "crof/qwen3.5-9b"
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "low"
@@ -130,12 +142,12 @@ TOOL_PROVIDERS = (
     ),
     pytest.param(
         ProviderCase(
-            name="novita",
-            api_key_env="NOVITA_API_KEY",
-            model=NOVITA_DEEPSEEK_V4_FLASH_MODEL,
-            client_factory=_novita_client,
+            name="gmicloud",
+            api_key_env="GMICLOUD_API_KEY",
+            model=GMICLOUD_DEEPSEEK_V4_FLASH_MODEL,
+            client_factory=_gmicloud_client,
         ),
-        id="novita-deepseek-v4-flash",
+        id="gmicloud-deepseek-v4-flash",
     ),
     GPT_OSS_PROVIDERS[2],
     pytest.param(
@@ -323,12 +335,12 @@ async def test_live_gpt_oss_reasoning_request(provider: ProviderCase) -> None:
     assert _message_has_output(result.message)
 
 
-async def test_live_novita_deepseek_v4_flash_basic_reasoning_request() -> None:
+async def test_live_gmicloud_deepseek_v4_flash_basic_reasoning_request() -> None:
     provider = ProviderCase(
-        name="novita",
-        api_key_env="NOVITA_API_KEY",
-        model=NOVITA_DEEPSEEK_V4_FLASH_MODEL,
-        client_factory=_novita_client,
+        name="gmicloud",
+        api_key_env="GMICLOUD_API_KEY",
+        model=GMICLOUD_DEEPSEEK_V4_FLASH_MODEL,
+        client_factory=_gmicloud_client,
     )
 
     result = await _complete(
