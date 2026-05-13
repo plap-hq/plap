@@ -44,7 +44,6 @@ Definitions:
   contextual so call-time classification can decide later.
 """
 TOOL_EFFECT_CLASSIFIER_NAME = "llm_tool_effect_classifier"
-TOOL_EFFECT_CLASSIFIER_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 
 TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -85,7 +84,6 @@ Definitions:
   to decide safely.
 """
 TOOL_CALL_EFFECT_CLASSIFIER_NAME = "llm_tool_call_effect_classifier"
-TOOL_CALL_EFFECT_CLASSIFIER_MODEL = TOOL_EFFECT_CLASSIFIER_MODEL
 
 TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -117,6 +115,7 @@ class LLMToolClassifier(IToolClassifier):
         client: IChatCompletionClient,
         *,
         classifier_model: str,
+        classifier_cache_model: str,
         classifier: str = TOOL_EFFECT_CLASSIFIER_NAME,
         prompt: str = TOOL_EFFECT_CLASSIFIER_PROMPT,
         max_concurrency: int = 4,
@@ -124,6 +123,7 @@ class LLMToolClassifier(IToolClassifier):
         self._client = client
         self.classifier = classifier
         self.classifier_model = classifier_model
+        self.classifier_cache_model = classifier_cache_model
         self.prompt_hash = _prompt_hash(
             prompt,
             response_format=TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
@@ -180,7 +180,7 @@ class LLMToolClassifier(IToolClassifier):
             classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 raw=raw,
             )
@@ -190,6 +190,7 @@ class LLMToolClassifier(IToolClassifier):
                 "tool.classifier.failed",
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
+                classifier_cache_model=self.classifier_cache_model,
                 error_type=type(exc).__name__,
                 signature_hash=signature.signature_hash.hex(),
             )
@@ -201,7 +202,7 @@ class LLMToolClassifier(IToolClassifier):
             return _unknown_classification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 rationale=f"classifier failed: {type(exc).__name__}",
                 raw_output={},
@@ -212,6 +213,7 @@ class LLMToolClassifier(IToolClassifier):
                 "tool.classifier.fresh",
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
+                classifier_cache_model=self.classifier_cache_model,
                 confidence=classification.confidence,
                 effect_class=classification.effect_class,
                 signature_hash=signature.signature_hash.hex(),
@@ -231,6 +233,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
         client: IChatCompletionClient,
         *,
         classifier_model: str,
+        classifier_cache_model: str,
         classifier: str = TOOL_CALL_EFFECT_CLASSIFIER_NAME,
         prompt: str = TOOL_CALL_EFFECT_CLASSIFIER_PROMPT,
         max_concurrency: int = 4,
@@ -238,6 +241,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
         self._client = client
         self.classifier = classifier
         self.classifier_model = classifier_model
+        self.classifier_cache_model = classifier_cache_model
         self.prompt_hash = _prompt_hash(
             prompt,
             response_format=TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
@@ -306,7 +310,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 raw=raw,
             )
@@ -317,6 +321,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 arguments_hash=call.arguments_hash.hex(),
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
+                classifier_cache_model=self.classifier_cache_model,
                 error_type=type(exc).__name__,
                 signature_hash=call.signature_hash.hex(),
             )
@@ -330,7 +335,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 rationale=f"classifier failed: {type(exc).__name__}",
                 raw_output={},
@@ -342,6 +347,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 arguments_hash=call.arguments_hash.hex(),
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
+                classifier_cache_model=self.classifier_cache_model,
                 confidence=classification.confidence,
                 effect_class=classification.effect_class,
                 signature_hash=call.signature_hash.hex(),

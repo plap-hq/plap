@@ -16,9 +16,7 @@ from plap.llms.router import (
     UnavailableChatCompletionClient,
 )
 from plap.responses.tools import (
-    TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_CALL_EFFECT_CLASSIFIER_NAME,
-    TOOL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_NAME,
     LLMToolCallClassifier,
     LLMToolClassifier,
@@ -200,6 +198,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
+        llm_openrouter_api_key="openrouter-key",
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -208,18 +207,55 @@ def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
 
     assert isinstance(classifier, LLMToolClassifier)
     assert classifier.classifier == TOOL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == TOOL_EFFECT_CLASSIFIER_MODEL
+    assert classifier.classifier_model == settings.tool_effect_classifier_model
+    assert classifier.classifier_cache_model == settings.tool_effect_classifier_cache_model
+
+
+def test_app_runtime_builds_tool_classifier_for_configured_model() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        tool_effect_classifier_model="crof/qwen3.5-9b",
+        tool_effect_classifier_cache_model="qwen3.5-9b",
+    )
+    client = _create_chat_completion_client(settings)
+
+    classifier = _create_tool_classifier(settings, client)
+
+    assert isinstance(classifier, LLMToolClassifier)
+    assert classifier.classifier == TOOL_EFFECT_CLASSIFIER_NAME
+    assert classifier.classifier_model == "crof/qwen3.5-9b"
+    assert classifier.classifier_cache_model == "qwen3.5-9b"
 
 
 def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
-    settings = _settings(llm_lightning_api_key="lightning-key")
+    settings = _settings(
+        llm_lightning_api_key="lightning-key",
+        llm_openrouter_api_key="openrouter-key",
+    )
     client = _create_chat_completion_client(settings)
 
     classifier = _create_tool_call_classifier(settings, client)
 
     assert isinstance(classifier, LLMToolCallClassifier)
     assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == TOOL_CALL_EFFECT_CLASSIFIER_MODEL
+    assert classifier.classifier_model == settings.tool_call_effect_classifier_model
+    assert classifier.classifier_cache_model == settings.tool_call_effect_classifier_cache_model
+
+
+def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
+    settings = _settings(
+        llm_novita_api_key="novita-key",
+        tool_call_effect_classifier_model="novita/deepseek/deepseek-v4-flash",
+        tool_call_effect_classifier_cache_model="deepseek-v4-flash",
+    )
+    client = _create_chat_completion_client(settings)
+
+    classifier = _create_tool_call_classifier(settings, client)
+
+    assert isinstance(classifier, LLMToolCallClassifier)
+    assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
+    assert classifier.classifier_model == "novita/deepseek/deepseek-v4-flash"
+    assert classifier.classifier_cache_model == "deepseek-v4-flash"
 
 
 def test_app_runtime_rejects_unrouted_tool_call_classifier_route() -> None:
@@ -424,6 +460,24 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
     assert "plap/standard" in settings.runtime_model_profiles
 
 
+def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        llm_novita_api_key="novita-key",
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="novita/deepseek/deepseek-v4-flash",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
+            )
+        },
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
     settings = _settings(
         llm_lightning_api_key="lightning-key",
@@ -434,6 +488,27 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
+            )
+        },
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        _validate_runtime_model_profiles(settings)
+
+    assert exc_info.value.public is None
+    assert exc_info.value.private.reason == "runtime_profile_route_unconfigured"
+
+
+def test_app_runtime_rejects_unrouted_runtime_profile_fallback_entry() -> None:
+    settings = _settings(
+        llm_crof_api_key="crof-key",
+        runtime_model_profiles={
+            "plap/standard": _profile_config(
+                main_model="crof/qwen3.5-9b,lightning/lightning-ai/gpt-oss-20b",
+                main_debate_model="crof/qwen3.5-9b",
+                reviewer_model="crof/qwen3.5-9b",
+                arbitrator_model="crof/qwen3.5-9b",
+                reasoning_summarizer_model="crof/qwen3.5-9b",
             )
         },
     )

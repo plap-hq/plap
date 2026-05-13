@@ -184,6 +184,7 @@ class IToolPolicyResolver(Protocol):
 class IToolClassifier(Protocol):
     classifier: str
     classifier_model: str
+    classifier_cache_model: str
     prompt_hash: bytes
 
     async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]: ...
@@ -193,6 +194,7 @@ class IToolClassifier(Protocol):
 class IToolCallClassifier(Protocol):
     classifier: str
     classifier_model: str
+    classifier_cache_model: str
     prompt_hash: bytes
 
     async def classify_many(self, calls: list[ToolCallSignature]) -> dict[tuple[bytes, bytes], ToolCallClassification]: ...
@@ -293,7 +295,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
             l2_cached = await self._repository.get_classifications(
                 [signature.signature_hash for signature in l2_signatures],
                 classifier=self._classifier.classifier,
-                classifier_model=self._classifier.classifier_model,
+                classifier_model=self._classifier.classifier_cache_model,
                 prompt_hash=self._classifier.prompt_hash,
             )
             for classification in l2_cached.values():
@@ -346,7 +348,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
         return (
             signature_hash,
             self._classifier.classifier,
-            self._classifier.classifier_model,
+            self._classifier.classifier_cache_model,
             self._classifier.prompt_hash,
         )
 
@@ -413,7 +415,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             l2_cached = await self._repository.get_tool_call_classifications(
                 list(contextual_by_key),
                 classifier=self._classifier.classifier,
-                classifier_model=self._classifier.classifier_model,
+                classifier_model=self._classifier.classifier_cache_model,
                 prompt_hash=self._classifier.prompt_hash,
             )
             for classification in l2_cached.values():
@@ -488,7 +490,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
             signature_hash,
             arguments_hash,
             self._classifier.classifier,
-            self._classifier.classifier_model,
+            self._classifier.classifier_cache_model,
             self._classifier.prompt_hash,
         )
 

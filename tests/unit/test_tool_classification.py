@@ -84,6 +84,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
         client=client,
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(signature)
@@ -116,6 +117,7 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
             client=_FakeChatClient("{}"),
             classifier="fake",
             classifier_model="fake/model",
+            classifier_cache_model="fake/cache",
             prompt="prompt-b",
         ).prompt_hash
     )
@@ -126,6 +128,7 @@ async def test_llm_tool_classifier_malformed_json_returns_contextual() -> None:
         client=_FakeChatClient("not json"),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(function_tool_signature(_read_file_tool()))
@@ -146,6 +149,7 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
         ),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     classifications = await classifier.classify_many([read_signature, list_signature])
@@ -171,6 +175,7 @@ async def test_llm_tool_classifier_parses_contextual_json() -> None:
         client=_FakeChatClient('{"effect_class":"contextual","confidence":0.8,"rationale":"Shell commands depend on arguments."}'),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(signature)
@@ -193,6 +198,7 @@ async def test_llm_tool_classifier_parses_visible_json() -> None:
         client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates user-visible agent plan only."}'),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(signature)
@@ -235,6 +241,7 @@ async def test_llm_tool_call_classifier_parses_valid_json() -> None:
         client=_FakeChatClient('{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(
@@ -273,6 +280,7 @@ async def test_llm_tool_call_classifier_malformed_json_returns_unknown() -> None
         client=_FakeChatClient("not json"),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(
@@ -300,6 +308,7 @@ async def test_llm_tool_call_classifier_parses_visible_json() -> None:
         client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates visible plan state only."}'),
         classifier="fake",
         classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
     )
 
     result = await classifier.classify(
@@ -405,6 +414,25 @@ async def test_cached_policy_resolver_uses_shared_empty_l1() -> None:
 
     assert classifier.calls == 1
     assert repository.get_classifications_calls == 1
+
+
+async def test_cached_policy_resolver_reuses_cache_model_across_execution_routes() -> None:
+    repository = _MemoryClassificationRepository()
+    first = _RecordingClassifier(
+        classifier_model="lightning/lightning-ai/gpt-oss-20b",
+        classifier_cache_model="gpt-oss-20b",
+    )
+    second = _RecordingClassifier(
+        classifier_model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra",
+        classifier_cache_model="gpt-oss-20b",
+    )
+
+    await CachedToolPolicyResolver(repository, first).resolve([_read_file_tool()])
+    await CachedToolPolicyResolver(repository, second).resolve([_read_file_tool()])
+
+    assert first.calls == 1
+    assert second.calls == 0
+    assert repository.store_classifications_calls == 1
 
 
 async def test_cached_policy_resolver_preserves_contextual_classification() -> None:
@@ -581,6 +609,32 @@ async def test_cached_tool_call_policy_resolver_uses_shared_empty_l1() -> None:
     assert repository.get_tool_call_classifications_calls == 1
 
 
+async def test_cached_tool_call_policy_resolver_reuses_cache_model_across_execution_routes() -> None:
+    repository = _MemoryClassificationRepository()
+    first = _RecordingToolCallClassifier(
+        classifier_model="lightning/lightning-ai/gpt-oss-20b",
+        classifier_cache_model="gpt-oss-20b",
+    )
+    second = _RecordingToolCallClassifier(
+        classifier_model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra",
+        classifier_cache_model="gpt-oss-20b",
+    )
+    calls = [
+        ToolCall(
+            tool=_bash_tool(),
+            policy=ToolPolicy(name="bash", source="client", effect_class="contextual"),
+            arguments='{"command":"ls"}',
+        )
+    ]
+
+    await CachedToolCallPolicyResolver(repository, first).resolve(calls)
+    await CachedToolCallPolicyResolver(repository, second).resolve(calls)
+
+    assert first.calls == 1
+    assert second.calls == 0
+    assert repository.store_tool_call_classifications_calls == 1
+
+
 def _read_file_tool() -> FunctionTool:
     return FunctionTool(
         description="Read a file without changing it.",
@@ -654,6 +708,7 @@ class _RecordingClassifier(IToolClassifier):
     calls: int = 0
     classifier: str = "fake"
     classifier_model: str = "fake/model"
+    classifier_cache_model: str = "fake/cache"
     prompt_hash: bytes = b"p" * 32
 
     async def classify_many(self, signatures: list[ToolSignature]) -> dict[bytes, ToolClassification]:
@@ -662,7 +717,7 @@ class _RecordingClassifier(IToolClassifier):
             signature.signature_hash: ToolClassification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="safe",
                 confidence=1.0,
@@ -680,7 +735,7 @@ class _ContextualClassifier(_RecordingClassifier):
             signature.signature_hash: ToolClassification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="contextual",
                 confidence=0.8,
@@ -698,7 +753,7 @@ class _FallbackClassifier(_RecordingClassifier):
             signature.signature_hash: ToolClassification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="contextual",
                 confidence=0.0,
@@ -715,6 +770,7 @@ class _RecordingToolCallClassifier(IToolCallClassifier):
     calls: int = 0
     classifier: str = "fake"
     classifier_model: str = "fake/model"
+    classifier_cache_model: str = "fake/cache"
     prompt_hash: bytes = b"c" * 32
 
     async def classify_many(self, calls: list[ToolCallSignature]) -> dict[tuple[bytes, bytes], ToolCallClassification]:
@@ -724,7 +780,7 @@ class _RecordingToolCallClassifier(IToolCallClassifier):
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="safe",
                 confidence=1.0,
@@ -743,7 +799,7 @@ class _FallbackToolCallClassifier(_RecordingToolCallClassifier):
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="unknown",
                 confidence=0.0,

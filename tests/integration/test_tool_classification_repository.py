@@ -334,6 +334,7 @@ def _bash_tool() -> FunctionTool:
 class _CountingClassifier:
     classifier = "fake"
     classifier_model = "fake/model"
+    classifier_cache_model = "fake/model"
     prompt_hash = b"p" * 32
 
     def __init__(self) -> None:
@@ -345,7 +346,7 @@ class _CountingClassifier:
             signature.signature_hash: ToolClassification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
-                classifier_model=self.classifier_model,
+                classifier_model=self.classifier_cache_model,
                 prompt_hash=self.prompt_hash,
                 effect_class="safe",
                 confidence=1.0,

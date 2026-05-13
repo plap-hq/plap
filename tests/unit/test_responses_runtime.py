@@ -82,7 +82,7 @@ from plap.settings import (
 
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
-CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 
 
 def _assert_public_error(
@@ -104,6 +104,15 @@ def _assert_public_error(
         assert message_contains in exc.public.message
     if private_reason is not None:
         assert exc.private.reason == private_reason
+
+
+def _parse_prefixed_json(content: str, *, prefix: str) -> object:
+    assert content.startswith(prefix)
+    return json.loads(content.removeprefix(prefix))
+
+
+def _split_sections(content: str) -> list[str]:
+    return content.split("\n\n")
 
 
 async def stream_response_events(*args, **kwargs):
@@ -827,14 +836,32 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert held_payload.messages[1].content == "This tool call was not executed."
     reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
     assert reviewer_payload.messages[0].role == "user"
-    assert "original question" not in (reviewer_payload.messages[0].content or "")
-    assert "draft answer" in (reviewer_payload.messages[0].content or "")
-    assert '"available_in_debate"' not in (reviewer_payload.messages[0].content or "")
-    assert '"available_in_normal_step"' not in (reviewer_payload.messages[0].content or "")
-    reviewer_request_contents = "\n".join(message.content or "" for message in client.requests[1].messages)
-    assert CALLED_TOOL_DEFINITIONS_HEADER in reviewer_request_contents
-    assert '"name":"mutate_record"' in reviewer_request_contents
-    assert '"description":"test tool"' in reviewer_request_contents
+    reviewer_sections = _split_sections(reviewer_payload.messages[0].content or "")
+    assert reviewer_sections[0] == (
+        "Review the current proposed next step below. Decide whether it is the correct next thing "
+        "to do or return now, or reopen with one short review note."
+    )
+    assert _parse_prefixed_json(
+        reviewer_sections[1],
+        prefix="Current proposed next step:\n",
+    ) == {
+        "role": "assistant",
+        "content": "draft answer",
+        "tool_calls": [{"name": "mutate_record", "arguments": {"id": "1"}}],
+    }
+    tool_definitions = _parse_prefixed_json(
+        client.requests[1].messages[2].content or "",
+        prefix=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n",
+    )
+    assert tool_definitions == [
+        {
+            "description": "test tool",
+            "name": "mutate_record",
+            "parameters": {"type": "object"},
+            "strict": True,
+            "type": "function",
+        }
+    ]
     assert completed.output[-1].name == "mutate_record"
     assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
     assert len(client.requests) == 2
@@ -967,20 +994,45 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message", "function_call"]
     main_debate_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
     assert main_debate_payload.messages[0].role == "user"
-    assert "original question" not in (main_debate_payload.messages[0].content or "")
-    assert "draft answer" not in (main_debate_payload.messages[0].content or "")
-    assert "Check ids." in (main_debate_payload.messages[0].content or "")
-    debate_request = client.requests[2]
-    contents = [message.content or "" for message in debate_request.messages[1:]]
-    assert any(content == "original question" for content in contents)
-    assert any(content == "draft answer" for content in contents)
-    assert any(content == "This tool call was not executed." for content in contents)
-    assert any(
-        CALLED_TOOL_DEFINITIONS_HEADER in content
-        for content in contents
+    assert main_debate_payload.messages[0].content == (
+        "Latest review note:\nCheck ids.\n\n"
+        "Write one short response note about the current proposed next step. "
+        "Focus on whether it is the correct next thing to do or return now."
     )
-    assert any('"name":"mutate_record"' in content for content in contents)
-    assert "Check ids." in (debate_request.messages[-1].content or "")
+    debate_request = client.requests[2]
+    assert [message.role for message in debate_request.messages] == [
+        "developer",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+        "user",
+    ]
+    assert debate_request.messages[1].content == "original question"
+    assert debate_request.messages[2].content == "draft answer"
+    assert [
+        {"name": call.name, "arguments": json.loads(call.arguments)}
+        for call in (debate_request.messages[2].tool_calls or [])
+    ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
+    assert debate_request.messages[3].content == "This tool call was not executed."
+    tool_definitions = _parse_prefixed_json(
+        debate_request.messages[4].content or "",
+        prefix=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n",
+    )
+    assert tool_definitions == [
+        {
+            "description": "test tool",
+            "name": "mutate_record",
+            "parameters": {"type": "object"},
+            "strict": True,
+            "type": "function",
+        }
+    ]
+    assert debate_request.messages[5].content == (
+        "Latest review note:\nCheck ids.\n\n"
+        "Write one short response note about the current proposed next step. "
+        "Focus on whether it is the correct next thing to do or return now."
+    )
 
 
 async def test_stream_response_events_main_debate_reasoning_summary_excludes_debate_turns() -> None:
@@ -1058,15 +1110,34 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     ]
     arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
     assert arbitrator_payload.messages[0].role == "user"
-    assert "original question" not in (arbitrator_payload.messages[0].content or "")
-    assert "draft answer" in (arbitrator_payload.messages[0].content or "")
-    assert "after review" in (arbitrator_payload.messages[0].content or "")
-    assert '"available_in_debate"' not in (arbitrator_payload.messages[0].content or "")
-    assert '"available_in_normal_step"' not in (arbitrator_payload.messages[0].content or "")
-    arbitrator_request_contents = "\n".join(message.content or "" for message in client.requests[3].messages)
-    assert CALLED_TOOL_DEFINITIONS_HEADER in arbitrator_request_contents
-    assert '"name":"mutate_record"' in arbitrator_request_contents
-    assert '"description":"test tool"' in arbitrator_request_contents
+    arbitrator_sections = _split_sections(arbitrator_payload.messages[0].content or "")
+    assert _parse_prefixed_json(
+        arbitrator_sections[0],
+        prefix="Current proposed next step:\n",
+    ) == {
+        "role": "assistant",
+        "content": "draft answer",
+        "tool_calls": [{"name": "mutate_record", "arguments": {"id": "1"}}],
+    }
+    assert arbitrator_sections[1] == "Latest review note:\nCheck ids."
+    assert arbitrator_sections[2] == "Latest response note:\nafter review"
+    assert arbitrator_sections[3] == (
+        "Decide whether to accept the current proposed next step, send one next-step note back "
+        "to the normal main step for a fresh retry, or reopen the review cycle."
+    )
+    tool_definitions = _parse_prefixed_json(
+        client.requests[3].messages[2].content or "",
+        prefix=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n",
+    )
+    assert tool_definitions == [
+        {
+            "description": "test tool",
+            "name": "mutate_record",
+            "parameters": {"type": "object"},
+            "strict": True,
+            "type": "function",
+        }
+    ]
     stable_guidance = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert stable_guidance.temp is False
     assert stable_guidance.messages[0].role == "assistant"
@@ -1075,16 +1146,44 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert stable_guidance.messages[1].role == "tool"
     assert stable_guidance.messages[1].content == "This tool call was not executed."
     assert stable_guidance.messages[2].role == "assistant"
-    assert stable_guidance.messages[2].content == "Use the safer path."
+    assert stable_guidance.messages[2].content == (
+        "Internal retry guidance for the next fresh answer only.\n"
+        "This is not a user-facing message.\n"
+        "Do not quote it, acknowledge it, apologize for it, or reply to it directly.\n\n"
+        "Use the safer path."
+    )
     final_main_request = client.requests[4]
-    final_main_contents = [message.content or "" for message in final_main_request.messages[1:]]
-    assert any("original question" in content for content in final_main_contents)
-    assert any("draft answer" in content for content in final_main_contents)
-    assert any("This tool call was not executed." in content for content in final_main_contents)
-    assert any("Use the safer path." in content for content in final_main_contents)
+    assert [message.role for message in final_main_request.messages] == [
+        "developer",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert final_main_request.messages[1].content == "original question"
+    assert final_main_request.messages[2].content == "draft answer"
+    assert [
+        {"name": call.name, "arguments": json.loads(call.arguments)}
+        for call in (final_main_request.messages[2].tool_calls or [])
+    ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
+    assert final_main_request.messages[3].content == "This tool call was not executed."
+    assert final_main_request.messages[4].content == (
+        "Internal retry guidance for the next fresh answer only.\n"
+        "This is not a user-facing message.\n"
+        "Do not quote it, acknowledge it, apologize for it, or reply to it directly.\n\n"
+        "Use the safer path."
+    )
     final_reviewer_payload = open_reasoning_payload(completed.output[6].encrypted_content, keyring=_keyring())
     assert final_reviewer_payload.messages[0].role == "user"
-    assert "final public answer" in (final_reviewer_payload.messages[0].content or "")
+    reviewer_sections = _split_sections(final_reviewer_payload.messages[0].content or "")
+    assert reviewer_sections[0] == (
+        "Review the current proposed next step below. Decide whether it is the correct next thing "
+        "to do or return now, or reopen with one short review note."
+    )
+    assert _parse_prefixed_json(
+        reviewer_sections[1],
+        prefix="Current proposed next step:\n",
+    ) == {"role": "assistant", "content": "final public answer"}
     assert completed.output[-1].content[0].text == "final public answer"
     assert len(client.requests) == 6
     assert client.requests[1].response_format is None
@@ -1137,10 +1236,11 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
     ]
     reopened_reviewer_payload = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert reopened_reviewer_payload.messages[0].role == "user"
-    assert "original question" not in (reopened_reviewer_payload.messages[0].content or "")
-    assert "draft answer" not in (reopened_reviewer_payload.messages[0].content or "")
-    assert "after review one" in (reopened_reviewer_payload.messages[0].content or "")
-    assert "Look at edge case." in (reopened_reviewer_payload.messages[0].content or "")
+    assert _split_sections(reopened_reviewer_payload.messages[0].content or "") == [
+        "Previous next-step note:\nLook at edge case.",
+        "Latest response note:\nafter review one",
+        "Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.",
+    ]
 
 
 async def test_stream_response_events_reviewer_accept_publishes_held_server_output() -> None:

@@ -16,6 +16,7 @@ from plap.llms.canopywave import CanopyWaveChatCompletionClient
 from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
 from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.crof import CrofChatCompletionClient
+from plap.llms.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.fireworks import FireworksChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
@@ -24,6 +25,7 @@ from plap.llms.router import (
     ModelRoute,
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
+    _model_attempts,
 )
 from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
@@ -31,8 +33,6 @@ from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
-    TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
-    TOOL_EFFECT_CLASSIFIER_MODEL,
     IToolCallClassifier,
     IToolClassifier,
     LLMToolCallClassifier,
@@ -232,23 +232,26 @@ def _create_tool_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
 ) -> IToolClassifier:
+    classifier_model = settings.tool_effect_classifier_model
+    classifier_cache_model = settings.tool_effect_classifier_cache_model
     if not _has_configured_chat_completion_route(
         settings,
-        TOOL_EFFECT_CLASSIFIER_MODEL,
+        classifier_model,
     ):
         raise PlapError(
             public=None,
             private=PrivateError(
                 event="app.startup_invalid",
                 reason="tool_effect_classifier_route_unconfigured",
-                message=f"tool effect classifier model does not match any configured LLM route: {TOOL_EFFECT_CLASSIFIER_MODEL!r}",
+                message=f"tool effect classifier model does not match any configured LLM route: {classifier_model!r}",
                 level=ErrorLevel.ERROR,
-                context={"model": TOOL_EFFECT_CLASSIFIER_MODEL},
+                context={"model": classifier_model},
             ),
         )
     return LLMToolClassifier(
         client=chat_completion_client,
-        classifier_model=TOOL_EFFECT_CLASSIFIER_MODEL,
+        classifier_model=classifier_model,
+        classifier_cache_model=classifier_cache_model,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
 
@@ -257,23 +260,26 @@ def _create_tool_call_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
 ) -> IToolCallClassifier:
+    classifier_model = settings.tool_call_effect_classifier_model
+    classifier_cache_model = settings.tool_call_effect_classifier_cache_model
     if not _has_configured_chat_completion_route(
         settings,
-        TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
+        classifier_model,
     ):
         raise PlapError(
             public=None,
             private=PrivateError(
                 event="app.startup_invalid",
                 reason="tool_call_classifier_route_unconfigured",
-                message=f"tool call classifier model does not match any configured LLM route: {TOOL_CALL_EFFECT_CLASSIFIER_MODEL!r}",
+                message=f"tool call classifier model does not match any configured LLM route: {classifier_model!r}",
                 level=ErrorLevel.ERROR,
-                context={"model": TOOL_CALL_EFFECT_CLASSIFIER_MODEL},
+                context={"model": classifier_model},
             ),
         )
     return LLMToolCallClassifier(
         client=chat_completion_client,
-        classifier_model=TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
+        classifier_model=classifier_model,
+        classifier_cache_model=classifier_cache_model,
         max_concurrency=settings.tool_classifier_max_concurrency,
     )
 
@@ -382,10 +388,6 @@ def _validate_runtime_profile_tokenizers(settings: Settings) -> None:
         validated.add(tokenizer_key)
 
 
-def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
-    return any(model.startswith(prefix) for prefix in _configured_chat_completion_prefixes(settings))
-
-
 def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
     if settings.llm_lightning_api_key:
         yield "lightning/"
@@ -399,6 +401,17 @@ def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
         yield "crof/"
     if settings.llm_openrouter_api_key:
         yield "openrouter/"
+
+
+def _has_configured_chat_completion_route_entry(settings: Settings, model: str) -> bool:
+    return any(model.startswith(prefix) for prefix in _configured_chat_completion_prefixes(settings))
+
+
+def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
+    try:
+        return all(_has_configured_chat_completion_route_entry(settings, attempt) for attempt in _model_attempts(model))
+    except ChatCompletionUnsupportedRequestError:
+        return False
 
 
 def create_app(settings: Settings | None = None) -> Litestar:

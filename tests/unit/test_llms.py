@@ -183,6 +183,127 @@ async def test_routing_client_strips_route_prefix_for_stream() -> None:
     assert client.stream_requests[0].model == "accounts/fireworks/models/gpt-oss-20b"
 
 
+async def test_routing_client_falls_back_to_later_model_for_completion() -> None:
+    class _FailingCompletionClient:
+        def __init__(self) -> None:
+            self.complete_requests: list[ChatCompletionRequest] = []
+
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            self.complete_requests.append(request)
+            raise ChatCompletionProviderError("primary failed")
+
+    primary_client = _FailingCompletionClient()
+    fallback_client = _RecordingChatCompletionClient("novita")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary_client),
+            ModelRoute(prefix="novita/", client=fallback_client),
+        ]
+    )
+
+    result = await router.complete(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert result.model == "novita/deepseek/deepseek-v4-flash"
+    assert result.message.content == "novita"
+    assert primary_client.complete_requests[0].model == "qwen3.5-9b"
+    assert fallback_client.complete_requests[0].model == "deepseek/deepseek-v4-flash"
+
+
+async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
+    class _FailingStreamClient:
+        def __init__(self) -> None:
+            self.stream_requests: list[ChatCompletionRequest] = []
+
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise AssertionError("complete() should not be used in this test")
+
+        async def stream(self, request: ChatCompletionRequest):
+            self.stream_requests.append(request)
+            raise ChatCompletionProviderError("primary failed")
+            yield  # pragma: no cover
+
+    primary_client = _FailingStreamClient()
+    fallback_client = _RecordingChatCompletionClient("novita")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary_client),
+            ModelRoute(prefix="novita/", client=fallback_client),
+        ]
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "novita/deepseek/deepseek-v4-flash"
+    assert deltas[0].content_delta == "novita"
+    assert primary_client.stream_requests[0].model == "qwen3.5-9b"
+    assert fallback_client.stream_requests[0].model == "deepseek/deepseek-v4-flash"
+
+
+async def test_routing_client_does_not_switch_providers_after_stream_yields() -> None:
+    class _PartialStreamClient:
+        def __init__(self) -> None:
+            self.stream_requests: list[ChatCompletionRequest] = []
+
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise AssertionError("complete() should not be used in this test")
+
+        async def stream(self, request: ChatCompletionRequest):
+            self.stream_requests.append(request)
+            yield ChatCompletionDelta(
+                id="partial",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                content_delta="partial",
+            )
+            raise ChatCompletionProviderError("stream failed")
+
+    primary_client = _PartialStreamClient()
+    fallback_client = _RecordingChatCompletionClient("novita")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary_client),
+            ModelRoute(prefix="novita/", client=fallback_client),
+        ]
+    )
+    received: list[ChatCompletionDelta] = []
+
+    with pytest.raises(ChatCompletionProviderError, match="stream failed"):
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        ):
+            received.extend((delta,))
+
+    assert received == [
+        ChatCompletionDelta(
+            id="partial",
+            model="crof/qwen3.5-9b",
+            created_at=None,
+            choice_index=0,
+            content_delta="partial",
+        )
+    ]
+    assert fallback_client.stream_requests == []
+
+
 async def test_routing_client_rejects_unmatched_model() -> None:
     router = RoutingChatCompletionClient([ModelRoute(prefix="openai/", client=_RecordingChatCompletionClient("openai"))])
 
@@ -195,6 +316,21 @@ async def test_routing_client_rejects_unmatched_model() -> None:
         )
 
 
+async def test_routing_client_rejects_unmatched_primary_fallback_model() -> None:
+    client = _RecordingChatCompletionClient("crof")
+    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=client)])
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="openai/model-a,crof/qwen3.5-9b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+    assert client.complete_requests == []
+
+
 async def test_routing_client_rejects_empty_provider_model() -> None:
     router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))])
 
@@ -202,6 +338,18 @@ async def test_routing_client_rejects_empty_provider_model() -> None:
         await router.complete(
             ChatCompletionRequest(
                 model="crof/",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+
+async def test_routing_client_rejects_empty_fallback_model_entry() -> None:
+    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))])
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="empty model entry"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,",
                 messages=[ChatMessage(role="user", content="hello")],
             )
         )
@@ -534,12 +682,62 @@ def test_openrouter_params_preserve_openai_compatible_fields() -> None:
     assert params["metadata"] == {"k": "v"}
     assert params["service_tier"] == "flex"
     assert params["prediction"] == {"type": "content", "content": "expected"}
+    assert "extra_body" not in params
+
+
+def test_openrouter_params_route_provider_order_from_suffixes() -> None:
+    params = to_openrouter_chat_params(_request_for_model("deepseek/deepseek-v4-flash:provider1:provider2"), stream=False)
+
+    assert params["model"] == "deepseek/deepseek-v4-flash"
+    assert params["extra_body"] == {
+        "provider": {
+            "order": ["provider1", "provider2"],
+            "allow_fallbacks": False,
+        }
+    }
+
+
+def test_openrouter_params_preserve_special_suffix_without_provider_order() -> None:
+    params = to_openrouter_chat_params(_request_for_model("stepfun/step-3.5-flash:nitro"), stream=False)
+
+    assert params["model"] == "stepfun/step-3.5-flash:nitro"
+    assert "extra_body" not in params
+
+
+def test_openrouter_params_allow_special_suffix_with_provider_order() -> None:
+    params = to_openrouter_chat_params(_request_for_model("meta-llama/llama-3.3-70b-instruct:free:provider1"), stream=False)
+
+    assert params["model"] == "meta-llama/llama-3.3-70b-instruct:free"
+    assert params["extra_body"] == {
+        "provider": {
+            "order": ["provider1"],
+            "allow_fallbacks": False,
+        }
+    }
 
 
 def test_openrouter_client_defaults_to_openrouter_base_url() -> None:
     client = OpenRouterChatCompletionClient(api_key="test-key")
 
     assert str(client._client.base_url).rstrip("/") == OPENROUTER_OPENAI_BASE_URL
+
+
+async def test_openrouter_client_uses_openai_create_with_provider_order_extra_body() -> None:
+    fake_completion = _FakeOpenAICompletion(_completion_response(model="deepseek/deepseek-v4-flash", content="ok"))
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = OpenRouterChatCompletionClient(client=fake_client)
+
+    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash:nitro:provider1:provider2"))
+
+    assert fake_completion.calls[0]["stream"] is False
+    assert fake_completion.calls[0]["model"] == "deepseek/deepseek-v4-flash:nitro"
+    assert fake_completion.calls[0]["extra_body"] == {
+        "provider": {
+            "order": ["provider1", "provider2"],
+            "allow_fallbacks": False,
+        }
+    }
+    assert result.message.content == "ok"
 
 
 async def test_openai_client_normalizes_completion_result() -> None:

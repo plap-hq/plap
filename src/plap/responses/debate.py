@@ -56,7 +56,7 @@ from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
 DEBATE_STEP_MAX_ATTEMPTS = 3
-CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed answer:"
+CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 logger = structlog.get_logger(__name__)
 
 
@@ -140,16 +140,16 @@ async def _retry_debate_step(actor: str, operation) -> object:
                 raise
 
 
-REVIEWER_DEVELOPER_PROMPT = """You are checking whether the current proposed answer should be sent to the user now.
+REVIEWER_DEVELOPER_PROMPT = """You are checking whether the current proposed next step should be returned now.
 
 You will see:
 - the conversation transcript
-- the current proposed answer
+- the current proposed next step
 - on later rounds, the latest response note and possibly a previous next-step note
 
 Definitions:
-- current proposed answer: the next thing that would be returned now if it were accepted,
-  which may be a direct answer, a tool call, or a combination of both
+- current proposed next step: the exact next thing that would be returned now if accepted,
+  which may be a direct user-facing message, a tool call, or a combination of both
 - response note: another model's reply to the latest review note; it may agree or disagree
 - next-step note: a short note about what the next round should focus on
 
@@ -167,66 +167,66 @@ Decision format:
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
 receive a user message titled `Tool definitions for tools used by the proposed
-answer`. If present, it contains tool definitions for tools that are available
-to the normal answer-writing step for this request and that are already used in
-the proposed answer. Use it to understand what those proposed tool calls mean
+next step`. If present, it contains tool definitions for tools that are available
+to the normal main step for this request and that are already used in
+the proposed next step. Use it to understand what those proposed tool calls mean
 and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal answer-writing step lacks
-it. Do not reject or criticize a proposed answer merely because one of those
+callable in this debate step does not mean the normal main step lacks
+it. Do not reject or criticize a proposed next step merely because one of those
 tools is not callable in this debate step.
 
 Use:
-- `ACCEPT` if the current proposed answer is the correct next thing to return exactly as-is
+- `ACCEPT` if the current proposed next step is the correct next step to do or return now exactly as-is
 - `REOPEN` if another round is needed
 
 If you use `REOPEN`, you MUST write one short review note above the final line saying what seems wrong,
-missing, unsupported, or risky about the current proposed answer.
+missing, unsupported, or risky about the current proposed next step.
 """
 
-MAIN_DEBATE_DEVELOPER_PROMPT = """You are writing a response note about the current proposed answer.
+MAIN_DEBATE_DEVELOPER_PROMPT = """You are writing a response note about the current proposed next step.
 
 You will see:
 - the full conversation context
-- the current proposed answer
+- the current proposed next step
 - the latest review note
 
 Definitions:
-- current proposed answer: the next thing that would be returned now if accepted,
-  which may be a direct answer, a tool call, or a combination of both
-- review note: another model's critique of that answer; it may be correct or incorrect
+- current proposed next step: the exact next thing that would be returned now if accepted,
+  which may be a direct user-facing message, a tool call, or a combination of both
+- review note: another model's critique of that next step; it may be correct or incorrect
 
 Write one short response note. The response note should explain, from your own judgment:
 - what the review note got right
 - what it got wrong
-- what matters most for deciding whether the current proposed answer is the correct next thing to return
+- what matters most for deciding whether the current proposed next step is the correct next step to do or return now
 
 Do not write a replacement answer for the user.
-Do not decide whether the current proposed answer should be sent.
+Do not decide whether the current proposed next step should be sent.
 You may agree, partly agree, or disagree with the review note.
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
 receive a user message titled `Tool definitions for tools used by the proposed
-answer`. If present, it contains tool definitions for tools that are available
-to the normal answer-writing step for this request and that are already used in
-the proposed answer. Use it to understand what those proposed tool calls mean
+next step`. If present, it contains tool definitions for tools that are available
+to the normal main step for this request and that are already used in
+the proposed next step. Use it to understand what those proposed tool calls mean
 and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal answer-writing step lacks
-it. Do not reject or criticize a proposed answer merely because one of those
+callable in this debate step does not mean the normal main step lacks
+it. Do not reject or criticize a proposed next step merely because one of those
 tools is not callable in this debate step.
 """
 
-ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed answer.
+ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed next step.
 
 You will see:
 - the conversation transcript
-- the current proposed answer
+- the current proposed next step
 - the latest review note
 - the latest response note
 
 Definitions:
-- current proposed answer: the next thing that would be returned now if accepted,
-  which may be a direct answer, a tool call, or a combination of both
-- review note: a short note explaining what seems wrong, missing, unsupported, or risky about that answer
+- current proposed next step: the exact next thing that would be returned now if accepted,
+  which may be a direct user-facing message, a tool call, or a combination of both
+- review note: a short note explaining what seems wrong, missing, unsupported, or risky about that next step
 - response note: a short note replying to the review note from independent judgment
 - next-step note: a short note telling the next round what to focus on
 
@@ -244,27 +244,29 @@ Decision format:
 Use available tools when they help.
 You only have access here to a restricted safe subset of tools. You may also
 receive a user message titled `Tool definitions for tools used by the proposed
-answer`. If present, it contains tool definitions for tools that are available
-to the normal answer-writing step for this request and that are already used in
-the proposed answer. Use it to understand what those proposed tool calls mean
+next step`. If present, it contains tool definitions for tools that are available
+to the normal main step for this request and that are already used in
+the proposed next step. Use it to understand what those proposed tool calls mean
 and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal answer-writing step lacks
-it. Do not reject or criticize a proposed answer merely because one of those
+callable in this debate step does not mean the normal main step lacks
+it. Do not reject or criticize a proposed next step merely because one of those
 tools is not callable in this debate step.
 
 Use:
-- `ACCEPT` if the current proposed answer is the correct next thing to return exactly as-is
-- `REVISE` if the current proposed answer should not be sent and the normal answer-writing step should try again from scratch
+- `ACCEPT` if the current proposed next step is the correct next step to do or return now exactly as-is
+- `REVISE` if the current proposed next step should not be sent and the normal main step should try again from scratch
 - `REOPEN` if another review/response round is needed
 
 If you use `REVISE`:
-- the current proposed answer will not be sent
+- the current proposed next step will not be sent
 - the response note will not be sent
 - you MUST write one short next-step note above the final line
-- that next-step note will be sent to the normal answer-writing step, which will write a fresh new answer from scratch
+- that next-step note will be sent to the normal main step, which will choose and write a fresh next step from scratch
+- write from the perspective of the main step, unlike you the main step does not know of "review," "reviewer," "arbitrator," "proposed next step," "decision."
+- all the main step needs to know is what to do next and what went wrong
 
 If you use `REOPEN`:
-- the current proposed answer will not be sent
+- the current proposed next step will not be sent
 - the response note will not be sent
 - you MUST write one short next-step note above the final line
 - that next-step note will be sent into another review/response round
@@ -546,8 +548,10 @@ def _reviewer_initial_turn(
     return StateMessage(
         role="user",
         content=(
-            "Review the current proposed answer below. Decide whether to accept it as-is or reopen with one short review note.\n\n"
-            "Current proposed answer:\n"
+            "Review the current proposed next step below. Decide whether it is the "
+            "correct next thing to do or return now, or reopen with one short review "
+            "note.\n\n"
+            "Current proposed next step:\n"
             f"{_json_text(_compact_candidate(parts))}"
         ),
     )
@@ -558,7 +562,7 @@ def _reviewer_reopen_turn(*, latest_response_note: StateMessage, latest_next_ste
     if latest_next_step_note is not None:
         parts.append(f"Previous next-step note:\n{latest_next_step_note}")
     parts.append(f"Latest response note:\n{latest_response_note.content_text() or ''}")
-    parts.append("Revisit the current proposed answer and decide whether to accept it or reopen again with a new review note.")
+    parts.append("Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.")
     return StateMessage(role="user", content="\n\n".join(parts))
 
 
@@ -568,8 +572,8 @@ def _main_debate_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
         content=(
             "Latest review note:\n"
             f"{reviewer_decision.note or ''}\n\n"
-            "Write one short response note about the current proposed answer. "
-            "You may agree, partly agree, or disagree with the review note."
+            "Write one short response note about the current proposed next step. "
+            "Focus on whether it is the correct next thing to do or return now."
         ),
     )
 
@@ -583,14 +587,16 @@ def _arbitrator_initial_turn(
     return StateMessage(
         role="user",
         content=(
-            "Current proposed answer:\n"
+            "Current proposed next step:\n"
             f"{_json_text(_compact_candidate(parts))}"
             "\n\n"
             "Latest review note:\n"
             f"{reviewer_decision.note or ''}\n\n"
             "Latest response note:\n"
             f"{latest_response_note.content_text() or ''}\n\n"
-            "Decide whether to accept the current proposed answer, revise normal main with one next-step note, or reopen the review cycle."
+            "Decide whether to accept the current proposed next step, send one "
+            "next-step note back to the normal main step for a fresh retry, or reopen "
+            "the review cycle."
         ),
     )
 
@@ -603,7 +609,9 @@ def _arbitrator_reopen_turn(*, reviewer_decision: ReviewerDecision, latest_respo
             f"{reviewer_decision.note or ''}\n\n"
             "Latest response note:\n"
             f"{latest_response_note.content_text() or ''}\n\n"
-            "Decide whether to accept the current proposed answer, revise normal main with one next-step note, or reopen the review cycle."
+            "Decide whether to accept the current proposed next step, send one "
+            "next-step note back to the normal main step for a fresh retry, or reopen "
+            "the review cycle."
         ),
     )
 
@@ -1042,6 +1050,15 @@ async def publish_accepted_candidate(
     state.clear_debate()
 
 
+def _wrap_revise_note_for_main(note: str) -> str:
+    return (
+        "Internal retry guidance for the next fresh answer only.\n"
+        "This is not a user-facing message.\n"
+        "Do not quote it, acknowledge it, apologize for it, or reply to it directly.\n\n"
+        f"{note}"
+    )
+
+
 async def resume_main_with_revise_bundle(
     *,
     state: MutableQueues,
@@ -1054,7 +1071,7 @@ async def resume_main_with_revise_bundle(
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="revise_requires_held_candidate", private_message="revise requires held candidate state")
 
-    note_message = StateMessage(role="assistant", content=note)
+    note_message = StateMessage(role="assistant", content=_wrap_revise_note_for_main(note))
     bundled_messages = (
         parts.held_candidate.message,
         *[row.message for row in parts.held_hidden_tool_rows],

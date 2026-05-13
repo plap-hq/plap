@@ -27,7 +27,6 @@ if str(SRC_ROOT) not in sys.path:
 from plap.auth import APIKeyManager, normalize_email  # noqa: E402
 from plap.persistence.db import create_database_engine, create_session_maker  # noqa: E402
 from plap.persistence.models import Organization, OrganizationMembership, User, UserEmail  # noqa: E402
-from plap.responses.tools.classify import TOOL_CALL_EFFECT_CLASSIFIER_MODEL, TOOL_EFFECT_CLASSIFIER_MODEL  # noqa: E402
 from plap.settings import Settings, _default_runtime_model_profiles  # noqa: E402
 
 STATE_ENV_KEYS = (
@@ -249,17 +248,28 @@ def _require_provider_keys() -> None:
 
 
 def _required_provider_env_vars() -> list[str]:
-    models = {TOOL_EFFECT_CLASSIFIER_MODEL, TOOL_CALL_EFFECT_CLASSIFIER_MODEL}
+    models = {
+        os.environ.get("PLAP_TOOL_EFFECT_CLASSIFIER_MODEL") or Settings.model_fields["tool_effect_classifier_model"].default,
+        os.environ.get("PLAP_TOOL_CALL_EFFECT_CLASSIFIER_MODEL") or Settings.model_fields["tool_call_effect_classifier_model"].default,
+    }
     for profile in _default_runtime_model_profiles().values():
         models.update(profile.all_models())
 
     required: set[str] = set()
     for model in models:
-        for prefix, env_var in ROUTE_ENV_VARS.items():
-            if model.startswith(prefix):
-                required.add(env_var)
-                break
+        for attempt in _route_model_attempts(model):
+            for prefix, env_var in ROUTE_ENV_VARS.items():
+                if attempt.startswith(prefix):
+                    required.add(env_var)
+                    break
     return sorted(required)
+
+
+def _route_model_attempts(model: str) -> list[str]:
+    attempts = [part.strip() for part in model.split(",")]
+    if not attempts or any(not attempt for attempt in attempts):
+        raise SystemExit(f"Invalid routed model fallback chain in dev settings: {model!r}")
+    return attempts
 
 
 def _ensure_managed_postgres(args: argparse.Namespace, managed_state: dict[str, str], resources: EphemeralResources) -> None:

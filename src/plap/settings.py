@@ -149,8 +149,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 deprecated=False,
             ),
             main=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro",
-                max_completion_tokens=262_144,
+                model="crof/mimo-v2.5-pro-precision",
+                max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
@@ -162,8 +162,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro",
-                max_completion_tokens=262_144,
+                model="crof/mimo-v2.5-pro-precision",
+                max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
@@ -924,6 +924,10 @@ class Settings(BaseSettings):
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None
     llm_openrouter_api_key: str | None = None
+    tool_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"
+    tool_call_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"
+    tool_effect_classifier_cache_model: str = "gpt-oss-20b"
+    tool_call_effect_classifier_cache_model: str = "gpt-oss-20b"
     tool_classifier_max_concurrency: int = 2
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096

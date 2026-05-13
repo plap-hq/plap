@@ -1,8 +1,6 @@
 from plap.responses.tools.classify import (
-    TOOL_CALL_EFFECT_CLASSIFIER_MODEL,
     TOOL_CALL_EFFECT_CLASSIFIER_NAME,
     TOOL_CALL_EFFECT_CLASSIFIER_PROMPT,
-    TOOL_EFFECT_CLASSIFIER_MODEL,
     TOOL_EFFECT_CLASSIFIER_NAME,
     TOOL_EFFECT_CLASSIFIER_PROMPT,
     LLMToolCallClassifier,
@@ -39,10 +37,8 @@ from plap.responses.tools.policy import (
 from plap.responses.tools.repository import ToolClassificationRepository, ToolClassificationStore
 
 __all__ = [
-    "TOOL_CALL_EFFECT_CLASSIFIER_MODEL",
     "TOOL_CALL_EFFECT_CLASSIFIER_NAME",
     "TOOL_CALL_EFFECT_CLASSIFIER_PROMPT",
-    "TOOL_EFFECT_CLASSIFIER_MODEL",
     "TOOL_EFFECT_CLASSIFIER_NAME",
     "TOOL_EFFECT_CLASSIFIER_PROMPT",
     "CachedToolCallPolicyResolver",

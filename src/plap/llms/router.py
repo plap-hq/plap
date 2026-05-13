@@ -9,7 +9,25 @@ from plap.llms.chat import (
     ChatCompletionResult,
     IChatCompletionClient,
 )
-from plap.llms.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.errors import ChatCompletionProviderError, ChatCompletionUnsupportedRequestError
+
+
+def _model_attempts(model: str) -> tuple[str, ...]:
+    attempts = tuple(part.strip() for part in model.split(","))
+    if not attempts or any(not attempt for attempt in attempts):
+        raise ChatCompletionUnsupportedRequestError(f"Model fallback chain {model!r} contains an empty model entry")
+    return attempts
+
+
+def _provider_model(model: str, prefix: str) -> str:
+    provider_model = model.removeprefix(prefix)
+    if not provider_model:
+        raise ChatCompletionUnsupportedRequestError(f"No provider model configured for model {model!r}")
+    return provider_model
+
+
+def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
+    return ChatCompletionUnsupportedRequestError(f"No chat completion provider configured for model {model!r}")
 
 
 @dataclass(frozen=True)
@@ -29,19 +47,45 @@ class RoutingChatCompletionClient(IChatCompletionClient):
             raise ValueError("at least one model route is required")
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        route = self._route_for(request.model)
-        provider_model = _provider_model(request.model, route.prefix)
-        result = await route.client.complete(replace(request, model=provider_model))
-        return replace(result, model=request.model)
+        last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
+        for attempt_model in _model_attempts(request.model):
+            route = self._route_for(attempt_model)
+            provider_model = _provider_model(attempt_model, route.prefix)
+            try:
+                result = await route.client.complete(replace(request, model=provider_model))
+            except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
+                last_error = exc
+                continue
+            return replace(result, model=attempt_model)
+
+        if last_error is None:
+            raise _unsupported_model(request.model)
+        raise last_error
 
     async def stream(
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
-        route = self._route_for(request.model)
-        provider_model = _provider_model(request.model, route.prefix)
-        async for delta in route.client.stream(replace(request, model=provider_model)):
-            yield replace(delta, model=request.model)
+        last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
+        for attempt_model in _model_attempts(request.model):
+            route = self._route_for(attempt_model)
+            provider_model = _provider_model(attempt_model, route.prefix)
+            yielded = False
+            try:
+                async for delta in route.client.stream(replace(request, model=provider_model)):
+                    yielded = True
+                    yield replace(delta, model=attempt_model)
+            except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
+                if yielded:
+                    raise
+                last_error = exc
+                continue
+            else:
+                return
+
+        if last_error is None:
+            raise _unsupported_model(request.model)
+        raise last_error
 
     def _route_for(self, model: str) -> ModelRoute:
         best_route: ModelRoute | None = None
@@ -70,14 +114,3 @@ class UnavailableChatCompletionClient(IChatCompletionClient):
             yield  # pragma: no cover
 
         return raise_unsupported()
-
-
-def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
-    return ChatCompletionUnsupportedRequestError(f"No chat completion provider configured for model {model!r}")
-
-
-def _provider_model(model: str, prefix: str) -> str:
-    provider_model = model.removeprefix(prefix)
-    if not provider_model:
-        raise ChatCompletionUnsupportedRequestError(f"No provider model configured for model {model!r}")
-    return provider_model
