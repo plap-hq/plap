@@ -57,7 +57,7 @@ from plap.responses.tools import ToolPolicy, normalize_function_tool
 from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
-HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
+HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was intercepted by a reviewer."
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
