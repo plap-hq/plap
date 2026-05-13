@@ -1565,6 +1565,7 @@ async def test_stream_response_events_executes_server_tool_and_loops_back() -> N
         [
             ChatMessage(
                 role="assistant",
+                reasoning_content="need search results before I answer",
                 tool_calls=[
                     ChatToolCall(
                         id="upstream_search_1",
@@ -1611,6 +1612,7 @@ async def test_stream_response_events_executes_server_tool_and_loops_back() -> N
     assert len(client.requests) == 2
     loop_messages = client.requests[1].messages[1:]
     assert loop_messages[-2].role == "assistant"
+    assert loop_messages[-2].reasoning_content == "need search results before I answer"
     assert loop_messages[-2].tool_calls[0].id == "upstream_search_1"
     assert loop_messages[-1].role == "tool"
     assert loop_messages[-1].tool_call_id == "upstream_search_1"

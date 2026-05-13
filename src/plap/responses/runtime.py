@@ -1059,8 +1059,7 @@ async def run_response(
             client_call_indexes = []
 
         if candidate.content is not None or candidate.tool_calls or candidate.reasoning_content or candidate.reasoning_details:
-            assistant_context_message = candidate.without_reasoning()
-            state.append_main_stable(assistant_context_message, content_hash=published.assistant_hash)
+            state.append_main_stable(candidate, content_hash=published.assistant_hash)
 
         for index, output in server_outputs.items():
             tool_message = StateMessage(
