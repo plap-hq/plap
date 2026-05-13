@@ -728,9 +728,48 @@ def test_parse_reviewer_decision_extracts_note_from_wrapper_line() -> None:
     assert decision.note == "Need a narrower patch and better failure handling."
 
 
+def test_parse_reviewer_decision_extracts_note_from_leading_wrapper_line() -> None:
+    decision = parse_reviewer_decision(
+        StateMessage(role="assistant", content="Decision: REOPEN\n\nNeed a narrower patch and better failure handling.")
+    )
+
+    assert decision.action == ReviewerActionType.REOPEN
+    assert decision.note == "Need a narrower patch and better failure handling."
+
+
+def test_parse_reviewer_decision_accepts_trailing_punctuation_on_wrapper_line() -> None:
+    decision = parse_reviewer_decision(
+        StateMessage(role="assistant", content="Need a narrower patch and better failure handling.\n\nDecision: REOPEN.")
+    )
+
+    assert decision.action == ReviewerActionType.REOPEN
+    assert decision.note == "Need a narrower patch and better failure handling."
+
+
 def test_parse_arbitrator_decision_extracts_note_from_prefixed_wrapper_line() -> None:
     decision = parse_arbitrator_decision(
         StateMessage(role="assistant", content="Use the safer path from scratch.\n\nFinal decision: REVISE")
+    )
+
+    assert decision.action == ArbitratorActionType.REVISE
+    assert decision.note == "Use the safer path from scratch."
+
+
+def test_parse_arbitrator_decision_accepts_trailing_punctuation_on_wrapper_line() -> None:
+    decision = parse_arbitrator_decision(
+        StateMessage(role="assistant", content="Use the safer path from scratch.\n\nFinal decision: REVISE.")
+    )
+
+    assert decision.action == ArbitratorActionType.REVISE
+    assert decision.note == "Use the safer path from scratch."
+
+
+def test_parse_arbitrator_decision_accepts_matching_boundary_wrapper_lines() -> None:
+    decision = parse_arbitrator_decision(
+        StateMessage(
+            role="assistant",
+            content="Decision: REVISE\n\nUse the safer path from scratch.\n\nFinal decision: REVISE",
+        )
     )
 
     assert decision.action == ArbitratorActionType.REVISE
@@ -751,6 +790,15 @@ def test_parse_reviewer_decision_requires_tail_marker() -> None:
         parse_reviewer_decision(StateMessage(role="assistant", content="Need a narrower patch."))
 
     _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="decision_invalid_tail_marker")
+
+
+def test_parse_reviewer_decision_rejects_conflicting_boundary_markers() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        parse_reviewer_decision(
+            StateMessage(role="assistant", content="Decision: REOPEN\n\nNeed a narrower patch.\n\nFinal decision: ACCEPT")
+        )
+
+    _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="decision_ambiguous_boundary_markers")
 
 
 def test_parse_arbitrator_decision_requires_note_for_revise() -> None:

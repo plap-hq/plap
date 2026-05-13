@@ -61,6 +61,7 @@ HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was intercepted by a reviewer."
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
+DECISION_TRAILING_PUNCTUATION = frozenset({".", ",", ":", ";", ")", "]", '"', "'"})
 logger = structlog.get_logger(__name__)
 
 
@@ -118,6 +119,7 @@ def _is_retryable_debate_error(exc: PlapError) -> bool:
         "arbitrator_note_required",
         "decision_missing_content",
         "decision_invalid_tail_marker",
+        "decision_ambiguous_boundary_markers",
         "debate_tool_arguments_invalid_json",
         "debate_tool_arguments_not_object",
     }
@@ -430,29 +432,52 @@ _ARBITRATOR_ACTIONS_BY_TOKEN = {
 }
 
 
-def _tail_decision(message: StateMessage, *, label: str, allowed_actions: Mapping[str, object]) -> tuple[object, str | None]:
+def _decision_line_action(line: str, *, allowed_actions: Mapping[str, object]) -> object | None:
+    if not line:
+        return None
+    token = line.rsplit(maxsplit=1)[-1]
+    action = allowed_actions.get(token)
+    if action is not None:
+        return action
+    if len(token) > 1 and token[-1] in DECISION_TRAILING_PUNCTUATION:
+        return allowed_actions.get(token[:-1])
+    return None
+
+
+def _boundary_decision(message: StateMessage, *, label: str, allowed_actions: Mapping[str, object]) -> tuple[object, str | None]:
     if message.content is None or not message.content.strip():
         raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
     lines = message.content.rstrip().splitlines()
-    for index in range(len(lines) - 1, -1, -1):
-        decision_line = lines[index].strip()
-        if not decision_line:
-            continue
-        action_token = decision_line.split()[-1]
-        action = allowed_actions.get(action_token)
-        if action is None:
-            expected = ", ".join(allowed_actions)
-            raise _debate_unavailable_error(
-                reason="decision_invalid_tail_marker",
-                private_message=f"{label} final line must end with one of {expected}",
-            )
-        note = "\n".join(lines[:index]).strip() or None
-        return action, note
-    raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
+    non_empty_indexes = [index for index, line in enumerate(lines) if line.strip()]
+    if not non_empty_indexes:
+        raise _debate_unavailable_error(reason="decision_missing_content", private_message=f"{label} is missing content")
+
+    first_index = non_empty_indexes[0]
+    last_index = non_empty_indexes[-1]
+    first_action = _decision_line_action(lines[first_index].strip(), allowed_actions=allowed_actions)
+    last_action = _decision_line_action(lines[last_index].strip(), allowed_actions=allowed_actions)
+
+    if first_action is None and last_action is None:
+        expected = ", ".join(allowed_actions)
+        raise _debate_unavailable_error(
+            reason="decision_invalid_tail_marker",
+            private_message=f"{label} boundary line must end with one of {expected}",
+        )
+
+    if first_index != last_index and first_action is not None and last_action is not None and first_action != last_action:
+        raise _debate_unavailable_error(
+            reason="decision_ambiguous_boundary_markers",
+            private_message=f"{label} first and last decision lines disagree",
+        )
+
+    action = first_action if first_action is not None else last_action
+    wrapper_indexes = {index for index, decision in ((first_index, first_action), (last_index, last_action)) if decision is not None}
+    note = "\n".join(line for index, line in enumerate(lines) if index not in wrapper_indexes).strip() or None
+    return action, note
 
 
 def parse_reviewer_decision(message: StateMessage) -> ReviewerDecision:
-    action, note = _tail_decision(message, label="reviewer decision", allowed_actions=_REVIEWER_ACTIONS_BY_TOKEN)
+    action, note = _boundary_decision(message, label="reviewer decision", allowed_actions=_REVIEWER_ACTIONS_BY_TOKEN)
     if action == ReviewerActionType.REOPEN and not note:
         raise _debate_unavailable_error(reason="reviewer_reopen_requires_note", private_message="reviewer reopen requires note")
     if action == ReviewerActionType.ACCEPT:
@@ -461,7 +486,7 @@ def parse_reviewer_decision(message: StateMessage) -> ReviewerDecision:
 
 
 def parse_arbitrator_decision(message: StateMessage) -> ArbitratorDecision:
-    action, note = _tail_decision(message, label="arbitrator decision", allowed_actions=_ARBITRATOR_ACTIONS_BY_TOKEN)
+    action, note = _boundary_decision(message, label="arbitrator decision", allowed_actions=_ARBITRATOR_ACTIONS_BY_TOKEN)
     if action in {ArbitratorActionType.REVISE, ArbitratorActionType.REOPEN} and not note:
         raise _debate_unavailable_error(reason="arbitrator_note_required", private_message="arbitrator note is required")
     if action == ArbitratorActionType.ACCEPT:
