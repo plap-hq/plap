@@ -69,9 +69,12 @@ from plap.responses.ingest import (
 from plap.responses.ingest.render import compact_transcript
 from plap.responses.models import StateMessage, StateToolCall
 from plap.responses.reasoning import IReasoningSummarizer
-from plap.responses.runtime import prepare_tools, resolve_tool_calls
 from plap.responses.runtime import (
     STREAM_ABORTED_TOOL_PLACEHOLDER,
+    prepare_tools,
+    resolve_tool_calls,
+)
+from plap.responses.runtime import (
     stream_response_events as _stream_response_events,
 )
 from plap.responses.store import PreparedRequest
@@ -1505,7 +1508,9 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
     reopened_reviewer_payload = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert reopened_reviewer_payload.messages[0].role == "user"
     reopened_sections = _split_sections(reopened_reviewer_payload.messages[0].content or "")
-    assert reopened_sections[0] == "Previous next-step note:\nLook at edge case."
+    reopened_heading, reopened_note = reopened_sections[0].split("\n", 1)
+    assert reopened_heading.endswith("note:")
+    assert reopened_note == "Look at edge case."
     assert reopened_sections[1] == "Latest response note:\nafter review one"
     assert reopened_sections[2].startswith("Revisit the current proposed next step")
 

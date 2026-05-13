@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import anyio
 import structlog
 from litestar import delete, get, post, websocket
 from litestar.connection import WebSocket
@@ -63,51 +64,62 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
     )
 
 
+async def _close_stream_events(events: AsyncIterator[ResponseStreamEvent]) -> None:
+    aclose = getattr(events, "aclose", None)
+    if aclose is None:
+        return
+    with anyio.CancelScope(shield=True):
+        await aclose()
+
+
 async def _sse_payload(
     events: AsyncIterator[ResponseStreamEvent],
 ) -> AsyncIterator[str]:
     last_sequence_number = 0
     try:
-        async for event in events:
-            last_sequence_number = event.sequence_number
-            yield event.model_dump_json(exclude_none=True)
-    except PlapError as exc:
-        public = exc.public or PublicError(
-            status_code=500,
-            type="server_error",
-            code="server_error",
-            message="Response generation failed.",
-        )
-        exc.log(
-            logger,
-            failure_code=public.code,
-            failure_type=public.type,
-            path="/v1/responses",
-            status_code=public.status_code,
-            transport="sse",
-        )
-        yield build_error_event(public=public).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(
-            exclude_none=True
-        )
-    except Exception:
-        logger.exception(
-            "response.sse.unhandled_failed",
-            error_type="server_error",
-            failure_code="server_error",
-            failure_type="server_error",
-            path="/v1/responses",
-            status_code=500,
-            transport="sse",
-        )
-        yield build_error_event(
-            public=PublicError(
+        try:
+            async for event in events:
+                last_sequence_number = event.sequence_number
+                yield event.model_dump_json(exclude_none=True)
+        except PlapError as exc:
+            public = exc.public or PublicError(
                 status_code=500,
                 type="server_error",
                 code="server_error",
                 message="Response generation failed.",
             )
-        ).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(exclude_none=True)
-    yield "[DONE]"
+            exc.log(
+                logger,
+                failure_code=public.code,
+                failure_type=public.type,
+                path="/v1/responses",
+                status_code=public.status_code,
+                transport="sse",
+            )
+            yield build_error_event(public=public).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(
+                exclude_none=True
+            )
+        except Exception:
+            logger.exception(
+                "response.sse.unhandled_failed",
+                error_type="server_error",
+                failure_code="server_error",
+                failure_type="server_error",
+                path="/v1/responses",
+                status_code=500,
+                transport="sse",
+            )
+            yield build_error_event(
+                public=PublicError(
+                    status_code=500,
+                    type="server_error",
+                    code="server_error",
+                    message="Response generation failed.",
+                )
+            ).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(exclude_none=True)
+        yield "[DONE]"
+    finally:
+        await _close_stream_events(events)
 
 
 def _completed_response_from_events(

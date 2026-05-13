@@ -835,6 +835,46 @@ async def test_sse_payload_emits_error_event_on_late_stream_failure() -> None:
     assert chunks[2] == "[DONE]"
 
 
+async def test_sse_payload_closes_underlying_event_stream_on_consumer_cancellation() -> None:
+    stream_closed = anyio.Event()
+    first_chunk = anyio.Event()
+    consumer_started = anyio.Event()
+    consumer_cancel_scope: anyio.CancelScope | None = None
+
+    async def events() -> AsyncIterator[ResponseTextDoneEvent]:
+        try:
+            yield ResponseTextDoneEvent(
+                content_index=0,
+                item_id="msg_1",
+                output_index=0,
+                sequence_number=1,
+                text="partial",
+                type="response.output_text.done",
+            )
+            await anyio.sleep_forever()
+        finally:
+            stream_closed.set()
+
+    async def consume() -> None:
+        nonlocal consumer_cancel_scope
+        with anyio.CancelScope() as cancel_scope:
+            consumer_cancel_scope = cancel_scope
+            consumer_started.set()
+            async for _chunk in _sse_payload(events()):
+                first_chunk.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(consume)
+        await consumer_started.wait()
+        await first_chunk.wait()
+        await anyio.sleep(0)
+        assert consumer_cancel_scope is not None
+        consumer_cancel_scope.cancel()
+
+    with anyio.fail_after(1):
+        await stream_closed.wait()
+
+
 async def test_create_response_prepares_runtime_tools_without_changing_behavior(
     test_app_factory,
     seeded_auth_data,

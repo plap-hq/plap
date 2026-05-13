@@ -667,6 +667,16 @@ class _StreamLifecycle:
     generation_cancel_scope: anyio.CancelScope | None = None
 
 
+async def _handle_stream_disconnect(lifecycle: _StreamLifecycle) -> None:
+    lifecycle.client_disconnected = True
+    if lifecycle.out is not None:
+        lifecycle.out.detach_client()
+    if lifecycle.generation_cancel_scope is not None:
+        lifecycle.generation_cancel_scope.cancel()
+    with anyio.CancelScope(shield=True):
+        await lifecycle.producer_done.wait()
+
+
 async def _run_main_completion(
     *,
     out: ResponseEventIO,
@@ -1210,13 +1220,8 @@ async def stream_response_events(
                 try:
                     yield event
                 except GeneratorExit:
-                    lifecycle.client_disconnected = True
-                    if lifecycle.out is not None:
-                        lifecycle.out.detach_client()
-                    if lifecycle.generation_cancel_scope is not None:
-                        lifecycle.generation_cancel_scope.cancel()
-                    await lifecycle.producer_done.wait()
-                    break
+                    await _handle_stream_disconnect(lifecycle)
+                    return
     if lifecycle.client_disconnected:
         return
     if producer_error is not None:

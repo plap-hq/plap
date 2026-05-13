@@ -202,6 +202,10 @@ Decision format:
   Final decision: ACCEPT
 - Put no review-note text on the final line. Put all review-note text above it.
 
+Consistency rules:
+- If you write that the current proposed next step is wrong, unsupported, risky, or missing something, you must not use ACCEPT.
+- Before finishing, check that your final decision line agrees with the rest of your output.
+
 {DEBATE_TOOL_AVAILABILITY_PROMPT}
 
 {DEBATE_REQUEST_CONSTRAINTS_PROMPT}
@@ -216,8 +220,9 @@ Use:
 
 Do not reopen merely because later work still exists outside the current requested scope.
 
-If you use `REOPEN`, you MUST write one short review note above the final line saying what seems wrong,
-missing, unsupported, or risky about the current proposed next step.
+If you use `REOPEN`:
+- you MUST write one short review note above the final line saying what seems wrong, missing, unsupported, or risky about the current proposed next step.
+- do not add labels such as "Review note:"
 """
 
 MAIN_DEBATE_DEVELOPER_PROMPT = f"""You are writing a response note about the current proposed next step.
@@ -239,9 +244,9 @@ Definitions:
 Write one short response note from independent judgment.
 
 Start with exactly one of:
-- Wrong:
-- Partly right:
-- Correct:
+- The review note is wrong:
+- The review note is partly right:
+- The review note is correct:
 
 Presume the current proposed next step is correct.
 The review note must identify a concrete defect in that next step for the current requested scope.
@@ -286,6 +291,10 @@ Decision format:
   Final decision: REOPEN
 - Put no note text on the final line. Put all note text above it.
 
+Consistency rules:
+- If you write that the current proposed next step is wrong, unsupported, risky, or missing something, you must not use ACCEPT.
+- Before finishing, check that your final decision line agrees with the rest of your output.
+
 {DEBATE_TOOL_AVAILABILITY_PROMPT}
 
 {DEBATE_REQUEST_CONSTRAINTS_PROMPT}
@@ -304,6 +313,7 @@ If you use `REVISE`:
 - the response note will not be sent
 - you MUST write one short next-step note above the final line
 - that next-step note will be sent to the normal main step, which will choose and write a fresh next step from scratch
+- do not add labels such as "Next-step note:"
 - write the next-step note as instructions to the next main turn
 - write from the perspective of the main step; it does not know of
   "review," "reviewer," "arbitrator," "proposed next step," or "decision"
@@ -313,7 +323,9 @@ If you use `REOPEN`:
 - the current proposed next step will not be sent
 - the response note will not be sent
 - you MUST write one short next-step note above the final line
-- that next-step note will be sent into another review/response round
+- that next-step note will be sent into another review round
+- do not add labels such as "Next-step note:"
+- put what you want the next review round to focus on in that note
 """
 
 
@@ -794,7 +806,7 @@ def _reviewer_reopen_turn(
 ) -> StateMessage:
     content_parts = []
     if latest_next_step_note is not None:
-        content_parts.append(f"Previous next-step note:\n{latest_next_step_note}")
+        content_parts.append(f"Current next-step note:\n{latest_next_step_note}")
     content_parts.append(f"Latest response note:\n{latest_response_note.content_text() or ''}")
     content_parts.append("Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.")
     return StateMessage(role="user", content="\n\n".join(content_parts))
