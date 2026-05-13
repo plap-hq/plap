@@ -434,7 +434,7 @@ def test_gmicloud_params_map_supported_provider_fields() -> None:
     assert params["messages"][0] == {"role": "system", "content": "be precise"}
     assert params["stream"] is True
     assert params["stream_options"] == {"include_usage": True}
-    assert params["context_length_exceeded_behavior"] == "error"
+    assert params["extra_body"] == {"context_length_exceeded_behavior": "error"}
     assert params["tools"] == [
         {
             "type": "function",
@@ -1074,7 +1074,7 @@ async def test_gmicloud_client_uses_openai_create_with_gmicloud_params() -> None
     assert fake_completion.calls[0]["stream"] is False
     assert fake_completion.calls[0]["model"] == "openai/gpt-oss-120b"
     assert fake_completion.calls[0]["max_tokens"] == 128
-    assert fake_completion.calls[0]["context_length_exceeded_behavior"] == "error"
+    assert fake_completion.calls[0]["extra_body"] == {"context_length_exceeded_behavior": "error"}
     assert fake_completion.calls[0]["top_k"] == 17
     assert fake_completion.calls[0]["messages"][0] == {
         "role": "system",

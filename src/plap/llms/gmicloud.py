@@ -33,7 +33,7 @@ def to_gmicloud_chat_params(
     )
     max_completion_tokens = params.pop("max_completion_tokens", None)
     _set(params, "max_tokens", max_completion_tokens)
-    params["context_length_exceeded_behavior"] = "error"
+    params["extra_body"] = {"context_length_exceeded_behavior": "error"}
     return params
 
 
