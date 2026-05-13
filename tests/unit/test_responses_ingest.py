@@ -747,35 +747,30 @@ async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> N
     )
 
 
-async def test_ingestion_accepts_reasoning_forward_refs() -> None:
+async def test_ingestion_rejects_reasoning_forward_refs() -> None:
     target = {"role": "assistant", "content": "target"}
 
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "reviewer",
-                    False,
-                    [
-                        {
-                            "content_hash": _message_hash(target),
-                            "reasoning_content": "hidden",
-                        },
-                        target,
-                    ],
-                )
-            ]
-        ),
-        keyring=_keyring(),
-    )
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item(
+                        "reviewer",
+                        False,
+                        [
+                            {
+                                "content_hash": _message_hash(target),
+                                "reasoning_content": "hidden",
+                            },
+                            target,
+                        ],
+                    )
+                ]
+            ),
+            keyring=_keyring(),
+        )
 
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "target",
-            "reasoning_content": "hidden",
-        }
-    ]
+    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
 
 
 async def test_ingestion_missing_reasoning_forward_ref_fails_closed() -> None:
@@ -803,55 +798,35 @@ async def test_ingestion_missing_reasoning_forward_ref_fails_closed() -> None:
     )
 
 
-async def test_ingestion_main_reasoning_refs_merge_without_new_ordinal() -> None:
+async def test_ingestion_rejects_reasoning_patch_followed_by_additional_messages() -> None:
     anchor = {"role": "assistant", "content": "anchor"}
 
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "anchor"),
-                _reasoning_item(
-                    "main",
-                    False,
-                    [
-                        {
-                            "content_hash": _message_hash(anchor),
-                            "reasoning_content": "anchor reasoning",
-                        },
-                        {
-                            "role": "assistant",
-                            "content": "new reasoning message",
-                            "reasoning_content": "new hidden",
-                        },
-                    ],
-                ),
-            ]
-        ),
-        keyring=_keyring(),
-    )
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _message("assistant", "anchor"),
+                    _reasoning_item(
+                        "main",
+                        False,
+                        [
+                            {
+                                "content_hash": _message_hash(anchor),
+                                "reasoning_content": "anchor reasoning",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "new reasoning message",
+                                "reasoning_content": "new hidden",
+                            },
+                        ],
+                    ),
+                ]
+            ),
+            keyring=_keyring(),
+        )
 
-    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
-        (
-            0,
-            0,
-            {
-                "role": "assistant",
-                "content": "anchor",
-                "reasoning_content": "anchor reasoning",
-            },
-        ),
-        (
-            1,
-            1,
-            {
-                "role": "assistant",
-                "content": "new reasoning message",
-                "reasoning_content": "new hidden",
-            },
-        ),
-    ]
-    assert result.cursors == {"m": 2}
-    assert result.main_context == _main_transcript(result)
+    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
 
 
 async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
@@ -875,12 +850,14 @@ async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
     )
 
 
-async def test_ingestion_uses_nearest_backward_hash_prefix_match(
+async def test_ingestion_sealed_function_call_requires_current_assistant_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_hash(message: StateMessage) -> str:
         content = str(message.content or "")
-        return "0102030405060708" + ("a" if content.endswith("a") else "b") * 48
+        if content.endswith("a"):
+            return "0102030405060708" + "a" * 48
+        return "1112131415161718" + "b" * 48
 
     monkeypatch.setattr(StateMessage, "content_hash", fake_hash)
     call_id = _call_id(
@@ -889,37 +866,92 @@ async def test_ingestion_uses_nearest_backward_hash_prefix_match(
         upstream_tool_call_id="up_ambiguous_0",
     )
 
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "reviewer",
-                    False,
-                    [
-                        {"role": "assistant", "content": "a"},
-                        {"role": "assistant", "content": "b"},
-                    ],
-                ),
-                _function_call(call_id),
-                _function_output(call_id, "nearest output"),
-            ]
-        ),
-        keyring=_keyring(),
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item(
+                        "reviewer",
+                        False,
+                        [
+                            {"role": "assistant", "content": "a"},
+                            {"role": "assistant", "content": "b"},
+                        ],
+                    ),
+                    _function_call(call_id),
+                    _function_output(call_id, "nearest output"),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_tool_replay",
+        param="input",
+        private_reason="sealed_function_call_content_hash_target_missing",
     )
 
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {"role": "assistant", "content": "a"},
-        {
-            "role": "assistant",
-            "content": "b",
-            "tool_calls": [_tool_call("up_ambiguous_0")],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "up_ambiguous_0",
-            "content": "nearest output",
-        },
-    ]
+
+async def test_ingestion_rejects_second_pending_reasoning_patch() -> None:
+    target = {"role": "assistant", "content": "target"}
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item(
+                        "reviewer",
+                        False,
+                        [{"content_hash": _message_hash(target), "reasoning_content": "hidden one"}],
+                    ),
+                    _reasoning_item(
+                        "reviewer",
+                        False,
+                        [{"content_hash": _message_hash(target), "reasoning_content": "hidden two"}],
+                    ),
+                    _message("assistant", "target"),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_content_hash_target_missing")
+
+
+async def test_ingestion_rejects_function_call_after_output_for_same_assistant_turn() -> None:
+    assistant = {"role": "assistant", "content": "need file"}
+    call_id_one = _call_id(
+        side="reviewer",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_reasoning_0",
+    )
+    call_id_two = _call_id(
+        side="reviewer",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_reasoning_1",
+        tool_call_index=1,
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item("reviewer", False, [assistant]),
+                    _function_call(call_id_one),
+                    _function_output(call_id_one, "first output"),
+                    _function_call(call_id_two),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_tool_replay",
+        param="input",
+        private_reason="sealed_function_call_after_function_call_output",
+    )
 
 
 async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:

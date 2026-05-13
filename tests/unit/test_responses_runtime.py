@@ -71,6 +71,7 @@ from plap.responses.models import StateMessage, StateToolCall
 from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import prepare_tools, resolve_tool_calls
 from plap.responses.runtime import (
+    STREAM_ABORTED_TOOL_PLACEHOLDER,
     stream_response_events as _stream_response_events,
 )
 from plap.responses.store import PreparedRequest
@@ -4497,7 +4498,7 @@ async def test_stream_response_events_stream_draft_stubs_tool_outputs_until_fina
     added_payload = open_reasoning_payload(added_reasoning.encrypted_content, keyring=_keyring())
     assert added_payload.temp is False
     assert added_payload.messages[0].tool_calls[0].name == "read_file"
-    assert added_payload.messages[1].content == "Tool execution aborted"
+    assert added_payload.messages[1].content == STREAM_ABORTED_TOOL_PLACEHOLDER
 
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["reasoning", "function_call"]
@@ -4820,17 +4821,17 @@ async def test_stream_response_events_patches_reasoning_and_emits_tool_call() ->
     completed = events[-1].response
     assert [item.type for item in completed.output] == [
         "reasoning",
-        "message",
         "function_call",
     ]
-    public_message = {"role": "assistant", "content": ""}
     payload = open_reasoning_payload(
         completed.output[0].encrypted_content,
         keyring=_keyring(),
     )
     assert [message.to_primitive() for message in payload.messages] == [
         {
-            "content_hash": content_hash(StateMessage.from_primitive(public_message)),
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "upstream_call_1", "name": "read_file", "arguments": '{"path":"README.md"}'}],
             "reasoning_content": "thinking",
         }
     ]

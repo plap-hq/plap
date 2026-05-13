@@ -183,35 +183,55 @@ class _AssociatedQueues:
     reviewer: _PrivateSideQueue
     arbitrator: _PrivateSideQueue
     cursors: dict[str, int]
+
+
 class _QueueBase:
     def __init__(self, side: Side) -> None:
         self.side = side
         self._entries: list[ChatMessageSpan | SideMessage] = []
         self._pending_tool_call_ids: set[str] = set()
-        self._pending_reasoning_patches: dict[str, list[ReasoningMessagePatch]] = {}
+        self._pending_reasoning_patch: ReasoningMessagePatch | None = None
+        self._current_assistant_entry: ChatMessageSpan | SideMessage | None = None
+        self._tool_outputs_started = False
         self._unreplayed_reasoning_tool_call_ids: set[str] = set()
         self._reasoning_tool_call_ids_seen: set[str] = set()
 
     def add_reasoning(self, payload: ReasoningPayload) -> None:
+        if self._pending_reasoning_patch is not None:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        if self._pending_tool_call_ids:
+            raise _tool_replay_error(
+                reason="pending_tool_outputs_block_message",
+                private_message="same-side reasoning cannot appear before pending tool outputs",
+            )
+        saw_patch = False
         for message in payload.messages:
             if isinstance(message, StateMessage):
+                if saw_patch:
+                    raise _reasoning_replay_error(
+                        reason="reasoning_message_invalid",
+                        private_message="reasoning patch cannot be followed by additional messages",
+                    )
                 appended = self._append_message(message, temp=payload.temp)
                 self._track_reasoning_message(appended)
                 continue
             if not isinstance(message, ReasoningMessagePatch):
                 raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="reasoning message is invalid")
-            target = self._message_by_hash(message.content_hash)
-            if target is None:
-                self._pending_reasoning_patches.setdefault(message.content_hash, []).append(message)
-                continue
-            self._apply_reasoning_patch(message, target)
+            if saw_patch:
+                raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="multiple reasoning patches are not allowed")
+            self._pending_reasoning_patch = message
+            self._clear_current_assistant_entry()
+            saw_patch = True
 
     def associate_function_call(
         self,
         item: RequestFunctionCallItem,
         call_id: SealedCallID,
     ) -> None:
-        target = self._message_for_call(call_id)
+        target = self._sealed_function_call_target(call_id)
         if call_id.tool_call_index < len(target.tool_calls):
             existing = target.tool_call_at(call_id.tool_call_index)
             if existing.id != call_id.upstream_tool_call_id:
@@ -235,7 +255,7 @@ class _QueueBase:
         *,
         temp: bool = False,
     ) -> None:
-        self._require_tool_call(call_id)
+        self._require_tool_call_output(call_id)
         self._consume_pending_tool_call(call_id.upstream_tool_call_id)
         self._append_tool_output(
             StateMessage(
@@ -258,27 +278,95 @@ class _QueueBase:
         if patch.tool_calls is not None or patch.role == "tool" or (target.is_tool() and patch.tool_call_id is not None):
             self._track_reasoning_message(target)
 
-    def _resolve_pending_reasoning_patches(self, content_hash: str, message: StateMessage) -> None:
-        for patch in self._pending_reasoning_patches.pop(content_hash, []):
-            self._apply_reasoning_patch(patch, message)
+    def _assert_message_matches_pending_reasoning_patch(self, message: StateMessage) -> None:
+        patch = self._pending_reasoning_patch
+        if patch is None:
+            return
+        if not message.is_assistant() or message.content_hash() != patch.content_hash:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
 
-    def _message_by_hash(self, hash_value: str) -> StateMessage | None:
-        for entry in reversed(self._entries):
-            if entry.content_hash == hash_value:
-                return entry.message
-        return None
+    def _apply_pending_reasoning_patch(self, entry: ChatMessageSpan | SideMessage) -> None:
+        patch = self._pending_reasoning_patch
+        if patch is None:
+            return
+        if not entry.message.is_assistant() or entry.content_hash != patch.content_hash:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        self._pending_reasoning_patch = None
+        self._apply_reasoning_patch(patch, entry.message)
 
-    def _message_for_call(self, call_id: SealedCallID) -> StateMessage:
-        prefix = call_id.content_hash_prefix.hex()
-        for entry in reversed(self._entries):
-            if entry.content_hash.startswith(prefix) and entry.message.is_assistant():
-                return entry.message
-        raise _tool_replay_error(
-            reason="sealed_function_call_content_hash_target_missing", private_message="sealed function call content_hash target is missing"
-        )
+    def _remember_entry(self, entry: ChatMessageSpan | SideMessage) -> None:
+        self._entries.append(entry)
+        self._apply_pending_reasoning_patch(entry)
+        message = entry.message
+        if message.is_assistant():
+            self._set_current_assistant_entry(entry)
+            return
+        if message.is_tool():
+            if self._current_assistant_entry is not None:
+                self._tool_outputs_started = True
+            return
+        self._clear_current_assistant_entry()
 
-    def _require_tool_call(self, call_id: SealedCallID) -> None:
-        target = self._message_for_call(call_id)
+    def _set_current_assistant_entry(self, entry: ChatMessageSpan | SideMessage) -> None:
+        self._current_assistant_entry = entry
+        self._tool_outputs_started = False
+
+    def _clear_current_assistant_entry(self) -> None:
+        self._current_assistant_entry = None
+        self._tool_outputs_started = False
+
+    def _current_assistant_message(self) -> StateMessage | None:
+        if self._current_assistant_entry is None:
+            return None
+        return self._current_assistant_entry.message
+
+    def _sealed_function_call_target(self, call_id: SealedCallID) -> StateMessage:
+        if self._pending_reasoning_patch is not None:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        entry = self._current_assistant_entry
+        if entry is None or not entry.message.is_assistant():
+            raise _tool_replay_error(
+                reason="sealed_function_call_content_hash_target_missing",
+                private_message="sealed function call content_hash target is missing",
+            )
+        if not entry.content_hash.startswith(call_id.content_hash_prefix.hex()):
+            raise _tool_replay_error(
+                reason="sealed_function_call_content_hash_target_missing",
+                private_message="sealed function call content_hash target is missing",
+            )
+        if self._tool_outputs_started:
+            raise _tool_replay_error(
+                reason="sealed_function_call_after_function_call_output",
+                private_message="sealed function_call cannot appear after function_call_output for the same assistant turn",
+            )
+        return entry.message
+
+    def _require_tool_call_output(self, call_id: SealedCallID) -> None:
+        target = self._current_assistant_message()
+        if self._pending_reasoning_patch is not None:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        if target is None or self._current_assistant_entry is None:
+            raise _tool_replay_error(
+                reason="sealed_function_call_content_hash_target_missing",
+                private_message="sealed function call content_hash target is missing",
+            )
+        if not self._current_assistant_entry.content_hash.startswith(call_id.content_hash_prefix.hex()):
+            raise _tool_replay_error(
+                reason="sealed_function_call_content_hash_target_missing",
+                private_message="sealed function call content_hash target is missing",
+            )
         if not target.tool_calls:
             raise _tool_replay_error(
                 reason="sealed_function_call_output_target_has_no_tool_calls",
@@ -350,7 +438,7 @@ class _QueueBase:
         self._satisfy_reasoning_tool_call_from_hidden_output(message)
 
     def assert_no_pending_tool_calls(self) -> None:
-        if self._pending_reasoning_patches:
+        if self._pending_reasoning_patch is not None:
             raise _reasoning_replay_error(
                 reason="reasoning_content_hash_target_missing", private_message="reasoning content_hash target is missing"
             )
@@ -391,13 +479,22 @@ class _MainQueue(_QueueBase):
     def add_existing_row(self, row: ChatMessageSpan) -> None:
         self._seed_rows.append(row)
         self._entries.append(row)
-        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
 
     def add_message(self, message: StateMessage) -> ChatMessageSpan:
         return self._append_main_row(message)
 
     def attach_fabricated_call(self, call: RequestFunctionCallItem) -> None:
-        target = self._closest_previous_assistant()
+        if self._pending_reasoning_patch is not None:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        target = self._current_assistant_message()
+        if target is None or self._tool_outputs_started:
+            raise _tool_replay_error(
+                reason="fabricated_function_call_without_previous_assistant",
+                private_message="fabricated function_call has no previous assistant message",
+            )
         target.append_tool_call(
             StateToolCall(
                 id=call.call_id,
@@ -432,6 +529,7 @@ class _MainQueue(_QueueBase):
     ) -> ChatMessageSpan | SideMessage:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
+        self._assert_message_matches_pending_reasoning_patch(message)
         if temp:
             entry = SideMessage(message=message)
             self._temp_rows.append(entry)
@@ -444,21 +542,10 @@ class _MainQueue(_QueueBase):
                     private_message="function_call_output requires a preceding main segment",
                     cause=exc,
                 ) from exc
-            self._entries.append(row)
-            self._resolve_pending_reasoning_patches(row.content_hash, row.message)
+            self._remember_entry(row)
             return row
-        self._entries.append(entry)
-        self._resolve_pending_reasoning_patches(entry.content_hash, entry.message)
+        self._remember_entry(entry)
         return entry
-
-    def _closest_previous_assistant(self) -> StateMessage:
-        for entry in reversed(self._entries):
-            if entry.message.is_assistant():
-                return entry.message
-        raise _tool_replay_error(
-            reason="fabricated_function_call_without_previous_assistant",
-            private_message="fabricated function_call has no previous assistant message",
-        )
 
 
 class _PrivateSideQueue(_QueueBase):
@@ -473,16 +560,16 @@ class _PrivateSideQueue(_QueueBase):
 
     def _append_message(self, message: StateMessage, *, temp: bool = False) -> StateMessage:
         self._ensure_no_pending_tool_calls()
+        self._assert_message_matches_pending_reasoning_patch(message)
         row = SideMessage(message=message)
-        self._entries.append(row)
-        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
+        self._remember_entry(row)
         return row.message
 
     def _append_tool_output(self, message: StateMessage, *, temp: bool = False) -> None:
         _ = temp
+        self._assert_message_matches_pending_reasoning_patch(message)
         row = SideMessage(message=message)
-        self._entries.append(row)
-        self._resolve_pending_reasoning_patches(row.content_hash, row.message)
+        self._remember_entry(row)
 
 
 def _normalize_input_items(request: ResponseCreateRequest) -> list[object]:

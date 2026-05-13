@@ -129,7 +129,7 @@ type _CommitValue = (
 
 
 def _public_assistant_message(candidate: StateMessage) -> StateMessage | None:
-    if candidate.content is None:
+    if candidate.content is None or candidate.content == "":
         return None
     return StateMessage(role="assistant", content=candidate.content)
 

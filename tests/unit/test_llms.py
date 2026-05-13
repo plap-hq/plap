@@ -659,15 +659,160 @@ def test_gmicloud_params_map_supported_provider_fields() -> None:
     assert params["stop"] == ["END"]
     assert params["seed"] == 7
     assert params["n"] == 1
+    assert params["reasoning_effort"] == "low"
     assert "max_completion_tokens" not in params
     assert "logprobs" not in params
     assert "top_logprobs" not in params
-    assert "reasoning_effort" not in params
     assert "prompt_cache_key" not in params
     assert "metadata" not in params
     assert "prediction" not in params
     assert "service_tier" not in params
     assert "user" not in params
+
+
+def test_gmicloud_deepseek_params_enable_thinking_and_keep_reasoning_effort() -> None:
+    request = replace(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), reasoning_effort="xhigh")
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert params["max_tokens"] == 128
+    assert params["reasoning_effort"] == "xhigh"
+    assert params["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "thinking": {"type": "enabled"},
+    }
+
+
+def test_gmicloud_deepseek_params_disable_thinking_for_none_effort() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="none",
+    )
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert "reasoning_effort" not in params
+    assert params["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "thinking": {"type": "disabled"},
+    }
+
+
+def test_gmicloud_deepseek_params_translate_tool_replay_shape() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        messages=[
+            ChatMessage(role="developer", content="be precise"),
+            ChatMessage(
+                role="assistant",
+                content="",
+                reasoning_content="think first",
+                tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments='{"q":"hi"}')],
+            ),
+            ChatMessage(role="tool", tool_call_id="call_1", content="tool result"),
+        ],
+        reasoning_effort="high",
+    )
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert params["messages"] == [
+        {"role": "user", "content": "be precise"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "think first"},
+                {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"q": "hi"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "tool result"}],
+        },
+    ]
+
+
+def test_gmicloud_deepseek_params_group_consecutive_tool_results() -> None:
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="",
+                reasoning_content="need two results",
+                tool_calls=[
+                    ChatToolCall(id="call_1", name="lookup", arguments='{"q":"hi"}'),
+                    ChatToolCall(id="call_2", name="lookup", arguments='{"q":"bye"}'),
+                ],
+            ),
+            ChatMessage(role="tool", tool_call_id="call_1", content="result one"),
+            ChatMessage(role="tool", tool_call_id="call_2", content="result two"),
+        ],
+        reasoning_effort="high",
+    )
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert params["messages"][1] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "result one"},
+            {"type": "tool_result", "tool_use_id": "call_2", "content": "result two"},
+        ],
+    }
+
+
+def test_gmicloud_mimo_params_map_supported_reasoning_effort_values() -> None:
+    request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="medium")
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert params["reasoning_effort"] == "medium"
+    assert params["extra_body"] == {"context_length_exceeded_behavior": "error"}
+
+
+def test_gmicloud_mimo_params_pass_minimal_and_xhigh_effort_through() -> None:
+    minimal_request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="minimal")
+    xhigh_request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="xhigh")
+
+    minimal_params = to_gmicloud_chat_params(minimal_request, stream=False)
+    xhigh_params = to_gmicloud_chat_params(xhigh_request, stream=False)
+
+    assert minimal_params["reasoning_effort"] == "minimal"
+    assert xhigh_params["reasoning_effort"] == "xhigh"
+
+
+def test_gmicloud_mimo_params_omit_none_effort() -> None:
+    request = ChatCompletionRequest(
+        model="XiaomiMiMo/MiMo-V2.5-Pro",
+        messages=[ChatMessage(role="user", content="hello")],
+        reasoning_effort="none",
+    )
+
+    params = to_gmicloud_chat_params(request, stream=False)
+
+    assert "reasoning_effort" not in params
+
+
+def test_gmicloud_deepseek_params_map_forced_function_tool_choice_to_required() -> None:
+    params = to_gmicloud_chat_params(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), stream=False)
+
+    assert params["tool_choice"] == "required"
+
+
+def test_gmicloud_deepseek_params_reject_unsupported_forced_function_tool_choice_shape() -> None:
+    request = replace(
+        _request_for_model("deepseek-ai/DeepSeek-V4-Flash"),
+        tools=[
+            ChatTool(function=ChatFunctionTool(name="lookup")),
+            ChatTool(function=ChatFunctionTool(name="other")),
+        ],
+        tool_choice=ChatToolChoiceFunction(name="lookup"),
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="forced function tool_choice"):
+        to_gmicloud_chat_params(request, stream=False)
 
 
 def test_novita_params_map_supported_provider_fields() -> None:
@@ -1317,13 +1462,27 @@ async def test_gmicloud_client_uses_openai_create_with_gmicloud_params() -> None
     assert fake_completion.calls[0]["max_tokens"] == 128
     assert fake_completion.calls[0]["extra_body"] == {"context_length_exceeded_behavior": "error"}
     assert fake_completion.calls[0]["top_k"] == 17
+    assert fake_completion.calls[0]["reasoning_effort"] == "low"
     assert fake_completion.calls[0]["messages"][0] == {
         "role": "system",
         "content": "be precise",
     }
     assert "max_completion_tokens" not in fake_completion.calls[0]
-    assert "reasoning_effort" not in fake_completion.calls[0]
     assert result.message.content == "ok"
+
+
+async def test_gmicloud_client_uses_thinking_controls_for_deepseek_v4_flash() -> None:
+    fake_completion = _FakeOpenAICompletion(_completion_response(model="deepseek-ai/DeepSeek-V4-Flash", content="ok"))
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = GMICloudChatCompletionClient(client=fake_client)
+
+    await client.complete(replace(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), reasoning_effort="xhigh"))
+
+    assert fake_completion.calls[0]["reasoning_effort"] == "xhigh"
+    assert fake_completion.calls[0]["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "thinking": {"type": "enabled"},
+    }
 
 
 async def test_lightning_client_maps_developer_role_to_system() -> None:

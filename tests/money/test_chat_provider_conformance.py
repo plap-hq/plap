@@ -84,6 +84,7 @@ LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
 LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning/lightning-ai/llama-3.3-70b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
 GMICLOUD_DEEPSEEK_V4_FLASH_MODEL = "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
+GMICLOUD_MIMO_V25_PRO_MODEL = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
 FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
 CROF_QWEN_3_5_9B_MODEL = "crof/qwen3.5-9b"
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "low"
@@ -356,6 +357,119 @@ async def test_live_gmicloud_deepseek_v4_flash_basic_reasoning_request() -> None
             reasoning_effort="high",
             max_completion_tokens=256,
             temperature=0.6,
+        ),
+    )
+
+    assert _message_has_output(result.message)
+
+
+async def test_live_gmicloud_deepseek_v4_flash_xhigh_reasoning_request() -> None:
+    provider = ProviderCase(
+        name="gmicloud",
+        api_key_env="GMICLOUD_API_KEY",
+        model=GMICLOUD_DEEPSEEK_V4_FLASH_MODEL,
+        client_factory=_gmicloud_client,
+    )
+
+    result = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content="Think through 19 * 9, then give only the final product.",
+                )
+            ],
+            reasoning_effort="xhigh",
+            max_completion_tokens=256,
+            temperature=0.6,
+        ),
+    )
+
+    assert _message_has_output(result.message)
+
+
+async def test_live_gmicloud_deepseek_v4_flash_tool_replay_round_trip() -> None:
+    provider = ProviderCase(
+        name="gmicloud",
+        api_key_env="GMICLOUD_API_KEY",
+        model=GMICLOUD_DEEPSEEK_V4_FLASH_MODEL,
+        client_factory=_gmicloud_client,
+    )
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="record_answer",
+            description="Record a numeric answer.",
+            parameters={
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+        )
+    )
+    first_request = ChatCompletionRequest(
+        model=provider.model,
+        messages=[
+            ChatMessage(
+                role="user",
+                content="Call the record_answer tool with answer set to 4.",
+            )
+        ],
+        tools=[tool],
+        tool_choice="required",
+        reasoning_effort="high",
+        max_completion_tokens=192,
+        temperature=0,
+    )
+
+    first = await _complete(provider, first_request)
+
+    tool_calls = first.message.tool_calls or []
+    assert tool_calls
+
+    second = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[
+                ChatMessage(role="user", content="Call the record_answer tool with answer set to 4."),
+                ChatMessage(
+                    role="assistant",
+                    content=first.message.content or "",
+                    reasoning_content=first.message.reasoning_content,
+                    tool_calls=tool_calls,
+                ),
+                ChatMessage(role="tool", tool_call_id=tool_calls[0].id, content="recorded 4"),
+                ChatMessage(role="user", content="Now tell me what happened in one sentence."),
+            ],
+            tools=[tool],
+            reasoning_effort="high",
+            max_completion_tokens=192,
+            temperature=0,
+        ),
+    )
+
+    assert _message_has_output(second.message)
+
+
+async def test_live_gmicloud_mimo_none_reasoning_effort_request() -> None:
+    provider = ProviderCase(
+        name="gmicloud",
+        api_key_env="GMICLOUD_API_KEY",
+        model=GMICLOUD_MIMO_V25_PRO_MODEL,
+        client_factory=_gmicloud_client,
+    )
+
+    result = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[ChatMessage(role="user", content="Reply with exactly: pong")],
+            reasoning_effort="none",
+            max_completion_tokens=96,
+            temperature=0,
         ),
     )
 
