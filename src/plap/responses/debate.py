@@ -585,6 +585,15 @@ def _transcript_wrapper(transcript: Sequence[TranscriptMessage]) -> ChatMessage:
     return ChatMessage(role="user", content=f"Conversation transcript:\n{_json_text([message.to_primitive() for message in transcript])}")
 
 
+def _revise_note_wrapper(note: str) -> str:
+    return (
+        "Internal retry guidance for the next fresh answer only.\n"
+        "This is not a user-facing message.\n"
+        "Do not quote it, acknowledge it, apologize for it, or reply to it directly.\n\n"
+        f"{note}"
+    )
+
+
 def _transcript_rows(
     spans: tuple[ChatMessageSpan, ...],
     *,
@@ -1233,15 +1242,6 @@ async def publish_accepted_candidate(
     state.clear_debate()
 
 
-def _wrap_revise_note_for_main(note: str) -> str:
-    return (
-        "Internal retry guidance for the next fresh answer only.\n"
-        "This is not a user-facing message.\n"
-        "Do not quote it, acknowledge it, apologize for it, or reply to it directly.\n\n"
-        f"{note}"
-    )
-
-
 async def resume_main_with_revise_bundle(
     *,
     state: MutableQueues,
@@ -1254,7 +1254,7 @@ async def resume_main_with_revise_bundle(
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="revise_requires_held_candidate", private_message="revise requires held candidate state")
 
-    note_message = StateMessage(role="assistant", content=_wrap_revise_note_for_main(note))
+    note_message = StateMessage(role="assistant", content=_revise_note_wrapper(note))
     bundled_messages = (
         parts.held_candidate.message,
         *[row.message for row in parts.held_hidden_tool_rows],
