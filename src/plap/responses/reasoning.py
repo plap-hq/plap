@@ -25,6 +25,12 @@ Rules:
 - Preserve only high-level checks, revisions, comparisons, and conclusions.
 - If the fragment adds nothing useful, return a short neutral sentence.
 
+Grounding:
+- Base the summary only on the provided new private reasoning fragment and the previously emitted public summary.
+- Do not attribute policies, refusals, rules, or instructions to OpenAI or any other vendor or organization unless that exact name appears in the new private reasoning fragment.
+- Do not introduce external policy labels or safety taxonomy terms unless they appear in the fragment.
+- When the fragment refers generically to internal rules or instructions, keep the summary generic, for example: "my rules", "my instructions", or "the policy".
+
 Style:
 - First person, as the assistant speaking naturally.
 - Concise for concise mode, fuller for detailed mode.

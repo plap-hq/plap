@@ -8,7 +8,6 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.responses.reasoning import (
-    REASONING_SUMMARY_PART_PROMPT,
     LLMReasoningSummarizer,
     ReasoningSummaryPartSource,
 )
@@ -35,8 +34,12 @@ async def test_reasoning_summarizer_stream_part_uses_append_prompt() -> None:
 
     assert deltas == ["part"]
     request = client.requests[0]
+    assert request.model == "model-a"
     assert request.max_completion_tokens == 192
-    assert request.messages[0].content == REASONING_SUMMARY_PART_PROMPT
+    assert request.prompt_cache_key == "cache-a|reasoning_summarizer"
+    assert request.temperature == 0
+    assert request.messages[0].role == "developer"
+    assert request.messages[1].role == "user"
     assert "I checked the goal." in (request.messages[1].content or "")
     assert "I verified the tool choice." in (request.messages[1].content or "")
 
