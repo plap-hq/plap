@@ -504,6 +504,45 @@ class ResponseStore:
             update_result.close()
             return failed_response_id is not None
 
+    async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
+        if not prepared.persist_response:
+            return False
+        log_debug(
+            logger,
+            "response.store.cancel",
+            response_id=response.id,
+            status=response.status,
+        )
+        log_payload(
+            logger,
+            "response.store.cancel.payload",
+            response=response.model_dump(mode="json", exclude_none=True),
+        )
+        async with self._database.connection_transaction() as connection:
+            update_result = await connection.execute(
+                text(
+                    """
+                    update responses.response_records
+                       set status = 'cancelled',
+                           completed_at = :completed_at,
+                           fields = cast(:fields as jsonb)
+                     where scope_id = :scope_id
+                       and response_id = :response_id
+                       and status in ('queued', 'in_progress')
+                    returning response_id
+                    """
+                ),
+                {
+                    "completed_at": self._completed_at(response),
+                    "fields": self._json_text(self._response_fields(response)),
+                    "scope_id": prepared.scope_id,
+                    "response_id": response.id,
+                },
+            )
+            cancelled_response_id = update_result.scalar_one_or_none()
+            update_result.close()
+            return cancelled_response_id is not None
+
     async def get_response(self, auth_context: AuthContext, response_id: str) -> ResponseObject | None:
         scope_id = self._scope_id(auth_context)
         async with self._database.connection() as connection:

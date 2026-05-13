@@ -181,5 +181,9 @@ class ChatCompletionContextLengthExceededError(ChatCompletionInvalidRequestError
     pass
 
 
+class ChatCompletionTimeoutError(ChatCompletionProviderError):
+    pass
+
+
 class ChatCompletionUnsupportedRequestError(ChatCompletionError):
     pass

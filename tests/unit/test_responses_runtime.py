@@ -1870,6 +1870,35 @@ async def test_stream_response_events_marks_persisted_response_failed_on_runtime
     assert response_store.failed_response_ids == response_store.begin_response_ids
 
 
+async def test_stream_response_events_marks_persisted_response_cancelled_on_disconnect() -> None:
+    response_store = _RecordingResponseStore()
+    client = _YieldThenBlockChatClient()
+
+    events = _stream_response_events(
+        ResponseCreateRequest(model="plap/test", input="hello", reasoning={"summary": "auto"}),
+        transport="stream",
+        auth_context=_auth_context(),
+        settings=_settings(),
+        sealing_keyring=_keyring(),
+        tool_policy_resolver=_RecordingResolver(),
+        tool_call_policy_resolver=_RecordingCallResolver(),
+        chat_completion_client=client,
+        reasoning_summarizer=_FakeReasoningSummarizer(),
+        response_store=response_store,
+    )
+
+    assert (await anext(events)).type == "response.created"
+    assert (await anext(events)).type == "response.in_progress"
+    await client.stream_started.wait()
+
+    await events.aclose()
+    await client.stream_closed.wait()
+
+    assert len(response_store.begin_response_ids) == 1
+    assert response_store.cancelled_response_ids == response_store.begin_response_ids
+    assert response_store.failed_response_ids == []
+
+
 async def test_stream_response_events_executes_batched_compaction() -> None:
     client = _StaticChatClient(
         [
@@ -4901,10 +4930,14 @@ class _NoopResponseStore:
     async def fail_response(self, *args, **kwargs) -> bool:
         return False
 
+    async def cancel_response(self, *args, **kwargs) -> bool:
+        return False
+
 
 class _RecordingResponseStore(_NoopResponseStore):
     def __init__(self) -> None:
         self.begin_response_ids: list[str] = []
+        self.cancelled_response_ids: list[str] = []
         self.failed_response_ids: list[str] = []
 
     async def prepare_request(
@@ -4934,6 +4967,11 @@ class _RecordingResponseStore(_NoopResponseStore):
         self.failed_response_ids.append(response_id)
         return True
 
+    async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
+        _ = prepared
+        self.cancelled_response_ids.append(response.id)
+        return True
+
 
 class _YieldThenRaiseChatClient(IChatCompletionClient):
     def __init__(self, exc: Exception) -> None:
@@ -4956,6 +4994,36 @@ class _YieldThenRaiseChatClient(IChatCompletionClient):
         raise self.exc
         if False:
             yield ChatCompletionDelta(id="chatcmpl_test", model=None, created_at=None, choice_index=0)
+
+
+class _YieldThenBlockChatClient(IChatCompletionClient):
+    def __init__(self) -> None:
+        self.stream_started = anyio.Event()
+        self.stream_closed = anyio.Event()
+
+    async def complete(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResult:
+        _ = request
+        raise AssertionError("unexpected complete() call")
+
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionDelta]:
+        self.stream_started.set()
+        try:
+            yield ChatCompletionDelta(
+                id="chatcmpl_test",
+                model=request.model,
+                created_at=None,
+                choice_index=0,
+                reasoning_delta="thinking",
+            )
+            await anyio.sleep_forever()
+        finally:
+            self.stream_closed.set()
 
 
 class _FakeReasoningSummarizer(IReasoningSummarizer):

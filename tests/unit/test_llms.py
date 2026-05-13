@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
+import anyio
 import httpx
-import plap.llms.router as router_module
 import pytest
 from fireworks.client.error import InvalidRequestError
 from openai import BadRequestError
 
+import plap.llms.router as router_module
 from plap.llms.canopywave import (
     CANOPYWAVE_OPENAI_BASE_URL,
     CanopyWaveChatCompletionClient,
@@ -360,6 +361,41 @@ async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.
             "winning_attempt_index": 2,
         },
     ]
+
+
+async def test_routing_client_falls_back_when_first_stream_delta_times_out() -> None:
+    class _NeverStartingStreamClient:
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise AssertionError("complete() should not be used in this test")
+
+        async def stream(self, request: ChatCompletionRequest):
+            _ = request
+            await anyio.sleep_forever()
+            yield  # pragma: no cover
+
+    fallback_client = _RecordingChatCompletionClient("gmicloud")
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=_NeverStartingStreamClient()),
+            ModelRoute(prefix="gmicloud/", client=fallback_client),
+        ],
+        stream_first_delta_timeout_seconds=0.01,
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
+    assert deltas[0].content_delta == "gmicloud"
+    assert fallback_client.stream_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
 
 
 async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1172,6 +1208,55 @@ async def test_openai_client_normalizes_stream_chunks() -> None:
     assert deltas[1].tool_call_delta.name == "lookup"
     assert deltas[1].usage is not None
     assert deltas[1].usage.total_tokens == 3
+
+
+async def test_openai_client_closes_underlying_stream_when_consumer_stops_early() -> None:
+    class _ClosableStream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._yielded = False
+
+        def __aiter__(self) -> _ClosableStream:
+            return self
+
+        async def __anext__(self) -> object:
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return SimpleNamespace(
+                id="chatcmpl_1",
+                model="model-a",
+                created=10,
+                system_fingerprint=None,
+                service_tier=None,
+                choices=[
+                    SimpleNamespace(
+                        index=0,
+                        finish_reason="stop",
+                        delta=SimpleNamespace(
+                            content="ok",
+                            refusal=None,
+                            reasoning_content=None,
+                            reasoning_details=None,
+                            tool_calls=None,
+                        ),
+                    )
+                ],
+                usage=None,
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    stream = _ClosableStream()
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(stream)))
+
+    iterator = client.stream(_request())
+    first = await anext(iterator)
+    await iterator.aclose()
+
+    assert first.content_delta == "ok"
+    assert stream.closed is True
 
 
 async def test_fireworks_client_uses_acreate_and_normalizes_response() -> None:

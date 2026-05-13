@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -113,12 +114,16 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
         return completion_result_from_provider(response)
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
+        stream: Any | None = None
         try:
             stream = await self._client.chat.completions.create(**self._chat_params(request, stream=True))
             async for chunk in stream:
                 yield from_chat_completion_chunk(chunk)
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
+        finally:
+            if stream is not None:
+                await _close_stream_object(stream)
 
 
 def to_openai_chat_params(
@@ -424,3 +429,24 @@ def _stringify_arguments(value: Any) -> str | None:
     if value is None or isinstance(value, str):
         return value
     return msgspec.json.encode(value).decode()
+
+
+async def _close_stream_object(stream: Any) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if callable(aclose):
+        try:
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+        return
+
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return

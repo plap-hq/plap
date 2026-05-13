@@ -191,6 +191,7 @@ class ResponseEventIO:
         self._prepared = prepared
         self._response_store = response_store
         self._send = send
+        self._client_attached = True
         self._reasoning_summarizer = reasoning_summarizer
         self._reasoning_summarizer_model = reasoning_summarizer_model
         self._reasoning_summarizer_prompt_cache_key_base = reasoning_summarizer_prompt_cache_key_base
@@ -214,6 +215,9 @@ class ResponseEventIO:
 
     async def in_progress(self) -> None:
         await self._enqueue_commit(_CommitKind.IN_PROGRESS, self._response)
+
+    def detach_client(self) -> None:
+        self._client_attached = False
 
     async def output(
         self,
@@ -415,6 +419,22 @@ class ResponseEventIO:
         )
         await self._enqueue_commit(_CommitKind.COMPLETED, response)
 
+    def cancelled_response(
+        self,
+        *,
+        service_tier: str | None = None,
+        usage: ResponseUsage | None = None,
+    ) -> ResponseObject:
+        return self._response.model_copy(
+            update={
+                "completed_at": time.time(),
+                "output": list(self._output_items),
+                "service_tier": service_tier or self._response.service_tier,
+                "status": "cancelled",
+                "usage": usage,
+            }
+        )
+
     async def aclose(self) -> None:
         await self._commit_send.aclose()
 
@@ -448,18 +468,24 @@ class ResponseEventIO:
             async for commit in self._commit_receive:
                 try:
                     if commit.kind == _CommitKind.CREATED:
+                        response = cast(ResponseObject, commit.value)
                         await self._response_store.begin_response(self._prepared, cast(ResponseObject, commit.value))
+                        self._response = response
+                        self._ack_commit(commit)
                         await self._send_event(
                             ResponseCreatedEvent(
-                                response=cast(ResponseObject, commit.value),
+                                response=response,
                                 sequence_number=0,
                                 type="response.created",
                             )
                         )
                     elif commit.kind == _CommitKind.IN_PROGRESS:
+                        response = cast(ResponseObject, commit.value)
+                        self._response = response
+                        self._ack_commit(commit)
                         await self._send_event(
                             ResponseInProgressEvent(
-                                response=cast(ResponseObject, commit.value),
+                                response=response,
                                 sequence_number=0,
                                 type="response.in_progress",
                             )
@@ -477,6 +503,8 @@ class ResponseEventIO:
                     else:
                         response = cast(ResponseObject, commit.value).model_copy(update={"output": self._output_items})
                         await self._response_store.finish_response(self._prepared, response)
+                        self._response = response
+                        self._ack_commit(commit)
                         await self._send_event(
                             ResponseCompletedEvent(
                                 response=response,
@@ -491,6 +519,8 @@ class ResponseEventIO:
                     self._ack_commit(commit)
 
     async def _send_event(self, event: ResponseStreamEvent) -> None:
+        if not self._client_attached:
+            return
         self._sequence_number += 1
         payload = self._projection.stream_payload(event, sequence_number=self._sequence_number)
         log_debug(logger, "response.io.event.sent", event_type=payload.get("type"), sequence_number=self._sequence_number)
@@ -509,10 +539,10 @@ class ResponseEventIO:
             output_index,
             item.model_dump(mode="json", exclude_none=True),
         )
-        self._ack_commit(commit)
         completed_item = item
-        await self._emit_output_item_events(item, output_index=output_index)
         self._output_items.append(completed_item)
+        self._ack_commit(commit)
+        await self._emit_output_item_events(item, output_index=output_index)
 
     async def _emit_reasoning_draft_begin(self, commit: _Commit) -> None:
         draft = cast(_ReasoningDraftBegin, commit.value)
@@ -523,6 +553,8 @@ class ResponseEventIO:
             output_index,
             draft.item.model_dump(mode="json", exclude_none=True),
         )
+        self._output_items.append(draft.item)
+        self._ack_commit(commit, result=ReasoningDraft(item_id=draft.item.id, output_index=output_index))
         await self._send_event(
             ResponseOutputItemAddedEvent(
                 item=draft.item,
@@ -531,8 +563,6 @@ class ResponseEventIO:
                 type="response.output_item.added",
             )
         )
-        self._output_items.append(draft.item)
-        self._ack_commit(commit, result=ReasoningDraft(item_id=draft.item.id, output_index=output_index))
 
     async def _emit_reasoning_draft_replace(self, commit: _Commit) -> None:
         draft = cast(_ReasoningDraftReplace, commit.value)
@@ -576,6 +606,7 @@ class ResponseEventIO:
             item.model_dump(mode="json", exclude_none=True),
         )
         self._output_items[draft.output_index] = item
+        self._ack_commit(commit)
         await self._send_event(
             ResponseOutputItemDoneEvent(
                 item=item,
@@ -584,7 +615,6 @@ class ResponseEventIO:
                 type="response.output_item.done",
             )
         )
-        self._ack_commit(commit)
 
     async def _emit_output_item_events(
         self,

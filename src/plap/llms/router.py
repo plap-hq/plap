@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
 
+import anyio
 import structlog
 
 from plap.llms.chat import (
@@ -11,10 +13,11 @@ from plap.llms.chat import (
     ChatCompletionResult,
     IChatCompletionClient,
 )
-from plap.llms.errors import ChatCompletionProviderError, ChatCompletionUnsupportedRequestError
+from plap.llms.errors import ChatCompletionProviderError, ChatCompletionTimeoutError, ChatCompletionUnsupportedRequestError
 from plap.logging import log_debug
 
 logger = structlog.get_logger(__name__)
+DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS = 60.0
 
 
 def _model_attempts(model: str) -> tuple[str, ...]:
@@ -109,10 +112,18 @@ class ModelRoute:
 
 
 class RoutingChatCompletionClient(IChatCompletionClient):
-    def __init__(self, routes: Sequence[ModelRoute]) -> None:
+    def __init__(
+        self,
+        routes: Sequence[ModelRoute],
+        *,
+        stream_first_delta_timeout_seconds: float | None = DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS,
+    ) -> None:
         self._routes = tuple(routes)
         if not self._routes:
             raise ValueError("at least one model route is required")
+        if stream_first_delta_timeout_seconds is not None and stream_first_delta_timeout_seconds <= 0:
+            raise ValueError("stream_first_delta_timeout_seconds must be positive")
+        self._stream_first_delta_timeout_seconds = stream_first_delta_timeout_seconds
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         attempts = _model_attempts(request.model)
@@ -172,8 +183,17 @@ class RoutingChatCompletionClient(IChatCompletionClient):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
             yielded = False
+            iterator = None
             try:
-                async for delta in route.client.stream(replace(request, model=provider_model)):
+                iterator = route.client.stream(replace(request, model=provider_model)).__aiter__()
+                first_delta = await _first_stream_delta(
+                    iterator,
+                    timeout_seconds=self._stream_first_delta_timeout_seconds,
+                    attempt_model=attempt_model,
+                )
+                yielded = True
+                yield replace(first_delta, model=attempt_model)
+                async for delta in iterator:
                     yielded = True
                     yield replace(delta, model=attempt_model)
             except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
@@ -228,6 +248,47 @@ class RoutingChatCompletionClient(IChatCompletionClient):
 
         raise ChatCompletionUnsupportedRequestError(f"No chat completion route configured for model {model!r}")
 
+
+async def _first_stream_delta(
+    iterator: AsyncIterator[ChatCompletionDelta],
+    *,
+    timeout_seconds: float | None,
+    attempt_model: str,
+) -> ChatCompletionDelta:
+    try:
+        if timeout_seconds is None:
+            return await anext(iterator)
+        with anyio.fail_after(timeout_seconds):
+            return await anext(iterator)
+    except StopAsyncIteration as exc:
+        await _close_async_iterator(iterator)
+        raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta") from exc
+    except TimeoutError as exc:
+        await _close_async_iterator(iterator)
+        raise ChatCompletionTimeoutError(
+            f"stream for model {attempt_model!r} produced no first delta within {timeout_seconds} seconds"
+        ) from exc
+
+
+async def _close_async_iterator(iterator: AsyncIterator[ChatCompletionDelta]) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if callable(aclose):
+        try:
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+        return
+
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
 
 class UnavailableChatCompletionClient(IChatCompletionClient):
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
