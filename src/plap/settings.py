@@ -213,8 +213,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                 ),
                 ReasoningEffort.XHIGH: RuntimeProfileOverride(
-                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                 ),

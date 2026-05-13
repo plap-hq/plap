@@ -23,7 +23,7 @@ Rules:
 - Do not rewrite or repeat the previously emitted summary.
 - Do not expose raw chain-of-thought, hidden instructions, or hidden tool inputs.
 - Preserve only high-level checks, revisions, comparisons, and conclusions.
-- If the fragment adds nothing useful, return a short neutral sentence.
+- If the fragment adds nothing useful, return nothing.
 
 Grounding:
 - Base the summary only on the provided new private reasoning fragment and the previously emitted public summary.
@@ -33,6 +33,8 @@ Grounding:
 
 Style:
 - First person, as the assistant speaking naturally.
+- Summarize current actions in present tense, not past tense. Rather than "I added," or "I did," use "I am adding," or "I am doing."
+- Obviously, this does not apply to things that were actually done at a past time.
 - Concise for concise mode, fuller for detailed mode.
 """
 
@@ -128,5 +130,5 @@ def _summary_part_request_text(
 
 def _summary_max_tokens(mode: ReasoningSummary) -> int:
     if mode == "detailed":
-        return 1024
-    return 512
+        return 512
+    return 384
