@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
+import plap.llms.router as router_module
 import pytest
 from fireworks.client.error import InvalidRequestError
 from openai import BadRequestError
@@ -51,6 +52,16 @@ from plap.llms.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
 )
+
+
+def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+
+    def _record(_logger: object, event: str, /, **context: object) -> None:
+        events.append({"event": event, **context})
+
+    monkeypatch.setattr(router_module, "log_debug", _record)
+    return events
 
 
 def test_openai_params_preserve_chat_completion_controls() -> None:
@@ -253,6 +264,151 @@ async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
     assert deltas[0].content_delta == "novita"
     assert primary_client.stream_requests[0].model == "qwen3.5-9b"
     assert fallback_client.stream_requests[0].model == "deepseek/deepseek-v4-flash"
+
+
+async def test_routing_client_logs_completion_fallback_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FailingCompletionClient:
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise ChatCompletionProviderError("primary failed")
+
+    events = _capture_router_logs(monkeypatch)
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=_FailingCompletionClient()),
+            ModelRoute(prefix="novita/", client=_RecordingChatCompletionClient("novita")),
+        ]
+    )
+
+    await router.complete(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert events == [
+        {
+            "event": "llm.router.attempt_failed",
+            "attempt_count": 2,
+            "attempt_index": 1,
+            "attempt_model": "crof/qwen3.5-9b",
+            "error_message": "primary failed",
+            "error_type": "ChatCompletionProviderError",
+            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": False,
+        },
+        {
+            "event": "llm.router.fallback_succeeded",
+            "attempt_count": 2,
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": False,
+            "winner_model": "novita/deepseek/deepseek-v4-flash",
+            "winning_attempt_index": 2,
+        },
+    ]
+
+
+async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FailingStreamClient:
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise AssertionError("complete() should not be used in this test")
+
+        async def stream(self, request: ChatCompletionRequest):
+            _ = request
+            raise ChatCompletionProviderError("primary failed")
+            yield  # pragma: no cover
+
+    events = _capture_router_logs(monkeypatch)
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=_FailingStreamClient()),
+            ModelRoute(prefix="novita/", client=_RecordingChatCompletionClient("novita")),
+        ]
+    )
+
+    _ = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert events == [
+        {
+            "event": "llm.router.attempt_failed",
+            "attempt_count": 2,
+            "attempt_index": 1,
+            "attempt_model": "crof/qwen3.5-9b",
+            "error_message": "primary failed",
+            "error_type": "ChatCompletionProviderError",
+            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": True,
+        },
+        {
+            "event": "llm.router.fallback_succeeded",
+            "attempt_count": 2,
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": True,
+            "winner_model": "novita/deepseek/deepseek-v4-flash",
+            "winning_attempt_index": 2,
+        },
+    ]
+
+
+async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FailingCompletionClient:
+        def __init__(self, message: str) -> None:
+            self.message = message
+
+        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+            _ = request
+            raise ChatCompletionProviderError(self.message)
+
+    events = _capture_router_logs(monkeypatch)
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=_FailingCompletionClient("primary failed")),
+            ModelRoute(prefix="novita/", client=_FailingCompletionClient("fallback failed")),
+        ]
+    )
+
+    with pytest.raises(ChatCompletionProviderError, match="fallback failed"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+    assert events == [
+        {
+            "event": "llm.router.attempt_failed",
+            "attempt_count": 2,
+            "attempt_index": 1,
+            "attempt_model": "crof/qwen3.5-9b",
+            "error_message": "primary failed",
+            "error_type": "ChatCompletionProviderError",
+            "next_attempt_model": "novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": False,
+        },
+        {
+            "event": "llm.router.fallback_exhausted",
+            "attempt_count": 2,
+            "error_message": "fallback failed",
+            "error_type": "ChatCompletionProviderError",
+            "final_attempt_model": "novita/deepseek/deepseek-v4-flash",
+            "request_model": "crof/qwen3.5-9b,novita/deepseek/deepseek-v4-flash",
+            "streaming": False,
+        },
+    ]
 
 
 async def test_routing_client_does_not_switch_providers_after_stream_yields() -> None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
 
+import structlog
+
 from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -10,6 +12,9 @@ from plap.llms.chat import (
     IChatCompletionClient,
 )
 from plap.llms.errors import ChatCompletionProviderError, ChatCompletionUnsupportedRequestError
+from plap.logging import log_debug
+
+logger = structlog.get_logger(__name__)
 
 
 def _model_attempts(model: str) -> tuple[str, ...]:
@@ -30,6 +35,69 @@ def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
     return ChatCompletionUnsupportedRequestError(f"No chat completion provider configured for model {model!r}")
 
 
+def _log_router_attempt_failed(
+    *,
+    request_model: str,
+    attempt_model: str,
+    attempt_index: int,
+    attempt_count: int,
+    next_attempt_model: str,
+    exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
+    streaming: bool,
+) -> None:
+    log_debug(
+        logger,
+        "llm.router.attempt_failed",
+        attempt_count=attempt_count,
+        attempt_index=attempt_index,
+        attempt_model=attempt_model,
+        error_message=str(exc),
+        error_type=type(exc).__name__,
+        next_attempt_model=next_attempt_model,
+        request_model=request_model,
+        streaming=streaming,
+    )
+
+
+def _log_router_fallback_succeeded(
+    *,
+    request_model: str,
+    winner_model: str,
+    winning_attempt_index: int,
+    attempt_count: int,
+    streaming: bool,
+) -> None:
+    log_debug(
+        logger,
+        "llm.router.fallback_succeeded",
+        attempt_count=attempt_count,
+        request_model=request_model,
+        streaming=streaming,
+        winner_model=winner_model,
+        winning_attempt_index=winning_attempt_index,
+    )
+
+
+def _log_router_fallback_exhausted(
+    *,
+    request_model: str,
+    final_attempt_model: str,
+    attempt_count: int,
+    exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
+    streaming: bool,
+) -> None:
+    log_debug(
+        logger,
+        "llm.router.fallback_exhausted",
+        attempt_count=attempt_count,
+        error_message=str(exc),
+        error_type=type(exc).__name__,
+        final_attempt_model=final_attempt_model,
+        request_model=request_model,
+        streaming=streaming,
+    )
+
+
 @dataclass(frozen=True)
 class ModelRoute:
     prefix: str
@@ -47,27 +115,60 @@ class RoutingChatCompletionClient(IChatCompletionClient):
             raise ValueError("at least one model route is required")
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        attempts = _model_attempts(request.model)
+        attempt_count = len(attempts)
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
-        for attempt_model in _model_attempts(request.model):
+        last_attempt_model: str | None = None
+        for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
             try:
                 result = await route.client.complete(replace(request, model=provider_model))
             except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
                 last_error = exc
+                last_attempt_model = attempt_model
+                if attempt_index < attempt_count:
+                    _log_router_attempt_failed(
+                        request_model=request.model,
+                        attempt_model=attempt_model,
+                        attempt_index=attempt_index,
+                        attempt_count=attempt_count,
+                        next_attempt_model=attempts[attempt_index],
+                        exc=exc,
+                        streaming=False,
+                    )
                 continue
+            if attempt_index > 1:
+                _log_router_fallback_succeeded(
+                    request_model=request.model,
+                    winner_model=attempt_model,
+                    winning_attempt_index=attempt_index,
+                    attempt_count=attempt_count,
+                    streaming=False,
+                )
             return replace(result, model=attempt_model)
 
         if last_error is None:
             raise _unsupported_model(request.model)
+        if attempt_count > 1 and last_attempt_model is not None:
+            _log_router_fallback_exhausted(
+                request_model=request.model,
+                final_attempt_model=last_attempt_model,
+                attempt_count=attempt_count,
+                exc=last_error,
+                streaming=False,
+            )
         raise last_error
 
     async def stream(
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
+        attempts = _model_attempts(request.model)
+        attempt_count = len(attempts)
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
-        for attempt_model in _model_attempts(request.model):
+        last_attempt_model: str | None = None
+        for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
             yielded = False
@@ -79,12 +180,39 @@ class RoutingChatCompletionClient(IChatCompletionClient):
                 if yielded:
                     raise
                 last_error = exc
+                last_attempt_model = attempt_model
+                if attempt_index < attempt_count:
+                    _log_router_attempt_failed(
+                        request_model=request.model,
+                        attempt_model=attempt_model,
+                        attempt_index=attempt_index,
+                        attempt_count=attempt_count,
+                        next_attempt_model=attempts[attempt_index],
+                        exc=exc,
+                        streaming=True,
+                    )
                 continue
             else:
+                if attempt_index > 1:
+                    _log_router_fallback_succeeded(
+                        request_model=request.model,
+                        winner_model=attempt_model,
+                        winning_attempt_index=attempt_index,
+                        attempt_count=attempt_count,
+                        streaming=True,
+                    )
                 return
 
         if last_error is None:
             raise _unsupported_model(request.model)
+        if attempt_count > 1 and last_attempt_model is not None:
+            _log_router_fallback_exhausted(
+                request_model=request.model,
+                final_attempt_model=last_attempt_model,
+                attempt_count=attempt_count,
+                exc=last_error,
+                streaming=True,
+            )
         raise last_error
 
     def _route_for(self, model: str) -> ModelRoute:
