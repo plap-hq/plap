@@ -47,37 +47,37 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 deprecated=False,
             ),
             main=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             compactor=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             reviewer=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
@@ -149,37 +149,37 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 deprecated=False,
             ),
             main=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro-precision",
+                model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro,crof/mimo-v2.5-pro-precision",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             compactor=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro-precision",
+                model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro,crof/mimo-v2.5-pro-precision",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reviewer=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             arbitrator=RuntimeActorConfig(
-                model="novita/deepseek/deepseek-v4-flash",
+                model="novita/deepseek/deepseek-v4-flash,openrouter/deepseek/deepseek-v4-flash:atlascloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b"),
+            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
             reviewer_transcript_token_budget=800_000,
             arbitrator_transcript_token_budget=300_000,
             soft_compact_threshold=200_000,
@@ -920,6 +920,7 @@ class Settings(BaseSettings):
     log_file: str | None = None
     llm_lightning_api_key: str | None = None
     llm_canopywave_api_key: str | None = None
+    llm_gmicloud_api_key: str | None = None
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None

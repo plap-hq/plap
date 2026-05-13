@@ -19,7 +19,7 @@ NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
 NOVITA_FORCED_TOOL_CHOICE_QUIRK_MODELS = frozenset({"deepseek/deepseek-v4-flash"})
 NOVITA_THINKING_CONTROL_MODELS = frozenset({"deepseek/deepseek-v4-flash"})
 
-NOVITA_CHAT_FIELDS = (*COMMON_CHAT_FIELDS, "logprobs", "reasoning_effort")
+NOVITA_CHAT_FIELDS = (*COMMON_CHAT_FIELDS, "top_k", "logprobs", "reasoning_effort")
 
 NOVITA_CHAT_PROVIDER_PROFILE = ChatProviderProfile(
     developer_role="system",

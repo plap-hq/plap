@@ -32,6 +32,7 @@ from plap.llms.errors import (
     ChatCompletionRateLimitError,
     ChatCompletionUnsupportedRequestError,
 )
+from plap.llms.gmicloud import GMICloudChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
 from plap.llms.openrouter import OpenRouterChatCompletionClient
 from plap.llms.router import (
@@ -68,6 +69,7 @@ __all__ = [
     "ChatToolChoiceMode",
     "ChatUsage",
     "CrofChatCompletionClient",
+    "GMICloudChatCompletionClient",
     "IChatCompletionClient",
     "ModelRoute",
     "NovitaChatCompletionClient",

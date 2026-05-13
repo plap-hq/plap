@@ -50,6 +50,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
         _settings(
             llm_lightning_api_key="lightning-key",
             llm_canopywave_api_key="canopywave-key",
+            llm_gmicloud_api_key="gmicloud-key",
             llm_novita_api_key="novita-key",
             llm_crof_api_key="crof-key",
             llm_openrouter_api_key="openrouter-key",
@@ -57,6 +58,13 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     )
 
     assert isinstance(client, RoutingChatCompletionClient)
+
+
+def test_app_runtime_builds_gmicloud_route_from_provider_prefix_setting() -> None:
+    client = _create_chat_completion_client(_settings(llm_gmicloud_api_key="gmicloud-key"))
+
+    assert isinstance(client, RoutingChatCompletionClient)
+    assert [route.prefix for route in client._routes] == ["gmicloud/"]
 
 
 def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
@@ -178,6 +186,23 @@ def test_app_runtime_validates_canopywave_provider_prefix() -> None:
                 reviewer_model="canopywave/example-model",
                 arbitrator_model="canopywave/example-model",
                 reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
+            )
+        },
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+
+def test_app_runtime_validates_gmicloud_provider_prefix() -> None:
+    settings = _settings(
+        llm_gmicloud_api_key="gmicloud-key",
+        runtime_model_profiles={
+            "plap/gmi": _profile_config(
+                main_model="gmicloud/openai/gpt-oss-120b",
+                main_debate_model="gmicloud/openai/gpt-oss-120b",
+                reviewer_model="gmicloud/openai/gpt-oss-120b",
+                arbitrator_model="gmicloud/openai/gpt-oss-120b",
+                reasoning_summarizer_model="gmicloud/openai/gpt-oss-120b",
             )
         },
     )

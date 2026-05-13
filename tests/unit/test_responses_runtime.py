@@ -36,12 +36,15 @@ from plap.responses.contracts import (
     ResponseTextConfig,
     SummaryTextContent,
     TextFormatJSONObject,
+    TextFormatJSONSchema,
+    ToolChoiceFunction,
     WebSearchTool,
 )
 from plap.responses.debate import (
     ArbitratorActionType,
     ReviewerActionType,
     _budgeted_transcript_message,
+    _request_constraints_wrapper,
     parse_arbitrator_decision,
     parse_reviewer_decision,
 )
@@ -83,6 +86,7 @@ from plap.settings import (
 MCP_SEARCH_TOOL_NAME = "search_web"
 MCP_NEWS_TOOL_NAME = "search_news"
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
+REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
 
 
 def _assert_public_error(
@@ -113,6 +117,20 @@ def _parse_prefixed_json(content: str, *, prefix: str) -> object:
 
 def _split_sections(content: str) -> list[str]:
     return content.split("\n\n")
+
+
+def _assert_in_progress_review_context(content: str) -> None:
+    assert content.startswith("Review context:\n")
+    assert "stage: in-progress tool step" in content
+    assert "requested scope" in content
+    assert "whole-task completion yet" in content
+
+
+def _assert_user_return_review_context(content: str) -> None:
+    assert content.startswith("Review context:\n")
+    assert "stage: user-facing return step" in content
+    assert "requested scope" in content
+    assert "continuation beyond that scope" in content
 
 
 async def stream_response_events(*args, **kwargs):
@@ -837,10 +855,8 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
     assert reviewer_payload.messages[0].role == "user"
     reviewer_sections = _split_sections(reviewer_payload.messages[0].content or "")
-    assert reviewer_sections[0] == (
-        "Review the current proposed next step below. Decide whether it is the correct next thing "
-        "to do or return now, or reopen with one short review note."
-    )
+    assert reviewer_sections[0].startswith("Review the current proposed next step below.")
+    _assert_in_progress_review_context(client.requests[1].messages[3].content or "")
     assert _parse_prefixed_json(
         reviewer_sections[1],
         prefix="Current proposed next step:\n",
@@ -865,6 +881,123 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert completed.output[-1].name == "mutate_record"
     assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
     assert len(client.requests) == 2
+
+
+async def test_stream_response_events_reviewer_request_includes_tool_choice_constraints() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="update the record",
+                include=["reasoning.encrypted_content"],
+                tool_choice=ToolChoiceFunction(name="mutate_record", type="function"),
+                tools=[_tool("mutate_record")],
+            ),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    reviewer_request = client.requests[1]
+    assert reviewer_request.messages[2].role == "user"
+    constraints = _parse_prefixed_json(
+        reviewer_request.messages[2].content or "",
+        prefix=f"{REQUEST_CONSTRAINTS_HEADER}\n",
+    )
+    assert constraints == {"tool_choice": {"type": "function", "name": "mutate_record"}}
+    _assert_in_progress_review_context(reviewer_request.messages[4].content or "")
+
+
+async def test_stream_response_events_reviewer_request_includes_response_format_constraints() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content='{"ok":true}'),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="return a structured result",
+                include=["reasoning.encrypted_content"],
+                text=ResponseTextConfig(
+                    format=TextFormatJSONObject(type="json_object")
+                ),
+            ),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    reviewer_request = client.requests[1]
+    assert reviewer_request.messages[2].role == "user"
+    constraints = _parse_prefixed_json(
+        reviewer_request.messages[2].content or "",
+        prefix=f"{REQUEST_CONSTRAINTS_HEADER}\n",
+    )
+    assert constraints == {"response_format": {"type": "json_object"}}
+    _assert_user_return_review_context(reviewer_request.messages[3].content or "")
+
+
+def test_request_constraints_wrapper_serializes_json_schema_response_format() -> None:
+    message = _request_constraints_wrapper(
+        ResponseCreateRequest(
+            model="plap/test",
+            input="return a structured result",
+            text=ResponseTextConfig(
+                format=TextFormatJSONSchema(
+                    name="result",
+                    schema={
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean"}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                    strict=True,
+                    type="json_schema",
+                )
+            ),
+        )
+    )
+
+    assert message is not None
+    constraints = _parse_prefixed_json(message.content or "", prefix=f"{REQUEST_CONSTRAINTS_HEADER}\n")
+    assert constraints == {
+        "response_format": {
+            "type": "json_schema",
+            "name": "result",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+        }
+    }
 
 
 async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resumes() -> None:
@@ -904,6 +1037,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert [item.type for item in first_completed.output] == ["reasoning", "reasoning", "function_call"]
     reviewer_call = first_completed.output[-1]
     assert open_call_id(reviewer_call.call_id, keyring=_keyring()).side == "reviewer"
+    _assert_in_progress_review_context(first_client.requests[1].messages[3].content or "")
     first_transcript = json.loads(
         (first_client.requests[1].messages[1].content or "").removeprefix("Conversation transcript:\n")
     )
@@ -946,6 +1080,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert open_call_id(second_completed.output[-1].call_id, keyring=_keyring()).side == "main"
     assert second_client.requests[0].messages[-1].role == "tool"
     assert second_client.requests[0].messages[-1].content == "README tool output"
+    _assert_in_progress_review_context(second_client.requests[0].messages[3].content or "")
     second_transcript = json.loads(
         (second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n")
     )
@@ -994,17 +1129,16 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message", "function_call"]
     main_debate_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
     assert main_debate_payload.messages[0].role == "user"
-    assert main_debate_payload.messages[0].content == (
-        "Latest review note:\nCheck ids.\n\n"
-        "Write one short response note about the current proposed next step. "
-        "Focus on whether it is the correct next thing to do or return now."
-    )
+    main_debate_sections = _split_sections(main_debate_payload.messages[0].content or "")
+    assert main_debate_sections[0] == "Latest review note:\nCheck ids."
+    assert main_debate_sections[1] == "Write one short response note about the current proposed next step."
     debate_request = client.requests[2]
     assert [message.role for message in debate_request.messages] == [
         "developer",
         "user",
         "assistant",
         "tool",
+        "user",
         "user",
         "user",
     ]
@@ -1015,6 +1149,7 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
         for call in (debate_request.messages[2].tool_calls or [])
     ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
     assert debate_request.messages[3].content == "This tool call was not executed."
+    _assert_in_progress_review_context(debate_request.messages[5].content or "")
     tool_definitions = _parse_prefixed_json(
         debate_request.messages[4].content or "",
         prefix=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n",
@@ -1028,11 +1163,10 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
             "type": "function",
         }
     ]
-    assert debate_request.messages[5].content == (
-        "Latest review note:\nCheck ids.\n\n"
-        "Write one short response note about the current proposed next step. "
-        "Focus on whether it is the correct next thing to do or return now."
-    )
+    assert _split_sections(debate_request.messages[6].content or "") == [
+        "Latest review note:\nCheck ids.",
+        "Write one short response note about the current proposed next step.",
+    ]
 
 
 async def test_stream_response_events_main_debate_reasoning_summary_excludes_debate_turns() -> None:
@@ -1111,6 +1245,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
     assert arbitrator_payload.messages[0].role == "user"
     arbitrator_sections = _split_sections(arbitrator_payload.messages[0].content or "")
+    _assert_in_progress_review_context(client.requests[3].messages[3].content or "")
     assert _parse_prefixed_json(
         arbitrator_sections[0],
         prefix="Current proposed next step:\n",
@@ -1176,10 +1311,8 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     final_reviewer_payload = open_reasoning_payload(completed.output[6].encrypted_content, keyring=_keyring())
     assert final_reviewer_payload.messages[0].role == "user"
     reviewer_sections = _split_sections(final_reviewer_payload.messages[0].content or "")
-    assert reviewer_sections[0] == (
-        "Review the current proposed next step below. Decide whether it is the correct next thing "
-        "to do or return now, or reopen with one short review note."
-    )
+    _assert_user_return_review_context(client.requests[5].messages[2].content or "")
+    assert reviewer_sections[0].startswith("Review the current proposed next step below.")
     assert _parse_prefixed_json(
         reviewer_sections[1],
         prefix="Current proposed next step:\n",
@@ -1236,11 +1369,10 @@ async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> N
     ]
     reopened_reviewer_payload = open_reasoning_payload(completed.output[4].encrypted_content, keyring=_keyring())
     assert reopened_reviewer_payload.messages[0].role == "user"
-    assert _split_sections(reopened_reviewer_payload.messages[0].content or "") == [
-        "Previous next-step note:\nLook at edge case.",
-        "Latest response note:\nafter review one",
-        "Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.",
-    ]
+    reopened_sections = _split_sections(reopened_reviewer_payload.messages[0].content or "")
+    assert reopened_sections[0] == "Previous next-step note:\nLook at edge case."
+    assert reopened_sections[1] == "Latest response note:\nafter review one"
+    assert reopened_sections[2].startswith("Revisit the current proposed next step")
 
 
 async def test_stream_response_events_reviewer_accept_publishes_held_server_output() -> None:

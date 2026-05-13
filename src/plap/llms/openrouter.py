@@ -24,9 +24,11 @@ OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(
     }
 )
 
+OPENROUTER_CHAT_FIELDS = (*OPENAI_CHAT_FIELDS, "top_k")
+
 OPENROUTER_CHAT_PROVIDER_PROFILE = ChatProviderProfile(
     developer_role="system",
-    passthrough_fields=OPENAI_CHAT_FIELDS,
+    passthrough_fields=OPENROUTER_CHAT_FIELDS,
 )
 
 

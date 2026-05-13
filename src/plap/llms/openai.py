@@ -179,6 +179,7 @@ def _chat_param_values(
     values["max_completion_tokens"] = request.max_completion_tokens
     values["temperature"] = request.temperature
     values["top_p"] = request.top_p
+    values["top_k"] = request.top_k
     values["frequency_penalty"] = request.frequency_penalty
     values["presence_penalty"] = request.presence_penalty
     values["logit_bias"] = request.logit_bias

@@ -34,6 +34,7 @@ from plap.llms.errors import (
     is_context_length_exceeded_error,
 )
 from plap.llms.fireworks import FireworksChatCompletionClient, to_fireworks_chat_params
+from plap.llms.gmicloud import GMICLOUD_OPENAI_BASE_URL, GMICloudChatCompletionClient, to_gmicloud_chat_params
 from plap.llms.lightning import (
     LIGHTNING_OPENAI_BASE_URL,
     LightningChatCompletionClient,
@@ -93,6 +94,7 @@ def test_openai_params_preserve_chat_completion_controls() -> None:
     assert params["service_tier"] == "flex"
     assert params["prediction"] == {"type": "content", "content": "expected"}
     assert params["stream_options"] == {"include_usage": True}
+    assert "top_k" not in params
     assert "prompt_cache_retention" not in params
     assert "safety_identifier" not in params
     assert "store" not in params
@@ -411,6 +413,7 @@ def test_fireworks_params_preserve_supported_provider_hints() -> None:
         },
     }
     assert params["max_completion_tokens"] == 128
+    assert params["top_k"] == 17
     assert params["reasoning_effort"] == "low"
     assert params["prompt_cache_key"] == "cache-a"
     assert params["metadata"] == {"k": "v"}
@@ -425,6 +428,56 @@ def test_fireworks_params_omit_stream_options_without_stream() -> None:
     assert "stream_options" not in params
 
 
+def test_gmicloud_params_map_supported_provider_fields() -> None:
+    params = to_gmicloud_chat_params(_request_for_model("openai/gpt-oss-120b"), stream=True)
+
+    assert params["messages"][0] == {"role": "system", "content": "be precise"}
+    assert params["stream"] is True
+    assert params["stream_options"] == {"include_usage": True}
+    assert params["context_length_exceeded_behavior"] == "error"
+    assert params["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+                "strict": True,
+                "description": "look something up",
+            },
+        }
+    ]
+    assert params["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert params["parallel_tool_calls"] is True
+    assert params["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object"},
+            "strict": True,
+            "description": "answer schema",
+        },
+    }
+    assert params["max_tokens"] == 128
+    assert params["temperature"] == 0.2
+    assert params["top_p"] == 0.9
+    assert params["top_k"] == 17
+    assert params["frequency_penalty"] == 0.1
+    assert params["presence_penalty"] == 0.2
+    assert params["logit_bias"] == {"1": -10}
+    assert params["stop"] == ["END"]
+    assert params["seed"] == 7
+    assert params["n"] == 1
+    assert "max_completion_tokens" not in params
+    assert "logprobs" not in params
+    assert "top_logprobs" not in params
+    assert "reasoning_effort" not in params
+    assert "prompt_cache_key" not in params
+    assert "metadata" not in params
+    assert "prediction" not in params
+    assert "service_tier" not in params
+    assert "user" not in params
+
+
 def test_novita_params_map_supported_provider_fields() -> None:
     params = to_novita_chat_params(_request_for_model("openai/gpt-oss-20b"), stream=True)
 
@@ -432,6 +485,7 @@ def test_novita_params_map_supported_provider_fields() -> None:
     assert params["stream"] is True
     assert params["stream_options"] == {"include_usage": True}
     assert params["max_tokens"] == 128
+    assert params["top_k"] == 17
     assert params["parallel_tool_calls"] is True
     assert params["reasoning_effort"] == "low"
     assert "max_completion_tokens" not in params
@@ -550,6 +604,7 @@ def test_canopywave_params_preserve_openai_compatible_fields() -> None:
     assert params["stream"] is True
     assert params["stream_options"] == {"include_usage": True}
     assert params["max_completion_tokens"] == 128
+    assert "top_k" not in params
     assert params["parallel_tool_calls"] is True
     assert params["reasoning_effort"] == "low"
     assert params["prompt_cache_key"] == "cache-a"
@@ -678,6 +733,7 @@ def test_openrouter_params_preserve_openai_compatible_fields() -> None:
     assert params["max_completion_tokens"] == 128
     assert params["parallel_tool_calls"] is True
     assert params["reasoning_effort"] == "low"
+    assert params["top_k"] == 17
     assert params["prompt_cache_key"] == "cache-a"
     assert params["metadata"] == {"k": "v"}
     assert params["service_tier"] == "flex"
@@ -1000,6 +1056,33 @@ async def test_fireworks_client_normalizes_context_length_exceeded_errors() -> N
 
     with pytest.raises(ChatCompletionContextLengthExceededError, match="context window"):
         await client.complete(_request())
+
+
+def test_gmicloud_client_defaults_to_gmicloud_openai_base_url() -> None:
+    client = GMICloudChatCompletionClient(api_key="test-key")
+
+    assert str(client._client.base_url).rstrip("/") == GMICLOUD_OPENAI_BASE_URL
+
+
+async def test_gmicloud_client_uses_openai_create_with_gmicloud_params() -> None:
+    fake_completion = _FakeOpenAICompletion(_completion_response(model="openai/gpt-oss-120b", content="ok"))
+    fake_client = _FakeOpenAIClient(fake_completion)
+    client = GMICloudChatCompletionClient(client=fake_client)
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-120b"))
+
+    assert fake_completion.calls[0]["stream"] is False
+    assert fake_completion.calls[0]["model"] == "openai/gpt-oss-120b"
+    assert fake_completion.calls[0]["max_tokens"] == 128
+    assert fake_completion.calls[0]["context_length_exceeded_behavior"] == "error"
+    assert fake_completion.calls[0]["top_k"] == 17
+    assert fake_completion.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "be precise",
+    }
+    assert "max_completion_tokens" not in fake_completion.calls[0]
+    assert "reasoning_effort" not in fake_completion.calls[0]
+    assert result.message.content == "ok"
 
 
 async def test_lightning_client_maps_developer_role_to_system() -> None:
@@ -1438,6 +1521,7 @@ def _request() -> ChatCompletionRequest:
         max_completion_tokens=128,
         temperature=0.2,
         top_p=0.9,
+        top_k=17,
         frequency_penalty=0.1,
         presence_penalty=0.2,
         logit_bias={"1": -10},

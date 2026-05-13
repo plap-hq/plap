@@ -27,6 +27,9 @@ from plap.responses.contracts import (
     ResponseFunctionCallItem,
     ResponseReasoningItem,
     SummaryTextContent,
+    TextFormatJSONObject,
+    TextFormatJSONSchema,
+    ToolChoiceFunction,
 )
 from plap.responses.ingest import (
     SealedCallID,
@@ -57,6 +60,7 @@ from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was not executed."
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
+REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
 logger = structlog.get_logger(__name__)
 
 
@@ -140,7 +144,39 @@ async def _retry_debate_step(actor: str, operation) -> object:
                 raise
 
 
-REVIEWER_DEVELOPER_PROMPT = """You are checking whether the current proposed next step should be returned now.
+DEBATE_TOOL_AVAILABILITY_PROMPT = """Use available tools when they help.
+You only have access here to a restricted safe subset of tools. You may also
+receive a user message titled `Tool definitions for tools used by the proposed
+next step`. If present, it contains tool definitions for tools that are
+available to the normal main step for this request and that are already used in
+the proposed next step. Use it to understand what those proposed tool calls
+mean and whether they are appropriate. The fact that one of those tools is not
+callable in this debate step does not mean the normal main step lacks it. Do
+not reject or criticize a proposed next step merely because one of those tools
+is not callable in this debate step."""
+
+DEBATE_REQUEST_CONSTRAINTS_PROMPT = """You may also receive a user message titled `Request constraints for the proposed next step:`.
+If present, it describes client-requested tool-choice or output-format
+constraints. Treat those constraints as authoritative when judging whether the
+current proposed next step is appropriate. Do not criticize a proposed next
+step for following them."""
+
+REQUESTED_SCOPE_RULES_PROMPT = """Requested scope rules:
+- infer the user's current requested scope from the transcript
+- the current requested scope may be the whole task or only a bounded slice
+- do not widen the current requested scope
+- an in-progress tool step may be intentionally partial
+- a user-facing return step may be correct even if more work exists outside the current requested scope"""
+
+REVIEW_CONTEXT_RULES_PROMPT = """If the review context says this is an in-progress tool step:
+- judge correctness of the next action, not whole-task completion
+- do not treat remaining later work as a defect by itself
+
+If the review context says this is a user-facing return step:
+- judge completion of the current requested scope only
+- do not treat additional work outside that scope as required continuation"""
+
+REVIEWER_DEVELOPER_PROMPT = f"""You are checking whether the current proposed next step should be returned now.
 
 You will see:
 - the conversation transcript
@@ -164,26 +200,25 @@ Decision format:
   Final decision: ACCEPT
 - Put no review-note text on the final line. Put all review-note text above it.
 
-Use available tools when they help.
-You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions for tools used by the proposed
-next step`. If present, it contains tool definitions for tools that are available
-to the normal main step for this request and that are already used in
-the proposed next step. Use it to understand what those proposed tool calls mean
-and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal main step lacks
-it. Do not reject or criticize a proposed next step merely because one of those
-tools is not callable in this debate step.
+{DEBATE_TOOL_AVAILABILITY_PROMPT}
+
+{DEBATE_REQUEST_CONSTRAINTS_PROMPT}
+
+{REQUESTED_SCOPE_RULES_PROMPT}
+
+{REVIEW_CONTEXT_RULES_PROMPT}
 
 Use:
-- `ACCEPT` if the current proposed next step is the correct next step to do or return now exactly as-is
-- `REOPEN` if another round is needed
+- `ACCEPT` if the current proposed next step is correct for the current requested scope
+- `REOPEN` only if you can identify a concrete defect in the current proposed next step for that scope
+
+Do not reopen merely because later work still exists outside the current requested scope.
 
 If you use `REOPEN`, you MUST write one short review note above the final line saying what seems wrong,
 missing, unsupported, or risky about the current proposed next step.
 """
 
-MAIN_DEBATE_DEVELOPER_PROMPT = """You are writing a response note about the current proposed next step.
+MAIN_DEBATE_DEVELOPER_PROMPT = f"""You are writing a response note about the current proposed next step.
 
 You will see:
 - the full conversation context
@@ -195,27 +230,35 @@ Definitions:
   which may be a direct user-facing message, a tool call, or a combination of both
 - review note: another model's critique of that next step; it may be correct or incorrect
 
-Write one short response note. The response note should explain, from your own judgment:
-- what the review note got right
-- what it got wrong
-- what matters most for deciding whether the current proposed next step is the correct next step to do or return now
+{REQUESTED_SCOPE_RULES_PROMPT}
+
+{REVIEW_CONTEXT_RULES_PROMPT}
+
+Write one short response note from independent judgment.
+
+Start with exactly one of:
+- Wrong:
+- Partly right:
+- Correct:
+
+Presume the current proposed next step is correct.
+The review note must identify a concrete defect in that next step for the current requested scope.
+If it does not, treat the review note as wrong.
+If the review note widens scope, confuses stage, demands whole-task completion
+too early, or demands continuation beyond the current requested scope, say so
+explicitly.
+Do not partially agree just to sound balanced.
+Do not hedge.
+Do not soften disagreement.
 
 Do not write a replacement answer for the user.
 Do not decide whether the current proposed next step should be sent.
-You may agree, partly agree, or disagree with the review note.
-Use available tools when they help.
-You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions for tools used by the proposed
-next step`. If present, it contains tool definitions for tools that are available
-to the normal main step for this request and that are already used in
-the proposed next step. Use it to understand what those proposed tool calls mean
-and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal main step lacks
-it. Do not reject or criticize a proposed next step merely because one of those
-tools is not callable in this debate step.
+{DEBATE_TOOL_AVAILABILITY_PROMPT}
+
+{DEBATE_REQUEST_CONSTRAINTS_PROMPT}
 """
 
-ARBITRATOR_DEVELOPER_PROMPT = """You are deciding what happens to the current proposed next step.
+ARBITRATOR_DEVELOPER_PROMPT = f"""You are deciding what happens to the current proposed next step.
 
 You will see:
 - the conversation transcript
@@ -241,29 +284,28 @@ Decision format:
   Final decision: REOPEN
 - Put no note text on the final line. Put all note text above it.
 
-Use available tools when they help.
-You only have access here to a restricted safe subset of tools. You may also
-receive a user message titled `Tool definitions for tools used by the proposed
-next step`. If present, it contains tool definitions for tools that are available
-to the normal main step for this request and that are already used in
-the proposed next step. Use it to understand what those proposed tool calls mean
-and whether they are appropriate. The fact that one of those tools is not
-callable in this debate step does not mean the normal main step lacks
-it. Do not reject or criticize a proposed next step merely because one of those
-tools is not callable in this debate step.
+{DEBATE_TOOL_AVAILABILITY_PROMPT}
+
+{DEBATE_REQUEST_CONSTRAINTS_PROMPT}
+
+{REQUESTED_SCOPE_RULES_PROMPT}
+
+{REVIEW_CONTEXT_RULES_PROMPT}
 
 Use:
-- `ACCEPT` if the current proposed next step is the correct next step to do or return now exactly as-is
-- `REVISE` if the current proposed next step should not be sent and the normal main step should try again from scratch
-- `REOPEN` if another review/response round is needed
+- `ACCEPT` if the current proposed next step is correct for the current requested scope
+- `REVISE` if the current proposed next step is wrong for that scope and should be discarded in favor of a fresh retry
+- `REOPEN` if the current proposed next step is wrong for that scope but another review/response round is still likely useful
 
 If you use `REVISE`:
 - the current proposed next step will not be sent
 - the response note will not be sent
 - you MUST write one short next-step note above the final line
 - that next-step note will be sent to the normal main step, which will choose and write a fresh next step from scratch
-- write from the perspective of the main step, unlike you the main step does not know of "review," "reviewer," "arbitrator," "proposed next step," "decision."
-- all the main step needs to know is what to do next and what went wrong
+- write the next-step note as instructions to the next main turn
+- write from the perspective of the main step; it does not know of
+  "review," "reviewer," "arbitrator," "proposed next step," or "decision"
+- state only what to do next and what went wrong
 
 If you use `REOPEN`:
 - the current proposed next step will not be sent
@@ -456,6 +498,62 @@ def _compact_candidate(
     return value
 
 
+def _is_in_progress_tool_step(parts: TempMainParts) -> bool:
+    if parts.held_candidate is None:
+        raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
+    return bool(parts.held_candidate.message.tool_calls)
+
+
+def _review_context_wrapper(parts: TempMainParts) -> ChatMessage:
+    if _is_in_progress_tool_step(parts):
+        return ChatMessage(
+            role="user",
+            content=(
+                "Review context:\n"
+                "- stage: in-progress tool step\n"
+                "- standard: judge whether this is the correct next action for the user's current "
+                "requested scope; do not require whole-task completion yet"
+            ),
+        )
+    return ChatMessage(
+        role="user",
+        content=(
+            "Review context:\n"
+            "- stage: user-facing return step\n"
+            "- standard: judge whether this properly completes the user's current requested scope; "
+            "do not require continuation beyond that scope"
+        ),
+    )
+
+
+def _request_constraints_wrapper(request) -> ChatMessage | None:
+    constraints: dict[str, object] = {}
+
+    tool_choice = request.tool_choice
+    if isinstance(tool_choice, ToolChoiceFunction):
+        constraints["tool_choice"] = {"type": "function", "name": tool_choice.name}
+    elif tool_choice not in {None, "auto"}:
+        constraints["tool_choice"] = tool_choice
+
+    text_config = request.text
+    if text_config is not None and text_config.format is not None:
+        text_format = text_config.format
+        if isinstance(text_format, TextFormatJSONObject):
+            constraints["response_format"] = {"type": "json_object"}
+        elif isinstance(text_format, TextFormatJSONSchema):
+            constraints["response_format"] = {
+                "type": "json_schema",
+                "name": text_format.name,
+                "strict": text_format.strict,
+                "schema": text_format.schema_,
+            }
+
+    if not constraints:
+        return None
+
+    return ChatMessage(role="user", content=f"{REQUEST_CONSTRAINTS_HEADER}\n{_json_text(constraints)}")
+
+
 def _candidate_called_tool_definitions_message(
     parts: TempMainParts,
     *,
@@ -542,6 +640,104 @@ def _budgeted_transcript_message(
     return _transcript_wrapper(transcript)
 
 
+def _reviewer_header_messages(
+    *,
+    state: MutableQueues,
+    parts: TempMainParts,
+    main_developer_message: StateMessage,
+    profile: RuntimeModelProfileConfig,
+    request,
+    normal_tools: Sequence[FunctionTool],
+    tool_policies: Mapping[str, ToolPolicy],
+    thread: Sequence[StateMessage],
+) -> list[ChatMessage]:
+    header_messages: list[ChatMessage] = [
+        ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
+        _budgeted_transcript_message(
+            state.main_context,
+            actor_config=profile.reviewer,
+            main_developer_message=main_developer_message,
+            recount_margin=profile.transcript_recount_margin,
+            token_budget=profile.reviewer_transcript_token_budget,
+        ),
+    ]
+    request_constraints = _request_constraints_wrapper(request)
+    if request_constraints is not None:
+        header_messages.append(request_constraints)
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
+    header_messages.append(_review_context_wrapper(parts))
+    header_messages.extend(message.to_chat_message() for message in thread)
+    return header_messages
+
+
+def _main_debate_header_messages(
+    *,
+    state: MutableQueues,
+    parts: TempMainParts,
+    request,
+    normal_tools: Sequence[FunctionTool],
+    tool_policies: Mapping[str, ToolPolicy],
+) -> list[ChatMessage]:
+    header_messages: list[ChatMessage] = [
+        ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
+        *state.render_effective_main_context(include_citation=False),
+    ]
+    request_constraints = _request_constraints_wrapper(request)
+    if request_constraints is not None:
+        header_messages.append(request_constraints)
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
+    header_messages.append(_review_context_wrapper(parts))
+    return header_messages
+
+
+def _arbitrator_header_messages(
+    *,
+    state: MutableQueues,
+    parts: TempMainParts,
+    main_developer_message: StateMessage,
+    profile: RuntimeModelProfileConfig,
+    request,
+    normal_tools: Sequence[FunctionTool],
+    tool_policies: Mapping[str, ToolPolicy],
+    thread: Sequence[StateMessage],
+) -> list[ChatMessage]:
+    header_messages: list[ChatMessage] = [
+        ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
+        _budgeted_transcript_message(
+            state.main_context,
+            actor_config=profile.arbitrator,
+            main_developer_message=main_developer_message,
+            recount_margin=profile.transcript_recount_margin,
+            token_budget=profile.arbitrator_transcript_token_budget,
+        ),
+    ]
+    request_constraints = _request_constraints_wrapper(request)
+    if request_constraints is not None:
+        header_messages.append(request_constraints)
+    tool_definitions_message = _candidate_called_tool_definitions_message(
+        parts,
+        normal_tools=normal_tools,
+        debate_tool_policies=tool_policies,
+    )
+    if tool_definitions_message is not None:
+        header_messages.append(tool_definitions_message)
+    header_messages.append(_review_context_wrapper(parts))
+    header_messages.extend(message.to_chat_message() for message in thread)
+    return header_messages
+
+
 def _reviewer_initial_turn(
     parts: TempMainParts,
 ) -> StateMessage:
@@ -557,13 +753,17 @@ def _reviewer_initial_turn(
     )
 
 
-def _reviewer_reopen_turn(*, latest_response_note: StateMessage, latest_next_step_note: str | None) -> StateMessage:
-    parts = []
+def _reviewer_reopen_turn(
+    *,
+    latest_response_note: StateMessage,
+    latest_next_step_note: str | None,
+) -> StateMessage:
+    content_parts = []
     if latest_next_step_note is not None:
-        parts.append(f"Previous next-step note:\n{latest_next_step_note}")
-    parts.append(f"Latest response note:\n{latest_response_note.content_text() or ''}")
-    parts.append("Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.")
-    return StateMessage(role="user", content="\n\n".join(parts))
+        content_parts.append(f"Previous next-step note:\n{latest_next_step_note}")
+    content_parts.append(f"Latest response note:\n{latest_response_note.content_text() or ''}")
+    content_parts.append("Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.")
+    return StateMessage(role="user", content="\n\n".join(content_parts))
 
 
 def _main_debate_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
@@ -572,8 +772,7 @@ def _main_debate_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
         content=(
             "Latest review note:\n"
             f"{reviewer_decision.note or ''}\n\n"
-            "Write one short response note about the current proposed next step. "
-            "Focus on whether it is the correct next thing to do or return now."
+            "Write one short response note about the current proposed next step."
         ),
     )
 
@@ -601,7 +800,11 @@ def _arbitrator_initial_turn(
     )
 
 
-def _arbitrator_reopen_turn(*, reviewer_decision: ReviewerDecision, latest_response_note: StateMessage) -> StateMessage:
+def _arbitrator_reopen_turn(
+    *,
+    reviewer_decision: ReviewerDecision,
+    latest_response_note: StateMessage,
+) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
@@ -776,24 +979,16 @@ async def run_reviewer_turn(
     usage_ledger: UsageLedger,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = _thread_messages(state.reviewer)
-    header_messages: list[ChatMessage] = [
-        ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
-        _budgeted_transcript_message(
-            state.main_context,
-            actor_config=profile.reviewer,
-            main_developer_message=main_developer_message,
-            recount_margin=profile.transcript_recount_margin,
-            token_budget=profile.reviewer_transcript_token_budget,
-        ),
-    ]
-    tool_definitions_message = _candidate_called_tool_definitions_message(
-        parts,
+    header_messages = _reviewer_header_messages(
+        state=state,
+        parts=parts,
+        main_developer_message=main_developer_message,
+        profile=profile,
+        request=request,
         normal_tools=normal_tools,
-        debate_tool_policies=tool_policies,
+        tool_policies=tool_policies,
+        thread=thread,
     )
-    if tool_definitions_message is not None:
-        header_messages.append(tool_definitions_message)
-    header_messages.extend(message.to_chat_message() for message in thread)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     elif thread:
@@ -842,17 +1037,13 @@ async def run_main_debate_turn(
     usage_ledger: UsageLedger,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = [row.message for row in parts.remaining_temp_rows]
-    header_messages: list[ChatMessage] = [
-        ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
-        *state.render_effective_main_context(include_citation=False),
-    ]
-    tool_definitions_message = _candidate_called_tool_definitions_message(
-        parts,
+    header_messages = _main_debate_header_messages(
+        state=state,
+        parts=parts,
+        request=request,
         normal_tools=normal_tools,
-        debate_tool_policies=tool_policies,
+        tool_policies=tool_policies,
     )
-    if tool_definitions_message is not None:
-        header_messages.append(tool_definitions_message)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     else:
@@ -901,24 +1092,16 @@ async def run_arbitrator_turn(
             private_message="final decision step is missing review or response note",
         )
     thread = _thread_messages(state.arbitrator)
-    header_messages: list[ChatMessage] = [
-        ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
-        _budgeted_transcript_message(
-            state.main_context,
-            actor_config=profile.arbitrator,
-            main_developer_message=main_developer_message,
-            recount_margin=profile.transcript_recount_margin,
-            token_budget=profile.arbitrator_transcript_token_budget,
-        ),
-    ]
-    tool_definitions_message = _candidate_called_tool_definitions_message(
-        parts,
+    header_messages = _arbitrator_header_messages(
+        state=state,
+        parts=parts,
+        main_developer_message=main_developer_message,
+        profile=profile,
+        request=request,
         normal_tools=normal_tools,
-        debate_tool_policies=tool_policies,
+        tool_policies=tool_policies,
+        thread=thread,
     )
-    if tool_definitions_message is not None:
-        header_messages.append(tool_definitions_message)
-    header_messages.extend(message.to_chat_message() for message in thread)
     if _thread_waiting_after_tool_output(thread):
         turn_messages: list[StateMessage] = []
     elif thread:

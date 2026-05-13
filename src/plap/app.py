@@ -18,6 +18,7 @@ from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.fireworks import FireworksChatCompletionClient
+from plap.llms.gmicloud import GMICloudChatCompletionClient
 from plap.llms.lightning import LightningChatCompletionClient
 from plap.llms.novita import NovitaChatCompletionClient
 from plap.llms.openrouter import OpenRouterChatCompletionClient
@@ -211,6 +212,10 @@ def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
         client = CanopyWaveChatCompletionClient(api_key=settings.llm_canopywave_api_key)
         yield ModelRoute(prefix="canopywave/", client=client)
 
+    if settings.llm_gmicloud_api_key:
+        client = GMICloudChatCompletionClient(api_key=settings.llm_gmicloud_api_key)
+        yield ModelRoute(prefix="gmicloud/", client=client)
+
     if settings.llm_novita_api_key:
         client = NovitaChatCompletionClient(api_key=settings.llm_novita_api_key)
         yield ModelRoute(prefix="novita/", client=client)
@@ -393,6 +398,8 @@ def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
         yield "lightning/"
     if settings.llm_canopywave_api_key:
         yield "canopywave/"
+    if settings.llm_gmicloud_api_key:
+        yield "gmicloud/"
     if settings.llm_novita_api_key:
         yield "novita/"
     if settings.llm_fireworks_api_key:

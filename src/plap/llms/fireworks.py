@@ -36,6 +36,7 @@ from plap.llms.openai import (
 
 FIREWORKS_CHAT_FIELDS = (
     *COMMON_CHAT_FIELDS,
+    "top_k",
     "logprobs",
     "top_logprobs",
     "reasoning_effort",
