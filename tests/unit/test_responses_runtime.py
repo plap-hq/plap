@@ -1394,10 +1394,8 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     }
     assert arbitrator_sections[1] == "Latest review note:\nCheck ids."
     assert arbitrator_sections[2] == "Latest response note:\nafter review"
-    assert arbitrator_sections[3] == (
-        "Decide whether to accept the current proposed next step, send one next-step note back "
-        "to the normal main step for a fresh retry, or reopen the review cycle."
-    )
+    assert "send one next-step note back to the normal main step for a fresh retry" in arbitrator_sections[3]
+    assert "send one guidance note back into the review cycle" in arbitrator_sections[3]
     tool_definitions = _parse_prefixed_json(
         client.requests[3].messages[2].content or "",
         prefix=f"{CALLED_TOOL_DEFINITIONS_HEADER}\n",

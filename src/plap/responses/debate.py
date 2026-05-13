@@ -183,13 +183,13 @@ REVIEWER_DEVELOPER_PROMPT = f"""You are checking whether the current proposed ne
 You will see:
 - the conversation transcript
 - the current proposed next step
-- on later rounds, the latest response note and possibly a previous next-step note
+- on later rounds, the latest response note and possibly a guidance note
 
 Definitions:
 - current proposed next step: the exact next thing that would be returned now if accepted,
   which may be a direct user-facing message, a tool call, or a combination of both
 - response note: another model's reply to the latest review note; it may agree or disagree
-- next-step note: a short note about what the next round should focus on
+- guidance note: a short note about what the next review round should focus on
 
 Do not return JSON.
 
@@ -221,7 +221,8 @@ Use:
 Do not reopen merely because later work still exists outside the current requested scope.
 
 If you use `REOPEN`:
-- you MUST write one short review note above the final line saying what seems wrong, missing, unsupported, or risky about the current proposed next step.
+- you MUST write one short review note above the final line saying what seems
+  wrong, missing, unsupported, or risky about the current proposed next step.
 - do not add labels such as "Review note:"
 """
 
@@ -278,7 +279,8 @@ Definitions:
   which may be a direct user-facing message, a tool call, or a combination of both
 - review note: a short note explaining what seems wrong, missing, unsupported, or risky about that next step
 - response note: a short note replying to the review note from independent judgment
-- next-step note: a short note telling the next round what to focus on
+- next-step note: a short note telling the next main step what to focus on
+- guidance note: a short note about what the next review round should focus on
 
 Do not return JSON.
 
@@ -310,7 +312,6 @@ Use:
 
 If you use `REVISE`:
 - the current proposed next step will not be sent
-- the response note will not be sent
 - you MUST write one short next-step note above the final line
 - that next-step note will be sent to the normal main step, which will choose and write a fresh next step from scratch
 - do not add labels such as "Next-step note:"
@@ -321,10 +322,9 @@ If you use `REVISE`:
 
 If you use `REOPEN`:
 - the current proposed next step will not be sent
-- the response note will not be sent
-- you MUST write one short next-step note above the final line
-- that next-step note will be sent into another review round
-- do not add labels such as "Next-step note:"
+- you MUST write one short guidance note above the final line
+- that guidance note will be sent into another review round
+- do not add labels such as "Guidance note:"
 - put what you want the next review round to focus on in that note
 """
 
@@ -802,11 +802,11 @@ def _reviewer_initial_turn(
 def _reviewer_reopen_turn(
     *,
     latest_response_note: StateMessage,
-    latest_next_step_note: str | None,
+    latest_guidance_note: str | None,
 ) -> StateMessage:
     content_parts = []
-    if latest_next_step_note is not None:
-        content_parts.append(f"Current next-step note:\n{latest_next_step_note}")
+    if latest_guidance_note is not None:
+        content_parts.append(f"Current guidance note:\n{latest_guidance_note}")
     content_parts.append(f"Latest response note:\n{latest_response_note.content_text() or ''}")
     content_parts.append("Revisit the current proposed next step and decide whether to accept it or reopen again with a new review note.")
     return StateMessage(role="user", content="\n\n".join(content_parts))
@@ -840,8 +840,8 @@ def _arbitrator_initial_turn(
             "Latest response note:\n"
             f"{latest_response_note.content_text() or ''}\n\n"
             "Decide whether to accept the current proposed next step, send one "
-            "next-step note back to the normal main step for a fresh retry, or reopen "
-            "the review cycle."
+            "next-step note back to the normal main step for a fresh retry, or send one "
+            "guidance note back into the review cycle."
         ),
     )
 
@@ -859,8 +859,8 @@ def _arbitrator_reopen_turn(
             "Latest response note:\n"
             f"{latest_response_note.content_text() or ''}\n\n"
             "Decide whether to accept the current proposed next step, send one "
-            "next-step note back to the normal main step for a fresh retry, or reopen "
-            "the review cycle."
+            "next-step note back to the normal main step for a fresh retry, or send one "
+            "guidance note back into the review cycle."
         ),
     )
 
@@ -1039,7 +1039,7 @@ async def run_reviewer_turn(
         turn_messages: list[StateMessage] = []
     elif thread:
         latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
-        latest_next_step_note = _latest_arbitrator_note(_thread_messages(state.arbitrator))
+        latest_guidance_note = _latest_arbitrator_note(_thread_messages(state.arbitrator))
         if latest_response_note is None:
             raise _debate_internal_error(
                 reason="reviewer_reopen_missing_latest_response_note", private_message="reviewer reopen is missing latest response note"
@@ -1047,7 +1047,7 @@ async def run_reviewer_turn(
         turn_messages = [
             _reviewer_reopen_turn(
                 latest_response_note=latest_response_note,
-                latest_next_step_note=latest_next_step_note,
+                latest_guidance_note=latest_guidance_note,
             )
         ]
     else:
