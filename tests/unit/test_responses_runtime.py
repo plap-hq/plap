@@ -47,7 +47,8 @@ from plap.responses.contracts import (
     WebSearchTool,
 )
 from plap.responses.debate import (
-    HELD_CLIENT_TOOL_PLACEHOLDER,
+    DEBATE_UNSAFE_TOOL_PLACEHOLDER,
+    DEBATE_HELD_TOOL_PLACEHOLDER,
     ArbitratorActionType,
     ReviewerActionType,
     _budgeted_transcript_message,
@@ -253,7 +254,7 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
     tool = _read_file_tool()
     tools, policies, _ = await prepare_tools(
         ResponseCreateRequest(tools=[tool, WebSearchTool(type="web_search")]),
-        _RecordingResolver(),
+        _RecordingResolver({"read_file": "contextual"}),
         (_FakeMCPToolProvider(),),
     )
     call_resolver = _RecordingCallResolver()
@@ -279,7 +280,33 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
         "read_file",
     ]
     assert [policy.source for policy in resolved] == ["server", "client", "client"]
-    assert call_resolver.calls == [[("read_file", '{"path":"a"}'), ("read_file", '{"path":"b"}')]]
+    assert call_resolver.calls == [[
+        (MCP_SEARCH_TOOL_NAME, '{"query":"x"}'),
+        ("read_file", '{"path":"a"}'),
+        ("read_file", '{"path":"b"}'),
+    ]]
+
+
+async def test_resolve_tool_calls_classifies_contextual_server_calls() -> None:
+    provider = _FakeMCPToolProvider(tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME, effect_class="contextual"))
+    tools, policies, _ = await prepare_tools(
+        ResponseCreateRequest(tools=[WebSearchTool(type="web_search")]),
+        _RecordingResolver(),
+        (provider,),
+    )
+    call_resolver = _RecordingCallResolver({MCP_SEARCH_TOOL_NAME: "safe"})
+
+    resolved = await resolve_tool_calls(
+        [ChatToolCall(id="call_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":"x"}')],
+        tools={tool.name: tool for tool in tools},
+        tool_policies=policies,
+        resolver=call_resolver,
+    )
+
+    assert [policy.name for policy in resolved] == [MCP_SEARCH_TOOL_NAME]
+    assert [policy.source for policy in resolved] == ["server"]
+    assert [policy.effect_class for policy in resolved] == ["safe"]
+    assert call_resolver.calls == [[(MCP_SEARCH_TOOL_NAME, '{"query":"x"}')]]
 
 
 def test_compact_transcript_folds_tool_outputs() -> None:
@@ -989,7 +1016,7 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
     assert held_payload.continuation_side == "reviewer"
     assert held_payload.messages[0].tool_calls[0].id == "upstream_mutate_1"
     assert held_payload.messages[1].tool_call_id == "upstream_mutate_1"
-    assert held_payload.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
+    assert held_payload.messages[1].content == DEBATE_HELD_TOOL_PLACEHOLDER
     reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
     assert reviewer_payload.messages[0].role == "user"
     reviewer_sections = _split_sections(reviewer_payload.messages[0].content or "")
@@ -1062,6 +1089,52 @@ async def test_stream_response_events_reviewer_request_includes_tool_choice_cons
     _assert_in_progress_review_context(reviewer_request.messages[4].content or "")
 
 
+async def test_stream_response_events_reviewer_accept_executes_intercepted_contextual_server_call_and_resumes_main() -> None:
+    provider = _FakeMCPToolProvider(output="search result", tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME, effect_class="contextual"))
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[ChatToolCall(id="upstream_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":"cats"}')],
+            ),
+            _assistant_text("ACCEPT"),
+            ChatMessage(role="assistant", content="final answer"),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="search for cats",
+                    include=["reasoning.encrypted_content"],
+                    tools=[WebSearchTool(type="web_search")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver({MCP_SEARCH_TOOL_NAME: "unknown"}),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                mcp_tool_providers=(provider,),
+            )
+        ]
+    )
+
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
+    assert len(client.requests) == 4
+    assert any(
+        message.role == "tool" and message.tool_call_id == "upstream_search_1" and message.content == "search result"
+        for message in client.requests[2].messages
+    )
+    assert any(item.type == "function_call_output" and getattr(item, "output", None) == "search result" for item in completed.output)
+    assert any(item.type == "message" and item.content[0].text == "final answer" for item in completed.output)
+
+
 async def test_stream_response_events_reviewer_request_includes_response_format_constraints() -> None:
     client = _StaticChatClient(
         [
@@ -1098,6 +1171,63 @@ async def test_stream_response_events_reviewer_request_includes_response_format_
     )
     assert constraints == {"response_format": {"type": "json_object"}}
     _assert_user_return_review_context(reviewer_request.messages[3].content or "")
+
+
+async def test_stream_response_events_reviewer_stubs_unsafe_contextual_call_and_emits_safe_call() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ChatToolCall(id="review_read_1", name="read", arguments='{"filePath":"/tmp/file"}'),
+                    ChatToolCall(
+                        id="review_bash_1",
+                        name="bash",
+                        arguments='{"command":"python3 -c 1","description":"Decode the base64 properly"}',
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="update the record",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record"), _tool("read"), _tool("bash")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read": "safe", "bash": "contextual"}),
+                tool_call_policy_resolver=_RecordingCallResolver({"bash": "unknown"}),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert "bash" in [tool.function.name for tool in client.requests[1].tools]
+    assert any(item.type == "function_call" and item.name == "read" for item in completed.output)
+    assert not any(item.type == "function_call" and item.name == "bash" for item in completed.output)
+    reasoning_payloads = [
+        open_reasoning_payload(item.encrypted_content, keyring=_keyring())
+        for item in completed.output
+        if item.type == "reasoning" and item.encrypted_content is not None
+    ]
+    assert any(
+        any(message.role == "tool" and message.content == DEBATE_UNSAFE_TOOL_PLACEHOLDER for message in payload.messages)
+        for payload in reasoning_payloads
+    )
 
 
 def test_request_constraints_wrapper_serializes_json_schema_response_format() -> None:
@@ -1286,7 +1416,7 @@ async def test_stream_response_events_main_debate_uses_effective_main_context() 
         {"name": call.name, "arguments": json.loads(call.arguments)}
         for call in (debate_request.messages[2].tool_calls or [])
     ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
-    assert debate_request.messages[3].content == HELD_CLIENT_TOOL_PLACEHOLDER
+    assert debate_request.messages[3].content == DEBATE_HELD_TOOL_PLACEHOLDER
     _assert_in_progress_review_context(debate_request.messages[5].content or "")
     tool_definitions = _parse_prefixed_json(
         debate_request.messages[4].content or "",
@@ -1415,7 +1545,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert stable_guidance.messages[0].content == "draft answer"
     assert stable_guidance.messages[0].tool_calls[0].name == "mutate_record"
     assert stable_guidance.messages[1].role == "tool"
-    assert stable_guidance.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
+    assert stable_guidance.messages[1].content == DEBATE_HELD_TOOL_PLACEHOLDER
     assert stable_guidance.messages[2].role == "assistant"
     assert stable_guidance.messages[2].content == (
         "Internal retry guidance for the next fresh answer only.\n"
@@ -1437,7 +1567,7 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
         {"name": call.name, "arguments": json.loads(call.arguments)}
         for call in (final_main_request.messages[2].tool_calls or [])
     ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
-    assert final_main_request.messages[3].content == HELD_CLIENT_TOOL_PLACEHOLDER
+    assert final_main_request.messages[3].content == DEBATE_HELD_TOOL_PLACEHOLDER
     assert final_main_request.messages[4].content == (
         "Internal retry guidance for the next fresh answer only.\n"
         "This is not a user-facing message.\n"
@@ -1457,6 +1587,54 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     assert len(client.requests) == 6
     assert client.requests[1].response_format is None
     assert client.requests[3].response_format is None
+
+
+async def test_stream_response_events_arbitrator_accept_executes_intercepted_contextual_server_call_and_resumes_main() -> None:
+    provider = _FakeMCPToolProvider(output="search result for cats", tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME, effect_class="contextual"))
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[ChatToolCall(id="upstream_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":"cats"}')],
+            ),
+            _assistant_text("Check ids.\n\nDecision: REOPEN"),
+            ChatMessage(role="assistant", content="The review note is wrong: the tool execution is appropriate."),
+            _assistant_text("ACCEPT"),
+            ChatMessage(role="assistant", content="final answer"),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="search for cats",
+                    include=["reasoning.encrypted_content"],
+                    tools=[WebSearchTool(type="web_search")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver({MCP_SEARCH_TOOL_NAME: "unknown"}),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                mcp_tool_providers=(provider,),
+            )
+        ]
+    )
+
+    assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
+    assert len(client.requests) == 6
+    assert any(
+        message.role == "tool" and message.tool_call_id == "upstream_search_1" and message.content == "search result for cats"
+        for message in client.requests[4].messages
+    )
+    assert any(item.type == "function_call_output" and getattr(item, "output", None) == "search result for cats" for item in completed.output)
+    assert any(item.type == "message" and item.content[0].text == "final answer" for item in completed.output)
 
 
 async def test_stream_response_events_reviewer_reopen_turn_is_incremental() -> None:
@@ -1811,7 +1989,10 @@ async def test_stream_response_events_mixed_server_client_tools_do_not_loop() ->
     assert completed.output[2].name == "read_file"
     assert completed.output[3].call_id == completed.output[1].call_id
     assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
-    assert call_resolver.calls == [[("read_file", '{"path":"README.md"}')]]
+    assert call_resolver.calls == [[
+        (MCP_SEARCH_TOOL_NAME, '{"query":"cats"}'),
+        ("read_file", '{"path":"README.md"}'),
+    ]]
     assert len(client.requests) == 1
 
 
@@ -4571,7 +4752,7 @@ async def test_stream_response_events_adopts_streamed_candidate_into_debate_with
     assert [part.text for part in completed.output[0].summary] == ["checked candidate"]
     held_payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
     assert held_payload.temp is True
-    assert held_payload.messages[1].content == HELD_CLIENT_TOOL_PLACEHOLDER
+    assert held_payload.messages[1].content == DEBATE_HELD_TOOL_PLACEHOLDER
     accepted_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
     assert accepted_payload.temp is False
     assert accepted_payload.messages[0].role == "assistant"
@@ -4858,7 +5039,8 @@ class _RecordingResolver(IToolPolicyResolver):
 
 
 class _RecordingCallResolver(IToolCallPolicyResolver):
-    def __init__(self) -> None:
+    def __init__(self, effects: dict[str, str] | None = None) -> None:
+        self.effects = effects or {}
         self.calls: list[list[tuple[str, str]]] = []
 
     async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]:
@@ -4866,15 +5048,19 @@ class _RecordingCallResolver(IToolCallPolicyResolver):
         return tuple(
             ToolPolicy(
                 name=call.tool.name,
-                source="client",
-                effect_class=call.policy.effect_class,
+                source=call.policy.source,
+                effect_class=self.effects.get(call.tool.name, call.policy.effect_class),
             )
             for call in calls
         )
 
 
-def _mcp_tool_configs(*names: str, type: str = "web_search") -> dict[str, MCPToolConfig]:
-    return {name: MCPToolConfig(type=type) for name in names}
+def _mcp_tool_configs(
+    *names: str,
+    type: str = "web_search",
+    effect_class: str = "safe",
+) -> dict[str, MCPToolConfig]:
+    return {name: MCPToolConfig(type=type, effect_class=effect_class) for name in names}
 
 
 class _FakeMCPToolProvider(IMCPToolProvider):

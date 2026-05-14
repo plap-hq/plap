@@ -67,9 +67,9 @@ from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
-    ToolCall,
     ToolPolicy,
     canonical_tool_arguments,
+    resolve_tool_call_policies,
 )
 from plap.responses.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPToolExecutor
 from plap.settings import RuntimeModelProfileConfig, RuntimeSelector, Settings
@@ -363,46 +363,37 @@ async def resolve_tool_calls(
     tool_policies: Mapping[str, ToolPolicy],
     resolver: IToolCallPolicyResolver,
 ) -> tuple[ToolPolicy, ...]:
-    if not calls:
-        return ()
     _validate_tool_call_batch(calls, tool_policies)
-
-    resolved: list[ToolPolicy | None] = []
-    client_calls: list[ToolCall] = []
-    client_indexes: list[int] = []
-    for call in calls:
-        policy = tool_policies[call.name]
-        if policy.source == "server":
-            resolved.append(policy)
-            continue
-
-        tool = tools.get(call.name)
-        if tool is None:
+    try:
+        return await resolve_tool_call_policies(
+            calls,
+            tools=tools,
+            tool_policies=tool_policies,
+            resolver=resolver,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("unknown tool call: "):
+            tool_name = message.removeprefix("unknown tool call: ")
+            raise _runtime_internal_error(
+                reason="unknown_tool_call",
+                private_message=f"unknown tool call: {tool_name}",
+                cause=exc,
+            ) from exc
+        if message.startswith("unknown tool definition for call: "):
+            tool_name = message.removeprefix("unknown tool definition for call: ")
             raise _runtime_internal_error(
                 reason="unknown_client_tool_call",
-                private_message=f"unknown client tool call: {call.name}",
-            )
-        client_indexes.append(len(resolved))
-        resolved.append(None)
-        client_calls.append(
-            ToolCall(
-                tool=tool,
-                policy=policy,
-                arguments=call.arguments,
-            )
-        )
-
-    if client_calls:
-        client_policies = await resolver.resolve(client_calls)
-        for index, policy in zip(client_indexes, client_policies, strict=True):
-            resolved[index] = policy
-
-    if any(policy is None for policy in resolved):
+                private_message=f"unknown client tool call: {tool_name}",
+                cause=exc,
+            ) from exc
+        raise
+    except RuntimeError as exc:
         raise _runtime_internal_error(
             reason="tool_call_policy_resolution_incomplete",
             private_message="tool call policy resolution did not produce all outputs",
-        )
-    return tuple(policy for policy in resolved if policy is not None)
+            cause=exc,
+        ) from exc
 
 
 def _chat_tool_choice(request: ResponseCreateRequest):
@@ -845,6 +836,7 @@ async def run_response(
                 tools=base_tools,
                 tool_policies=base_tool_policies,
                 server_executors=base_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
                 usage_ledger=usage_ledger,
@@ -992,6 +984,7 @@ async def run_response(
                 tools=base_tools,
                 tool_policies=base_tool_policies,
                 server_executors=base_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
                 chat_completion_client=chat_completion_client,
                 prompt_cache_key_base=prompt_cache_key_base,
                 usage_ledger=usage_ledger,
@@ -1012,6 +1005,9 @@ async def run_response(
             intercepted_client_indexes: list[int] = []
             for index, (call, policy) in enumerate(zip(tool_calls, resolved_policies, strict=True)):
                 if policy.source == "server":
+                    if policy.effect_class != "safe" and profile.debate_max_rounds > 0:
+                        intercepted_client_indexes.append(index)
+                        continue
                     executor = effective_server_executors.get(call.name)
                     if executor is None:
                         raise _runtime_internal_error(
@@ -1049,6 +1045,7 @@ async def run_response(
                     tools=base_tools,
                     tool_policies=base_tool_policies,
                     server_executors=base_server_executors,
+                    tool_call_policy_resolver=tool_call_policy_resolver,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
                     usage_ledger=usage_ledger,

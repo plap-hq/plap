@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -11,6 +11,7 @@ import structlog
 from cachetools import LRUCache
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.llms.chat import ChatToolCall
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
 
@@ -203,6 +204,37 @@ class IToolCallClassifier(Protocol):
 @runtime_checkable
 class IToolCallPolicyResolver(Protocol):
     async def resolve(self, calls: Sequence[ToolCall]) -> tuple[ToolPolicy, ...]: ...
+
+
+async def resolve_tool_call_policies(
+    calls: Sequence[ChatToolCall],
+    *,
+    tools: Mapping[str, FunctionTool],
+    tool_policies: Mapping[str, ToolPolicy],
+    resolver: IToolCallPolicyResolver,
+) -> tuple[ToolPolicy, ...]:
+    if not calls:
+        return ()
+
+    calls_to_resolve: list[ToolCall] = []
+    for call in calls:
+        policy = tool_policies.get(call.name)
+        if policy is None:
+            raise ValueError(f"unknown tool call: {call.name}")
+
+        tool = tools.get(call.name)
+        if tool is None:
+            raise ValueError(f"unknown tool definition for call: {call.name}")
+
+        calls_to_resolve.append(
+            ToolCall(
+                tool=tool,
+                policy=policy,
+                arguments=call.arguments,
+            )
+        )
+
+    return await resolver.resolve(calls_to_resolve)
 
 
 def normalize_function_tool(tool: FunctionTool) -> dict[str, object]:

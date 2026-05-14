@@ -53,11 +53,18 @@ from plap.responses.models import (
     UsageLedger,
 )
 from plap.responses.tokens import measure_prompt_tokens
-from plap.responses.tools import ToolPolicy, normalize_function_tool
+from plap.responses.tools import (
+    IToolCallPolicyResolver,
+    ToolPolicy,
+    canonical_tool_arguments,
+    normalize_function_tool,
+    resolve_tool_call_policies,
+)
 from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
-HELD_CLIENT_TOOL_PLACEHOLDER = "This tool call was intercepted by a reviewer."
+DEBATE_HELD_TOOL_PLACEHOLDER = "This tool call was intercepted by a reviewer."
+DEBATE_UNSAFE_TOOL_PLACEHOLDER = "This tool call is unsafe to run in this environment."
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
@@ -147,7 +154,7 @@ async def _retry_debate_step(actor: str, operation) -> object:
 
 
 DEBATE_TOOL_AVAILABILITY_PROMPT = """Use available tools when they help.
-You only have access here to a restricted safe subset of tools. You may also
+You only have access here to a restricted callable subset of tools. You may also
 receive a user message titled `Tool definitions for tools used by the proposed
 next step`. If present, it contains tool definitions for tools that are
 available to the normal main step for this request and that are already used in
@@ -155,7 +162,13 @@ the proposed next step. Use it to understand what those proposed tool calls
 mean and whether they are appropriate. The fact that one of those tools is not
 callable in this debate step does not mean the normal main step lacks it. Do
 not reject or criticize a proposed next step merely because one of those tools
-is not callable in this debate step."""
+is not callable in this debate step.
+
+If a callable tool returns the text `This tool call is unsafe to run in
+this environment.`, treat that as an authoritative tool result indicating that
+this specific tool call is not allowed here. Do not retry the same call.
+Instead, continue from that result by reasoning about the task, using other
+safe tools, or changing approach."""
 
 DEBATE_REQUEST_CONSTRAINTS_PROMPT = """You may also receive a user message titled `Request constraints for the proposed next step:`.
 If present, it describes client-requested tool-choice or output-format
@@ -372,24 +385,24 @@ class DebateResult(StrEnum):
     CONTINUE_MAIN = "continue_main"
 
 
-def debate_safe_surface(
+def debate_callable_surface(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
 ) -> tuple[tuple[FunctionTool, ...], dict[str, ToolPolicy], dict[str, IServerToolExecutor]]:
-    safe_tools: list[FunctionTool] = []
-    safe_policies: dict[str, ToolPolicy] = {}
-    safe_executors: dict[str, IServerToolExecutor] = {}
+    callable_tools: list[FunctionTool] = []
+    callable_policies: dict[str, ToolPolicy] = {}
+    callable_executors: dict[str, IServerToolExecutor] = {}
     for tool in tools:
         policy = tool_policies.get(tool.name)
-        if policy is None or policy.effect_class != "safe":
+        if policy is None or policy.effect_class not in {"safe", "contextual"}:
             continue
-        safe_tools.append(tool)
-        safe_policies[tool.name] = policy
+        callable_tools.append(tool)
+        callable_policies[tool.name] = policy
         executor = server_executors.get(tool.name)
         if executor is not None:
-            safe_executors[tool.name] = executor
-    return tuple(safe_tools), safe_policies, safe_executors
+            callable_executors[tool.name] = executor
+    return tuple(callable_tools), callable_policies, callable_executors
 
 
 def build_completion_request(
@@ -515,7 +528,7 @@ def _compact_candidate(
     outputs = {
         row.message.tool_call_id: row.message.content_text() or ""
         for row in parts.held_hidden_tool_rows
-        if row.message.tool_call_id is not None and (row.message.content_text() or "") != HELD_CLIENT_TOOL_PLACEHOLDER
+        if row.message.tool_call_id is not None and (row.message.content_text() or "") != DEBATE_HELD_TOOL_PLACEHOLDER
     }
     value: dict[str, object] = {"role": "assistant"}
     if candidate.content_text() is not None:
@@ -936,6 +949,7 @@ async def _execute_actor_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -977,24 +991,75 @@ async def _execute_actor_turn(
                 return ActorFinished(messages=turn_messages, assistant=assistant, usage=result.usage, service_tier=result.service_tier)
 
             client_calls: list[ChatToolCall] = []
-            server_output_seen = False
+            inline_output_seen = False
+            supported_calls: list[ChatToolCall] = []
+            tools_by_name = {tool.name: tool for tool in tools}
             for call in tool_calls:
                 policy = tool_policies.get(call.name)
-                if policy is None or policy.effect_class != "safe":
-                    raise _debate_unavailable_error(
-                        reason="debate_actor_called_unsupported_tool", private_message="debate actor called unsupported tool"
+                if policy is None:
+                    log_debug(logger, "debate.actor.tool_stubbed", actor=actor_name, reason="tool_unavailable", tool_name=call.name)
+                    turn_messages.append(
+                        StateMessage(
+                            role="tool",
+                            tool_call_id=call.id,
+                            content=DEBATE_UNSAFE_TOOL_PLACEHOLDER,
+                        )
                     )
-                if policy.source == "server":
+                    inline_output_seen = True
+                    continue
+                if policy.effect_class == "contextual":
+                    _arguments_object(call.arguments, label="debate tool arguments")
+                supported_calls.append(call)
+
+            if supported_calls:
+                resolved_policies = await resolve_tool_call_policies(
+                    supported_calls,
+                    tools=tools_by_name,
+                    tool_policies=tool_policies,
+                    resolver=tool_call_policy_resolver,
+                )
+            else:
+                resolved_policies = ()
+
+            for call, policy in zip(supported_calls, resolved_policies, strict=True):
+                log_debug(
+                    logger,
+                    "debate.actor.tool_resolved",
+                    actor=actor_name,
+                    effect_class=policy.effect_class,
+                    source=policy.source,
+                    tool_name=call.name,
+                )
+                if policy.source == "server" and policy.effect_class == "safe":
                     executor = server_executors.get(call.name)
                     if executor is None:
                         raise _debate_internal_error(
                             reason="debate_server_tool_executor_missing", private_message="debate server tool executor is missing"
                         )
                     output = await executor.call_tool(call.name, _arguments_object(call.arguments, label="debate tool arguments"))
+                    log_debug(logger, "debate.actor.server_tool_executed", actor=actor_name, tool_name=call.name)
                     turn_messages.append(StateMessage(role="tool", tool_call_id=call.id, content=output))
-                    server_output_seen = True
-                else:
+                    inline_output_seen = True
+                    continue
+                if policy.effect_class == "safe":
                     client_calls.append(call)
+                    continue
+                log_debug(
+                    logger,
+                    "debate.actor.tool_stubbed",
+                    actor=actor_name,
+                    effect_class=policy.effect_class,
+                    source=policy.source,
+                    tool_name=call.name,
+                )
+                turn_messages.append(
+                    StateMessage(
+                        role="tool",
+                        tool_call_id=call.id,
+                        content=DEBATE_UNSAFE_TOOL_PLACEHOLDER,
+                    )
+                )
+                inline_output_seen = True
 
             if client_calls:
                 return ActorAwaitingClientTool(
@@ -1005,7 +1070,7 @@ async def _execute_actor_turn(
                     service_tier=result.service_tier,
                 )
 
-            if server_output_seen:
+            if inline_output_seen:
                 usage_ledger.record_hidden(actor_config.public_usage, result.usage)
 
 
@@ -1020,6 +1085,7 @@ async def run_reviewer_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -1061,6 +1127,7 @@ async def run_reviewer_turn(
         tools=tools,
         tool_policies=tool_policies,
         server_executors=server_executors,
+        tool_call_policy_resolver=tool_call_policy_resolver,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
@@ -1078,6 +1145,7 @@ async def run_main_debate_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -1108,6 +1176,7 @@ async def run_main_debate_turn(
         tools=tools,
         tool_policies=tool_policies,
         server_executors=server_executors,
+        tool_call_policy_resolver=tool_call_policy_resolver,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
@@ -1126,6 +1195,7 @@ async def run_arbitrator_turn(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
@@ -1174,6 +1244,7 @@ async def run_arbitrator_turn(
         tools=tools,
         tool_policies=tool_policies,
         server_executors=server_executors,
+        tool_call_policy_resolver=tool_call_policy_resolver,
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
@@ -1193,7 +1264,7 @@ def _held_candidate_messages(
             StateMessage(
                 role="tool",
                 tool_call_id=call.id,
-                content=server_outputs.get(index, HELD_CLIENT_TOOL_PLACEHOLDER),
+                content=server_outputs.get(index, DEBATE_HELD_TOOL_PLACEHOLDER),
             )
     )
     return messages
@@ -1250,7 +1321,9 @@ async def publish_accepted_candidate(
     out: ResponseEventIO,
     debug_debate_summaries: bool,
     keyring: SealingKeyring,
-) -> None:
+    tool_policies: Mapping[str, ToolPolicy],
+    server_executors: Mapping[str, IServerToolExecutor],
+) -> DebateResult:
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
@@ -1260,7 +1333,32 @@ async def publish_accepted_candidate(
         for row in parts.held_hidden_tool_rows
         if row.message.tool_call_id is not None
     }
-    emitted_outputs = {call_id: output for call_id, output in hidden_outputs.items() if output != HELD_CLIENT_TOOL_PLACEHOLDER}
+    emitted_outputs = {call_id: output for call_id, output in hidden_outputs.items() if output != DEBATE_HELD_TOOL_PLACEHOLDER}
+    has_client_handoff = False
+    for call in candidate.tool_calls:
+        output = hidden_outputs.get(call.id)
+        if output is not None and output != DEBATE_HELD_TOOL_PLACEHOLDER:
+            continue
+        policy = tool_policies.get(call.name)
+        if policy is None:
+            raise _debate_internal_error(
+                reason="debate_accepted_candidate_tool_policy_missing",
+                private_message=f"debate accepted candidate tool policy is missing: {call.name}",
+            )
+        if policy.source == "server":
+            executor = server_executors.get(call.name)
+            if executor is None:
+                raise _debate_internal_error(
+                    reason="debate_accepted_candidate_server_tool_executor_missing",
+                    private_message=f"debate accepted candidate server tool executor is missing: {call.name}",
+                )
+            emitted_outputs[call.id] = await executor.call_tool(
+                call.name,
+                canonical_tool_arguments(call.arguments),
+            )
+            log_debug(logger, "debate.accepted_candidate.server_tool_executed", tool_name=call.name)
+            continue
+        has_client_handoff = True
     published = await out.publish_main_candidate(
         candidate=candidate,
         keyring=keyring,
@@ -1272,11 +1370,29 @@ async def publish_accepted_candidate(
 
     for call in candidate.tool_calls:
         output = hidden_outputs.get(call.id)
-        if output is None or output == HELD_CLIENT_TOOL_PLACEHOLDER:
+        if output is None or output == DEBATE_HELD_TOOL_PLACEHOLDER:
+            output = emitted_outputs.get(call.id)
+        if output is None or output == DEBATE_HELD_TOOL_PLACEHOLDER:
             continue
         state.append_main_stable(StateMessage(role="tool", tool_call_id=call.id, content=output))
 
     state.clear_debate()
+    if candidate.tool_calls and not has_client_handoff:
+        log_debug(
+            logger,
+            "debate.accepted_candidate.continue_main",
+            executed_server_outputs=len(emitted_outputs),
+            tool_call_count=len(candidate.tool_calls),
+        )
+        return DebateResult.CONTINUE_MAIN
+    log_debug(
+        logger,
+        "debate.accepted_candidate.completed",
+        emitted_output_count=len(emitted_outputs),
+        has_client_handoff=has_client_handoff,
+        tool_call_count=len(candidate.tool_calls),
+    )
+    return DebateResult.COMPLETED
 
 
 async def resume_main_with_revise_bundle(
@@ -1331,27 +1447,36 @@ async def continue_debate(
     tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
     held_anchor_index: int | None = None,
 ) -> DebateResult:
-    safe_tools, safe_tool_policies, safe_server_executors = debate_safe_surface(tools, tool_policies, server_executors)
+    callable_tools, callable_tool_policies, callable_server_executors = debate_callable_surface(
+        tools,
+        tool_policies,
+        server_executors,
+    )
     parts = state.temp_main_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
 
     if profile.debate_max_rounds == 0:
-        if held_anchor_index is not None:
-            usage_ledger.use_hidden_as_anchor(held_anchor_index)
-        await publish_accepted_candidate(
+        debate_result = await publish_accepted_candidate(
             state=state,
             out=out,
             debug_debate_summaries=debug_debate_summaries,
             keyring=keyring,
+            tool_policies=tool_policies,
+            server_executors=server_executors,
         )
-        await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
-        return DebateResult.COMPLETED
+        if debate_result == DebateResult.COMPLETED:
+            if held_anchor_index is not None:
+                usage_ledger.use_hidden_as_anchor(held_anchor_index)
+            await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+            return DebateResult.COMPLETED
+        return DebateResult.CONTINUE_MAIN
 
     while True:
         actor = state.current_actor()
@@ -1367,9 +1492,10 @@ async def continue_debate(
                     profile=profile,
                     request=request,
                     normal_tools=tools,
-                    tools=safe_tools,
-                    tool_policies=safe_tool_policies,
-                    server_executors=safe_server_executors,
+                    tools=callable_tools,
+                    tool_policies=callable_tool_policies,
+                    server_executors=callable_server_executors,
+                    tool_call_policy_resolver=tool_call_policy_resolver,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
                     usage_ledger=usage_ledger,
@@ -1417,17 +1543,22 @@ async def continue_debate(
                 keyring=keyring,
             )
             if decision.action == ReviewerActionType.ACCEPT:
+                debate_result = await publish_accepted_candidate(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    tool_policies=tool_policies,
+                    server_executors=server_executors,
+                )
+                if debate_result == DebateResult.CONTINUE_MAIN:
+                    usage_ledger.record_hidden(profile.reviewer.public_usage, outcome.usage)
+                    return DebateResult.CONTINUE_MAIN
                 if held_anchor_index is not None:
                     usage_ledger.record_hidden(profile.reviewer.public_usage, outcome.usage)
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
                     usage_ledger.set_anchor(outcome.usage)
-                await publish_accepted_candidate(
-                    state=state,
-                    out=out,
-                    debug_debate_summaries=debug_debate_summaries,
-                    keyring=keyring,
-                )
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
@@ -1444,9 +1575,10 @@ async def continue_debate(
                     profile=profile,
                     request=request,
                     normal_tools=tools,
-                    tools=safe_tools,
-                    tool_policies=safe_tool_policies,
-                    server_executors=safe_server_executors,
+                    tools=callable_tools,
+                    tool_policies=callable_tool_policies,
+                    server_executors=callable_server_executors,
+                    tool_call_policy_resolver=tool_call_policy_resolver,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
                     usage_ledger=usage_ledger,
@@ -1502,9 +1634,10 @@ async def continue_debate(
                     profile=profile,
                     request=request,
                     normal_tools=tools,
-                    tools=safe_tools,
-                    tool_policies=safe_tool_policies,
-                    server_executors=safe_server_executors,
+                    tools=callable_tools,
+                    tool_policies=callable_tool_policies,
+                    server_executors=callable_server_executors,
+                    tool_call_policy_resolver=tool_call_policy_resolver,
                     chat_completion_client=chat_completion_client,
                     prompt_cache_key_base=prompt_cache_key_base,
                     usage_ledger=usage_ledger,
@@ -1558,17 +1691,22 @@ async def continue_debate(
                 keyring=keyring,
             )
             if decision.action == ArbitratorActionType.ACCEPT:
+                debate_result = await publish_accepted_candidate(
+                    state=state,
+                    out=out,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    tool_policies=tool_policies,
+                    server_executors=server_executors,
+                )
+                if debate_result == DebateResult.CONTINUE_MAIN:
+                    usage_ledger.record_hidden(profile.arbitrator.public_usage, outcome.usage)
+                    return DebateResult.CONTINUE_MAIN
                 if held_anchor_index is not None:
                     usage_ledger.record_hidden(profile.arbitrator.public_usage, outcome.usage)
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 else:
                     usage_ledger.set_anchor(outcome.usage)
-                await publish_accepted_candidate(
-                    state=state,
-                    out=out,
-                    debug_debate_summaries=debug_debate_summaries,
-                    keyring=keyring,
-                )
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 

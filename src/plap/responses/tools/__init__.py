@@ -31,6 +31,7 @@ from plap.responses.tools.policy import (
     function_tool_call_signature,
     function_tool_signature,
     normalize_function_tool,
+    resolve_tool_call_policies,
     signature_hash_hex,
     tool_arguments_hash,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "function_tool_call_signature",
     "function_tool_signature",
     "normalize_function_tool",
+    "resolve_tool_call_policies",
     "signature_hash_hex",
     "tool_arguments_hash",
 ]
