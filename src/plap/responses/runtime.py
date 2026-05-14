@@ -516,20 +516,31 @@ def _stream_draft_item(*, payload: ReasoningPayload, keyring: SealingKeyring, it
     )
 
 
+SUMMARY_MIN_FLUSH_CHARS = 400
+SUMMARY_MIN_BOUNDARY_CHARS = 240
+SUMMARY_HARD_FLUSH_CHARS = 800
+
+
+def _summary_boundary_index(buffer: str) -> int | None:
+    boundary_markers = ("\n\n", ". ", "? ", "! ")
+    boundary = max(
+        (buffer.rfind(marker) + len(marker) for marker in boundary_markers if buffer.rfind(marker) >= 0),
+        default=0,
+    )
+    return boundary or None
+
+
 def _summary_flush_index(buffer: str, *, force: bool, tool_boundary: bool = False) -> int | None:
     if not buffer.strip():
         return None
     if force or tool_boundary:
         return len(buffer)
-    if len(buffer) < 160:
+    if len(buffer) < SUMMARY_MIN_FLUSH_CHARS:
         return None
-    boundaries = [buffer.rfind("\n"), buffer.rfind(". "), buffer.rfind("? "), buffer.rfind("! ")]
-    boundary = max(boundaries)
-    if boundary >= 80:
-        if buffer[boundary] == "\n":
-            return boundary + 1
-        return boundary + 2
-    if len(buffer) >= 320:
+    boundary = _summary_boundary_index(buffer)
+    if boundary is not None and boundary >= SUMMARY_MIN_BOUNDARY_CHARS:
+        return boundary
+    if len(buffer) >= SUMMARY_HARD_FLUSH_CHARS:
         return len(buffer)
     return None
 

@@ -47,8 +47,8 @@ from plap.responses.contracts import (
     WebSearchTool,
 )
 from plap.responses.debate import (
-    DEBATE_UNSAFE_TOOL_PLACEHOLDER,
     DEBATE_HELD_TOOL_PLACEHOLDER,
+    DEBATE_UNSAFE_TOOL_PLACEHOLDER,
     ArbitratorActionType,
     ReviewerActionType,
     _budgeted_transcript_message,
@@ -69,9 +69,10 @@ from plap.responses.ingest import (
 )
 from plap.responses.ingest.render import compact_transcript
 from plap.responses.models import StateMessage, StateToolCall
-from plap.responses.reasoning import IReasoningSummarizer
+from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.runtime import (
     STREAM_ABORTED_TOOL_PLACEHOLDER,
+    _take_summary_fragment,
     prepare_tools,
     resolve_tool_calls,
 )
@@ -4557,6 +4558,49 @@ async def test_stream_response_events_streams_requested_reasoning_summary() -> N
     assert summarizer.part_calls[0][5].reasoning_text == "thinking"
 
 
+def test_take_summary_fragment_waits_on_rule_lists_without_paragraph_breaks() -> None:
+    buffer = "\n".join(
+        (
+            "Key points from the rules:",
+            "- Output ONLY a thread title. Nothing else.",
+            "- Single line, 50 characters or fewer.",
+            "- No explanations.",
+            "- Use the same language as the user message.",
+            "- Never include tool names in the title.",
+            "- Focus on the main topic or question the user needs to retrieve.",
+            "- Keep exact technical terms, numbers, filenames, and HTTP codes.",
+            "- Never use tools.",
+            "- Always output something meaningful.",
+        )
+    )
+
+    fragment, remainder = _take_summary_fragment(buffer, force=False)
+
+    assert fragment is None
+    assert remainder == buffer
+
+
+def test_take_summary_fragment_prefers_paragraph_boundary_near_end() -> None:
+    paragraph_1 = "I am checking the request constraints and comparing them with the current plan. " * 4
+    paragraph_2 = "I am reviewing the main failure modes and narrowing the likely cause before changing code. " * 4
+    paragraph_3 = "z" * 320
+    buffer = f"{paragraph_1}\n\n{paragraph_2}\n\n{paragraph_3}"
+
+    fragment, remainder = _take_summary_fragment(buffer, force=False)
+
+    assert fragment == f"{paragraph_1}\n\n{paragraph_2}".strip()
+    assert remainder == paragraph_3
+
+
+def test_take_summary_fragment_hard_flushes_large_boundary_free_text() -> None:
+    buffer = "x" * 900
+
+    fragment, remainder = _take_summary_fragment(buffer, force=False)
+
+    assert fragment == buffer
+    assert remainder == ""
+
+
 async def test_stream_response_events_streams_main_reasoning_parts_from_provider_stream() -> None:
     summarizer = _FakeReasoningSummarizer(("checked part",))
     client = _StreamingStaticChatClient(
@@ -4611,13 +4655,82 @@ async def test_stream_response_events_streams_main_reasoning_parts_from_provider
     assert [event.type for event in events if "reasoning_summary_part" in event.type] == [
         "response.reasoning_summary_part.added",
         "response.reasoning_summary_part.done",
-        "response.reasoning_summary_part.added",
-        "response.reasoning_summary_part.done",
     ]
     completed = events[-1].response
     assert [item.type for item in completed.output] == ["reasoning", "message"]
-    assert [part.text for part in completed.output[0].summary] == ["checked part", "checked part"]
-    assert len(summarizer.part_calls) == 2
+    assert [part.text for part in completed.output[0].summary] == ["checked part"]
+    assert len(summarizer.part_calls) == 1
+
+
+async def test_stream_response_events_coalesces_rule_heavy_reasoning_into_few_summary_parts() -> None:
+    summarizer = _FakeReasoningSummarizer(("checked fragment",))
+    reasoning_text = "\n".join(
+        (
+            "First, the user is asking me to generate a title for this conversation. "
+            "I must follow all rules in <rules> and use the <examples> for guidance.",
+            "Key points from the rules:",
+            "- Output ONLY a thread title. Nothing else.",
+            "- Single line, 50 characters or fewer.",
+            "- No explanations.",
+            "- Use the same language as the user message.",
+            "- Never include tool names in the title.",
+            "- Focus on the main topic or question the user needs to retrieve.",
+            "- Keep exact technical terms, numbers, filenames, and HTTP codes.",
+            "- Never use tools.",
+            "- DO NOT SAY YOU CANNOT GENERATE A TITLE OR COMPLAIN ABOUT THE INPUT.",
+            "Now, analyzing the user message:",
+            "- The user describes an issue when clicking on a SELECT query in the Review Queue page.",
+            "- It goes to a URL that shows 'Could not load query' and 'Query not found'.",
+            "- The user asks to figure out why and fix it.",
+            "Main topic: query loading from a URL fails with a query not found error, and I need a concise title that captures that issue.",
+            "Possible titles: query not found error in Review Queue. Fix query loading issue from URL. Debugging query not found error.",
+            "I need to choose one concise, natural title and output only the title.",
+        )
+    )
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                reasoning_delta=reasoning_text,
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.STOP,
+                usage=ChatUsage(input_tokens=12, output_tokens=24, total_tokens=36, reasoning_tokens=18),
+            ),
+        )
+    )
+
+    _ = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                input="hello",
+                model="plap/test",
+                reasoning=ReasoningConfig(summary="concise"),
+                stream=True,
+            ),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver(),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=client,
+            reasoning_summarizer=summarizer,
+        )
+    ]
+
+    assert len(summarizer.part_calls) <= 3
+    first_source = summarizer.part_calls[0][5]
+    assert isinstance(first_source, ReasoningSummaryPartSource)
+    assert "First, the user is asking me to generate a title for this conversation." in first_source.reasoning_text
+    assert "DO NOT SAY YOU CANNOT GENERATE A TITLE OR COMPLAIN ABOUT THE INPUT." in first_source.reasoning_text
 
 
 async def test_stream_response_events_stream_draft_stubs_tool_outputs_until_finalized() -> None:
