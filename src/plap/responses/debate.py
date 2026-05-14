@@ -156,8 +156,7 @@ async def _retry_debate_step(actor: str, operation) -> object:
 DEBATE_TOOL_AVAILABILITY_PROMPT = """Use available tools when they help.
 You only have access here to a restricted callable subset of tools. You may also
 receive a user message titled `Tool definitions for tools used by the proposed
-next step`. If present, it contains tool definitions for tools that are
-available to the normal main step for this request and that are already used in
+next step`. If present, it contains tool definitions for tools that are already used in
 the proposed next step. Use it to understand what those proposed tool calls
 mean and whether they are appropriate. The fact that one of those tools is not
 callable in this debate step does not mean the normal main step lacks it. Do
@@ -218,6 +217,18 @@ Decision format:
 Consistency rules:
 - If you write that the current proposed next step is wrong, unsupported, risky, or missing something, you must not use ACCEPT.
 - Before finishing, check that your final decision line agrees with the rest of your output.
+
+Verification discipline:
+- Compare the current proposed next step, and on later rounds the latest
+  response note, against the actual transcript, tool outputs, and candidate
+  contents.
+- Do not credit claimed checks, fixes, reads, runs, or verifications unless they are supported there.
+- If something is claimed as handled, confirmed, safe, or complete but the
+  evidence is missing, contradictory, or materially incomplete, treat that as
+  a concrete defect.
+- If confident wording is covering a real uncertainty, unsupported
+  assumption, or overlooked edge case, treat that as unsupported rather than
+  acceptable.
 
 {DEBATE_TOOL_AVAILABILITY_PROMPT}
 
