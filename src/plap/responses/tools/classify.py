@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 import anyio
@@ -9,6 +10,7 @@ import structlog
 
 from plap.llms.chat import (
     ChatCompletionRequest,
+    ChatCompletionResult,
     ChatMessage,
     ChatResponseFormat,
     IChatCompletionClient,
@@ -109,6 +111,16 @@ TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
 TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 
 
+def _classifier_result_context(result: ChatCompletionResult) -> dict[str, object]:
+    return {
+        "finish_reason": result.finish_reason,
+        "model": result.model,
+        "service_tier": result.service_tier,
+        "system_fingerprint": result.system_fingerprint,
+        "usage": asdict(result.usage) if result.usage is not None else None,
+    }
+
+
 class LLMToolClassifier(IToolClassifier):
     def __init__(
         self,
@@ -157,25 +169,31 @@ class LLMToolClassifier(IToolClassifier):
         return classifications
 
     async def _classify_one(self, signature: ToolSignature) -> ToolClassification:
+        request = ChatCompletionRequest(
+            model=self.classifier_model,
+            messages=[
+                ChatMessage(role="system", content=self._prompt),
+                ChatMessage(
+                    role="user",
+                    content=msgspec.json.encode(
+                        {"signature": signature.signature},
+                        order="deterministic",
+                    ).decode(),
+                ),
+            ],
+            response_format=TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            max_completion_tokens=TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
+            temperature=0,
+        )
+        log_payload(
+            logger,
+            "tool.classifier.request.payload",
+            request=asdict(request),
+            signature=signature.signature,
+        )
+        result: ChatCompletionResult | None = None
         try:
-            result = await self._client.complete(
-                ChatCompletionRequest(
-                    model=self.classifier_model,
-                    messages=[
-                        ChatMessage(role="system", content=self._prompt),
-                        ChatMessage(
-                            role="user",
-                            content=msgspec.json.encode(
-                                {"signature": signature.signature},
-                                order="deterministic",
-                            ).decode(),
-                        ),
-                    ],
-                    response_format=TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
-                    max_completion_tokens=TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
-                    temperature=0,
-                )
-            )
+            result = await self._client.complete(request)
             raw = _parse_raw_output(result.message.content)
             classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
@@ -191,7 +209,10 @@ class LLMToolClassifier(IToolClassifier):
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
                 classifier_cache_model=self.classifier_cache_model,
+                error_message=str(exc),
                 error_type=type(exc).__name__,
+                has_result=result is not None,
+                **(_classifier_result_context(result) if result is not None else {}),
                 signature_hash=signature.signature_hash.hex(),
             )
             log_payload(
@@ -199,6 +220,14 @@ class LLMToolClassifier(IToolClassifier):
                 "tool.classifier.failed.payload",
                 signature=signature.signature,
             )
+            if result is not None:
+                log_payload(
+                    logger,
+                    "tool.classifier.failed.result.payload",
+                    request=asdict(request),
+                    result=asdict(result),
+                    signature=signature.signature,
+                )
             return _unknown_classification(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
@@ -222,6 +251,7 @@ class LLMToolClassifier(IToolClassifier):
                 logger,
                 "tool.classifier.fresh.payload",
                 raw_output=raw,
+                result=asdict(result),
                 signature=signature.signature,
             )
             return classification
@@ -283,28 +313,35 @@ class LLMToolCallClassifier(IToolCallClassifier):
         self,
         call: ToolCallSignature,
     ) -> ToolCallClassification:
+        request = ChatCompletionRequest(
+            model=self.classifier_model,
+            messages=[
+                ChatMessage(role="system", content=self._prompt),
+                ChatMessage(
+                    role="user",
+                    content=msgspec.json.encode(
+                        {
+                            "signature": call.signature.signature,
+                            "arguments": call.arguments,
+                        },
+                        order="deterministic",
+                    ).decode(),
+                ),
+            ],
+            response_format=TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            max_completion_tokens=TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
+            temperature=0,
+        )
+        log_payload(
+            logger,
+            "tool.call_classifier.request.payload",
+            arguments=call.arguments,
+            request=asdict(request),
+            signature=call.signature.signature,
+        )
+        result: ChatCompletionResult | None = None
         try:
-            result = await self._client.complete(
-                ChatCompletionRequest(
-                    model=self.classifier_model,
-                    messages=[
-                        ChatMessage(role="system", content=self._prompt),
-                        ChatMessage(
-                            role="user",
-                            content=msgspec.json.encode(
-                                {
-                                    "signature": call.signature.signature,
-                                    "arguments": call.arguments,
-                                },
-                                order="deterministic",
-                            ).decode(),
-                        ),
-                    ],
-                    response_format=TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
-                    max_completion_tokens=TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
-                    temperature=0,
-                )
-            )
+            result = await self._client.complete(request)
             raw = _parse_raw_output(result.message.content)
             classification = _tool_call_classification_from_raw(
                 signature_hash=call.signature_hash,
@@ -322,7 +359,10 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
                 classifier_cache_model=self.classifier_cache_model,
+                error_message=str(exc),
                 error_type=type(exc).__name__,
+                has_result=result is not None,
+                **(_classifier_result_context(result) if result is not None else {}),
                 signature_hash=call.signature_hash.hex(),
             )
             log_payload(
@@ -331,6 +371,15 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 arguments=call.arguments,
                 signature=call.signature.signature,
             )
+            if result is not None:
+                log_payload(
+                    logger,
+                    "tool.call_classifier.failed.result.payload",
+                    arguments=call.arguments,
+                    request=asdict(request),
+                    result=asdict(result),
+                    signature=call.signature.signature,
+                )
             return _unknown_tool_call_classification(
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
@@ -357,6 +406,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 "tool.call_classifier.fresh.payload",
                 arguments=call.arguments,
                 raw_output=raw,
+                result=asdict(result),
                 signature=call.signature.signature,
             )
             return classification
