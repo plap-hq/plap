@@ -195,36 +195,37 @@ class _QueueBase:
         self._tool_outputs_started = False
         self._unreplayed_reasoning_tool_call_ids: set[str] = set()
         self._reasoning_tool_call_ids_seen: set[str] = set()
+        self._deferred_reasoning_tool_outputs: list[tuple[StateMessage, bool]] = []
+        self._deferred_reasoning_tool_output_ids: set[str] = set()
 
     def add_reasoning(self, payload: ReasoningPayload) -> None:
-        if self._pending_reasoning_patch is not None:
-            raise _reasoning_replay_error(
-                reason="reasoning_content_hash_target_missing",
-                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
-            )
-        if self._pending_tool_call_ids:
-            raise _tool_replay_error(
-                reason="pending_tool_outputs_block_message",
-                private_message="same-side reasoning cannot appear before pending tool outputs",
-            )
-        saw_patch = False
-        for message in payload.messages:
-            if isinstance(message, StateMessage):
-                if saw_patch:
-                    raise _reasoning_replay_error(
-                        reason="reasoning_message_invalid",
-                        private_message="reasoning patch cannot be followed by additional messages",
-                    )
-                appended = self._append_message(message, temp=payload.temp)
-                self._track_reasoning_message(appended)
+        self._ensure_reasoning_can_start()
+        patch_seen = False
+        first_message_is_assistant = bool(payload.messages) and isinstance(payload.messages[0], StateMessage) and payload.messages[0].is_assistant()
+        for index, item in enumerate(payload.messages):
+            if isinstance(item, ReasoningMessagePatch):
+                if patch_seen:
+                    raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="multiple reasoning patches are not allowed")
+                self._register_reasoning_patch(item)
+                patch_seen = True
                 continue
-            if not isinstance(message, ReasoningMessagePatch):
+            if not isinstance(item, StateMessage):
                 raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="reasoning message is invalid")
-            if saw_patch:
-                raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="multiple reasoning patches are not allowed")
-            self._pending_reasoning_patch = message
-            self._clear_current_assistant_entry()
-            saw_patch = True
+            if patch_seen and not item.is_tool():
+                raise _reasoning_replay_error(
+                    reason="reasoning_message_invalid",
+                    private_message="reasoning patch can only be followed by hidden tool rows",
+                )
+            if self._is_deferred_reasoning_tool_output(
+                item,
+                patch_seen=patch_seen,
+                first_message_is_assistant=first_message_is_assistant,
+                index=index,
+            ):
+                self._defer_reasoning_tool_output(item, temp=payload.temp)
+                continue
+            self._append_reasoning_message(item, temp=payload.temp)
+        self._settle_deferred_reasoning_tool_outputs()
 
     def associate_function_call(
         self,
@@ -240,6 +241,7 @@ class _QueueBase:
                 )
             self._mark_reasoning_tool_call_replayed(call_id.upstream_tool_call_id)
             self._mark_pending_tool_call(call_id.upstream_tool_call_id)
+            self._settle_deferred_reasoning_tool_outputs()
             return
         if call_id.tool_call_index != len(target.tool_calls):
             raise _tool_replay_error(
@@ -247,6 +249,7 @@ class _QueueBase:
             )
         target.append_tool_call(_chat_tool_call(item, call_id))
         self._mark_pending_tool_call(call_id.upstream_tool_call_id)
+        self._settle_deferred_reasoning_tool_outputs()
 
     def associate_function_call_output(
         self,
@@ -255,6 +258,7 @@ class _QueueBase:
         *,
         temp: bool = False,
     ) -> None:
+        self._settle_deferred_reasoning_tool_outputs()
         self._require_tool_call_output(call_id)
         self._consume_pending_tool_call(call_id.upstream_tool_call_id)
         self._append_tool_output(
@@ -272,6 +276,40 @@ class _QueueBase:
     def _append_tool_output(self, message: StateMessage, *, temp: bool = False) -> None:
         _ = temp
         self._append_message(message)
+
+    def _ensure_reasoning_can_start(self) -> None:
+        if self._pending_reasoning_patch is not None:
+            raise _reasoning_replay_error(
+                reason="reasoning_content_hash_target_missing",
+                private_message="reasoning patch target assistant must appear immediately after its reasoning item",
+            )
+        if self._pending_tool_call_ids:
+            raise _tool_replay_error(
+                reason="pending_tool_outputs_block_message",
+                private_message="same-side reasoning cannot appear before pending tool outputs",
+            )
+
+    def _register_reasoning_patch(self, patch: ReasoningMessagePatch) -> None:
+        self._pending_reasoning_patch = patch
+        self._clear_current_assistant_entry()
+
+    def _is_deferred_reasoning_tool_output(
+        self,
+        message: StateMessage,
+        *,
+        patch_seen: bool,
+        first_message_is_assistant: bool,
+        index: int,
+    ) -> bool:
+        if not message.is_tool():
+            return False
+        if patch_seen:
+            return True
+        return first_message_is_assistant and index > 0
+
+    def _append_reasoning_message(self, message: StateMessage, *, temp: bool) -> None:
+        appended = self._append_message(message, temp=temp)
+        self._track_reasoning_message(appended)
 
     def _apply_reasoning_patch(self, patch: ReasoningMessagePatch, target: StateMessage) -> None:
         patch.apply_to(target)
@@ -306,6 +344,7 @@ class _QueueBase:
         message = entry.message
         if message.is_assistant():
             self._set_current_assistant_entry(entry)
+            self._settle_deferred_reasoning_tool_outputs()
             return
         if message.is_tool():
             if self._current_assistant_entry is not None:
@@ -320,6 +359,55 @@ class _QueueBase:
     def _clear_current_assistant_entry(self) -> None:
         self._current_assistant_entry = None
         self._tool_outputs_started = False
+
+    def _defer_reasoning_tool_output(self, message: StateMessage, *, temp: bool) -> None:
+        if not message.is_tool() or not message.tool_call_id:
+            raise _reasoning_replay_error(
+                reason="reasoning_message_invalid",
+                private_message="hidden reasoning tool output must be a tool message with tool_call_id",
+            )
+        if message.tool_call_id in self._deferred_reasoning_tool_output_ids:
+            raise _reasoning_replay_error(
+                reason="duplicate_reasoning_tool_output",
+                private_message="duplicate hidden reasoning tool output",
+            )
+        self._deferred_reasoning_tool_outputs.append((message, temp))
+        self._deferred_reasoning_tool_output_ids.add(message.tool_call_id)
+
+    def _settle_deferred_reasoning_tool_outputs(self) -> None:
+        if not self._deferred_reasoning_tool_outputs:
+            return
+        if self._pending_reasoning_patch is not None:
+            return
+        if self._current_assistant_message() is None:
+            return
+        if self._unreplayed_reasoning_tool_call_ids - self._deferred_reasoning_tool_output_ids:
+            return
+        deferred_outputs = list(self._deferred_reasoning_tool_outputs)
+        self._deferred_reasoning_tool_outputs.clear()
+        self._deferred_reasoning_tool_output_ids.clear()
+        for message, temp in deferred_outputs:
+            self._append_tool_output(message, temp=temp)
+            self._satisfy_reasoning_tool_call_from_hidden_output(message)
+
+    def _ensure_deferred_reasoning_tool_outputs_settled(
+        self,
+        *,
+        private_message: str,
+        next_message: StateMessage,
+    ) -> None:
+        if not self._deferred_reasoning_tool_outputs:
+            return
+        if self._pending_reasoning_patch is not None and next_message.is_assistant():
+            return
+        if next_message.is_tool():
+            return
+        self._settle_deferred_reasoning_tool_outputs()
+        if self._deferred_reasoning_tool_outputs:
+            raise _reasoning_replay_error(
+                reason="reasoning_message_invalid",
+                private_message=private_message,
+            )
 
     def _current_assistant_message(self) -> StateMessage | None:
         if self._current_assistant_entry is None:
@@ -438,9 +526,15 @@ class _QueueBase:
         self._satisfy_reasoning_tool_call_from_hidden_output(message)
 
     def assert_no_pending_tool_calls(self) -> None:
+        self._settle_deferred_reasoning_tool_outputs()
         if self._pending_reasoning_patch is not None:
             raise _reasoning_replay_error(
                 reason="reasoning_content_hash_target_missing", private_message="reasoning content_hash target is missing"
+            )
+        if self._deferred_reasoning_tool_outputs:
+            raise _reasoning_replay_error(
+                reason="reasoning_message_invalid",
+                private_message="hidden reasoning tool outputs could not be attached to their assistant turn",
             )
         if self._unreplayed_reasoning_tool_call_ids:
             raise _reasoning_replay_error(
@@ -529,6 +623,10 @@ class _MainQueue(_QueueBase):
     ) -> ChatMessageSpan | SideMessage:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
+        self._ensure_deferred_reasoning_tool_outputs_settled(
+            private_message="hidden reasoning tool outputs cannot be followed by additional messages before they attach",
+            next_message=message,
+        )
         self._assert_message_matches_pending_reasoning_patch(message)
         if temp:
             entry = SideMessage(message=message)
@@ -560,6 +658,10 @@ class _PrivateSideQueue(_QueueBase):
 
     def _append_message(self, message: StateMessage, *, temp: bool = False) -> StateMessage:
         self._ensure_no_pending_tool_calls()
+        self._ensure_deferred_reasoning_tool_outputs_settled(
+            private_message="hidden reasoning tool outputs cannot be followed by additional messages before they attach",
+            next_message=message,
+        )
         self._assert_message_matches_pending_reasoning_patch(message)
         row = SideMessage(message=message)
         self._remember_entry(row)
@@ -567,6 +669,10 @@ class _PrivateSideQueue(_QueueBase):
 
     def _append_tool_output(self, message: StateMessage, *, temp: bool = False) -> None:
         _ = temp
+        self._ensure_deferred_reasoning_tool_outputs_settled(
+            private_message="hidden reasoning tool outputs cannot be followed by additional messages before they attach",
+            next_message=message,
+        )
         self._assert_message_matches_pending_reasoning_patch(message)
         row = SideMessage(message=message)
         self._remember_entry(row)

@@ -719,6 +719,91 @@ async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
     ]
 
 
+async def test_ingestion_accepts_reasoning_patch_with_hidden_tool_output_before_public_output() -> None:
+    target = {"role": "assistant", "content": "patched target"}
+    call_id = _call_id(
+        side="main",
+        content_hash_value=_message_hash(target),
+        upstream_tool_call_id="up_visible_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    False,
+                    [
+                        {
+                            "content_hash": _message_hash(target),
+                            "tool_calls": [_tool_call("up_visible_0"), _tool_call("up_hidden_1")],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "up_hidden_1",
+                            "content": "hidden output",
+                        },
+                    ],
+                ),
+                _message("assistant", "patched target"),
+                _function_call(call_id),
+                _function_output(call_id, "visible output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.main_context] == [
+        {
+            "role": "assistant",
+            "content": "patched target",
+            "tool_calls": [_tool_call("up_visible_0"), _tool_call("up_hidden_1")],
+        },
+        {"role": "tool", "tool_call_id": "up_hidden_1", "content": "hidden output"},
+        {"role": "tool", "tool_call_id": "up_visible_0", "content": "visible output"},
+    ]
+
+
+async def test_ingestion_allows_followup_message_after_attachable_hidden_tool_output() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "reviewer",
+                    False,
+                    [
+                        {
+                            "role": "assistant",
+                            "content": "candidate",
+                            "tool_calls": [_tool_call("up_reasoning_0")],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "up_reasoning_0",
+                            "content": "hidden output",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "after tool",
+                        },
+                    ],
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.reviewer] == [
+        {
+            "role": "assistant",
+            "content": "candidate",
+            "tool_calls": [_tool_call("up_reasoning_0")],
+        },
+        {"role": "tool", "tool_call_id": "up_reasoning_0", "content": "hidden output"},
+        {"role": "assistant", "content": "after tool"},
+    ]
+
+
 async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> None:
     assistant = {
         "role": "assistant",
@@ -821,6 +906,39 @@ async def test_ingestion_rejects_reasoning_patch_followed_by_additional_messages
                             },
                         ],
                     ),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
+
+
+async def test_ingestion_rejects_followup_message_before_hidden_tool_outputs_can_attach() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item(
+                        "reviewer",
+                        False,
+                        [
+                            {
+                                "role": "assistant",
+                                "content": "candidate",
+                                "tool_calls": [_tool_call("up_reasoning_0"), _tool_call("up_reasoning_1")],
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "up_reasoning_0",
+                                "content": "hidden output",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "after tool",
+                            },
+                        ],
+                    )
                 ]
             ),
             keyring=_keyring(),
