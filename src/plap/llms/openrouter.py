@@ -8,6 +8,7 @@ from plap.llms.openai import (
     OPENAI_CHAT_FIELDS,
     ChatProviderProfile,
     OpenAICompatibleChatCompletionClient,
+    OPENAI_REASONING_TEXT_FIELDS,
     build_chat_params,
 )
 
@@ -25,6 +26,7 @@ OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(
 )
 
 OPENROUTER_CHAT_FIELDS = (*OPENAI_CHAT_FIELDS, "top_k")
+OPENROUTER_REASONING_TEXT_FIELDS = (*OPENAI_REASONING_TEXT_FIELDS, "reasoning")
 
 OPENROUTER_CHAT_PROVIDER_PROFILE = ChatProviderProfile(
     developer_role="system",
@@ -83,6 +85,8 @@ def to_openrouter_chat_params(
 
 
 class OpenRouterChatCompletionClient(OpenAICompatibleChatCompletionClient):
+    _reasoning_text_fields = OPENROUTER_REASONING_TEXT_FIELDS
+
     def __init__(
         self,
         *,

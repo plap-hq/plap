@@ -1134,6 +1134,109 @@ async def test_openrouter_client_uses_openai_create_with_provider_order_extra_bo
     assert result.message.content == "ok"
 
 
+async def test_openrouter_client_aliases_reasoning_to_reasoning_content() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "unknown",
+            "index": 0,
+            "text": "because",
+        }
+    ]
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="deepseek/deepseek-v4-flash",
+            content="ok",
+            reasoning="because",
+            reasoning_details=reasoning_details,
+        )
+    )
+    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
+
+    assert result.message.reasoning_content == "because"
+    assert result.message.reasoning_details == reasoning_details
+
+
+async def test_openrouter_client_prefers_reasoning_content_over_reasoning_alias() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="deepseek/deepseek-v4-flash",
+            content="ok",
+            reasoning_content="primary",
+            reasoning="secondary",
+        )
+    )
+    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
+
+    assert result.message.reasoning_content == "primary"
+
+
+async def test_openrouter_client_aliases_reasoning_stream_deltas() -> None:
+    reasoning_details = [
+        {
+            "type": "reasoning.text",
+            "format": "unknown",
+            "index": 0,
+            "text": "because",
+        }
+    ]
+    fake_completion = _FakeOpenAICompletion(
+        _async_iter(
+            [
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="deepseek/deepseek-v4-flash",
+                    created=10,
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content="ok",
+                                refusal=None,
+                                reasoning="because",
+                                reasoning_details=reasoning_details,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="deepseek/deepseek-v4-flash",
+                    created=10,
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason="stop",
+                            delta=SimpleNamespace(
+                                content=None,
+                                refusal=None,
+                                reasoning=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                    usage=None,
+                ),
+            ]
+        )
+    )
+    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [delta async for delta in client.stream(_request_for_model("deepseek/deepseek-v4-flash"))]
+
+    assert deltas[0].content_delta == "ok"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[0].reasoning_details_delta == reasoning_details
+    assert deltas[1].finish_reason == "stop"
+
+
 async def test_openai_client_normalizes_completion_result() -> None:
     reasoning_details = [
         {
@@ -2069,6 +2172,8 @@ def _completion_response(
     model: str = "model-a",
     content: str = "ok",
     reasoning_content: str | None = None,
+    reasoning: str | None = None,
+    reasoning_details: object | None = None,
     usage: object | None = None,
 ) -> object:
     return SimpleNamespace(
@@ -2082,6 +2187,8 @@ def _completion_response(
                     content=content,
                     refusal=None,
                     reasoning_content=reasoning_content,
+                    reasoning=reasoning,
+                    reasoning_details=reasoning_details,
                     tool_calls=None,
                 ),
             )

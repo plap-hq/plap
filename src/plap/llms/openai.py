@@ -68,6 +68,8 @@ OPENAI_CHAT_FIELDS = (
     "prediction",
 )
 
+OPENAI_REASONING_TEXT_FIELDS = ("reasoning_content",)
+
 
 @dataclass(frozen=True)
 class ChatProviderProfile:
@@ -142,6 +144,8 @@ def _raise_incomplete_stream_error() -> None:
 
 
 class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
+    _reasoning_text_fields = OPENAI_REASONING_TEXT_FIELDS
+
     def __init__(
         self,
         *,
@@ -172,7 +176,7 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
             response = await self._client.chat.completions.create(**self._chat_params(request, stream=False))
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
-        return completion_result_from_provider(response)
+        return completion_result_from_provider(response, reasoning_text_fields=self._reasoning_text_fields)
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         stream: Any | None = None
@@ -180,7 +184,7 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
         try:
             stream = await self._client.chat.completions.create(**self._chat_params(request, stream=True))
             async for chunk in stream:
-                delta = from_chat_completion_chunk(chunk)
+                delta = from_chat_completion_chunk(chunk, reasoning_text_fields=self._reasoning_text_fields)
                 state.apply(delta)
                 yield delta
             inferred_delta = state.inferred_terminal_delta()
@@ -350,7 +354,23 @@ def _prediction_to_param(prediction: ChatPrediction | None) -> dict[str, Any] | 
     return {"type": prediction.type, "content": prediction.content}
 
 
-def completion_result_from_provider(response: Any) -> ChatCompletionResult:
+def _reasoning_text_from_provider(
+    value: Any,
+    *,
+    reasoning_text_fields: tuple[str, ...],
+) -> Any:
+    for field in reasoning_text_fields:
+        reasoning = _get(value, field)
+        if reasoning is not None:
+            return reasoning
+    return None
+
+
+def completion_result_from_provider(
+    response: Any,
+    *,
+    reasoning_text_fields: tuple[str, ...] = OPENAI_REASONING_TEXT_FIELDS,
+) -> ChatCompletionResult:
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message")
     return ChatCompletionResult(
@@ -361,7 +381,7 @@ def completion_result_from_provider(response: Any) -> ChatCompletionResult:
             role="assistant",
             content=_get(message, "content"),
             refusal=_get(message, "refusal"),
-            reasoning_content=_get(message, "reasoning_content"),
+            reasoning_content=_reasoning_text_from_provider(message, reasoning_text_fields=reasoning_text_fields),
             reasoning_details=_get(message, "reasoning_details"),
             tool_calls=_tool_calls_from_provider(_get(message, "tool_calls")),
         ),
@@ -372,7 +392,11 @@ def completion_result_from_provider(response: Any) -> ChatCompletionResult:
     )
 
 
-def from_chat_completion_chunk(chunk: Any) -> ChatCompletionDelta:
+def from_chat_completion_chunk(
+    chunk: Any,
+    *,
+    reasoning_text_fields: tuple[str, ...] = OPENAI_REASONING_TEXT_FIELDS,
+) -> ChatCompletionDelta:
     choice = _first(_get(chunk, "choices"))
     delta = _get(choice, "delta")
     tool_call_delta = _first(_get(delta, "tool_calls"))
@@ -384,7 +408,7 @@ def from_chat_completion_chunk(chunk: Any) -> ChatCompletionDelta:
         choice_index=_get(choice, "index") or 0,
         content_delta=_get(delta, "content"),
         refusal_delta=_get(delta, "refusal"),
-        reasoning_delta=_get(delta, "reasoning_content"),
+        reasoning_delta=_reasoning_text_from_provider(delta, reasoning_text_fields=reasoning_text_fields),
         reasoning_details_delta=_get(delta, "reasoning_details"),
         tool_call_delta=ChatToolCallDelta(
             index=_get(tool_call_delta, "index") or 0,
