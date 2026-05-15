@@ -80,6 +80,67 @@ class ChatProviderProfile:
             raise ValueError("developer_role must be developer or system")
 
 
+@dataclass(slots=True)
+class _OpenAIStreamState:
+    last_id: str | None = None
+    last_model: str | None = None
+    last_created_at: float | None = None
+    last_choice_index: int = 0
+    last_system_fingerprint: str | None = None
+    last_service_tier: str | None = None
+    saw_content: bool = False
+    saw_tool_calls: bool = False
+    saw_finish_reason: bool = False
+
+    def apply(self, delta: ChatCompletionDelta) -> None:
+        if delta.id is not None:
+            self.last_id = delta.id
+        if delta.model is not None:
+            self.last_model = delta.model
+        if delta.created_at is not None:
+            self.last_created_at = delta.created_at
+        self.last_choice_index = delta.choice_index
+        if delta.system_fingerprint is not None:
+            self.last_system_fingerprint = delta.system_fingerprint
+        if delta.service_tier is not None:
+            self.last_service_tier = delta.service_tier
+        if delta.content_delta is not None:
+            self.saw_content = True
+        if delta.tool_call_delta is not None:
+            self.saw_tool_calls = True
+        if delta.finish_reason is not None:
+            self.saw_finish_reason = True
+
+    def inferred_finish_reason(self) -> ChatFinishReason | None:
+        if self.saw_finish_reason:
+            return None
+        if self.saw_tool_calls:
+            return ChatFinishReason.TOOL_CALLS
+        if self.saw_content:
+            return ChatFinishReason.STOP
+        return None
+
+    def inferred_terminal_delta(self) -> ChatCompletionDelta | None:
+        finish_reason = self.inferred_finish_reason()
+        if finish_reason is None:
+            return None
+        return ChatCompletionDelta(
+            id=self.last_id,
+            model=self.last_model,
+            created_at=self.last_created_at,
+            choice_index=self.last_choice_index,
+            finish_reason=finish_reason,
+            system_fingerprint=self.last_system_fingerprint,
+            service_tier=self.last_service_tier,
+        )
+
+
+def _raise_incomplete_stream_error() -> None:
+    raise ChatCompletionProviderError(
+        "stream ended without finish_reason and without inferable content or tool calls"
+    )
+
+
 class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
     def __init__(
         self,
@@ -115,10 +176,18 @@ class OpenAICompatibleChatCompletionClient(IChatCompletionClient):
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         stream: Any | None = None
+        state = _OpenAIStreamState()
         try:
             stream = await self._client.chat.completions.create(**self._chat_params(request, stream=True))
             async for chunk in stream:
-                yield from_chat_completion_chunk(chunk)
+                delta = from_chat_completion_chunk(chunk)
+                state.apply(delta)
+                yield delta
+            inferred_delta = state.inferred_terminal_delta()
+            if inferred_delta is not None:
+                yield inferred_delta
+            elif not state.saw_finish_reason:
+                _raise_incomplete_stream_error()
         except Exception as exc:
             raise _normalize_openai_error(exc) from exc
         finally:
@@ -384,6 +453,8 @@ def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletio
 
 
 def _normalize_openai_error(exc: Exception) -> ChatCompletionProviderError:
+    if isinstance(exc, ChatCompletionProviderError):
+        return exc
     if isinstance(exc, AuthenticationError):
         return ChatCompletionAuthenticationError(str(exc))
     if isinstance(exc, RateLimitError):

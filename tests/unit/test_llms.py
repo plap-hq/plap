@@ -19,6 +19,7 @@ from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
     ChatPrediction,
@@ -1353,6 +1354,120 @@ async def test_openai_client_normalizes_stream_chunks() -> None:
     assert deltas[1].tool_call_delta.name == "lookup"
     assert deltas[1].usage is not None
     assert deltas[1].usage.total_tokens == 3
+
+
+async def test_openai_client_infers_stop_finish_reason_on_clean_eof_after_content() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _async_iter(
+            [
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created=10,
+                    system_fingerprint="fp_1",
+                    service_tier="default",
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content="hel",
+                                refusal=None,
+                                reasoning_content=None,
+                                reasoning_details=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                    usage=None,
+                )
+            ]
+        )
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [delta async for delta in client.stream(_request())]
+
+    assert deltas[0].content_delta == "hel"
+    assert deltas[1].finish_reason == ChatFinishReason.STOP
+    assert deltas[1].content_delta is None
+
+
+async def test_openai_client_infers_tool_calls_finish_reason_on_clean_eof_after_tool_call_delta() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _async_iter(
+            [
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created=10,
+                    system_fingerprint="fp_1",
+                    service_tier="default",
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content=None,
+                                refusal=None,
+                                reasoning_content=None,
+                                reasoning_details=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        index=0,
+                                        id="call_1",
+                                        function=SimpleNamespace(name="lookup", arguments='{"q":"x"}'),
+                                    )
+                                ],
+                            ),
+                        )
+                    ],
+                    usage=None,
+                )
+            ]
+        )
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [delta async for delta in client.stream(_request())]
+
+    assert deltas[0].tool_call_delta is not None
+    assert deltas[0].tool_call_delta.name == "lookup"
+    assert deltas[1].finish_reason == ChatFinishReason.TOOL_CALLS
+
+
+async def test_openai_client_rejects_clean_eof_without_finish_reason_when_only_reasoning_streamed() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _async_iter(
+            [
+                SimpleNamespace(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created=10,
+                    system_fingerprint="fp_1",
+                    service_tier="default",
+                    choices=[
+                        SimpleNamespace(
+                            index=0,
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content=None,
+                                refusal=None,
+                                reasoning_content="because",
+                                reasoning_details=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                    usage=None,
+                )
+            ]
+        )
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    with pytest.raises(ChatCompletionProviderError, match="stream ended without finish_reason"):
+        _ = [delta async for delta in client.stream(_request())]
 
 
 async def test_openai_client_closes_underlying_stream_when_consumer_stops_early() -> None:
