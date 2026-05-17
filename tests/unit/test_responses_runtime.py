@@ -1361,6 +1361,80 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert '"description":"initial mutation tool"' not in second_request_contents
 
 
+async def test_stream_response_events_reviewer_safe_client_tool_resume_hoists_interleaved_assistant_message_before_temp() -> None:
+    first_client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="upstream_read_1", name="read_file", arguments='{"path":"README.md"}')],
+            ),
+        ]
+    )
+    first_events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input="update the record",
+                include=["reasoning.encrypted_content"],
+                instructions="Instruction A.",
+                tools=[_tool("mutate_record", description="initial mutation tool"), _read_file_tool()],
+            ),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=first_client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    first_completed = _completed_response(first_events)
+    reviewer_call = first_completed.output[-1]
+
+    second_client = _StaticChatClient(_assistant_text("ACCEPT"))
+    second_events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    *_replay_output_items(first_completed),
+                    _message("assistant", "plugin reminder"),
+                    RequestFunctionCallOutputItem(
+                        call_id=reviewer_call.call_id,
+                        output="README tool output",
+                        type="function_call_output",
+                    ),
+                ],
+                instructions="Instruction B.",
+                tools=[_tool("mutate_record", description="updated mutation tool"), _read_file_tool()],
+            ),
+            settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=second_client,
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    second_completed = _completed_response(second_events)
+    assert [item.type for item in second_completed.output] == ["reasoning", "message", "function_call"]
+    assert second_completed.output[-1].name == "mutate_record"
+    transcript = json.loads(
+        (second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n")
+    )
+    assert any(message["role"] == "assistant" and message["content"] == "plugin reminder" for message in transcript)
+    assert second_client.requests[0].messages[-1].role == "tool"
+    assert second_client.requests[0].messages[-1].content == "README tool output"
+
+
 async def test_stream_response_events_main_debate_uses_effective_main_context() -> None:
     client = _StaticChatClient(
         [
@@ -1591,7 +1665,10 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
 
 
 async def test_stream_response_events_arbitrator_accept_executes_intercepted_contextual_server_call_and_resumes_main() -> None:
-    provider = _FakeMCPToolProvider(output="search result for cats", tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME, effect_class="contextual"))
+    provider = _FakeMCPToolProvider(
+        output="search result for cats",
+        tools=_mcp_tool_configs(MCP_SEARCH_TOOL_NAME, effect_class="contextual"),
+    )
     client = _StaticChatClient(
         [
             ChatMessage(
@@ -1634,7 +1711,10 @@ async def test_stream_response_events_arbitrator_accept_executes_intercepted_con
         message.role == "tool" and message.tool_call_id == "upstream_search_1" and message.content == "search result for cats"
         for message in client.requests[4].messages
     )
-    assert any(item.type == "function_call_output" and getattr(item, "output", None) == "search result for cats" for item in completed.output)
+    assert any(
+        item.type == "function_call_output" and getattr(item, "output", None) == "search result for cats"
+        for item in completed.output
+    )
     assert any(item.type == "message" and item.content[0].text == "final answer" for item in completed.output)
 
 

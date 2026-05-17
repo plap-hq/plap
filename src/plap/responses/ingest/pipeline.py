@@ -126,8 +126,10 @@ async def ingest_response_request(
 ) -> IngestedQueues:
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
-    decoded, in_temp_debate = _decode_sealed_items(remaining, keyring=keyring)
-    pruned = _prune_temp_debate_globally(decoded)
+    decoded = _decode_sealed_items(remaining, keyring=keyring)
+    reordered = _hoist_interleaved_messages_before_temp_debate(decoded)
+    pruned = _prune_temp_debate_globally(reordered)
+    in_temp_debate = any(item.temp_related for item in pruned)
     routed = _route_items_by_side(pruned)
     queues = _associate_side_queues(compaction, routed)
     return IngestedQueues(
@@ -201,11 +203,18 @@ class _QueueBase:
     def add_reasoning(self, payload: ReasoningPayload) -> None:
         self._ensure_reasoning_can_start()
         patch_seen = False
-        first_message_is_assistant = bool(payload.messages) and isinstance(payload.messages[0], StateMessage) and payload.messages[0].is_assistant()
+        first_message_is_assistant = (
+            bool(payload.messages)
+            and isinstance(payload.messages[0], StateMessage)
+            and payload.messages[0].is_assistant()
+        )
         for index, item in enumerate(payload.messages):
             if isinstance(item, ReasoningMessagePatch):
                 if patch_seen:
-                    raise _reasoning_replay_error(reason="reasoning_message_invalid", private_message="multiple reasoning patches are not allowed")
+                    raise _reasoning_replay_error(
+                        reason="reasoning_message_invalid",
+                        private_message="multiple reasoning patches are not allowed",
+                    )
                 self._register_reasoning_patch(item)
                 patch_seen = True
                 continue
@@ -711,14 +720,12 @@ def _last_compaction_index(input_items: list[object]) -> int | None:
     return last_index
 
 
-def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) -> tuple[list[_DecodedItem], bool]:
+def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) -> list[_DecodedItem]:
     decoded: list[_DecodedItem] = []
     in_temp_debate = False
     for item in input_items:
         if isinstance(item, RequestMessageItem):
             decoded.append(_DecodedItem(item=item, resets_temp_debate=in_temp_debate))
-            if in_temp_debate:
-                in_temp_debate = False
             continue
         if isinstance(item, RequestReasoningItem):
             payload = _open_reasoning_item(item, keyring=keyring)
@@ -744,7 +751,7 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
             )
             if resets_temp_debate:
                 in_temp_debate = False
-    return decoded, in_temp_debate
+    return decoded
 
 
 def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
@@ -753,6 +760,43 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
             reason="unsealed_reasoning_input_untrusted", private_message="unsealed reasoning input is not trusted"
         )
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)
+
+
+def _hoist_interleaved_messages_before_temp_debate(items: list[_DecodedItem]) -> list[_DecodedItem]:
+    reordered: list[_DecodedItem] = []
+    index = 0
+
+    while index < len(items):
+        item = items[index]
+        if not item.temp_related:
+            reordered.append(item)
+            index += 1
+            continue
+
+        hoisted_messages: list[_DecodedItem] = []
+        temp_items: list[_DecodedItem] = []
+        tail_messages: list[_DecodedItem] = []
+
+        while index < len(items):
+            item = items[index]
+            if item.temp_related:
+                if tail_messages:
+                    hoisted_messages.extend(tail_messages)
+                    tail_messages.clear()
+                temp_items.append(item)
+                index += 1
+                continue
+            if isinstance(item.item, RequestMessageItem) and item.resets_temp_debate:
+                tail_messages.append(item)
+                index += 1
+                continue
+            break
+
+        reordered.extend(hoisted_messages)
+        reordered.extend(temp_items)
+        reordered.extend(tail_messages)
+
+    return reordered
 
 
 def _prune_temp_debate_globally(items: list[_DecodedItem]) -> list[_DecodedItem]:

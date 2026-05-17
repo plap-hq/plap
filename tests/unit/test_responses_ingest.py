@@ -462,6 +462,84 @@ async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
     assert result.continuation_side == "reviewer"
 
 
+async def test_ingestion_hoists_interleaved_assistant_message_before_temp_reviewer_continuation() -> None:
+    assistant = {"role": "assistant", "content": "need file"}
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_temp_reviewer_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item("reviewer", True, [assistant]),
+                _message("assistant", "fabricated reminder"),
+                _function_call(call_id),
+                _function_output(call_id, "review file"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.content for row in result.main_context] == ["fabricated reminder"]
+    assert [row.message.to_primitive() for row in result.reviewer] == [
+        {
+            "role": "assistant",
+            "content": "need file",
+            "tool_calls": [
+                {
+                    "id": "up_temp_reviewer_0",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
+    ]
+    assert result.continuation_side == "reviewer"
+    assert result.in_temp_debate is True
+
+
+async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_continuation() -> None:
+    assistant = {"role": "assistant", "content": "need file"}
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_temp_reviewer_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item("reviewer", True, [assistant]),
+                _message("user", "steering request"),
+                _function_call(call_id),
+                _function_output(call_id, "review file"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.content for row in result.main_context] == ["steering request"]
+    assert [row.message.to_primitive() for row in result.reviewer] == [
+        {
+            "role": "assistant",
+            "content": "need file",
+            "tool_calls": [
+                {
+                    "id": "up_temp_reviewer_0",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
+    ]
+    assert result.continuation_side == "reviewer"
+    assert result.in_temp_debate is True
+
+
 async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> None:
     assistant = {"role": "assistant", "content": "public assistant"}
     call_id = _call_id(
@@ -1034,7 +1112,12 @@ async def test_ingestion_rejects_second_pending_reasoning_patch() -> None:
             keyring=_keyring(),
         )
 
-    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_content_hash_target_missing")
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_reasoning_replay",
+        param="input",
+        private_reason="reasoning_content_hash_target_missing",
+    )
 
 
 async def test_ingestion_rejects_function_call_after_output_for_same_assistant_turn() -> None:
