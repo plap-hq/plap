@@ -540,6 +540,69 @@ async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_co
     assert result.in_temp_debate is True
 
 
+async def test_ingestion_hoists_interleaved_fabricated_pair_before_temp_reviewer_continuation() -> None:
+    assistant = {"role": "assistant", "content": "need file"}
+    call_id = _call_id(
+        side="reviewer",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_temp_reviewer_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _message("assistant", "stable assistant"),
+                _reasoning_item("reviewer", True, [assistant]),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="client_call_0",
+                    name="read_file",
+                    type="function_call",
+                ),
+                _function_output("client_call_0", "client output"),
+                _function_call(call_id),
+                _function_output(call_id, "review file"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.main_context] == [
+        {
+            "role": "assistant",
+            "content": "stable assistant",
+            "tool_calls": [
+                {
+                    "id": "client_call_0",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "client_call_0",
+            "content": "client output",
+        },
+    ]
+    assert [row.message.to_primitive() for row in result.reviewer] == [
+        {
+            "role": "assistant",
+            "content": "need file",
+            "tool_calls": [
+                {
+                    "id": "up_temp_reviewer_0",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
+    ]
+    assert result.continuation_side == "reviewer"
+    assert result.in_temp_debate is True
+
+
 async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> None:
     assistant = {"role": "assistant", "content": "public assistant"}
     call_id = _call_id(
@@ -618,6 +681,48 @@ async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
         ),
     ]
     assert result.main_context == _main_transcript(result)
+    assert result.reviewer == ()
+    assert result.arbitrator == ()
+    assert result.continuation_side == "main"
+
+
+async def test_ingestion_unopenable_call_prefix_falls_back_to_fabricated_pair() -> None:
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _message("assistant", "client fabricated assistant"),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="call_not_openable",
+                    name="read_file",
+                    type="function_call",
+                ),
+                _function_output("call_not_openable", "client output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
+        (
+            0,
+            0,
+            {
+                "role": "assistant",
+                "content": "client fabricated assistant",
+                "tool_calls": [{"id": "call_not_openable", "name": "read_file", "arguments": '{"path":"README.md"}'}],
+            },
+        ),
+        (
+            0,
+            0,
+            {
+                "role": "tool",
+                "tool_call_id": "call_not_openable",
+                "content": "client output",
+            },
+        ),
+    ]
     assert result.reviewer == ()
     assert result.arbitrator == ()
     assert result.continuation_side == "main"

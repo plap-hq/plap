@@ -13,12 +13,7 @@ from plap.responses.contracts import (
     RequestReasoningItem,
     ResponseCreateRequest,
 )
-from plap.responses.ingest.sealing import (
-    CALL_ID_PREFIX,
-    open_call_id,
-    open_compaction_payload,
-    open_reasoning_payload,
-)
+from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
 from plap.responses.models import (
     ChatMessageSpan,
     CompactionPayload,
@@ -127,7 +122,7 @@ async def ingest_response_request(
     input_items = _normalize_input_items(request)
     compaction, remaining = _open_compaction_root(input_items, keyring=keyring)
     decoded = _decode_sealed_items(remaining, keyring=keyring)
-    reordered = _hoist_interleaved_messages_before_temp_debate(decoded)
+    reordered = _hoist_interleaved_reset_candidates_before_temp_debate(decoded)
     pruned = _prune_temp_debate_globally(reordered)
     in_temp_debate = any(item.temp_related for item in pruned)
     routed = _route_items_by_side(pruned)
@@ -150,6 +145,9 @@ class _DecodedItem:
     reasoning: ReasoningPayload | None = None
     call_id: SealedCallID | None = None
     temp_related: bool = False
+    # Historical name: this marks non-temp items encountered while temp debate
+    # was active. Reorder may hoist them before the temp block, so this does
+    # not imply an immediate reset during decode.
     resets_temp_debate: bool = False
 
 
@@ -749,8 +747,6 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
                     resets_temp_debate=resets_temp_debate,
                 )
             )
-            if resets_temp_debate:
-                in_temp_debate = False
     return decoded
 
 
@@ -762,7 +758,7 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)
 
 
-def _hoist_interleaved_messages_before_temp_debate(items: list[_DecodedItem]) -> list[_DecodedItem]:
+def _hoist_interleaved_reset_candidates_before_temp_debate(items: list[_DecodedItem]) -> list[_DecodedItem]:
     reordered: list[_DecodedItem] = []
     index = 0
 
@@ -786,7 +782,7 @@ def _hoist_interleaved_messages_before_temp_debate(items: list[_DecodedItem]) ->
                 temp_items.append(item)
                 index += 1
                 continue
-            if isinstance(item.item, RequestMessageItem) and item.resets_temp_debate:
+            if item.resets_temp_debate:
                 tail_messages.append(item)
                 index += 1
                 continue
@@ -944,9 +940,10 @@ def _initial_cursors(compaction: CompactionPayload | None) -> dict[str, int]:
 
 
 def _open_call_id_or_none(value: str, *, keyring: SealingKeyring) -> SealedCallID | None:
-    if not value.startswith(CALL_ID_PREFIX):
+    try:
+        return open_call_id(value, keyring=keyring)
+    except PlapError:
         return None
-    return open_call_id(value, keyring=keyring)
 
 
 def _message_item_to_chat(item: RequestMessageItem) -> StateMessage:
