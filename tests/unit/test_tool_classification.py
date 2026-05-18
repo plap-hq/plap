@@ -11,6 +11,7 @@ from plap.llms.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
     ChatMessage,
+    ChatToolCall,
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool
@@ -79,7 +80,12 @@ def test_function_tool_signature_changes_for_effectful_fields() -> None:
 
 async def test_llm_tool_classifier_parses_valid_json() -> None:
     signature = function_tool_signature(_read_file_tool())
-    client = _FakeChatClient('{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}')
+    client = _FakeChatClient(
+        _classifier_tool_call_message(
+            "classify_tool_effect",
+            '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+        )
+    )
     classifier = LLMToolClassifier(
         client=client,
         classifier="fake",
@@ -93,22 +99,26 @@ async def test_llm_tool_classifier_parses_valid_json() -> None:
     assert result.confidence == 0.9
     assert result.rationale == "Read-only."
     assert client.requests[0].messages[0].role == "system"
-    assert client.requests[0].response_format is not None
-    assert client.requests[0].response_format.type == "json_schema"
-    assert client.requests[0].response_format.strict is True
-    assert client.requests[0].response_format.schema is not None
-    assert client.requests[0].response_format.schema["required"] == [
+    assert client.requests[0].response_format is None
+    assert client.requests[0].tool_choice == "required"
+    assert client.requests[0].parallel_tool_calls is False
+    assert len(client.requests[0].tools) == 1
+    tool = client.requests[0].tools[0]
+    assert tool.function.name == "classify_tool_effect"
+    assert tool.function.strict is True
+    assert tool.function.parameters is not None
+    assert tool.function.parameters["required"] == [
         "effect_class",
         "confidence",
         "rationale",
     ]
-    assert client.requests[0].response_format.schema["properties"]["effect_class"]["enum"] == [
+    assert tool.function.parameters["properties"]["effect_class"]["enum"] == [
         "safe",
         "visible",
         "mutation",
         "contextual",
     ]
-    assert "minLength" not in client.requests[0].response_format.schema["properties"]["rationale"]
+    assert "minLength" not in tool.function.parameters["properties"]["rationale"]
     assert client.requests[0].max_completion_tokens == TOOL_EFFECT_CLASSIFIER_MAX_TOKENS
     assert client.requests[0].temperature == 0
     assert (
@@ -143,8 +153,14 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
     classifier = LLMToolClassifier(
         client=_SequenceChatClient(
             [
-                '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
-                '{"effect_class":"safe","confidence":0.8,"rationale":"Read-only list."}',
+                _classifier_tool_call_message(
+                    "classify_tool_effect",
+                    '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+                ),
+                _classifier_tool_call_message(
+                    "classify_tool_effect",
+                    '{"effect_class":"safe","confidence":0.8,"rationale":"Read-only list."}',
+                ),
             ]
         ),
         classifier="fake",
@@ -172,7 +188,12 @@ async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None
 async def test_llm_tool_classifier_parses_contextual_json() -> None:
     signature = function_tool_signature(_bash_tool())
     classifier = LLMToolClassifier(
-        client=_FakeChatClient('{"effect_class":"contextual","confidence":0.8,"rationale":"Shell commands depend on arguments."}'),
+        client=_FakeChatClient(
+            _classifier_tool_call_message(
+                "classify_tool_effect",
+                '{"effect_class":"contextual","confidence":0.8,"rationale":"Shell commands depend on arguments."}',
+            )
+        ),
         classifier="fake",
         classifier_model="fake/model",
         classifier_cache_model="fake/cache",
@@ -195,7 +216,12 @@ async def test_llm_tool_classifier_parses_visible_json() -> None:
         )
     )
     classifier = LLMToolClassifier(
-        client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates user-visible agent plan only."}'),
+        client=_FakeChatClient(
+            _classifier_tool_call_message(
+                "classify_tool_effect",
+                '{"effect_class":"visible","confidence":0.85,"rationale":"Updates user-visible agent plan only."}',
+            )
+        ),
         classifier="fake",
         classifier_model="fake/model",
         classifier_cache_model="fake/cache",
@@ -238,7 +264,12 @@ async def test_llm_tool_call_classifier_parses_valid_json() -> None:
     arguments = {"command": "ls"}
     arguments_hash = tool_arguments_hash(arguments)
     classifier = LLMToolCallClassifier(
-        client=_FakeChatClient('{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}'),
+        client=_FakeChatClient(
+            _classifier_tool_call_message(
+                "classify_tool_call_effect",
+                '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+            )
+        ),
         classifier="fake",
         classifier_model="fake/model",
         classifier_cache_model="fake/cache",
@@ -254,16 +285,20 @@ async def test_llm_tool_call_classifier_parses_valid_json() -> None:
     assert result.effect_class == "safe"
     assert result.arguments_hash == arguments_hash
     request = classifier._client.requests[0]
-    assert request.response_format is not None
-    assert request.response_format.type == "json_schema"
-    assert request.response_format.schema is not None
-    assert request.response_format.schema["properties"]["effect_class"]["enum"] == [
+    assert request.response_format is None
+    assert request.tool_choice == "required"
+    assert request.parallel_tool_calls is False
+    assert len(request.tools) == 1
+    tool = request.tools[0]
+    assert tool.function.name == "classify_tool_call_effect"
+    assert tool.function.parameters is not None
+    assert tool.function.parameters["properties"]["effect_class"]["enum"] == [
         "safe",
         "visible",
         "mutation",
         "unknown",
     ]
-    assert "contextual" not in str(request.response_format.schema)
+    assert "contextual" not in str(tool.function.parameters)
     assert request.max_completion_tokens == TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS
     assert "bash" in (request.messages[1].content or "")
     assert "command" in (request.messages[1].content or "")
@@ -305,7 +340,12 @@ async def test_llm_tool_call_classifier_parses_visible_json() -> None:
         )
     )
     classifier = LLMToolCallClassifier(
-        client=_FakeChatClient('{"effect_class":"visible","confidence":0.85,"rationale":"Updates visible plan state only."}'),
+        client=_FakeChatClient(
+            _classifier_tool_call_message(
+                "classify_tool_call_effect",
+                '{"effect_class":"visible","confidence":0.85,"rationale":"Updates visible plan state only."}',
+            )
+        ),
         classifier="fake",
         classifier_model="fake/model",
         classifier_cache_model="fake/cache",
@@ -665,9 +705,22 @@ def _bash_tool() -> FunctionTool:
     )
 
 
+def _assistant_message(message: ChatMessage | str) -> ChatMessage:
+    if isinstance(message, ChatMessage):
+        return message
+    return ChatMessage(role="assistant", content=message)
+
+
+def _classifier_tool_call_message(name: str, arguments: str) -> ChatMessage:
+    return ChatMessage(
+        role="assistant",
+        tool_calls=[ChatToolCall(id=f"call_{name}", name=name, arguments=arguments)],
+    )
+
+
 class _FakeChatClient(IChatCompletionClient):
-    def __init__(self, content: str) -> None:
-        self.content = content
+    def __init__(self, message: ChatMessage | str) -> None:
+        self.message = _assistant_message(message)
         self.requests: list[ChatCompletionRequest] = []
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
@@ -676,7 +729,7 @@ class _FakeChatClient(IChatCompletionClient):
             id="chat_1",
             model=request.model,
             created_at=1.0,
-            message=ChatMessage(role="assistant", content=self.content),
+            message=self.message,
             finish_reason="stop",
         )
 
@@ -685,8 +738,8 @@ class _FakeChatClient(IChatCompletionClient):
 
 
 class _SequenceChatClient(IChatCompletionClient):
-    def __init__(self, contents: list[str]) -> None:
-        self.contents = contents
+    def __init__(self, messages: list[ChatMessage | str]) -> None:
+        self.messages = [_assistant_message(message) for message in messages]
         self.requests: list[ChatCompletionRequest] = []
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
@@ -695,7 +748,7 @@ class _SequenceChatClient(IChatCompletionClient):
             id=f"chat_{len(self.requests)}",
             model=request.model,
             created_at=1.0,
-            message=ChatMessage(role="assistant", content=self.contents[len(self.requests) - 1]),
+            message=self.messages[len(self.requests) - 1],
             finish_reason="stop",
         )
 

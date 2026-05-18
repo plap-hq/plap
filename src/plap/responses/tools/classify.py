@@ -11,10 +11,12 @@ import structlog
 from plap.llms.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatFunctionTool,
     ChatMessage,
-    ChatResponseFormat,
+    ChatTool,
     IChatCompletionClient,
 )
+from plap.llms.json_utils import parse_json_object_with_repair
 from plap.logging import log_debug, log_payload
 from plap.responses.tools.policy import (
     EffectClass,
@@ -31,8 +33,7 @@ logger = structlog.get_logger(__name__)
 
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
-Return only JSON matching this schema:
-{"effect_class":"safe|visible|mutation|contextual","confidence":0.0,"rationale":"short"}
+Call the `classify_tool_effect` tool exactly once.
 
 Definitions:
 - safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
@@ -61,19 +62,19 @@ TOOL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
-    type="json_schema",
-    name="tool_effect_classification",
-    schema=TOOL_EFFECT_CLASSIFIER_SCHEMA,
-    strict=True,
-    description="Effect classification for a client-provided function tool.",
+TOOL_EFFECT_CLASSIFIER_TOOL = ChatTool(
+    function=ChatFunctionTool(
+        name="classify_tool_effect",
+        parameters=TOOL_EFFECT_CLASSIFIER_SCHEMA,
+        strict=True,
+        description="Effect classification for a client-provided function tool.",
+    )
 )
 TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 
 TOOL_CALL_EFFECT_CLASSIFIER_PROMPT = """Classify a concrete client tool call.
 
-Return only JSON matching this schema:
-{"effect_class":"safe|visible|mutation|unknown","confidence":0.0,"rationale":"short"}
+Call the `classify_tool_call_effect` tool exactly once.
 
 Definitions:
 - safe: this specific call is read-only or exploratory and should not mutate files,
@@ -101,12 +102,13 @@ TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT = ChatResponseFormat(
-    type="json_schema",
-    name="tool_call_effect_classification",
-    schema=TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA,
-    strict=True,
-    description="Effect classification for a concrete client-provided function tool call.",
+TOOL_CALL_EFFECT_CLASSIFIER_TOOL = ChatTool(
+    function=ChatFunctionTool(
+        name="classify_tool_call_effect",
+        parameters=TOOL_CALL_EFFECT_CLASSIFIER_SCHEMA,
+        strict=True,
+        description="Effect classification for a concrete client-provided function tool call.",
+    )
 )
 TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 
@@ -138,7 +140,7 @@ class LLMToolClassifier(IToolClassifier):
         self.classifier_cache_model = classifier_cache_model
         self.prompt_hash = _prompt_hash(
             prompt,
-            response_format=TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            tool=TOOL_EFFECT_CLASSIFIER_TOOL,
             max_tokens=TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
         )
         self._prompt = prompt
@@ -181,7 +183,9 @@ class LLMToolClassifier(IToolClassifier):
                     ).decode(),
                 ),
             ],
-            response_format=TOOL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            tools=[TOOL_EFFECT_CLASSIFIER_TOOL],
+            tool_choice="required",
+            parallel_tool_calls=False,
             max_completion_tokens=TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
             temperature=0,
         )
@@ -194,7 +198,7 @@ class LLMToolClassifier(IToolClassifier):
         result: ChatCompletionResult | None = None
         try:
             result = await self._client.complete(request)
-            raw = _parse_raw_output(result.message.content)
+            raw = _parse_raw_output(result.message, expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
@@ -274,7 +278,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
         self.classifier_cache_model = classifier_cache_model
         self.prompt_hash = _prompt_hash(
             prompt,
-            response_format=TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            tool=TOOL_CALL_EFFECT_CLASSIFIER_TOOL,
             max_tokens=TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
         )
         self._prompt = prompt
@@ -328,7 +332,9 @@ class LLMToolCallClassifier(IToolCallClassifier):
                     ).decode(),
                 ),
             ],
-            response_format=TOOL_CALL_EFFECT_CLASSIFIER_RESPONSE_FORMAT,
+            tools=[TOOL_CALL_EFFECT_CLASSIFIER_TOOL],
+            tool_choice="required",
+            parallel_tool_calls=False,
             max_completion_tokens=TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
             temperature=0,
         )
@@ -342,7 +348,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
         result: ChatCompletionResult | None = None
         try:
             result = await self._client.complete(request)
-            raw = _parse_raw_output(result.message.content)
+            raw = _parse_raw_output(result.message, expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _tool_call_classification_from_raw(
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
@@ -412,30 +418,35 @@ class LLMToolCallClassifier(IToolCallClassifier):
             return classification
 
 
-def _parse_raw_output(content: str | None) -> dict[str, Any]:
-    if not content:
-        raise ValueError("classifier returned no content")
-    value = msgspec.json.decode(content.encode())
-    if not isinstance(value, dict):
-        raise TypeError("classifier returned non-object JSON")
-    return value
+def _parse_raw_output(message: ChatMessage, *, expected_tool_name: str) -> dict[str, Any]:
+    tool_calls = message.tool_calls or ()
+    if len(tool_calls) != 1:
+        raise ValueError("classifier did not return exactly one tool call")
+    tool_call = tool_calls[0]
+    if tool_call.name != expected_tool_name:
+        raise ValueError("classifier returned an unexpected tool call")
+    return parse_json_object_with_repair(tool_call.arguments)
 
 
 def _prompt_hash(
     prompt: str,
     *,
-    response_format: ChatResponseFormat,
+    tool: ChatTool,
     max_tokens: int,
 ) -> bytes:
     value = {
         "prompt": prompt,
-        "response_format": {
-            "type": response_format.type,
-            "name": response_format.name,
-            "schema": response_format.schema,
-            "strict": response_format.strict,
-            "description": response_format.description,
+        "tool": {
+            "type": tool.type,
+            "function": {
+                "name": tool.function.name,
+                "parameters": tool.function.parameters,
+                "strict": tool.function.strict,
+                "description": tool.function.description,
+            },
         },
+        "tool_choice": "required",
+        "parallel_tool_calls": False,
         "max_completion_tokens": max_tokens,
         "temperature": 0,
     }
