@@ -162,19 +162,19 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
             main_debate=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                model="crof/mimo-v2.5-pro-precision,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reviewer=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                model="crof/mimo-v2.5-pro-precision,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             arbitrator=RuntimeActorConfig(
-                model="crof/mimo-v2.5-pro,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                model="crof/mimo-v2.5-pro-precision,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
