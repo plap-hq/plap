@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 import anyio
@@ -31,9 +31,14 @@ from plap.responses.tools.policy import (
 
 logger = structlog.get_logger(__name__)
 
+
+class _ClassifierShapeError(ValueError):
+    pass
+
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
 Call the `classify_tool_effect` tool exactly once.
+Return no plain-text answer. Put your explanation only in the `rationale` field.
 
 Definitions:
 - safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
@@ -75,6 +80,7 @@ TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
 TOOL_CALL_EFFECT_CLASSIFIER_PROMPT = """Classify a concrete client tool call.
 
 Call the `classify_tool_call_effect` tool exactly once.
+Return no plain-text answer. Put your explanation only in the `rationale` field.
 
 Definitions:
 - safe: this specific call is read-only or exploratory and should not mutate files,
@@ -121,6 +127,58 @@ def _classifier_result_context(result: ChatCompletionResult) -> dict[str, object
         "system_fingerprint": result.system_fingerprint,
         "usage": asdict(result.usage) if result.usage is not None else None,
     }
+
+
+def _shape_retry_request(
+    request: ChatCompletionRequest,
+    *,
+    assistant: ChatMessage,
+    expected_tool_name: str,
+    error_message: str,
+) -> ChatCompletionRequest:
+    correction = ChatMessage(
+        role="user",
+        content=(
+            "Your previous answer was unusable. "
+            f"Problem: {error_message}. "
+            f"Reply again with exactly one real `{expected_tool_name}` tool call and no plain-text answer. "
+            "Put your explanation only in the `rationale` field. "
+            "Do not return multiple tool calls. Do not return prose in `content`."
+        ),
+    )
+    return replace(request, messages=[*request.messages, assistant, correction])
+
+
+async def _complete_with_shape_retry(
+    *,
+    client: IChatCompletionClient,
+    request: ChatCompletionRequest,
+    retry_event: str,
+    expected_tool_name: str,
+) -> ChatCompletionResult:
+    result = await client.complete(request)
+    try:
+        _parse_raw_output(result.message, expected_tool_name=expected_tool_name)
+    except _ClassifierShapeError as exc:
+        retry_request = _shape_retry_request(
+            request,
+            assistant=result.message,
+            expected_tool_name=expected_tool_name,
+            error_message=str(exc),
+        )
+        log_debug(
+            logger,
+            retry_event,
+            error_message=str(exc),
+            expected_tool_name=expected_tool_name,
+        )
+        log_payload(
+            logger,
+            f"{retry_event}.payload",
+            request=asdict(retry_request),
+        )
+        return await client.complete(retry_request)
+    return result
 
 
 class LLMToolClassifier(IToolClassifier):
@@ -197,7 +255,12 @@ class LLMToolClassifier(IToolClassifier):
         )
         result: ChatCompletionResult | None = None
         try:
-            result = await self._client.complete(request)
+            result = await _complete_with_shape_retry(
+                client=self._client,
+                request=request,
+                retry_event="tool.classifier.shape_retry",
+                expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name,
+            )
             raw = _parse_raw_output(result.message, expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
@@ -347,7 +410,12 @@ class LLMToolCallClassifier(IToolCallClassifier):
         )
         result: ChatCompletionResult | None = None
         try:
-            result = await self._client.complete(request)
+            result = await _complete_with_shape_retry(
+                client=self._client,
+                request=request,
+                retry_event="tool.call_classifier.shape_retry",
+                expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name,
+            )
             raw = _parse_raw_output(result.message, expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _tool_call_classification_from_raw(
                 signature_hash=call.signature_hash,
@@ -421,10 +489,10 @@ class LLMToolCallClassifier(IToolCallClassifier):
 def _parse_raw_output(message: ChatMessage, *, expected_tool_name: str) -> dict[str, Any]:
     tool_calls = message.tool_calls or ()
     if len(tool_calls) != 1:
-        raise ValueError("classifier did not return exactly one tool call")
+        raise _ClassifierShapeError("classifier did not return exactly one tool call")
     tool_call = tool_calls[0]
     if tool_call.name != expected_tool_name:
-        raise ValueError("classifier returned an unexpected tool call")
+        raise _ClassifierShapeError("classifier returned an unexpected tool call")
     return parse_json_object_with_repair(tool_call.arguments)
 
 

@@ -147,6 +147,34 @@ async def test_llm_tool_classifier_malformed_json_returns_contextual() -> None:
     assert result.confidence == 0.0
 
 
+async def test_llm_tool_classifier_reprompts_once_after_shape_failure() -> None:
+    signature = function_tool_signature(_read_file_tool())
+    classifier = LLMToolClassifier(
+        client=_SequenceChatClient(
+            [
+                ChatMessage(role="assistant", content="not a real tool call"),
+                _classifier_tool_call_message(
+                    "classify_tool_effect",
+                    '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+                ),
+            ]
+        ),
+        classifier="fake",
+        classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
+    )
+
+    result = await classifier.classify(signature)
+
+    assert result.effect_class == "safe"
+    assert len(classifier._client.requests) == 2
+    retry_request = classifier._client.requests[1]
+    assert retry_request.messages[-2].role == "assistant"
+    assert retry_request.messages[-2].content == "not a real tool call"
+    assert retry_request.messages[-1].role == "user"
+    assert (retry_request.messages[-1].content or "").strip()
+
+
 async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None:
     read_signature = function_tool_signature(_read_file_tool())
     list_signature = function_tool_signature(_list_files_tool())
@@ -327,6 +355,40 @@ async def test_llm_tool_call_classifier_malformed_json_returns_unknown() -> None
 
     assert result.effect_class == "unknown"
     assert result.confidence == 0.0
+
+
+async def test_llm_tool_call_classifier_reprompts_once_after_shape_failure() -> None:
+    signature = function_tool_signature(_bash_tool())
+    arguments = {"command": "ls"}
+    classifier = LLMToolCallClassifier(
+        client=_SequenceChatClient(
+            [
+                ChatMessage(role="assistant", content="not a real tool call"),
+                _classifier_tool_call_message(
+                    "classify_tool_call_effect",
+                    '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+                ),
+            ]
+        ),
+        classifier="fake",
+        classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
+    )
+
+    result = await classifier.classify(
+        ToolCallSignature(
+            signature=signature,
+            arguments=arguments,
+        )
+    )
+
+    assert result.effect_class == "safe"
+    assert len(classifier._client.requests) == 2
+    retry_request = classifier._client.requests[1]
+    assert retry_request.messages[-2].role == "assistant"
+    assert retry_request.messages[-2].content == "not a real tool call"
+    assert retry_request.messages[-1].role == "user"
+    assert (retry_request.messages[-1].content or "").strip()
 
 
 async def test_llm_tool_call_classifier_parses_visible_json() -> None:
