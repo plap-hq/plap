@@ -22,7 +22,7 @@ from plap.llms.openai import (
     build_chat_params,
 )
 
-CROF_OPENAI_BASE_URL = "https://beta.crof.ai/v1"
+CROF_OPENAI_BASE_URL = "https://crof.ai/v1"
 CROF_REASONING_CONTENT_RESPONSE_FORMAT_MODELS = frozenset({
     "deepseek-v3.2",
     "gemma-4-31b-it",
