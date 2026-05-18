@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 
@@ -64,7 +64,15 @@ from plap.responses.tools.mcp import IServerToolExecutor
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 DEBATE_HELD_TOOL_PLACEHOLDER = "This tool call was intercepted by a reviewer."
-DEBATE_UNSAFE_TOOL_PLACEHOLDER = "This tool call is unsafe to run in this environment."
+DEBATE_UNSAFE_TOOL_PLACEHOLDER = (
+    "This tool call is unsafe to run in this environment. "
+    "Do not retry the same call. Instead, continue from that result by reasoning about the task, "
+    "using other safe tools, or changing approach."
+)
+DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER = (
+    "This tool call could not be used because its arguments were not a valid JSON object. "
+    "If you still need this tool, call it again with corrected JSON object arguments."
+)
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
 REQUEST_CONSTRAINTS_HEADER = "Request constraints for the proposed next step:"
@@ -120,37 +128,14 @@ def _debate_internal_error(*, reason: str, private_message: str, cause: BaseExce
     )
 
 
-def _is_retryable_debate_error(exc: PlapError) -> bool:
+def _is_retryable_decision_error(exc: PlapError) -> bool:
     return exc.private.reason in {
         "reviewer_reopen_requires_note",
         "arbitrator_note_required",
         "decision_missing_content",
         "decision_invalid_tail_marker",
         "decision_ambiguous_boundary_markers",
-        "debate_tool_arguments_invalid_json",
-        "debate_tool_arguments_not_object",
     }
-
-
-async def _retry_debate_step(actor: str, operation) -> object:
-    attempts = 0
-    while True:
-        try:
-            return await operation()
-        except PlapError as exc:
-            if not _is_retryable_debate_error(exc):
-                raise
-            attempts += 1
-            log_debug(
-                logger,
-                "debate.step.retry",
-                actor=actor,
-                attempt=attempts,
-                max_attempts=DEBATE_STEP_MAX_ATTEMPTS,
-                reason=exc.private.reason,
-            )
-            if attempts >= DEBATE_STEP_MAX_ATTEMPTS:
-                raise
 
 
 DEBATE_TOOL_AVAILABILITY_PROMPT = """Use available tools when they help.
@@ -161,13 +146,7 @@ the proposed next step. Use it to understand what those proposed tool calls
 mean and whether they are appropriate. The fact that one of those tools is not
 callable in this debate step does not mean the normal main step lacks it. Do
 not reject or criticize a proposed next step merely because one of those tools
-is not callable in this debate step.
-
-If a callable tool returns the text `This tool call is unsafe to run in
-this environment.`, treat that as an authoritative tool result indicating that
-this specific tool call is not allowed here. Do not retry the same call.
-Instead, continue from that result by reasoning about the task, using other
-safe tools, or changing approach."""
+is not callable in this debate step."""
 
 DEBATE_REQUEST_CONSTRAINTS_PROMPT = """You may also receive a user message titled `Request constraints for the proposed next step:`.
 If present, it describes client-requested tool-choice or output-format
@@ -919,7 +898,17 @@ def _latest_arbitrator_note(thread: Sequence[StateMessage]) -> str | None:
 
 
 def _reviewer_round_count(reviewer: Sequence) -> int:
-    return sum(1 for row in reviewer if row.message.role == "user")
+    count = 0
+    for row in reviewer:
+        message = row.message
+        if not message.is_assistant():
+            continue
+        try:
+            parse_reviewer_decision(message)
+        except PlapError:
+            continue
+        count += 1
+    return count
 
 
 def _state_message_from_result(message: ChatMessage) -> StateMessage:
@@ -1003,6 +992,7 @@ async def _execute_actor_turn(
 
             client_calls: list[ChatToolCall] = []
             inline_output_seen = False
+            parsed_arguments: dict[str, dict[str, object]] = {}
             supported_calls: list[ChatToolCall] = []
             tools_by_name = {tool.name: tool for tool in tools}
             for call in tool_calls:
@@ -1018,8 +1008,25 @@ async def _execute_actor_turn(
                     )
                     inline_output_seen = True
                     continue
-                if policy.effect_class == "contextual":
-                    _arguments_object(call.arguments, label="debate tool arguments")
+                try:
+                    parsed_arguments[call.id] = _arguments_object(call.arguments, label="debate tool arguments")
+                except PlapError as exc:
+                    log_debug(
+                        logger,
+                        "debate.actor.tool_stubbed",
+                        actor=actor_name,
+                        reason=exc.private.reason,
+                        tool_name=call.name,
+                    )
+                    turn_messages.append(
+                        StateMessage(
+                            role="tool",
+                            tool_call_id=call.id,
+                            content=DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER,
+                        )
+                    )
+                    inline_output_seen = True
+                    continue
                 supported_calls.append(call)
 
             if supported_calls:
@@ -1047,7 +1054,7 @@ async def _execute_actor_turn(
                         raise _debate_internal_error(
                             reason="debate_server_tool_executor_missing", private_message="debate server tool executor is missing"
                         )
-                    output = await executor.call_tool(call.name, _arguments_object(call.arguments, label="debate tool arguments"))
+                    output = await executor.call_tool(call.name, parsed_arguments[call.id])
                     log_debug(logger, "debate.actor.server_tool_executed", actor=actor_name, tool_name=call.name)
                     turn_messages.append(StateMessage(role="tool", tool_call_id=call.id, content=output))
                     inline_output_seen = True
@@ -1085,6 +1092,127 @@ async def _execute_actor_turn(
                 usage_ledger.record_hidden(actor_config.public_usage, result.usage)
 
 
+def _decision_retry_problem(*, exc: PlapError, allowed_actions: Sequence[str]) -> str:
+    reason = exc.private.reason
+    allowed = ", ".join(allowed_actions)
+    if reason == "decision_missing_content":
+        return "Your previous answer was blank or had no usable decision."
+    if reason == "decision_invalid_tail_marker":
+        return f"Your final decision line was invalid. The final non-empty line must end with exactly one of: {allowed}."
+    if reason == "decision_ambiguous_boundary_markers":
+        return "Your first and last decision lines disagreed. Use one final decision line only."
+    if reason == "reviewer_reopen_requires_note":
+        return "If you choose REOPEN, include one short review note above the final line that explains the concrete defect."
+    if reason == "arbitrator_note_required":
+        return (
+            "If you choose REVISE or REOPEN, include one short note above the final line. "
+            "For REVISE, write a next-step note for the normal main step. "
+            "For REOPEN, write a guidance note for the next review round."
+        )
+    return exc.private.message
+
+
+def _decision_retry_message(*, allowed_actions: Sequence[str], note_rule: str, exc: PlapError) -> StateMessage:
+    allowed = ", ".join(allowed_actions)
+    return StateMessage(
+        role="user",
+        content=(
+            "Your previous answer could not be used as written.\n\n"
+            "Problem:\n"
+            f"- {_decision_retry_problem(exc=exc, allowed_actions=allowed_actions)}\n\n"
+            "Reply again for the same task. Keep the substance of your answer if the substance was correct, "
+            "and fix only the unusable part. Change the substance only if you genuinely need to after "
+            "re-checking the transcript.\n"
+            f"- The final non-empty line must end with exactly one of: {allowed}.\n"
+            f"- {note_rule}\n"
+            "- Put no note text on the final decision line.\n"
+            "- Do not put any text after the final decision line."
+        ),
+    )
+
+
+def _reviewer_retry_message(exc: PlapError) -> StateMessage:
+    return _decision_retry_message(
+        allowed_actions=("ACCEPT", "REOPEN"),
+        note_rule=(
+            "If you choose REOPEN, write one short review note above the final line explaining the concrete defect. "
+            "If you choose ACCEPT, do not add a review note just to satisfy this instruction."
+        ),
+        exc=exc,
+    )
+
+
+def _arbitrator_retry_message(exc: PlapError) -> StateMessage:
+    return _decision_retry_message(
+        allowed_actions=("ACCEPT", "REVISE", "REOPEN"),
+        note_rule=(
+            "If you choose REVISE or REOPEN, write one short note above the final line. "
+            "If you choose REVISE, make it a next-step note for the normal main step. "
+            "If you choose REOPEN, make it a guidance note for the next review round. "
+            "If you choose ACCEPT, do not add a note just to satisfy this instruction."
+        ),
+        exc=exc,
+    )
+
+
+async def _run_decision_actor_turn(
+    *,
+    actor_name: str,
+    actor_config: RuntimeActorConfig,
+    request,
+    header_messages: Sequence[ChatMessage],
+    turn_messages: list[StateMessage],
+    tools: Sequence[FunctionTool],
+    tool_policies: Mapping[str, ToolPolicy],
+    server_executors: Mapping[str, IServerToolExecutor],
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    chat_completion_client: IChatCompletionClient,
+    prompt_cache_key_base: str | None,
+    usage_ledger: UsageLedger,
+    parse_decision: Callable[[StateMessage], object],
+    build_retry_message: Callable[[PlapError], StateMessage],
+) -> tuple[ActorFinished | ActorAwaitingClientTool | None, object | None]:
+    attempts = 0
+    while True:
+        outcome = await _execute_actor_turn(
+            actor_name=actor_name,
+            actor_config=actor_config,
+            request=request,
+            header_messages=header_messages,
+            turn_messages=turn_messages,
+            tools=tools,
+            tool_policies=tool_policies,
+            server_executors=server_executors,
+            tool_call_policy_resolver=tool_call_policy_resolver,
+            chat_completion_client=chat_completion_client,
+            prompt_cache_key_base=prompt_cache_key_base,
+            usage_ledger=usage_ledger,
+            response_format=None,
+        )
+        if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
+            return outcome, None
+        try:
+            decision = parse_decision(outcome.assistant)
+        except PlapError as exc:
+            if not _is_retryable_decision_error(exc):
+                raise
+            usage_ledger.record_hidden(actor_config.public_usage, outcome.usage)
+            attempts += 1
+            log_debug(
+                logger,
+                "debate.step.retry",
+                actor=actor_name,
+                attempt=attempts,
+                max_attempts=DEBATE_STEP_MAX_ATTEMPTS,
+                reason=exc.private.reason,
+            )
+            if attempts >= DEBATE_STEP_MAX_ATTEMPTS:
+                raise
+            turn_messages.append(build_retry_message(exc))
+            continue
+        return outcome, decision
+
+
 async def run_reviewer_turn(
     *,
     state: MutableQueues,
@@ -1100,7 +1228,7 @@ async def run_reviewer_turn(
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
-) -> ActorFinished | ActorAwaitingClientTool | None:
+) -> tuple[ActorFinished | ActorAwaitingClientTool | None, ReviewerDecision | None]:
     thread = _thread_messages(state.reviewer)
     header_messages = _reviewer_header_messages(
         state=state,
@@ -1129,7 +1257,7 @@ async def run_reviewer_turn(
         ]
     else:
         turn_messages = [_reviewer_initial_turn(parts)]
-    return await _execute_actor_turn(
+    return await _run_decision_actor_turn(
         actor_name=Side.REVIEWER.value,
         actor_config=profile.reviewer,
         request=request,
@@ -1142,7 +1270,8 @@ async def run_reviewer_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        response_format=None,
+        parse_decision=parse_reviewer_decision,
+        build_retry_message=_reviewer_retry_message,
     )
 
 
@@ -1210,7 +1339,7 @@ async def run_arbitrator_turn(
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
-) -> ActorFinished | ActorAwaitingClientTool | None:
+) -> tuple[ActorFinished | ActorAwaitingClientTool | None, ArbitratorDecision | None]:
     reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
     latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
     if reviewer_decision is None or latest_response_note is None:
@@ -1246,7 +1375,7 @@ async def run_arbitrator_turn(
                 latest_response_note=latest_response_note,
             )
         ]
-    return await _execute_actor_turn(
+    return await _run_decision_actor_turn(
         actor_name=Side.ARBITRATOR.value,
         actor_config=profile.arbitrator,
         request=request,
@@ -1259,7 +1388,8 @@ async def run_arbitrator_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        response_format=None,
+        parse_decision=parse_arbitrator_decision,
+        build_retry_message=_arbitrator_retry_message,
     )
 
 
@@ -1494,28 +1624,21 @@ async def continue_debate(
         log_debug(logger, "debate.turn", actor=actor, held_anchor_index=held_anchor_index)
 
         if actor == Actor.REVIEWER:
-
-            async def reviewer_step(parts=parts):
-                outcome = await run_reviewer_turn(
-                    state=state,
-                    parts=parts,
-                    main_developer_message=main_developer_message,
-                    profile=profile,
-                    request=request,
-                    normal_tools=tools,
-                    tools=callable_tools,
-                    tool_policies=callable_tool_policies,
-                    server_executors=callable_server_executors,
-                    tool_call_policy_resolver=tool_call_policy_resolver,
-                    chat_completion_client=chat_completion_client,
-                    prompt_cache_key_base=prompt_cache_key_base,
-                    usage_ledger=usage_ledger,
-                )
-                if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
-                    return outcome, None
-                return outcome, parse_reviewer_decision(outcome.assistant)
-
-            outcome, decision = await _retry_debate_step(Actor.REVIEWER.value, reviewer_step)
+            outcome, decision = await run_reviewer_turn(
+                state=state,
+                parts=parts,
+                main_developer_message=main_developer_message,
+                profile=profile,
+                request=request,
+                normal_tools=tools,
+                tools=callable_tools,
+                tool_policies=callable_tool_policies,
+                server_executors=callable_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                chat_completion_client=chat_completion_client,
+                prompt_cache_key_base=prompt_cache_key_base,
+                usage_ledger=usage_ledger,
+            )
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1578,24 +1701,20 @@ async def continue_debate(
             continue
 
         if actor == Actor.MAIN_DEBATE:
-
-            async def main_debate_step(parts=parts):
-                return await run_main_debate_turn(
-                    state=state,
-                    parts=parts,
-                    profile=profile,
-                    request=request,
-                    normal_tools=tools,
-                    tools=callable_tools,
-                    tool_policies=callable_tool_policies,
-                    server_executors=callable_server_executors,
-                    tool_call_policy_resolver=tool_call_policy_resolver,
-                    chat_completion_client=chat_completion_client,
-                    prompt_cache_key_base=prompt_cache_key_base,
-                    usage_ledger=usage_ledger,
-                )
-
-            outcome = await _retry_debate_step(Actor.MAIN_DEBATE.value, main_debate_step)
+            outcome = await run_main_debate_turn(
+                state=state,
+                parts=parts,
+                profile=profile,
+                request=request,
+                normal_tools=tools,
+                tools=callable_tools,
+                tool_policies=callable_tool_policies,
+                server_executors=callable_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                chat_completion_client=chat_completion_client,
+                prompt_cache_key_base=prompt_cache_key_base,
+                usage_ledger=usage_ledger,
+            )
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
@@ -1636,28 +1755,21 @@ async def continue_debate(
             continue
 
         if actor == Actor.ARBITRATOR:
-
-            async def arbitrator_step(parts=parts):
-                outcome = await run_arbitrator_turn(
-                    state=state,
-                    parts=parts,
-                    main_developer_message=main_developer_message,
-                    profile=profile,
-                    request=request,
-                    normal_tools=tools,
-                    tools=callable_tools,
-                    tool_policies=callable_tool_policies,
-                    server_executors=callable_server_executors,
-                    tool_call_policy_resolver=tool_call_policy_resolver,
-                    chat_completion_client=chat_completion_client,
-                    prompt_cache_key_base=prompt_cache_key_base,
-                    usage_ledger=usage_ledger,
-                )
-                if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
-                    return outcome, None
-                return outcome, parse_arbitrator_decision(outcome.assistant)
-
-            outcome, decision = await _retry_debate_step(Actor.ARBITRATOR.value, arbitrator_step)
+            outcome, decision = await run_arbitrator_turn(
+                state=state,
+                parts=parts,
+                main_developer_message=main_developer_message,
+                profile=profile,
+                request=request,
+                normal_tools=tools,
+                tools=callable_tools,
+                tool_policies=callable_tool_policies,
+                server_executors=callable_server_executors,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                chat_completion_client=chat_completion_client,
+                prompt_cache_key_base=prompt_cache_key_base,
+                usage_ledger=usage_ledger,
+            )
             if outcome is None:
                 if held_anchor_index is not None and usage_ledger.anchor is None:
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)

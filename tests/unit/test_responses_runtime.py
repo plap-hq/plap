@@ -48,11 +48,13 @@ from plap.responses.contracts import (
 )
 from plap.responses.debate import (
     DEBATE_HELD_TOOL_PLACEHOLDER,
+    DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER,
     DEBATE_UNSAFE_TOOL_PLACEHOLDER,
     ArbitratorActionType,
     ReviewerActionType,
     _budgeted_transcript_message,
     _request_constraints_wrapper,
+    _reviewer_round_count,
     build_completion_request,
     parse_arbitrator_decision,
     parse_reviewer_decision,
@@ -68,7 +70,7 @@ from plap.responses.ingest import (
     seal_compaction_payload,
 )
 from plap.responses.ingest.render import compact_transcript
-from plap.responses.models import StateMessage, StateToolCall
+from plap.responses.models import SideMessage, StateMessage, StateToolCall
 from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.runtime import (
     STREAM_ABORTED_TOOL_PLACEHOLDER,
@@ -839,6 +841,255 @@ def test_parse_arbitrator_decision_requires_note_for_revise() -> None:
         parse_arbitrator_decision(StateMessage(role="assistant", content="Decision: REVISE"))
 
     _assert_public_error(exc_info.value, code="temporarily_unavailable", private_reason="arbitrator_note_required")
+
+
+def test_reviewer_round_count_ignores_retry_feedback_user_turns() -> None:
+    reviewer = [
+        SideMessage(message=StateMessage(role="user", content="Review the current proposed next step.")),
+        SideMessage(message=StateMessage(role="assistant", content="I forgot the final decision line.")),
+        SideMessage(
+            message=StateMessage(
+                role="user",
+                content="Your previous answer could not be used as written.",
+            )
+        ),
+        SideMessage(message=StateMessage(role="assistant", content="Need a safer path.\n\nDecision: REOPEN")),
+    ]
+
+    assert _reviewer_round_count(reviewer) == 1
+
+
+async def test_stream_response_events_reviewer_retry_persists_failed_answer_and_feedback() -> None:
+    invalid_reviewer_answer = "This looks acceptable, but I forgot the final decision line."
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            ChatMessage(role="assistant", content=invalid_reviewer_answer),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello", include=["reasoning.encrypted_content"]),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant", "user", "assistant"]
+    assert reviewer_payload.messages[1].content == invalid_reviewer_answer
+    correction = reviewer_payload.messages[2].content or ""
+    assert "Your previous answer could not be used as written." in correction
+    assert "The final non-empty line must end with exactly one of: ACCEPT, REOPEN." in correction
+    assert "Put no note text on the final decision line." in correction
+    retry_request_tail = client.requests[2].messages[-3:]
+    assert [message.role for message in retry_request_tail] == ["user", "assistant", "user"]
+    assert retry_request_tail[1].content == invalid_reviewer_answer
+    assert "Your previous answer could not be used as written." in (retry_request_tail[2].content or "")
+    assert completed.output[-1].content[0].text == "draft answer"
+    assert len(client.requests) == 3
+
+
+async def test_stream_response_events_arbitrator_retry_persists_failed_answer_and_feedback() -> None:
+    invalid_arbitrator_answer = "The review note is correct. Use the safer path."
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            _assistant_text("Use the safer path.\n\nDecision: REOPEN"),
+            ChatMessage(role="assistant", content="The review note is correct."),
+            ChatMessage(role="assistant", content=invalid_arbitrator_answer),
+            _assistant_text("Use the safer path.\n\nDecision: REVISE"),
+            ChatMessage(role="assistant", content="final public answer"),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="original question",
+                    include=["reasoning.encrypted_content"],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
+    assert [message.role for message in arbitrator_payload.messages] == ["user", "assistant", "user", "assistant"]
+    assert arbitrator_payload.messages[1].content == invalid_arbitrator_answer
+    correction = arbitrator_payload.messages[2].content or ""
+    assert "Your previous answer could not be used as written." in correction
+    assert "The final non-empty line must end with exactly one of: ACCEPT, REVISE, REOPEN." in correction
+    assert "If you choose REVISE or REOPEN, write one short note above the final line." in correction
+    retry_request_tail = client.requests[4].messages[-3:]
+    assert [message.role for message in retry_request_tail] == ["user", "assistant", "user"]
+    assert retry_request_tail[1].content == invalid_arbitrator_answer
+    assert "Your previous answer could not be used as written." in (retry_request_tail[2].content or "")
+    assert completed.output[-1].content[0].text == "final public answer"
+    assert len(client.requests) == 7
+
+
+async def test_stream_response_events_reviewer_stubs_invalid_safe_tool_arguments() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="bad_read_1", name="read_file", arguments='{"path":}')],
+            ),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_read_file_tool()],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"read_file": "safe"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert reviewer_payload.messages[1].tool_calls[0].name == "read_file"
+    assert reviewer_payload.messages[2].tool_call_id == "bad_read_1"
+    assert reviewer_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    retry_request_tail = client.requests[2].messages[-3:]
+    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
+    assert retry_request_tail[1].tool_calls[0].name == "read_file"
+    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert not any(item.type == "function_call" for item in completed.output)
+    assert completed.output[-1].content[0].text == "draft answer"
+
+
+async def test_stream_response_events_main_debate_stubs_invalid_contextual_tool_arguments() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            _assistant_text("Need stronger evidence.\n\nDecision: REOPEN"),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="bad_bash_1", name="bash", arguments='{"command":}')],
+            ),
+            ChatMessage(role="assistant", content="The review note is wrong: the evidence is already present."),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("bash")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"bash": "contextual"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message"]
+    main_debate_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
+    assert [message.role for message in main_debate_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert main_debate_payload.messages[1].tool_calls[0].name == "bash"
+    assert main_debate_payload.messages[2].tool_call_id == "bad_bash_1"
+    assert main_debate_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    retry_request_tail = client.requests[3].messages[-3:]
+    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
+    assert retry_request_tail[1].tool_calls[0].name == "bash"
+    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert not any(item.type == "function_call" for item in completed.output)
+    assert completed.output[-1].content[0].text == "draft answer"
+
+
+async def test_stream_response_events_arbitrator_stubs_invalid_server_tool_arguments() -> None:
+    provider = _FakeMCPToolProvider(output="search result")
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            _assistant_text("Need stronger evidence.\n\nDecision: REOPEN"),
+            ChatMessage(role="assistant", content="The review note is wrong: the evidence is already present."),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="bad_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":}')],
+            ),
+            _assistant_text("ACCEPT"),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    include=["reasoning.encrypted_content"],
+                    tools=[WebSearchTool(type="web_search")],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+                mcp_tool_providers=(provider,),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message"]
+    arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
+    assert [message.role for message in arbitrator_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert arbitrator_payload.messages[1].tool_calls[0].name == MCP_SEARCH_TOOL_NAME
+    assert arbitrator_payload.messages[2].tool_call_id == "bad_search_1"
+    assert arbitrator_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    retry_request_tail = client.requests[4].messages[-3:]
+    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
+    assert retry_request_tail[1].tool_calls[0].name == MCP_SEARCH_TOOL_NAME
+    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert provider.calls == []
+    assert not any(item.type == "function_call" for item in completed.output)
+    assert completed.output[-1].content[0].text == "draft answer"
 
 
 async def test_stream_response_events_stop_answer_triggers_debate() -> None:
