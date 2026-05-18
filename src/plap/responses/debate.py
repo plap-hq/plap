@@ -1909,6 +1909,7 @@ async def _emit_debate_function_calls(
                 call_id=seal_call_id(
                     SealedCallID(
                         side=side,
+                        temp=True,
                         content_hash_prefix=content_hash_prefix(assistant_hash),
                         tool_call_index=index,
                         upstream_tool_call_id=call.id,

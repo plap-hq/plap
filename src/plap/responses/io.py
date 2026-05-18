@@ -351,6 +351,7 @@ class ResponseEventIO:
             sealed_call_id = seal_call_id(
                 SealedCallID(
                     side="main",
+                    temp=False,
                     content_hash_prefix=content_hash_prefix(assistant_hash),
                     tool_call_index=index,
                     upstream_tool_call_id=call.id,

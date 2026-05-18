@@ -688,6 +688,7 @@ class ReasoningPayload:
 @dataclass(frozen=True, slots=True)
 class SealedCallID:
     side: Side
+    temp: bool
     content_hash_prefix: bytes
     tool_call_index: int
     upstream_tool_call_id: str

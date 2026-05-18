@@ -738,12 +738,13 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
             continue
         if isinstance(item, RequestFunctionCallItem | RequestFunctionCallOutputItem):
             call_id = _open_call_id_or_none(item.call_id, keyring=keyring)
-            resets_temp_debate = in_temp_debate and call_id is None
+            temp_related = call_id is not None and call_id.temp
+            resets_temp_debate = in_temp_debate and (call_id is None or not call_id.temp)
             decoded.append(
                 _DecodedItem(
                     item=item,
                     call_id=call_id,
-                    temp_related=in_temp_debate and call_id is not None,
+                    temp_related=temp_related,
                     resets_temp_debate=resets_temp_debate,
                 )
             )

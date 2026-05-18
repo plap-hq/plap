@@ -749,7 +749,9 @@ async def test_stream_response_events_reviews_visible_client_function_call_when_
     assert CALLED_TOOL_DEFINITIONS_HEADER in reviewer_request_contents
     assert '"name":"update_plan"' in reviewer_request_contents
     assert completed.output[-1].name == "update_plan"
-    assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    decoded_call_id = open_call_id(completed.output[-1].call_id, keyring=_keyring())
+    assert decoded_call_id.side == "main"
+    assert decoded_call_id.temp is False
     assert call_resolver.calls == [[("update_plan", '{"step":"test"}')]]
     assert len(client.requests) == 2
 
@@ -1332,7 +1334,9 @@ async def test_stream_response_events_reviewer_accept_publishes_risky_candidate(
         }
     ]
     assert completed.output[-1].name == "mutate_record"
-    assert open_call_id(completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    decoded_call_id = open_call_id(completed.output[-1].call_id, keyring=_keyring())
+    assert decoded_call_id.side == "main"
+    assert decoded_call_id.temp is False
     assert len(client.requests) == 2
 
 
@@ -1592,7 +1596,9 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     first_completed = _completed_response(first_events)
     assert [item.type for item in first_completed.output] == ["reasoning", "reasoning", "function_call"]
     reviewer_call = first_completed.output[-1]
-    assert open_call_id(reviewer_call.call_id, keyring=_keyring()).side == "reviewer"
+    decoded_reviewer_call = open_call_id(reviewer_call.call_id, keyring=_keyring())
+    assert decoded_reviewer_call.side == "reviewer"
+    assert decoded_reviewer_call.temp is True
     _assert_in_progress_review_context(first_client.requests[1].messages[3].content or "")
     first_transcript = json.loads(
         (first_client.requests[1].messages[1].content or "").removeprefix("Conversation transcript:\n")
@@ -1633,7 +1639,9 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     second_completed = _completed_response(second_events)
     assert [item.type for item in second_completed.output] == ["reasoning", "message", "function_call"]
     assert second_completed.output[-1].name == "mutate_record"
-    assert open_call_id(second_completed.output[-1].call_id, keyring=_keyring()).side == "main"
+    decoded_second_call = open_call_id(second_completed.output[-1].call_id, keyring=_keyring())
+    assert decoded_second_call.side == "main"
+    assert decoded_second_call.temp is False
     assert second_client.requests[0].messages[-1].role == "tool"
     assert second_client.requests[0].messages[-1].content == "README tool output"
     _assert_in_progress_review_context(second_client.requests[0].messages[3].content or "")

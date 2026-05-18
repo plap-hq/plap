@@ -272,6 +272,7 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     temp_message = {"role": "assistant", "content": "temp reviewer"}
     call_id = _call_id(
         side="reviewer",
+        temp=True,
         content_hash_value=_message_hash(temp_message),
         upstream_tool_call_id="up_temp_0",
     )
@@ -308,6 +309,7 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     }
     call_id = _call_id(
         side="reviewer",
+        temp=True,
         content_hash_value=_message_hash(temp_message),
         upstream_tool_call_id="up_temp_0",
     )
@@ -328,6 +330,56 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     assert result.main_context_temp == ()
     assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
+    assert result.continuation_side == "main"
+    assert result.in_temp_debate is False
+
+
+async def test_ingestion_public_sealed_pair_after_temp_main_reasoning_prunes_temp_debate() -> None:
+    temp_assistant = {
+        "role": "assistant",
+        "content": " ",
+        "tool_calls": [_tool_call("up_temp_0")],
+    }
+    public_assistant = {"role": "assistant", "content": " "}
+    call_id = _call_id(
+        side="main",
+        temp=False,
+        content_hash_value=_message_hash(public_assistant),
+        upstream_tool_call_id="up_temp_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    True,
+                    [
+                        temp_assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": "up_temp_0",
+                            "content": "This tool call was intercepted by a reviewer.",
+                        },
+                    ],
+                ),
+                _message("assistant", " "),
+                _function_call(call_id),
+                _function_output(call_id, "public output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.main_context] == [
+        {
+            "role": "assistant",
+            "content": " ",
+            "tool_calls": [_tool_call("up_temp_0")],
+        },
+        {"role": "tool", "tool_call_id": "up_temp_0", "content": "public output"},
+    ]
+    assert result.main_context_temp == ()
     assert result.continuation_side == "main"
     assert result.in_temp_debate is False
 
@@ -466,6 +518,7 @@ async def test_ingestion_hoists_interleaved_assistant_message_before_temp_review
     assistant = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
         side="reviewer",
+        temp=True,
         content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_temp_reviewer_0",
     )
@@ -505,6 +558,7 @@ async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_co
     assistant = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
         side="reviewer",
+        temp=True,
         content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_temp_reviewer_0",
     )
@@ -544,6 +598,7 @@ async def test_ingestion_hoists_interleaved_fabricated_pair_before_temp_reviewer
     assistant = {"role": "assistant", "content": "need file"}
     call_id = _call_id(
         side="reviewer",
+        temp=True,
         content_hash_value=_message_hash(assistant),
         upstream_tool_call_id="up_temp_reviewer_0",
     )
@@ -1616,6 +1671,7 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
 def test_call_id_binary_encoding_is_compact_and_roundtrips() -> None:
     value = SealedCallID(
         side="arbitrator",
+        temp=True,
         content_hash_prefix=bytes.fromhex("0102030405060708"),
         tool_call_index=300,
         upstream_tool_call_id="provider_123",
@@ -1711,6 +1767,7 @@ def _reasoning_item(
 def _call_id(
     *,
     side: str,
+    temp: bool = False,
     upstream_tool_call_id: str,
     content_hash_value: str | None = None,
     content_hash_prefix_value: bytes | None = None,
@@ -1723,6 +1780,7 @@ def _call_id(
     return seal_call_id(
         SealedCallID(
             side=side,
+            temp=temp,
             content_hash_prefix=content_hash_prefix_value,
             tool_call_index=tool_call_index,
             upstream_tool_call_id=upstream_tool_call_id,

@@ -29,11 +29,15 @@ PAYLOAD_FORMAT_VERSION = 1
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 1
+CALL_ID_HEADER_BYTES = 2
 CALL_ID_CONTENT_HASH_PREFIX_BYTES = 8
 TAG_BYTES = 16
 _CALL_ID_VERSION_SHIFT = 4
 _CALL_ID_VERSION_MASK = 0xF0
-_CALL_ID_SIDE_MASK = 0x0F
+_CALL_ID_TEMP_MASK = 0x08
+_CALL_ID_FLAGS_MASK = 0x07
+_CALL_ID_SIDE_MASK = 0x1F
+_CALL_ID_SIDE_RESERVED_MASK = 0xE0
 _SIDE_CODES: dict[Side, int] = {Side.MAIN: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
 
@@ -336,10 +340,14 @@ def _pack_call_id(value: SealedCallID) -> bytes:
         raise _tool_replay_error(reason="tool_call_index_negative", private_message="tool_call_index must be non-negative")
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
-    header = (CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT) | _SIDE_CODES[value.side]
+    side_code = _SIDE_CODES[value.side]
+    if side_code & _CALL_ID_SIDE_RESERVED_MASK:
+        raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
+    header = (CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT) | (_CALL_ID_TEMP_MASK if value.temp else 0)
     return b"".join(
         (
             bytes([header]),
+            bytes([side_code]),
             value.content_hash_prefix,
             _pack_uvarint(value.tool_call_index),
             value.upstream_tool_call_id.encode(),
@@ -348,23 +356,37 @@ def _pack_call_id(value: SealedCallID) -> bytes:
 
 
 def _unpack_call_id(value: bytes) -> SealedCallID:
-    min_length = 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES + 1 + 1
+    min_length = CALL_ID_HEADER_BYTES + CALL_ID_CONTENT_HASH_PREFIX_BYTES + 1 + 1
     if len(value) < min_length:
         raise _tool_replay_error(reason="function_call_id_plaintext_too_short", private_message="function call id plaintext is too short")
     header = value[0]
     version = (header & _CALL_ID_VERSION_MASK) >> _CALL_ID_VERSION_SHIFT
     if version != CALL_ID_FORMAT_VERSION:
         raise _tool_replay_error(reason="unsupported_function_call_id_version", private_message="unsupported function call id version")
+    if header & _CALL_ID_FLAGS_MASK:
+        raise _tool_replay_error(
+            reason="function_call_id_reserved_bits_nonzero",
+            private_message="function call id reserved bits must be zero",
+        )
+    temp = bool(header & _CALL_ID_TEMP_MASK)
+    side_header = value[1]
+    if side_header & _CALL_ID_SIDE_RESERVED_MASK:
+        raise _tool_replay_error(
+            reason="function_call_id_reserved_bits_nonzero",
+            private_message="function call id reserved bits must be zero",
+        )
     try:
-        side = _SIDES[header & _CALL_ID_SIDE_MASK]
+        side = _SIDES[side_header & _CALL_ID_SIDE_MASK]
     except KeyError as exc:
         raise _tool_replay_error(
             reason="invalid_function_call_id_side", private_message="invalid function call id side", cause=exc
         ) from exc
-    content_hash_prefix_value = value[1 : 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES]
-    tool_call_index, offset = _unpack_uvarint(value, 1 + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
+    offset = CALL_ID_HEADER_BYTES
+    content_hash_prefix_value = value[offset : offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES]
+    tool_call_index, offset = _unpack_uvarint(value, offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
     return SealedCallID(
         side=side,
+        temp=temp,
         content_hash_prefix=content_hash_prefix_value,
         tool_call_index=tool_call_index,
         upstream_tool_call_id=_decode_upstream_id(value[offset:]),
