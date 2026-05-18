@@ -12,6 +12,7 @@ import msgspec
 from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.chat import ChatRole, ChatUsage
 from plap.llms.chat import ChatToolCall as LLMChatToolCall
+from plap.llms.tool_args import ToolArgumentsInvalidJSONError, normalize_tool_arguments_text, parse_tool_arguments_value
 from plap.responses.contracts import (
     ResponseUsage,
     ResponseUsageInputTokensDetails,
@@ -50,8 +51,8 @@ class StateToolCall:
 
     def arguments_value(self) -> object:
         try:
-            return msgspec.json.decode(self.arguments.encode())
-        except msgspec.DecodeError:
+            return parse_tool_arguments_value(self.arguments)
+        except ToolArgumentsInvalidJSONError:
             return self.arguments
 
     def to_assistant_primitive(self) -> dict[str, object]:
@@ -85,10 +86,9 @@ class StateToolCall:
 
     def canonical_arguments(self) -> str:
         try:
-            value = msgspec.json.decode(self.arguments.encode())
-        except msgspec.DecodeError:
+            return normalize_tool_arguments_text(self.arguments)
+        except ToolArgumentsInvalidJSONError:
             return self.arguments
-        return msgspec.json.encode(value, order="deterministic").decode()
 
     def deduplication_key(self) -> tuple[str, str]:
         return self.name, self.canonical_arguments()

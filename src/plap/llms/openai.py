@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-import msgspec
 from openai import (
     APIStatusError,
     AsyncOpenAI,
@@ -40,6 +39,7 @@ from plap.llms.errors import (
     is_context_length_exceeded_code,
     is_context_length_exceeded_error,
 )
+from plap.llms.tool_args import stringify_tool_arguments_value
 
 COMMON_CHAT_FIELDS = (
     "tools",
@@ -414,7 +414,7 @@ def from_chat_completion_chunk(
             index=_get(tool_call_delta, "index") or 0,
             id=_get(tool_call_delta, "id"),
             name=_get(function, "name"),
-            arguments_delta=_stringify_arguments(_get(function, "arguments")),
+            arguments_delta=stringify_tool_arguments_value(_get(function, "arguments")),
         )
         if tool_call_delta is not None
         else None,
@@ -432,7 +432,7 @@ def _tool_calls_from_provider(tool_calls: Any) -> list[ChatToolCall] | None:
     for index, tool_call in enumerate(tool_calls):
         function = _get(tool_call, "function")
         name = _get(function, "name")
-        arguments = _stringify_arguments(_get(function, "arguments"))
+        arguments = stringify_tool_arguments_value(_get(function, "arguments"))
         if name is None or arguments is None:
             continue
         normalized.append(
@@ -518,12 +518,6 @@ def _float_or_none(value: Any) -> float | None:
 
 def _finish_reason(value: Any) -> ChatFinishReason | None:
     return value
-
-
-def _stringify_arguments(value: Any) -> str | None:
-    if value is None or isinstance(value, str):
-        return value
-    return msgspec.json.encode(value).decode()
 
 
 async def _close_stream_object(stream: Any) -> None:

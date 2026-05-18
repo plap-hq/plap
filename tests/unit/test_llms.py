@@ -1295,6 +1295,40 @@ async def test_openai_client_normalizes_completion_result() -> None:
     assert result.usage.reasoning_tokens == 1
 
 
+async def test_openai_client_repairs_completion_tool_call_arguments() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        SimpleNamespace(
+            id="chatcmpl_1",
+            model="model-a",
+            created=10,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="tool_calls",
+                    message=SimpleNamespace(
+                        content="answer",
+                        refusal=None,
+                        reasoning_content=None,
+                        reasoning_details=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call_1",
+                                function=SimpleNamespace(name="lookup", arguments="{'q':'x'}"),
+                            )
+                        ],
+                    ),
+                )
+            ],
+            usage=None,
+        )
+    )
+    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(_request())
+
+    assert result.message.tool_calls is not None
+    assert result.message.tool_calls[0].arguments == '{"q":"x"}'
+
+
 async def test_openai_client_reads_top_level_reasoning_tokens() -> None:
     fake_completion = _FakeOpenAICompletion(
         SimpleNamespace(

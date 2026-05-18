@@ -953,7 +953,7 @@ async def test_stream_response_events_reviewer_stubs_invalid_safe_tool_arguments
             ChatMessage(role="assistant", content="draft answer"),
             ChatMessage(
                 role="assistant",
-                tool_calls=[ChatToolCall(id="bad_read_1", name="read_file", arguments='{"path":}')],
+                tool_calls=[ChatToolCall(id="bad_read_1", name="read_file", arguments='["README.md"]')],
             ),
             _assistant_text("ACCEPT"),
         ]
@@ -1000,7 +1000,7 @@ async def test_stream_response_events_main_debate_stubs_invalid_contextual_tool_
             _assistant_text("Need stronger evidence.\n\nDecision: REOPEN"),
             ChatMessage(
                 role="assistant",
-                tool_calls=[ChatToolCall(id="bad_bash_1", name="bash", arguments='{"command":}')],
+                tool_calls=[ChatToolCall(id="bad_bash_1", name="bash", arguments='["ls"]')],
             ),
             ChatMessage(role="assistant", content="The review note is wrong: the evidence is already present."),
             _assistant_text("ACCEPT"),
@@ -1050,7 +1050,7 @@ async def test_stream_response_events_arbitrator_stubs_invalid_server_tool_argum
             ChatMessage(role="assistant", content="The review note is wrong: the evidence is already present."),
             ChatMessage(
                 role="assistant",
-                tool_calls=[ChatToolCall(id="bad_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='{"query":}')],
+                tool_calls=[ChatToolCall(id="bad_search_1", name=MCP_SEARCH_TOOL_NAME, arguments='["cats"]')],
             ),
             _assistant_text("ACCEPT"),
         ]
@@ -1090,6 +1090,48 @@ async def test_stream_response_events_arbitrator_stubs_invalid_server_tool_argum
     assert provider.calls == []
     assert not any(item.type == "function_call" for item in completed.output)
     assert completed.output[-1].content[0].text == "draft answer"
+
+
+async def test_stream_response_events_reviewer_emits_repaired_safe_tool_arguments() -> None:
+    client = _StaticChatClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="draft answer",
+                tool_calls=[ChatToolCall(id="upstream_mutate_1", name="mutate_record", arguments='{"id":"1"}')],
+            ),
+            ChatMessage(
+                role="assistant",
+                tool_calls=[ChatToolCall(id="review_read_1", name="read_file", arguments="{'path':'README.md'}")],
+            ),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    include=["reasoning.encrypted_content"],
+                    tools=[_tool("mutate_record"), _read_file_tool()],
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver({"mutate_record": "mutation", "read_file": "safe"}),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "function_call"]
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant"]
+    assert reviewer_payload.messages[1].tool_calls[0].arguments == '{"path":"README.md"}'
+    assert completed.output[-1].arguments == '{"path":"README.md"}'
 
 
 async def test_stream_response_events_stop_answer_triggers_debate() -> None:
@@ -5134,6 +5176,59 @@ async def test_stream_response_events_stream_draft_stubs_tool_outputs_until_fina
     assert final_payload.temp is False
     assert [message.role for message in final_payload.messages] == ["assistant"]
     assert final_payload.messages[0].tool_calls[0].name == "read_file"
+
+
+async def test_stream_response_events_repairs_streamed_tool_call_arguments_before_emitting() -> None:
+    client = _StreamingStaticChatClient(
+        (
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=0,
+                    id="upstream_call_1",
+                    name="read_file",
+                    arguments_delta="{'path':'README.md'}",
+                ),
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_test",
+                model="plap/test",
+                created_at=None,
+                choice_index=0,
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=ChatUsage(input_tokens=10, output_tokens=14, total_tokens=24, reasoning_tokens=6),
+            ),
+        )
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    include=["reasoning.encrypted_content"],
+                    stream=True,
+                    tools=[_read_file_tool()],
+                ),
+                auth_context=_auth_context(),
+                settings=_settings(),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "function_call"]
+    payload = open_reasoning_payload(completed.output[0].encrypted_content, keyring=_keyring())
+    assert payload.messages[0].tool_calls[0].arguments == '{"path":"README.md"}'
+    assert completed.output[1].arguments == '{"path":"README.md"}'
 
 
 async def test_stream_response_events_adopts_streamed_candidate_into_debate_without_summary_duplication() -> None:
