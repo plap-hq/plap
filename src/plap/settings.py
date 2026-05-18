@@ -1049,10 +1049,10 @@ class Settings(BaseSettings):
     llm_fireworks_api_key: str | None = None
     llm_crof_api_key: str | None = None
     llm_openrouter_api_key: str | None = None
-    tool_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"
-    tool_call_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"
-    tool_effect_classifier_cache_model: str = "gpt-oss-20b"
-    tool_call_effect_classifier_cache_model: str = "gpt-oss-20b"
+    tool_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
+    tool_call_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
+    tool_effect_classifier_cache_model: str = "gpt-oss-120b"
+    tool_call_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_classifier_max_concurrency: int = 2
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096

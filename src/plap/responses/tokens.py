@@ -10,6 +10,7 @@ import tiktoken
 from plap.llms.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
 from plap.llms.chat import ChatMessage as LLMChatMessage
 from plap.llms.chat import ChatToolCall as LLMChatToolCall
+from plap.llms.json_utils import JSONInvalidError, normalize_json_text_with_repair_or_original, parse_json_value_with_repair
 from plap.responses.encoding_dsv4 import encode_messages as encode_dsv4_messages
 from plap.settings import RuntimeActorConfig
 
@@ -34,11 +35,7 @@ def _json_text(value: object) -> str:
 
 
 def _canonical_json_text(value: str) -> str:
-    try:
-        decoded = msgspec.json.decode(value.encode())
-    except msgspec.DecodeError:
-        return value
-    return _json_text(decoded)
+    return normalize_json_text_with_repair_or_original(value)
 
 
 def _tool_definition_value(tool: ChatTool) -> dict[str, object]:
@@ -70,8 +67,8 @@ def _tool_call_value(tool_call: LLMChatToolCall, *, arguments: object) -> dict[s
 
 def _template_tool_call(tool_call: LLMChatToolCall) -> dict[str, object]:
     try:
-        arguments: object = msgspec.json.decode(tool_call.arguments.encode())
-    except msgspec.DecodeError:
+        arguments: object = parse_json_value_with_repair(tool_call.arguments)
+    except JSONInvalidError:
         arguments = tool_call.arguments
     return _tool_call_value(tool_call, arguments=arguments)
 

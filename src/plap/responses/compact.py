@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-import msgspec
 import structlog
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
@@ -23,6 +22,7 @@ from plap.llms.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
+from plap.llms.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair, parse_json_value_with_repair
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     CompactedResponseObject,
@@ -653,19 +653,19 @@ def apply_compaction_call(
     reasoning_effort: ReasoningEffort | None = None,
 ) -> tuple[CompactionOutcome, list[ChatMessageSpan]]:
     try:
-        payload = msgspec.json.decode(arguments.encode())
-    except msgspec.DecodeError as exc:
+        payload = parse_json_object_with_repair(arguments)
+    except JSONInvalidError as exc:
         raise _compaction_unavailable_error(
             reason="compact_arguments_invalid_json",
             private_message="compact arguments must be valid JSON",
             cause=exc,
         ) from exc
-
-    if not isinstance(payload, dict):
+    except JSONNotObjectError as exc:
         raise _compaction_unavailable_error(
             reason="compact_arguments_not_object",
             private_message="compact arguments must be an object",
-        )
+            cause=exc,
+        ) from exc
 
     action = payload.get("action")
     if action == "bailout":
@@ -720,8 +720,8 @@ def apply_compaction_call(
     ranges = payload.get("ranges")
     if isinstance(ranges, str):
         try:
-            ranges = msgspec.json.decode(ranges.encode())
-        except msgspec.DecodeError as exc:
+            ranges = parse_json_value_with_repair(ranges)
+        except JSONInvalidError as exc:
             raise _compaction_unavailable_error(
                 reason="compact_ranges_invalid_json",
                 private_message="compact ranges must be valid JSON",

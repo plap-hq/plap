@@ -18,6 +18,7 @@ from plap.llms.errors import (
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
 )
+from plap.llms.json_utils import JSONInvalidError, normalize_json_text_with_repair, parse_json_value_with_repair
 from plap.llms.openai import (
     COMMON_CHAT_FIELDS,
     ChatProviderProfile,
@@ -114,6 +115,18 @@ def _uses_response_format_fallback(request: ChatCompletionRequest) -> bool:
     )
 
 
+def _validated_response_format_result(
+    result: ChatCompletionResult,
+    response_format: ChatResponseFormat,
+) -> tuple[ChatCompletionResult, str | None]:
+    normalized_content, validation_error = _validated_response_format_content(result.message.content, response_format)
+    if validation_error is not None or normalized_content is None:
+        return result, validation_error
+    if normalized_content == result.message.content:
+        return result, None
+    return replace(result, message=replace(result.message, content=normalized_content)), None
+
+
 async def complete_with_response_format_fallback(
     request: ChatCompletionRequest,
     *,
@@ -124,23 +137,21 @@ async def complete_with_response_format_fallback(
     if response_format is None:
         return await complete(request)
 
-    result = await complete(response_format_fallback_request(request))
-    validation_error = response_format_validation_error(
-        result.message.content,
+    result, validation_error = _validated_response_format_result(
+        await complete(response_format_fallback_request(request)),
         response_format,
     )
     if validation_error is None:
         return result
 
-    retry_result = await complete(
-        response_format_fallback_request(
-            request,
-            invalid_content=result.message.content,
-            validation_error=validation_error,
-        )
-    )
-    retry_validation_error = response_format_validation_error(
-        retry_result.message.content,
+    retry_result, retry_validation_error = _validated_response_format_result(
+        await complete(
+            response_format_fallback_request(
+                request,
+                invalid_content=result.message.content,
+                validation_error=validation_error,
+            )
+        ),
         response_format,
     )
     if retry_validation_error is None:
@@ -229,22 +240,31 @@ def response_format_instruction(response_format: ChatResponseFormat) -> str:
     return "\n".join(lines)
 
 
+def _validated_response_format_content(
+    content: str | None,
+    response_format: ChatResponseFormat,
+) -> tuple[str | None, str | None]:
+    if not content or not content.strip():
+        return None, "response content is empty"
+    try:
+        value = parse_json_value_with_repair(content)
+    except JSONInvalidError as exc:
+        return None, f"invalid JSON: {exc}"
+    if response_format.type == "json_object" and not isinstance(value, dict):
+        return None, "top-level JSON value is not an object"
+    if response_format.type == "json_schema":
+        validation_error = _json_schema_validation_error(value, response_format)
+        if validation_error is not None:
+            return None, validation_error
+    return normalize_json_text_with_repair(content), None
+
+
 def response_format_validation_error(
     content: str | None,
     response_format: ChatResponseFormat,
 ) -> str | None:
-    if not content or not content.strip():
-        return "response content is empty"
-    try:
-        value = msgspec.json.decode(content.encode())
-    except msgspec.DecodeError as exc:
-        return f"invalid JSON: {exc}"
-
-    if response_format.type == "json_object" and not isinstance(value, dict):
-        return "top-level JSON value is not an object"
-    if response_format.type == "json_schema":
-        return _json_schema_validation_error(value, response_format)
-    return None
+    _, validation_error = _validated_response_format_content(content, response_format)
+    return validation_error
 
 
 def _json_schema_validation_error(

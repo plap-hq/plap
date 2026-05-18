@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from plap.llms.chat import ChatCompletionRequest, ChatToolChoiceFunction
 from plap.llms.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.json_utils import JSONInvalidError, parse_json_value_with_repair
 from plap.llms.openai import (
     COMMON_CHAT_FIELDS,
     ChatProviderProfile,
@@ -26,8 +26,8 @@ GMICLOUD_CHAT_PROVIDER_PROFILE = ChatProviderProfile(
 
 def _gmicloud_parse_tool_input(arguments: str) -> dict[str, Any]:
     try:
-        value = json.loads(arguments)
-    except json.JSONDecodeError:
+        value = parse_json_value_with_repair(arguments)
+    except JSONInvalidError:
         return {"arguments": arguments}
     if isinstance(value, dict):
         return value

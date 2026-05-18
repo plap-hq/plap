@@ -21,7 +21,7 @@ from plap.llms.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.llms.tool_args import ToolArgumentsInvalidJSONError, ToolArgumentsNotObjectError, parse_tool_arguments_object
+from plap.llms.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
@@ -926,12 +926,12 @@ def _state_message_from_result(message: ChatMessage) -> StateMessage:
 
 def _arguments_object(arguments: str, *, label: str) -> dict[str, object]:
     try:
-        return parse_tool_arguments_object(arguments)
-    except ToolArgumentsInvalidJSONError as exc:
+        return parse_json_object_with_repair(arguments)
+    except JSONInvalidError as exc:
         raise _debate_unavailable_error(
             reason="debate_tool_arguments_invalid_json", private_message=f"{label} must be valid JSON", cause=exc
         ) from exc
-    except ToolArgumentsNotObjectError as exc:
+    except JSONNotObjectError as exc:
         raise _debate_unavailable_error(
             reason="debate_tool_arguments_not_object",
             private_message=f"{label} must be a JSON object",

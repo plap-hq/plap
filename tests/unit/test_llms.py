@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -1797,6 +1798,28 @@ async def test_lightning_120b_response_format_fallback_omits_native_field() -> N
     }
 
 
+async def test_lightning_120b_response_format_fallback_repairs_invalid_json_without_retry() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="lightning-ai/gpt-oss-120b",
+            content="{'ok':true,'answer':4}",
+        )
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    result = await client.complete(
+        ChatCompletionRequest(
+            model="lightning-ai/gpt-oss-120b",
+            messages=[ChatMessage(role="user", content='Return {"ok": true, "answer": 4}.')],
+            response_format=ChatResponseFormat(type="json_object"),
+            max_completion_tokens=128,
+        )
+    )
+
+    assert json.loads(result.message.content or "") == {"ok": True, "answer": 4}
+    assert len(fake_completion.calls) == 1
+
+
 async def test_lightning_120b_response_format_fallback_retries_schema_errors() -> None:
     fake_completion = _FakeOpenAICompletion(
         [
@@ -1898,6 +1921,31 @@ async def test_lightning_120b_response_format_fallback_streams_result() -> None:
     assert deltas[1].usage.total_tokens == 8
     assert fake_completion.calls[0]["stream"] is False
     assert "response_format" not in fake_completion.calls[0]
+
+
+async def test_lightning_120b_response_format_fallback_stream_repairs_invalid_json_without_retry() -> None:
+    fake_completion = _FakeOpenAICompletion(
+        _completion_response(
+            model="lightning-ai/gpt-oss-120b",
+            content="{'ok':true,'answer':4}",
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+        )
+    )
+    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
+
+    deltas = [
+        delta
+        async for delta in client.stream(
+            ChatCompletionRequest(
+                model="lightning-ai/gpt-oss-120b",
+                messages=[ChatMessage(role="user", content='Return {"ok": true, "answer": 4}.')],
+                response_format=ChatResponseFormat(type="json_object"),
+            )
+        )
+    ]
+
+    assert json.loads(deltas[0].content_delta or "") == {"ok": True, "answer": 4}
+    assert len(fake_completion.calls) == 1
 
 
 async def test_lightning_120b_response_format_fallback_stream_retries() -> None:

@@ -39,7 +39,7 @@ from plap.llms.errors import (
     is_context_length_exceeded_code,
     is_context_length_exceeded_error,
 )
-from plap.llms.tool_args import stringify_tool_arguments_value
+from plap.llms.json_utils import stringify_json_value
 
 COMMON_CHAT_FIELDS = (
     "tools",
@@ -414,7 +414,7 @@ def from_chat_completion_chunk(
             index=_get(tool_call_delta, "index") or 0,
             id=_get(tool_call_delta, "id"),
             name=_get(function, "name"),
-            arguments_delta=stringify_tool_arguments_value(_get(function, "arguments")),
+            arguments_delta=stringify_json_value(_get(function, "arguments")),
         )
         if tool_call_delta is not None
         else None,
@@ -432,7 +432,7 @@ def _tool_calls_from_provider(tool_calls: Any) -> list[ChatToolCall] | None:
     for index, tool_call in enumerate(tool_calls):
         function = _get(tool_call, "function")
         name = _get(function, "name")
-        arguments = stringify_tool_arguments_value(_get(function, "arguments"))
+        arguments = stringify_json_value(_get(function, "arguments"))
         if name is None or arguments is None:
             continue
         normalized.append(

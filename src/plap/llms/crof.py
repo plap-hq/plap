@@ -4,7 +4,6 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
-import msgspec
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from plap.llms.chat import (
@@ -14,6 +13,7 @@ from plap.llms.chat import (
     ChatResponseFormat,
 )
 from plap.llms.errors import ChatCompletionInvalidRequestError
+from plap.llms.json_utils import JSONInvalidError, normalize_json_text_with_repair, parse_json_value_with_repair
 from plap.llms.openai import (
     COMMON_CHAT_FIELDS,
     ChatProviderProfile,
@@ -116,32 +116,44 @@ def _normalize_crof_response_format_result(
         or response_format is None
         or result.message.content
         or not reasoning_content
-        or _response_format_validation_error(reasoning_content, response_format) is not None
     ):
+        return result
+
+    normalized_reasoning_content, validation_error = _validated_response_format_content(reasoning_content, response_format)
+    if validation_error is not None or normalized_reasoning_content is None:
         return result
 
     return replace(
         result,
-        message=replace(result.message, content=reasoning_content),
+        message=replace(result.message, content=normalized_reasoning_content),
     )
+
+
+def _validated_response_format_content(
+    content: str | None,
+    response_format: ChatResponseFormat,
+) -> tuple[str | None, str | None]:
+    if not content or not content.strip():
+        return None, "response content is empty"
+    try:
+        value = parse_json_value_with_repair(content)
+    except JSONInvalidError as exc:
+        return None, f"invalid JSON: {exc}"
+    if response_format.type == "json_object" and not isinstance(value, dict):
+        return None, "top-level JSON value is not an object"
+    if response_format.type == "json_schema":
+        validation_error = _json_schema_validation_error(value, response_format)
+        if validation_error is not None:
+            return None, validation_error
+    return normalize_json_text_with_repair(content), None
 
 
 def _response_format_validation_error(
     content: str | None,
     response_format: ChatResponseFormat,
 ) -> str | None:
-    if not content or not content.strip():
-        return "response content is empty"
-    try:
-        value = msgspec.json.decode(content.encode())
-    except msgspec.DecodeError as exc:
-        return f"invalid JSON: {exc}"
-
-    if response_format.type == "json_object" and not isinstance(value, dict):
-        return "top-level JSON value is not an object"
-    if response_format.type == "json_schema":
-        return _json_schema_validation_error(value, response_format)
-    return None
+    _, validation_error = _validated_response_format_content(content, response_format)
+    return validation_error
 
 
 def _json_schema_validation_error(

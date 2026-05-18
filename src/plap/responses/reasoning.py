@@ -71,8 +71,8 @@ class ReasoningSummaryPartSource:
 
 def _summary_max_tokens(mode: ReasoningSummary) -> int:
     if mode == "detailed":
-        return 512
-    return 384
+        return 768
+    return 512
 
 
 def _summary_part_request_text(

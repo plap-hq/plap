@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from plap.llms.tool_args import normalize_tool_arguments_text_or_original
+from plap.llms.json_utils import normalize_json_text_with_repair_or_original
 
 
 class ChatRole(StrEnum):
@@ -71,7 +71,7 @@ class ChatToolCall:
     arguments: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "arguments", normalize_tool_arguments_text_or_original(self.arguments))
+        object.__setattr__(self, "arguments", normalize_json_text_with_repair_or_original(self.arguments))
 
 
 @dataclass(frozen=True)

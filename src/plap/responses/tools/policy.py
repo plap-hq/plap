@@ -12,7 +12,7 @@ from cachetools import LRUCache
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.chat import ChatToolCall
-from plap.llms.tool_args import ToolArgumentsInvalidJSONError, ToolArgumentsNotObjectError, parse_tool_arguments_object
+from plap.llms.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
 
@@ -258,14 +258,14 @@ def signature_hash_hex(signature_hash: bytes) -> str:
 
 def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
     try:
-        return parse_tool_arguments_object(arguments)
-    except ToolArgumentsInvalidJSONError as exc:
+        return parse_json_object_with_repair(arguments)
+    except JSONInvalidError as exc:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_invalid_json",
             private_message="function call arguments must be valid JSON",
             cause=exc,
         ) from exc
-    except ToolArgumentsNotObjectError as exc:
+    except JSONNotObjectError as exc:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_not_object",
             private_message="function call arguments must be a JSON object",
