@@ -41,11 +41,16 @@ Call the `classify_tool_effect` tool exactly once.
 Return no plain-text answer. Put your explanation only in the `rationale` field.
 
 Definitions:
-- safe: read-only or exploratory; no file, client, repo, shell, or external mutation.
+- safe: intended for read-only, exploratory, or validation-only use. Incidental
+  local byproducts do not by themselves count as mutation. This includes automatic
+  local caches, bytecode, and transient validation artifacts created as a side
+  effect of checking, parsing, compiling, linting, or testing, such as
+  `__pycache__`, `.pyc`, `.pytest_cache`, `.mypy_cache`, linter caches, or
+  similar transient local metadata.
 - visible: changes visible user-facing state or agent control flow, but does not
   mutate files, repositories, clients, services, or external systems.
 - mutation: writes files, runs mutating commands, changes external state, or has
-  irreversible side effects.
+  irreversible side effects beyond incidental local byproducts.
 - contextual: can be safe or mutating depending on call arguments, such as shell,
   SQL, HTTP, or command execution tools. If the signature is too ambiguous or
   incomplete to decide safely from tool-level information alone, classify it as
@@ -83,12 +88,17 @@ Call the `classify_tool_call_effect` tool exactly once.
 Return no plain-text answer. Put your explanation only in the `rationale` field.
 
 Definitions:
-- safe: this specific call is read-only or exploratory and should not mutate files,
-  client state, repositories, shells, databases, services, or external systems.
+- safe: this specific call is read-only, exploratory, or validation-only.
+  Incidental local byproducts do not by themselves count as mutation. This
+  includes automatic local caches, bytecode, and transient validation artifacts
+  created as a side effect of checking, parsing, compiling, linting, or testing,
+  such as `__pycache__`, `.pyc`, `.pytest_cache`, `.mypy_cache`, linter caches,
+  or similar transient local metadata.
 - visible: this specific call changes visible user-facing state or agent control flow,
   but does not mutate files, repositories, clients, services, or external systems.
-- mutation: this specific call writes, deletes, runs mutating commands, sends data,
-  changes external state, or has irreversible side effects.
+- mutation: this specific call writes, deletes, runs mutating commands, sends
+  data, changes external state, or has irreversible side effects beyond
+  incidental local byproducts.
 - unknown: the concrete arguments are ambiguous, incomplete, malformed, or not enough
   to decide safely.
 """
