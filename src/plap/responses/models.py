@@ -18,7 +18,6 @@ from plap.responses.contracts import (
     ResponseUsageInputTokensDetails,
     ResponseUsageOutputTokensDetails,
 )
-from plap.responses.tokens import estimate_text_tokens
 from plap.settings import PublicUsageConfig
 
 _LEADING_INTERNAL_CITATION_RE = re.compile(r"^\s*(?:(?:\[~\d+(?:_\d+)?\])\s+)+")
@@ -32,13 +31,14 @@ def strip_leading_internal_citations(text: str | None) -> str | None:
 
 class Side(StrEnum):
     MAIN = "main"
+    DEFENDER = "defender"
     REVIEWER = "reviewer"
     ARBITRATOR = "arbitrator"
 
 
 class Actor(StrEnum):
     MAIN = "main"
-    MAIN_DEBATE = "main_debate"
+    DEFENDER = "defender"
     REVIEWER = "reviewer"
     ARBITRATOR = "arbitrator"
 
@@ -109,10 +109,6 @@ class StateMessage:
 
     def content_hash(self) -> str:
         return blake3.blake3(msgspec.json.encode(self.to_primitive(), order="deterministic")).hexdigest()
-
-    def estimated_token_count(self) -> int:
-        encoded = msgspec.json.encode(self.to_primitive(include_reasoning=False), order="deterministic").decode()
-        return estimate_text_tokens(encoded)
 
     def content_text(self) -> str | None:
         return self.content
@@ -398,50 +394,26 @@ class ChatMessageSpan:
     start: int
     end: int
     message: StateMessage
-    token_count: int
     content_hash: str = ""
-    children_token_count: int = 0
-    expanded_token_count: int = 0
     children: tuple[ChatMessageSpan, ...] = ()
-    children_pruned: bool = False
-    summary_fidelity: int | None = None
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end < 0:
             raise ValueError("message span bounds must be non-negative")
         if self.start > self.end:
             raise ValueError("message span start must not exceed end")
-        if self.token_count <= 0:
-            raise ValueError("message span token_count must be positive")
-        for field_name, value in (("children_token_count", self.children_token_count), ("expanded_token_count", self.expanded_token_count)):
-            if value < 0:
-                raise ValueError(f"message span {field_name} must be non-negative")
-        if self.summary_fidelity is not None and (
-            not isinstance(self.summary_fidelity, int) or isinstance(self.summary_fidelity, bool) or not 1 <= self.summary_fidelity <= 5
-        ):
-            raise ValueError("message span summary_fidelity must be between 1 and 5")
         if not self.content_hash:
             object.__setattr__(self, "content_hash", self.message.content_hash())
-        if self.children:
-            if not self.children_token_count:
-                object.__setattr__(self, "children_token_count", sum(child.token_count for child in self.children))
-            if not self.expanded_token_count:
-                object.__setattr__(self, "expanded_token_count", sum(child.expanded_token_count for child in self.children))
-        elif self.is_leaf and not self.expanded_token_count:
-            object.__setattr__(self, "expanded_token_count", self.token_count)
 
     @property
     def is_leaf(self) -> bool:
-        return not self.children and not self.children_pruned and self.summary_fidelity is None
+        return not self.children
 
     @property
     def citation(self) -> str:
         if self.start == self.end:
             return f"[~{self.start}]"
         return f"[~{self.start}_{self.end}]"
-
-    def citation_token_count(self) -> int:
-        return estimate_text_tokens(f"{self.citation}\n")
 
     def render_for_model(self, *, include_citation: bool) -> object:
         return self.message.to_chat_message(
@@ -456,10 +428,7 @@ class ChatMessageSpan:
             start=self.start,
             end=self.end,
             message=message,
-            token_count=message.estimated_token_count(),
             children=self.children,
-            children_pruned=self.children_pruned,
-            summary_fidelity=self.summary_fidelity,
         )
 
     def with_children(self, children: tuple[ChatMessageSpan, ...]) -> ChatMessageSpan:
@@ -469,11 +438,8 @@ class ChatMessageSpan:
             start=self.start,
             end=self.end,
             message=self.message,
-            token_count=self.token_count,
             content_hash=self.content_hash,
             children=children,
-            children_pruned=self.children_pruned,
-            summary_fidelity=self.summary_fidelity,
         )
 
     def collect_latest_tool_call_ids(self, latest_call_id_by_key: dict[tuple[str, str], str]) -> None:
@@ -554,20 +520,11 @@ class ChatMessageSpan:
             "start": self.start,
             "end": self.end,
             "message": self.message.to_primitive(),
-            "token_count": self.token_count,
         }
         if self.content_hash:
             value["content_hash"] = self.content_hash
-        if self.children_token_count:
-            value["children_token_count"] = self.children_token_count
-        if self.expanded_token_count:
-            value["expanded_token_count"] = self.expanded_token_count
         if self.children:
             value["children"] = [child.to_primitive() for child in self.children]
-        if self.children_pruned:
-            value["children_pruned"] = True
-        if self.summary_fidelity is not None:
-            value["summary_fidelity"] = self.summary_fidelity
         return value
 
     @classmethod
@@ -582,18 +539,12 @@ class ChatMessageSpan:
             children = tuple(cls.from_primitive(child) for child in children_value)
         message = StateMessage.from_primitive(value.get("message"))
         content_hash = value.get("content_hash")
-        summary_fidelity = value.get("summary_fidelity")
         return cls(
             start=_required_int(value, "start"),
             end=_required_int(value, "end"),
             message=message,
-            token_count=_required_positive_int(value, "token_count"),
             content_hash=content_hash if isinstance(content_hash, str) else "",
-            children_token_count=_optional_non_negative_int(value, "children_token_count"),
-            expanded_token_count=_optional_non_negative_int(value, "expanded_token_count"),
             children=children,
-            children_pruned=bool(value.get("children_pruned", False)),
-            summary_fidelity=summary_fidelity if isinstance(summary_fidelity, int) else None,
         )
 
 
@@ -639,7 +590,7 @@ class ReasoningPayload:
     side: Side
     temp: bool
     messages: tuple[StateMessage | ReasoningMessagePatch, ...]
-    continuation_side: Side | None = None
+    continuation_side: Side
 
     def to_primitive(self) -> dict[str, object]:
         return {
@@ -671,12 +622,12 @@ class ReasoningPayload:
             else:
                 messages.append(StateMessage.from_primitive(item))
         raw_continuation_side = value.get("continuation_side")
-        continuation_side = None
-        if raw_continuation_side is not None:
-            try:
-                continuation_side = Side(raw_continuation_side)
-            except ValueError as exc:
-                raise ValueError("reasoning continuation_side is invalid") from exc
+        if raw_continuation_side is None:
+            raise TypeError("reasoning continuation_side is required")
+        try:
+            continuation_side = Side(raw_continuation_side)
+        except ValueError as exc:
+            raise ValueError("reasoning continuation_side is invalid") from exc
         return cls(
             side=side,
             temp=temp,
@@ -697,18 +648,15 @@ class SealedCallID:
 @dataclass(frozen=True, slots=True)
 class IngestedQueues:
     main_context: tuple[ChatMessageSpan, ...]
-    main_context_temp: tuple[SideMessage, ...]
+    defender: tuple[SideMessage, ...]
     reviewer: tuple[SideMessage, ...]
     arbitrator: tuple[SideMessage, ...]
     continuation_side: Side
-    in_temp_debate: bool
-    compaction: CompactionPayload | None
     cursors: dict[str, int]
-    diagnostics: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
-class TempMainParts:
+class DefenderParts:
     held_candidate: SideMessage | None
     held_hidden_tool_rows: tuple[SideMessage, ...]
     remaining_temp_rows: tuple[SideMessage, ...]
@@ -733,7 +681,6 @@ def append_main_context_row(
         end=ordinal,
         message=message,
         content_hash=content_hash,
-        token_count=message.estimated_token_count(),
     )
     rows.append(row)
     return row
@@ -742,23 +689,21 @@ def append_main_context_row(
 @dataclass(slots=True)
 class MutableQueues:
     main_context: list[ChatMessageSpan]
-    main_context_temp: list[SideMessage]
+    defender: list[SideMessage]
     reviewer: list[SideMessage]
     arbitrator: list[SideMessage]
     cursors: dict[str, int]
     continuation_side: Side
-    in_temp_debate: bool
 
     @classmethod
     def from_ingested(cls, queues: IngestedQueues) -> MutableQueues:
         return cls(
             main_context=list(queues.main_context),
-            main_context_temp=list(queues.main_context_temp),
+            defender=list(queues.defender),
             reviewer=list(queues.reviewer),
             arbitrator=list(queues.arbitrator),
             cursors=dict(queues.cursors),
             continuation_side=queues.continuation_side,
-            in_temp_debate=queues.in_temp_debate,
         )
 
     def current_actor(self) -> Actor:
@@ -766,73 +711,54 @@ class MutableQueues:
             return Actor.REVIEWER
         if self.continuation_side == Side.ARBITRATOR:
             return Actor.ARBITRATOR
-        if self.in_temp_debate:
-            return Actor.MAIN_DEBATE
+        if self.continuation_side == Side.DEFENDER:
+            return Actor.DEFENDER
         return Actor.MAIN
 
-    def render_effective_main_context(self, *, include_citation: bool) -> tuple[LLMChatMessage, ...]:
-        messages = [row.render_for_model(include_citation=include_citation) for row in self.main_context]
-        messages.extend(entry.message.to_chat_message(untrusted=True) for entry in self.main_context_temp)
-        return tuple(messages)
-
-    def append_main_stable(self, message: StateMessage, *, content_hash: str = "") -> ChatMessageSpan:
+    def append_main(self, message: StateMessage, *, content_hash: str = "") -> ChatMessageSpan:
         return append_main_context_row(self.main_context, self.cursors, message, content_hash=content_hash)
-
-    def append_main_temp(self, message: StateMessage, *, content_hash: str = "") -> SideMessage:
-        row = SideMessage(message=message, content_hash=content_hash)
-        self.main_context_temp.append(row)
-        return row
 
     def append_side(self, side: Side, message: StateMessage, *, content_hash: str = "") -> SideMessage:
         side = Side(side)
         if side == Side.MAIN:
-            raise ValueError("append_side does not accept main; use append_main_stable or append_main_temp")
+            raise ValueError("append_side does not accept main; use append_main")
         row = SideMessage(message=message, content_hash=content_hash)
+        if side == Side.DEFENDER:
+            self.defender.append(row)
+            return row
         if side == Side.REVIEWER:
             self.reviewer.append(row)
         else:
             self.arbitrator.append(row)
         return row
 
-    def main_transcript(self, *, token_budget: int) -> tuple[ChatMessageSpan, ...]:
-        from plap.responses.ingest.render import render_main_transcript  # noqa: PLC0415
-
-        return render_main_transcript(tuple(self.main_context), token_budget=token_budget)
-
-    def compact_transcript(self, *, token_budget: int) -> tuple[TranscriptMessage, ...]:
-        from plap.responses.ingest.render import compact_transcript  # noqa: PLC0415
-
-        return compact_transcript(self.main_transcript(token_budget=token_budget))
-
-    def temp_main_parts(self) -> TempMainParts:
-        if not self.main_context_temp:
-            return TempMainParts(held_candidate=None, held_hidden_tool_rows=(), remaining_temp_rows=())
-        held_candidate = self.main_context_temp[0]
+    def defender_parts(self) -> DefenderParts:
+        if not self.defender:
+            return DefenderParts(held_candidate=None, held_hidden_tool_rows=(), remaining_temp_rows=())
+        held_candidate = self.defender[0]
         if not held_candidate.message.is_assistant():
-            return TempMainParts(
+            return DefenderParts(
                 held_candidate=None,
                 held_hidden_tool_rows=(),
-                remaining_temp_rows=tuple(self.main_context_temp),
+                remaining_temp_rows=tuple(self.defender),
             )
         hidden_end = 1
-        while hidden_end < len(self.main_context_temp) and self.main_context_temp[hidden_end].message.is_tool():
+        while hidden_end < len(self.defender) and self.defender[hidden_end].message.is_tool():
             hidden_end += 1
-        return TempMainParts(
+        return DefenderParts(
             held_candidate=held_candidate,
-            held_hidden_tool_rows=tuple(self.main_context_temp[1:hidden_end]),
-            remaining_temp_rows=tuple(self.main_context_temp[hidden_end:]),
+            held_hidden_tool_rows=tuple(self.defender[1:hidden_end]),
+            remaining_temp_rows=tuple(self.defender[hidden_end:]),
         )
 
-    def set_continuation(self, side: Side, *, in_temp_debate: bool) -> None:
+    def set_continuation(self, side: Side) -> None:
         self.continuation_side = side
-        self.in_temp_debate = in_temp_debate
 
     def clear_debate(self) -> None:
-        self.main_context_temp.clear()
+        self.defender.clear()
         self.reviewer.clear()
         self.arbitrator.clear()
         self.continuation_side = Side.MAIN
-        self.in_temp_debate = False
 
 
 def build_response_usage(

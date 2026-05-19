@@ -1,5 +1,5 @@
 from plap.responses.ingest.pipeline import ingest_response_request
-from plap.responses.ingest.render import compact_transcript, render_budgeted_spans, render_main_transcript
+from plap.responses.ingest.render import compact_transcript, truncate_transcript
 from plap.responses.ingest.sealing import (
     CALL_ID_CONTENT_HASH_PREFIX_BYTES,
     content_hash,
@@ -49,9 +49,8 @@ __all__ = [
     "open_call_id",
     "open_compaction_payload",
     "open_reasoning_payload",
-    "render_budgeted_spans",
-    "render_main_transcript",
     "seal_call_id",
     "seal_compaction_payload",
     "seal_reasoning_payload",
+    "truncate_transcript",
 ]

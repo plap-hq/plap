@@ -36,20 +36,20 @@ from plap.responses.ingest import (
     SealedCallID,
     compact_transcript,
     content_hash_prefix,
-    render_budgeted_spans,
     seal_call_id,
     seal_reasoning_payload,
+    truncate_transcript,
 )
 from plap.responses.io import ReasoningDraft, ResponseEventIO
 from plap.responses.models import (
     Actor,
     ChatMessageSpan,
+    DefenderParts,
     MutableQueues,
     ReasoningPayload,
     Side,
     StateMessage,
     StateToolCall,
-    TempMainParts,
     TranscriptMessage,
     UsageLedger,
 )
@@ -230,7 +230,7 @@ If you use `REOPEN`:
 - do not add labels such as "Review note:"
 """
 
-MAIN_DEBATE_DEVELOPER_PROMPT = f"""You are writing a response note about the current proposed next step.
+DEFENDER_DEVELOPER_PROMPT = f"""You are writing a response note about the current proposed next step.
 
 You will see:
 - the full conversation context
@@ -511,7 +511,7 @@ def parse_arbitrator_decision(message: StateMessage) -> ArbitratorDecision:
 
 
 def _compact_candidate(
-    parts: TempMainParts,
+    parts: DefenderParts,
 ) -> dict[str, object]:
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
@@ -539,13 +539,13 @@ def _compact_candidate(
     return value
 
 
-def _is_in_progress_tool_step(parts: TempMainParts) -> bool:
+def _is_in_progress_tool_step(parts: DefenderParts) -> bool:
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     return bool(parts.held_candidate.message.tool_calls)
 
 
-def _review_context_wrapper(parts: TempMainParts) -> ChatMessage:
+def _review_context_wrapper(parts: DefenderParts) -> ChatMessage:
     if _is_in_progress_tool_step(parts):
         return ChatMessage(
             role="user",
@@ -596,7 +596,7 @@ def _request_constraints_wrapper(request) -> ChatMessage | None:
 
 
 def _candidate_called_tool_definitions_message(
-    parts: TempMainParts,
+    parts: DefenderParts,
     *,
     normal_tools: Sequence[FunctionTool],
     debate_tool_policies: Mapping[str, ToolPolicy],
@@ -647,13 +647,11 @@ def _transcript_rows(
 
 
 def _measure_budgeted_transcript_tokens(
-    spans: tuple[ChatMessageSpan, ...],
+    transcript: tuple[TranscriptMessage, ...],
     *,
     actor_config: RuntimeActorConfig,
-    main_developer_message: StateMessage,
 ) -> int:
     try:
-        transcript = _transcript_rows(spans, main_developer_message=main_developer_message)
         return measure_prompt_tokens([_transcript_wrapper(transcript)], actor_config=actor_config)
     except Exception as exc:
         raise _debate_unavailable_error(
@@ -663,29 +661,17 @@ def _measure_budgeted_transcript_tokens(
         ) from exc
 
 
-def _budgeted_transcript_message(
+def _truncated_transcript_message(
     spans: Sequence[ChatMessageSpan],
     *,
     actor_config: RuntimeActorConfig,
     main_developer_message: StateMessage,
-    recount_margin: int,
-    token_budget: int,
+    max_tokens: int,
 ) -> ChatMessage:
-    measure = None
-    if actor_config.tokenizer_hf_repo is not None:
-        measure = lambda rendered: _measure_budgeted_transcript_tokens(
-            rendered,
-            actor_config=actor_config,
-            main_developer_message=main_developer_message,
-        )
-    transcript = _transcript_rows(
-        render_budgeted_spans(
-            tuple(spans),
-            measure=measure,
-            recount_margin=recount_margin,
-            token_budget=token_budget,
-        ),
-        main_developer_message=main_developer_message,
+    transcript = truncate_transcript(
+        _transcript_rows(tuple(spans), main_developer_message=main_developer_message),
+        measure=lambda candidate: _measure_budgeted_transcript_tokens(candidate, actor_config=actor_config),
+        max_tokens=max_tokens,
     )
     return _transcript_wrapper(transcript)
 
@@ -693,7 +679,7 @@ def _budgeted_transcript_message(
 def _reviewer_header_messages(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
@@ -703,12 +689,11 @@ def _reviewer_header_messages(
 ) -> list[ChatMessage]:
     header_messages: list[ChatMessage] = [
         ChatMessage(role="developer", content=REVIEWER_DEVELOPER_PROMPT),
-        _budgeted_transcript_message(
+        _truncated_transcript_message(
             state.main_context,
             actor_config=profile.reviewer,
             main_developer_message=main_developer_message,
-            recount_margin=profile.transcript_recount_margin,
-            token_budget=profile.reviewer_transcript_token_budget,
+            max_tokens=profile.reviewer_max_transcript_tokens,
         ),
     ]
     request_constraints = _request_constraints_wrapper(request)
@@ -726,17 +711,17 @@ def _reviewer_header_messages(
     return header_messages
 
 
-def _main_debate_header_messages(
+def _defender_header_messages(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     request,
     normal_tools: Sequence[FunctionTool],
     tool_policies: Mapping[str, ToolPolicy],
 ) -> list[ChatMessage]:
     header_messages: list[ChatMessage] = [
-        ChatMessage(role="developer", content=MAIN_DEBATE_DEVELOPER_PROMPT),
-        *state.render_effective_main_context(include_citation=False),
+        ChatMessage(role="developer", content=DEFENDER_DEVELOPER_PROMPT),
+        *_defender_context_messages(state),
     ]
     request_constraints = _request_constraints_wrapper(request)
     if request_constraints is not None:
@@ -755,7 +740,7 @@ def _main_debate_header_messages(
 def _arbitrator_header_messages(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
@@ -765,12 +750,11 @@ def _arbitrator_header_messages(
 ) -> list[ChatMessage]:
     header_messages: list[ChatMessage] = [
         ChatMessage(role="developer", content=ARBITRATOR_DEVELOPER_PROMPT),
-        _budgeted_transcript_message(
+        _truncated_transcript_message(
             state.main_context,
             actor_config=profile.arbitrator,
             main_developer_message=main_developer_message,
-            recount_margin=profile.transcript_recount_margin,
-            token_budget=profile.arbitrator_transcript_token_budget,
+            max_tokens=profile.arbitrator_max_transcript_tokens,
         ),
     ]
     request_constraints = _request_constraints_wrapper(request)
@@ -789,7 +773,7 @@ def _arbitrator_header_messages(
 
 
 def _reviewer_initial_turn(
-    parts: TempMainParts,
+    parts: DefenderParts,
 ) -> StateMessage:
     return StateMessage(
         role="user",
@@ -816,7 +800,7 @@ def _reviewer_reopen_turn(
     return StateMessage(role="user", content="\n\n".join(content_parts))
 
 
-def _main_debate_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
+def _defender_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
@@ -829,7 +813,7 @@ def _main_debate_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
 
 def _arbitrator_initial_turn(
     *,
-    parts: TempMainParts,
+    parts: DefenderParts,
     reviewer_decision: ReviewerDecision,
     latest_response_note: StateMessage,
 ) -> StateMessage:
@@ -875,6 +859,12 @@ def _thread_waiting_after_tool_output(thread: Sequence[StateMessage]) -> bool:
 
 def _thread_messages(rows: Sequence) -> list[StateMessage]:
     return [row.message for row in rows]
+
+
+def _defender_context_messages(state: MutableQueues) -> list[ChatMessage]:
+    messages = [row.render_for_model(include_citation=False) for row in state.main_context]
+    messages.extend(entry.message.to_chat_message(untrusted=True) for entry in state.defender)
+    return messages
 
 
 def _latest_assistant(messages: Sequence[StateMessage]) -> StateMessage | None:
@@ -1220,7 +1210,7 @@ async def _run_decision_actor_turn(
 async def run_reviewer_turn(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
@@ -1279,10 +1269,10 @@ async def run_reviewer_turn(
     )
 
 
-async def run_main_debate_turn(
+async def run_defender_turn(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     profile: RuntimeModelProfileConfig,
     request,
     normal_tools: Sequence[FunctionTool],
@@ -1295,7 +1285,7 @@ async def run_main_debate_turn(
     usage_ledger: UsageLedger,
 ) -> ActorFinished | ActorAwaitingClientTool | None:
     thread = [row.message for row in parts.remaining_temp_rows]
-    header_messages = _main_debate_header_messages(
+    header_messages = _defender_header_messages(
         state=state,
         parts=parts,
         request=request,
@@ -1308,12 +1298,12 @@ async def run_main_debate_turn(
         reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
         if reviewer_decision is None:
             raise _debate_internal_error(
-                reason="main_debate_missing_reviewer_decision", private_message="main debate is missing reviewer decision"
+                reason="defender_missing_reviewer_decision", private_message="defender is missing reviewer decision"
             )
-        turn_messages = [_main_debate_turn(reviewer_decision=reviewer_decision)]
+        turn_messages = [_defender_turn(reviewer_decision=reviewer_decision)]
     return await _execute_actor_turn(
-        actor_name=Actor.MAIN_DEBATE.value,
-        actor_config=profile.main_debate,
+        actor_name=Actor.DEFENDER.value,
+        actor_config=profile.defender,
         request=request,
         header_messages=header_messages,
         turn_messages=turn_messages,
@@ -1331,7 +1321,7 @@ async def run_main_debate_turn(
 async def run_arbitrator_turn(
     *,
     state: MutableQueues,
-    parts: TempMainParts,
+    parts: DefenderParts,
     main_developer_message: StateMessage,
     profile: RuntimeModelProfileConfig,
     request,
@@ -1430,7 +1420,7 @@ async def start_debate_from_candidate(
     if draft is None:
         await _persist_temp_turn(
             state=state,
-            side=Side.MAIN,
+            side=Side.DEFENDER,
             messages=messages,
             continuation_side=Side.REVIEWER,
             out=out,
@@ -1440,7 +1430,7 @@ async def start_debate_from_candidate(
         return
 
     payload = ReasoningPayload(
-        side=Side.MAIN,
+        side=Side.DEFENDER,
         temp=True,
         continuation_side=Side.REVIEWER,
         messages=tuple(messages),
@@ -1456,8 +1446,8 @@ async def start_debate_from_candidate(
         ),
     )
     for message in messages:
-        state.append_main_temp(message)
-    state.set_continuation(Side.REVIEWER, in_temp_debate=True)
+        state.append_side(Side.DEFENDER, message)
+    state.set_continuation(Side.REVIEWER)
 
 
 async def publish_accepted_candidate(
@@ -1469,7 +1459,7 @@ async def publish_accepted_candidate(
     tool_policies: Mapping[str, ToolPolicy],
     server_executors: Mapping[str, IServerToolExecutor],
 ) -> DebateResult:
-    parts = state.temp_main_parts()
+    parts = state.defender_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
     candidate = parts.held_candidate.message
@@ -1511,7 +1501,7 @@ async def publish_accepted_candidate(
         reasoning_summary=_debug_reasoning_summary(enabled=debug_debate_summaries, texts=_single_text(candidate.content)),
     )
 
-    state.append_main_stable(candidate.without_reasoning(), content_hash=published.assistant_hash)
+    state.append_main(candidate, content_hash=published.assistant_hash)
 
     for call in candidate.tool_calls:
         output = hidden_outputs.get(call.id)
@@ -1519,7 +1509,7 @@ async def publish_accepted_candidate(
             output = emitted_outputs.get(call.id)
         if output is None or output == DEBATE_HELD_TOOL_PLACEHOLDER:
             continue
-        state.append_main_stable(StateMessage(role="tool", tool_call_id=call.id, content=output))
+        state.append_main(StateMessage(role="tool", tool_call_id=call.id, content=output))
 
     state.clear_debate()
     if candidate.tool_calls and not has_client_handoff:
@@ -1548,7 +1538,7 @@ async def resume_main_with_revise_bundle(
     keyring: SealingKeyring,
     note: str,
 ) -> None:
-    parts = state.temp_main_parts()
+    parts = state.defender_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="revise_requires_held_candidate", private_message="revise requires held candidate state")
 
@@ -1573,10 +1563,10 @@ async def resume_main_with_revise_bundle(
             type="reasoning",
         )
     )
-    state.append_main_stable(parts.held_candidate.message, content_hash=parts.held_candidate.content_hash)
+    state.append_main(parts.held_candidate.message, content_hash=parts.held_candidate.content_hash)
     for row in parts.held_hidden_tool_rows:
-        state.append_main_stable(row.message, content_hash=row.content_hash)
-    state.append_main_stable(note_message)
+        state.append_main(row.message, content_hash=row.content_hash)
+    state.append_main(note_message)
     state.clear_debate()
 
 
@@ -1603,7 +1593,7 @@ async def continue_debate(
         tool_policies,
         server_executors,
     )
-    parts = state.temp_main_parts()
+    parts = state.defender_parts()
     if parts.held_candidate is None:
         raise _debate_internal_error(reason="held_candidate_missing", private_message="debate temp state is missing held candidate")
 
@@ -1675,7 +1665,7 @@ async def continue_debate(
                 state=state,
                 side=Side.REVIEWER,
                 messages=outcome.messages,
-                continuation_side=Side.MAIN,
+                continuation_side=Side.DEFENDER,
                 out=out,
                 debug_debate_summaries=debug_debate_summaries,
                 keyring=keyring,
@@ -1701,11 +1691,11 @@ async def continue_debate(
                 return DebateResult.COMPLETED
 
             usage_ledger.record_hidden(profile.reviewer.public_usage, outcome.usage)
-            parts = state.temp_main_parts()
+            parts = state.defender_parts()
             continue
 
-        if actor == Actor.MAIN_DEBATE:
-            outcome = await run_main_debate_turn(
+        if actor == Actor.DEFENDER:
+            outcome = await run_defender_turn(
                 state=state,
                 parts=parts,
                 profile=profile,
@@ -1728,15 +1718,15 @@ async def continue_debate(
                 usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
                     state=state,
-                    side=Side.MAIN,
+                    side=Side.DEFENDER,
                     messages=outcome.messages,
-                    continuation_side=Side.MAIN,
+                    continuation_side=Side.DEFENDER,
                     out=out,
                     debug_debate_summaries=debug_debate_summaries,
                     keyring=keyring,
                 )
                 await _emit_debate_function_calls(
-                    side=Side.MAIN,
+                    side=Side.DEFENDER,
                     assistant=outcome.assistant,
                     tool_calls=outcome.tool_calls,
                     out=out,
@@ -1745,17 +1735,17 @@ async def continue_debate(
                 await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
 
-            usage_ledger.record_hidden(profile.main_debate.public_usage, outcome.usage)
+            usage_ledger.record_hidden(profile.defender.public_usage, outcome.usage)
             await _persist_temp_turn(
                 state=state,
-                side=Side.MAIN,
+                side=Side.DEFENDER,
                 messages=outcome.messages,
                 continuation_side=Side.ARBITRATOR,
                 out=out,
                 debug_debate_summaries=debug_debate_summaries,
                 keyring=keyring,
             )
-            parts = state.temp_main_parts()
+            parts = state.defender_parts()
             continue
 
         if actor == Actor.ARBITRATOR:
@@ -1807,7 +1797,7 @@ async def continue_debate(
                     action=ArbitratorActionType.REVISE,
                     note=decision.note,
                 )
-            continuation = Side.REVIEWER if decision.action == ArbitratorActionType.REOPEN else Side.MAIN
+            continuation = Side.REVIEWER if decision.action == ArbitratorActionType.REOPEN else Side.DEFENDER
             await _persist_temp_turn(
                 state=state,
                 side=Side.ARBITRATOR,
@@ -1848,7 +1838,7 @@ async def continue_debate(
                 )
                 return DebateResult.CONTINUE_MAIN
 
-            parts = state.temp_main_parts()
+            parts = state.defender_parts()
             continue
 
         raise _debate_internal_error(reason="debate_actor_resolution_invalid", private_message="debate actor resolution is invalid")
@@ -1880,12 +1870,13 @@ async def _persist_temp_turn(
         )
     )
     if side == Side.MAIN:
-        for message in messages:
-            state.append_main_temp(message)
-    else:
-        for message in messages:
-            state.append_side(side, message)
-    state.set_continuation(continuation_side, in_temp_debate=True)
+        raise _debate_internal_error(
+            reason="persist_temp_turn_main_side_unsupported",
+            private_message="persisting temp debate turns on main is no longer supported",
+        )
+    for message in messages:
+        state.append_side(side, message)
+    state.set_continuation(continuation_side)
 async def _emit_debate_function_calls(
     *,
     side: Side,

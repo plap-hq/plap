@@ -51,7 +51,7 @@ from plap.responses.contracts import (
     SummaryTextContent,
 )
 from plap.responses.ingest.sealing import content_hash_prefix, seal_call_id, seal_reasoning_payload
-from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, SealedCallID, StateMessage
+from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, SealedCallID, Side, StateMessage
 from plap.responses.projection import ResponseProjection
 from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.store import PreparedRequest, ResponseStore
@@ -150,6 +150,7 @@ def _stable_reasoning_payload(
         return ReasoningPayload(
             side="main",
             temp=False,
+            continuation_side=Side.MAIN,
             messages=(
                 ReasoningMessagePatch(
                     content_hash=anchor_hash,
@@ -158,7 +159,7 @@ def _stable_reasoning_payload(
                 ),
             ),
         )
-    return ReasoningPayload(side="main", temp=False, messages=(candidate,))
+    return ReasoningPayload(side="main", temp=False, continuation_side=Side.MAIN, messages=(candidate,))
 
 
 @dataclass(slots=True)

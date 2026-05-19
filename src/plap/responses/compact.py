@@ -146,14 +146,6 @@ Summaries:
   verbatim when practical.
 - If a range contains an earlier summary, carry forward its important
   substance instead of merely mentioning that it existed.
-- Set `summary_fidelity` like this:
-- 5 = reliable working replacement where expansion is unlikely to change
-  future work except for exact wording or minor detail.
-- 4 = solid summary that preserves the main reusable information but may need
-  expansion if exactness matters.
-- 3 = usable gist with useful details missing.
-- 2 = lossy orientation.
-- 1 = minimal breadcrumb that should be expanded before relying on it substantively.
 
 Pruning:
 - `prune_before.duplicate_tool_calls` removes repeated tool history strictly
@@ -167,168 +159,94 @@ Pruning:
   messages strictly before a visible citation.
 
 Actions:
-- Use `action="apply"` whenever you can safely make the visible context smaller.
+- Always compact the visible context when it is safe to do so.
 - `ranges` may be empty when pruning alone is useful.
-- Use `action="bailout"` only when the run explicitly allows bailout and
-  another normal step should happen first or compaction would currently be
-  unsafe.
-- When using `action="bailout"`, set `bailout_reason` to a short reason."""
-SOFT_COMPACTION_PROMPT_SUFFIX = (
-    'This run allows `action="bailout"` if another normal step should happen first or compaction would currently be unsafe.'
-)
-HARD_COMPACTION_PROMPT_SUFFIX = (
-    'This run does not allow `action="bailout"`. You must use `action="apply"` and include the `ranges` field. '
-    'Use `ranges=[]` only when pruning alone makes the context smaller.'
-)
 
-
-class CompactionLevel(StrEnum):
-    NONE = "none"
-    SOFT = "soft"
-    HARD = "hard"
+Use the `ranges` field. `ranges=[]` is allowed only when pruning alone makes
+the context smaller."""
 
 
 class CompactionOutcome(StrEnum):
     NOT_NEEDED = "not_needed"
-    SOFT_BAILOUT = "soft_bailout"
     APPLIED = "applied"
     INCOMPLETE = "incomplete"
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionSettings:
-    soft_compact_threshold: int | None
     compact_threshold: int | None
     compact_max_rounds: int
 
 
-def compaction_level_for_token_count(token_count: int, *, settings: CompactionSettings) -> CompactionLevel:
-    if settings.compact_threshold is not None and token_count >= settings.compact_threshold:
-        return CompactionLevel.HARD
-    if settings.soft_compact_threshold is not None and token_count >= settings.soft_compact_threshold:
-        return CompactionLevel.SOFT
-    return CompactionLevel.NONE
-
-
-def _compact_action_schema(level: CompactionLevel) -> dict[str, object]:
-    if level == CompactionLevel.HARD:
-        return {
-            "type": "string",
-            "enum": ["apply"],
-            "description": "Always apply hard compaction.",
-        }
-    return {
-        "type": "string",
-        "enum": ["apply", "bailout"],
-        "description": "apply to compact the visible context, or bailout only when the run explicitly allows it.",
-    }
-
-
-def _compact_prune_before_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "description": (
-            "Optional pruning cutoffs. Set duplicate_tool_calls whenever repeated tool outputs before a "
-            "citation no longer need to be preserved exactly. Use reasoning to strip attached internal "
-            "reasoning traces from messages strictly before a citation."
+def compact_tool() -> FunctionTool:
+    return FunctionTool(
+        description=(
+            "Make the visible cited conversation context smaller by replacing ranges and optionally "
+            "pruning old duplicate tool calls or message reasoning."
         ),
-        "properties": {
-            "duplicate_tool_calls": {
-                "type": "string",
-                "description": (
-                    "Visible citation cutoff. Deduplicate identical tool calls strictly before this citation. "
-                    "Set this unless repeated tool history itself matters, such as investigating retries, "
-                    "timing, or nondeterminism."
-                ),
-            },
-            "reasoning": {
-                "type": "string",
-                "description": (
-                    "Visible citation cutoff. Remove attached internal reasoning traces from messages "
-                    "strictly before this citation."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    }
-
-
-def _compact_ranges_schema() -> dict[str, object]:
-    return {
-        "type": "array",
-        "description": (
-            "Inclusive, non-overlapping visible citation ranges to replace. The start and end values "
-            "must be citations exactly as shown in the conversation context, such as [~0] or [~0_7]. "
-            "Use an empty array when pruning alone is useful."
-        ),
-        "items": {
+        name=COMPACT_TOOL_NAME,
+        parameters={
             "type": "object",
             "properties": {
-                "start": {
-                    "type": "string",
-                    "description": "Citation of the first visible segment, for example [~0].",
+                "prune_before": {
+                    "type": "object",
+                    "description": (
+                        "Optional pruning cutoffs. Set duplicate_tool_calls whenever repeated tool outputs before a "
+                        "citation no longer need to be preserved exactly. Use reasoning to strip attached internal "
+                        "reasoning traces from messages strictly before a citation."
+                    ),
+                    "properties": {
+                        "duplicate_tool_calls": {
+                            "type": "string",
+                            "description": (
+                                "Visible citation cutoff. Deduplicate identical tool calls strictly before this citation. "
+                                "Set this unless repeated tool history itself matters, such as investigating retries, "
+                                "timing, or nondeterminism."
+                            ),
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": (
+                                "Visible citation cutoff. Remove attached internal reasoning traces from messages "
+                                "strictly before this citation."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
                 },
-                "end": {
-                    "type": "string",
-                    "description": "Citation of the last visible segment, for example [~3].",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Replacement summary for the selected range. Do not include citation markers or meta-commentary.",
-                },
-                "summary_fidelity": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5,
-                    "description": "Anchored 1-5 fidelity score for how well the summary can stand in for the selected range.",
+                "ranges": {
+                    "type": "array",
+                    "description": (
+                        "Inclusive, non-overlapping visible citation ranges to replace. The start and end values "
+                        "must be citations exactly as shown in the conversation context, such as [~0] or [~0_7]. "
+                        "Use an empty array when pruning alone is useful."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {
+                                "type": "string",
+                                "description": "Citation of the first visible segment, for example [~0].",
+                            },
+                            "end": {
+                                "type": "string",
+                                "description": "Citation of the last visible segment, for example [~3].",
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": (
+                                    "Replacement summary for the selected range. Do not include citation markers or meta-commentary."
+                                ),
+                            },
+                        },
+                        "required": ["start", "end", "summary"],
+                        "additionalProperties": False,
+                    },
                 },
             },
-            "required": ["start", "end", "summary", "summary_fidelity"],
+            "required": ["ranges"],
             "additionalProperties": False,
         },
-    }
-
-
-def _compact_parameters(level: CompactionLevel) -> dict[str, object]:
-    properties: dict[str, object] = {
-        "action": _compact_action_schema(level),
-        "prune_before": _compact_prune_before_schema(),
-        "ranges": _compact_ranges_schema(),
-    }
-    required = ["action"]
-    if level == CompactionLevel.SOFT:
-        properties["bailout_reason"] = {
-            "type": "string",
-            "description": "Short reason for an explicit bailout.",
-        }
-    else:
-        required.append("ranges")
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
-
-
-def _compact_tool_description(level: CompactionLevel) -> str:
-    if level == CompactionLevel.HARD:
-        return (
-            "Make the visible cited conversation context smaller. Use action=apply to replace ranges and optionally "
-            "prune old duplicate tool calls or message reasoning. Bailout is not available in this hard compaction run."
-        )
-    return (
-        "Make the visible cited conversation context smaller. Use action=apply to "
-        "replace ranges and optionally prune old duplicate tool calls or message reasoning. "
-        "Use action=bailout only when explicitly allowed and compaction should not happen yet."
-    )
-
-
-def compact_tool(level: CompactionLevel) -> FunctionTool:
-    return FunctionTool(
-        description=_compact_tool_description(level),
-        name=COMPACT_TOOL_NAME,
-        parameters=_compact_parameters(level),
         strict=True,
         type="function",
     )
@@ -397,7 +315,6 @@ def resolve_compaction_settings(
     profile: RuntimeModelProfileConfig,
     request: ResponseCreateRequest,
 ) -> CompactionSettings:
-    soft_compact_threshold = profile.soft_compact_threshold
     compact_threshold = profile.compact_threshold
     compact_max_rounds = profile.compact_max_rounds
 
@@ -411,24 +328,12 @@ def resolve_compaction_settings(
                 param="context_management",
             )
         override = request.context_management[0]
-        if override.soft_compact_threshold is not None:
-            soft_compact_threshold = override.soft_compact_threshold
         if override.compact_threshold is not None:
             compact_threshold = override.compact_threshold
         if override.compact_max_rounds is not None:
             compact_max_rounds = override.compact_max_rounds
 
-    if soft_compact_threshold is not None and compact_threshold is not None and compact_threshold <= soft_compact_threshold:
-        raise _compaction_invalid_request_error(
-            code="invalid_context_management",
-            message="Compaction threshold must exceed soft compaction threshold.",
-            reason="invalid_compaction_threshold_order",
-            private_message="compact_threshold must exceed soft_compact_threshold",
-            param="context_management",
-        )
-
     return CompactionSettings(
-        soft_compact_threshold=soft_compact_threshold,
         compact_threshold=compact_threshold,
         compact_max_rounds=compact_max_rounds,
     )
@@ -437,21 +342,14 @@ def resolve_compaction_settings(
 def build_compaction_request(
     *,
     actor_config: RuntimeActorConfig,
-    level: CompactionLevel,
     request: ResponseCreateRequest,
     main_context: Sequence[ChatMessageSpan],
     prompt_cache_key_base: str | None,
     max_completion_tokens: int | None,
 ) -> ChatCompletionRequest:
-    developer_prompt = COMPACTOR_DEVELOPER_PROMPT
-    if level == CompactionLevel.SOFT:
-        developer_prompt = f"{developer_prompt}\n\n{SOFT_COMPACTION_PROMPT_SUFFIX}"
-    else:
-        developer_prompt = f"{developer_prompt}\n\n{HARD_COMPACTION_PROMPT_SUFFIX}"
-
-    messages = [ChatMessage(role="developer", content=developer_prompt)]
+    messages = [ChatMessage(role="developer", content=COMPACTOR_DEVELOPER_PROMPT)]
     messages.extend(row.render_for_model(include_citation=True) for row in main_context)
-    tool = compact_tool(level)
+    tool = compact_tool()
 
     return ChatCompletionRequest(
         model=actor_config.model,
@@ -647,11 +545,10 @@ def apply_compaction_call(
     arguments: str,
     *,
     actor_config: RuntimeActorConfig,
-    allow_bailout: bool,
     tools: Sequence[ChatTool] = (),
     response_format: ChatResponseFormat | None = None,
     reasoning_effort: ReasoningEffort | None = None,
-) -> tuple[CompactionOutcome, list[ChatMessageSpan]]:
+) -> list[ChatMessageSpan]:
     try:
         payload = parse_json_object_with_repair(arguments)
     except JSONInvalidError as exc:
@@ -666,27 +563,6 @@ def apply_compaction_call(
             private_message="compact arguments must be an object",
             cause=exc,
         ) from exc
-
-    action = payload.get("action")
-    if action == "bailout":
-        bailout_reason = payload.get("bailout_reason")
-        if not isinstance(bailout_reason, str) or not bailout_reason.strip():
-            raise _compaction_unavailable_error(
-                reason="compact_bailout_reason_missing",
-                private_message="compact bailout_reason is required",
-            )
-        if not allow_bailout:
-            raise _compaction_unavailable_error(
-                reason="compact_bailout_disallowed",
-                private_message="compact bailout is not allowed at the hard threshold",
-            )
-        return CompactionOutcome.SOFT_BAILOUT, list(main_context)
-
-    if action != "apply":
-        raise _compaction_unavailable_error(
-            reason="compact_action_invalid",
-            private_message="compact action must be apply or bailout",
-        )
 
     prune_before = payload.get("prune_before")
     if prune_before is not None and not isinstance(prune_before, dict):
@@ -730,7 +606,7 @@ def apply_compaction_call(
     if not isinstance(ranges, list):
         raise _compaction_unavailable_error(
             reason="compact_ranges_missing",
-            private_message="compact ranges are required for action=apply",
+            private_message="compact ranges are required",
         )
 
     segments = _visible_segments(main_context)
@@ -753,7 +629,7 @@ def apply_compaction_call(
             private_message="compact prune_before.reasoning citation is not visible",
         ).start
 
-    resolved_ranges: list[tuple[_VisibleSegment, _VisibleSegment, str, int]] = []
+    resolved_ranges: list[tuple[_VisibleSegment, _VisibleSegment, str]] = []
     for item in ranges:
         if not isinstance(item, dict):
             raise _compaction_unavailable_error(
@@ -764,7 +640,6 @@ def apply_compaction_call(
         start = item.get("start")
         end = item.get("end")
         summary = item.get("summary")
-        summary_fidelity = item.get("summary_fidelity")
         if not isinstance(start, str) or not isinstance(end, str):
             raise _compaction_unavailable_error(
                 reason="compact_range_citations_missing",
@@ -776,23 +651,17 @@ def apply_compaction_call(
                 reason="compact_range_summary_missing",
                 private_message="compact range summary is required",
             )
-        if not isinstance(summary_fidelity, int) or isinstance(summary_fidelity, bool) or not 1 <= summary_fidelity <= 5:
-            raise _compaction_unavailable_error(
-                reason="compact_range_summary_fidelity_invalid",
-                private_message="compact range summary_fidelity must be an integer from 1 to 5",
-            )
-
         start_segment, end_segment = _resolve_compaction_range(start, end, segments_by_citation)
         if start_segment.first_row_index > end_segment.first_row_index:
             raise _compaction_unavailable_error(
                 reason="compact_range_start_after_end",
                 private_message="compact range start must not follow end",
             )
-        resolved_ranges.append((start_segment, end_segment, summary_text.strip(), summary_fidelity))
+        resolved_ranges.append((start_segment, end_segment, summary_text.strip()))
 
     resolved_ranges.sort(key=lambda item: (item[0].first_row_index, item[1].stop_row_index))
     previous_stop_row_index = 0
-    for start_segment, end_segment, _, _ in resolved_ranges:
+    for start_segment, end_segment, _ in resolved_ranges:
         if start_segment.first_row_index < previous_stop_row_index:
             raise _compaction_unavailable_error(
                 reason="compact_ranges_overlap",
@@ -809,27 +678,9 @@ def apply_compaction_call(
         reasoning_effort=reasoning_effort,
     )
     cursor = 0
-    for start_segment, end_segment, summary, summary_fidelity in resolved_ranges:
+    for start_segment, end_segment, summary in resolved_ranges:
         selected = tuple(main_context[start_segment.first_row_index : end_segment.stop_row_index])
         summary_message = StateMessage(role="assistant", content=summary)
-        summary_token_count = summary_message.estimated_token_count()
-        exact_selected_token_count = _context_prompt_token_count(
-            selected,
-            actor_config=actor_config,
-            tools=tools,
-            response_format=response_format,
-            reasoning_effort=reasoning_effort,
-        )
-        exact_summary_token_count = _measure_compaction_messages(
-            [summary_message.to_chat_message(untrusted=True)],
-            actor_config=actor_config,
-            tools=tools,
-            response_format=response_format,
-            reasoning_effort=reasoning_effort,
-        )
-        if exact_summary_token_count >= exact_selected_token_count:
-            continue
-
         compacted.extend(main_context[cursor : start_segment.first_row_index])
 
         compacted.append(
@@ -837,9 +688,7 @@ def apply_compaction_call(
                 start=selected[0].start,
                 end=selected[-1].end,
                 message=summary_message,
-                token_count=summary_token_count,
                 children=selected,
-                summary_fidelity=summary_fidelity,
             )
         )
         cursor = end_segment.stop_row_index
@@ -868,7 +717,7 @@ def apply_compaction_call(
             private_message="compact apply must reduce prompt token count",
         )
 
-    return CompactionOutcome.APPLIED, compacted
+    return compacted
 
 
 async def run_explicit_compaction(
@@ -888,7 +737,6 @@ async def run_explicit_compaction(
         attempts += 1
         model_request = build_compaction_request(
             actor_config=profile.compactor,
-            level=CompactionLevel.HARD,
             request=request,
             main_context=state.main_context,
             prompt_cache_key_base=prompt_cache_key_base,
@@ -905,11 +753,10 @@ async def run_explicit_compaction(
         log_payload(logger, "response.compaction.result.payload", result=result)
 
         try:
-            _, state.main_context = apply_compaction_call(
+            state.main_context = apply_compaction_call(
                 state.main_context,
                 _compaction_arguments(result),
                 actor_config=profile.main,
-                allow_bailout=False,
             )
         except PlapError as exc:
             if not exc.private.reason.startswith("compact_") or attempts >= COMPACT_VALIDATION_MAX_ATTEMPTS:
@@ -980,14 +827,11 @@ class Compactor:
 
     async def compact(
         self,
-        level: CompactionLevel,
         *,
         tools: Sequence[ChatTool],
         response_format: ChatResponseFormat | None,
         reasoning_effort: ReasoningEffort | None,
     ) -> CompactionOutcome:
-        if level == CompactionLevel.NONE:
-            return CompactionOutcome.NOT_NEEDED
         if self._rounds_used >= self._settings.compact_max_rounds:
             return CompactionOutcome.NOT_NEEDED
 
@@ -1005,7 +849,6 @@ class Compactor:
             attempts += 1
             model_request = build_compaction_request(
                 actor_config=self._profile.compactor,
-                level=level,
                 request=self._request,
                 main_context=self._state.main_context,
                 prompt_cache_key_base=self._prompt_cache_key_base,
@@ -1023,11 +866,10 @@ class Compactor:
             log_payload(logger, "response.compaction.result.payload", result=result)
 
             try:
-                outcome, compacted = apply_compaction_call(
+                compacted = apply_compaction_call(
                     self._state.main_context,
                     _compaction_arguments(result),
                     actor_config=self._profile.main,
-                    allow_bailout=level == CompactionLevel.SOFT,
                     tools=tools,
                     response_format=response_format,
                     reasoning_effort=reasoning_effort,
@@ -1035,8 +877,6 @@ class Compactor:
             except PlapError as exc:
                 if not exc.private.reason.startswith("compact_"):
                     raise
-                if level == CompactionLevel.SOFT:
-                    return CompactionOutcome.SOFT_BAILOUT
                 if attempts >= COMPACT_VALIDATION_MAX_ATTEMPTS:
                     raise
                 log_debug(
@@ -1047,9 +887,6 @@ class Compactor:
                     reason=exc.private.reason,
                 )
                 continue
-
-            if outcome == CompactionOutcome.SOFT_BAILOUT:
-                return CompactionOutcome.SOFT_BAILOUT
 
             self._state.main_context = compacted
             await self._out.output(

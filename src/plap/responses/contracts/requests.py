@@ -89,15 +89,10 @@ class StreamOptions(StrictModel):
 
 
 class ContextManagementCompaction(StrictModel):
-    soft_compact_threshold: int | None = Field(
-        default=None,
-        ge=0,
-        description="Soft token threshold at which dedicated context compaction should be attempted.",
-    )
     compact_threshold: int | None = Field(
         default=None,
         ge=0,
-        description="Hard token threshold at which dedicated context compaction should be attempted.",
+        description="Token threshold at which dedicated context compaction should be attempted.",
     )
     compact_max_rounds: int | None = Field(
         default=None,
@@ -108,14 +103,8 @@ class ContextManagementCompaction(StrictModel):
 
     @model_validator(mode="after")
     def validate_override(self) -> ContextManagementCompaction:
-        if self.soft_compact_threshold is None and self.compact_threshold is None and self.compact_max_rounds is None:
+        if self.compact_threshold is None and self.compact_max_rounds is None:
             raise ValueError("compaction context_management requires at least one threshold or round override")
-        if (
-            self.soft_compact_threshold is not None
-            and self.compact_threshold is not None
-            and self.compact_threshold <= self.soft_compact_threshold
-        ):
-            raise ValueError("compact_threshold must exceed soft_compact_threshold")
         return self
 
 

@@ -33,7 +33,7 @@ from plap.responses.tools import (
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
     return {
-        "context_management": [{"soft_compact_threshold": 128, "type": "compaction"}],
+        "context_management": [{"compact_threshold": 128, "type": "compaction"}],
         "input": [
             {
                 "content": "hello from the client",
@@ -348,6 +348,7 @@ async def test_item_reference_inputs_expand_for_execution_and_persist_raw_refere
                         ReasoningPayload(
                             side="main",
                             temp=False,
+                            continuation_side="main",
                             messages=(
                                 ReasoningMessagePatch(
                                     content_hash=first_message_hash,
@@ -449,6 +450,7 @@ async def test_retrieve_response_redacts_reasoning_encrypted_content_but_item_re
         ReasoningPayload(
             side="main",
             temp=False,
+            continuation_side="main",
             messages=(
                 ReasoningMessagePatch(
                     content_hash=content_hash(first_message),
@@ -561,7 +563,7 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
     )
     reasoning_item = ResponseReasoningItem(
         encrypted_content=seal_reasoning_payload(
-            ReasoningPayload(side="main", temp=False, messages=(reasoning_patch,)),
+            ReasoningPayload(side="main", temp=False, continuation_side="main", messages=(reasoning_patch,)),
             keyring=test_app.state.sealing_keyring,
         ),
         id="rs_blocked_summary",
@@ -725,6 +727,7 @@ async def test_input_items_route_redacts_reasoning_encrypted_content_unless_incl
         ReasoningPayload(
             side="main",
             temp=False,
+            continuation_side="main",
             messages=(
                 ReasoningMessagePatch(
                     content_hash=content_hash(StateMessage(role="assistant", content="reply")),

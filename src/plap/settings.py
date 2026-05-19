@@ -59,7 +59,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
-            main_debate=RuntimeActorConfig(
+            defender=RuntimeActorConfig(
                 model="openrouter/deepseek/deepseek-v4-flash:novita,openrouter/deepseek/deepseek-v4-flash:atlas-cloud",
                 max_completion_tokens=393_216,
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
@@ -78,9 +78,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
-            reviewer_transcript_token_budget=800_000,
-            arbitrator_transcript_token_budget=300_000,
-            soft_compact_threshold=200_000,
+            reviewer_max_transcript_tokens=800_000,
+            arbitrator_max_transcript_tokens=300_000,
             compact_threshold=250_000,
             compact_max_rounds=0,
             debate_max_rounds=2,
@@ -88,31 +87,31 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             by_reasoning_effort={
                 ReasoningEffort.MINIMAL: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                 ),
                 ReasoningEffort.LOW: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                 ),
                 ReasoningEffort.MEDIUM: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                 ),
                 ReasoningEffort.HIGH: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                 ),
                 ReasoningEffort.XHIGH: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.XHIGH),
                 ),
@@ -161,7 +160,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
                 reasoning_effort=ReasoningEffort.HIGH,
             ),
-            main_debate=RuntimeActorConfig(
+            defender=RuntimeActorConfig(
                 model="crof/mimo-v2.5-pro-precision,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 max_completion_tokens=131_072,
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
@@ -180,9 +179,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
-            reviewer_transcript_token_budget=800_000,
-            arbitrator_transcript_token_budget=300_000,
-            soft_compact_threshold=200_000,
+            reviewer_max_transcript_tokens=800_000,
+            arbitrator_max_transcript_tokens=300_000,
             compact_threshold=250_000,
             compact_max_rounds=0,
             debate_max_rounds=2,
@@ -190,44 +188,37 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             by_reasoning_effort={
                 ReasoningEffort.MINIMAL: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.NONE),
                 ),
                 ReasoningEffort.LOW: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.LOW),
                 ),
                 ReasoningEffort.MEDIUM: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.MEDIUM),
                 ),
                 ReasoningEffort.HIGH: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                 ),
                 ReasoningEffort.XHIGH: RuntimeProfileOverride(
                     main=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
-                    main_debate=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
+                    defender=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     reviewer=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                     arbitrator=RuntimeActorOverride(reasoning_effort=ReasoningEffort.HIGH),
                 ),
             },
         ),
     }
-
-
-def _validate_compact_thresholds(soft_threshold: int | None, threshold: int | None) -> None:
-    if soft_threshold is not None and threshold is not None and threshold <= soft_threshold:
-        raise ValueError("compact threshold must exceed the soft compact threshold")
-
-
 _MCP_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
@@ -727,22 +718,16 @@ class RuntimeProfileOverride(BaseModel):
     model_info: RuntimeModelInfoOverride | None = None
     main: RuntimeActorOverride | None = None
     compactor: RuntimeActorOverride | None = None
-    main_debate: RuntimeActorOverride | None = None
+    defender: RuntimeActorOverride | None = None
     reviewer: RuntimeActorOverride | None = None
     arbitrator: RuntimeActorOverride | None = None
     reasoning_summarizer: RuntimeActorOverride | None = None
-    reviewer_transcript_token_budget: int | None = Field(default=None, ge=0)
-    arbitrator_transcript_token_budget: int | None = Field(default=None, ge=0)
-    soft_compact_threshold: int | None = Field(default=None, ge=0)
+    reviewer_max_transcript_tokens: int | None = Field(default=None, ge=0)
+    arbitrator_max_transcript_tokens: int | None = Field(default=None, ge=0)
     compact_threshold: int | None = Field(default=None, ge=0)
     compact_max_rounds: int | None = Field(default=None, ge=0)
     debate_max_rounds: int | None = Field(default=None, ge=0)
     reasoning_to_output: float | None = Field(default=None, ge=0)
-
-    @model_validator(mode="after")
-    def validate_compaction_config(self) -> RuntimeProfileOverride:
-        _validate_compact_thresholds(self.soft_compact_threshold, self.compact_threshold)
-        return self
 
     def apply_to(self, profile: RuntimeModelProfileConfig) -> RuntimeModelProfileConfig:
         updates: dict[str, object] = {}
@@ -754,20 +739,18 @@ class RuntimeProfileOverride(BaseModel):
             updates["main"] = profile.main.apply_override(self.main)
         if self.compactor is not None:
             updates["compactor"] = profile.compactor.apply_override(self.compactor)
-        if self.main_debate is not None:
-            updates["main_debate"] = profile.main_debate.apply_override(self.main_debate)
+        if self.defender is not None:
+            updates["defender"] = profile.defender.apply_override(self.defender)
         if self.reviewer is not None:
             updates["reviewer"] = profile.reviewer.apply_override(self.reviewer)
         if self.arbitrator is not None:
             updates["arbitrator"] = profile.arbitrator.apply_override(self.arbitrator)
         if self.reasoning_summarizer is not None:
             updates["reasoning_summarizer"] = profile.reasoning_summarizer.apply_override(self.reasoning_summarizer)
-        if self.reviewer_transcript_token_budget is not None:
-            updates["reviewer_transcript_token_budget"] = self.reviewer_transcript_token_budget
-        if self.arbitrator_transcript_token_budget is not None:
-            updates["arbitrator_transcript_token_budget"] = self.arbitrator_transcript_token_budget
-        if self.soft_compact_threshold is not None:
-            updates["soft_compact_threshold"] = self.soft_compact_threshold
+        if self.reviewer_max_transcript_tokens is not None:
+            updates["reviewer_max_transcript_tokens"] = self.reviewer_max_transcript_tokens
+        if self.arbitrator_max_transcript_tokens is not None:
+            updates["arbitrator_max_transcript_tokens"] = self.arbitrator_max_transcript_tokens
         if self.compact_threshold is not None:
             updates["compact_threshold"] = self.compact_threshold
         if self.compact_max_rounds is not None:
@@ -788,20 +771,18 @@ class RuntimeProfileOverride(BaseModel):
             fields.update(self.main.overridden_fields("main"))
         if self.compactor is not None:
             fields.update(self.compactor.overridden_fields("compactor"))
-        if self.main_debate is not None:
-            fields.update(self.main_debate.overridden_fields("main_debate"))
+        if self.defender is not None:
+            fields.update(self.defender.overridden_fields("defender"))
         if self.reviewer is not None:
             fields.update(self.reviewer.overridden_fields("reviewer"))
         if self.arbitrator is not None:
             fields.update(self.arbitrator.overridden_fields("arbitrator"))
         if self.reasoning_summarizer is not None:
             fields.update(self.reasoning_summarizer.overridden_fields("reasoning_summarizer"))
-        if self.reviewer_transcript_token_budget is not None:
-            fields.add("reviewer_transcript_token_budget")
-        if self.arbitrator_transcript_token_budget is not None:
-            fields.add("arbitrator_transcript_token_budget")
-        if self.soft_compact_threshold is not None:
-            fields.add("soft_compact_threshold")
+        if self.reviewer_max_transcript_tokens is not None:
+            fields.add("reviewer_max_transcript_tokens")
+        if self.arbitrator_max_transcript_tokens is not None:
+            fields.add("arbitrator_max_transcript_tokens")
         if self.compact_threshold is not None:
             fields.add("compact_threshold")
         if self.compact_max_rounds is not None:
@@ -818,7 +799,7 @@ class RuntimeProfileOverride(BaseModel):
     def all_models(self) -> tuple[str, ...]:
         return tuple(
             actor.model
-            for actor in (self.main, self.compactor, self.main_debate, self.reviewer, self.arbitrator, self.reasoning_summarizer)
+            for actor in (self.main, self.compactor, self.defender, self.reviewer, self.arbitrator, self.reasoning_summarizer)
             if actor is not None and actor.model is not None
         )
 
@@ -830,14 +811,12 @@ class RuntimeModelProfileConfig(BaseModel):
     model_info: RuntimeModelInfoConfig
     main: RuntimeActorConfig
     compactor: RuntimeActorConfig
-    main_debate: RuntimeActorConfig
+    defender: RuntimeActorConfig
     reviewer: RuntimeActorConfig
     arbitrator: RuntimeActorConfig
     reasoning_summarizer: RuntimeActorConfig
-    reviewer_transcript_token_budget: int = Field(default=0, ge=0)
-    arbitrator_transcript_token_budget: int = Field(default=0, ge=0)
-    transcript_recount_margin: int = Field(default=16384, ge=0)
-    soft_compact_threshold: int | None = Field(default=None, ge=0)
+    reviewer_max_transcript_tokens: int = Field(default=0, ge=0)
+    arbitrator_max_transcript_tokens: int = Field(default=0, ge=0)
     compact_threshold: int | None = Field(default=None, ge=0)
     compact_max_rounds: int = Field(default=3, ge=0)
     debate_max_rounds: int = Field(default=2, ge=0)
@@ -856,8 +835,6 @@ class RuntimeModelProfileConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_profile(self) -> RuntimeModelProfileConfig:
-        _validate_compact_thresholds(self.soft_compact_threshold, self.compact_threshold)
-
         if self.by_service_tier and not self.supports_parameter("service_tier"):
             raise ValueError("service_tier overrides require model_info.supported_parameters to include service_tier")
         if self.by_reasoning_effort and not self.supports_parameter("reasoning_effort"):
@@ -868,22 +845,12 @@ class RuntimeModelProfileConfig(BaseModel):
             if self.default_reasoning_effort not in self.by_reasoning_effort:
                 raise ValueError("default_reasoning_effort must reference a configured reasoning_effort override")
 
-        for override in self.by_service_tier.values():
-            resolved = override.apply_to(self)
-            _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
-
-        for override in self.by_reasoning_effort.values():
-            resolved = override.apply_to(self)
-            _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
-
         for service_override in self.by_service_tier.values():
             for reasoning_override in self.by_reasoning_effort.values():
                 conflicts = service_override.conflicts_with(reasoning_override)
                 if conflicts:
                     fields = ", ".join(sorted(conflicts))
                     raise ValueError(f"service_tier and reasoning_effort overrides both set: {fields}")
-                resolved = reasoning_override.apply_to(service_override.apply_to(self))
-                _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
 
         return self
 
@@ -936,14 +903,13 @@ class RuntimeModelProfileConfig(BaseModel):
                 )
             resolved = override.apply_to(resolved)
 
-        _validate_compact_thresholds(resolved.soft_compact_threshold, resolved.compact_threshold)
         return resolved
 
     def all_models(self) -> tuple[str, ...]:
         models = [
             self.main.model,
             self.compactor.model,
-            self.main_debate.model,
+            self.defender.model,
             self.reviewer.model,
             self.arbitrator.model,
             self.reasoning_summarizer.model,

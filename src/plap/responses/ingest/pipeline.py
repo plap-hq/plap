@@ -124,17 +124,14 @@ async def ingest_response_request(
     decoded = _decode_sealed_items(remaining, keyring=keyring)
     reordered = _hoist_interleaved_reset_candidates_before_temp_debate(decoded)
     pruned = _prune_temp_debate_globally(reordered)
-    in_temp_debate = any(item.temp_related for item in pruned)
     routed = _route_items_by_side(pruned)
     queues = _associate_side_queues(compaction, routed)
     return IngestedQueues(
         main_context=tuple(queues.main.context_rows),
-        main_context_temp=tuple(queues.main.context_temp_rows),
+        defender=tuple(queues.defender.rows),
         reviewer=tuple(queues.reviewer.rows),
         arbitrator=tuple(queues.arbitrator.rows),
         continuation_side=routed.continuation_side,
-        in_temp_debate=in_temp_debate,
-        compaction=compaction,
         cursors=queues.cursors,
     )
 
@@ -145,10 +142,6 @@ class _DecodedItem:
     reasoning: ReasoningPayload | None = None
     call_id: SealedCallID | None = None
     temp_related: bool = False
-    # Historical name: this marks non-temp items encountered while temp debate
-    # was active. Reorder may hoist them before the temp block, so this does
-    # not imply an immediate reset during decode.
-    resets_temp_debate: bool = False
 
 
 @dataclass(slots=True)
@@ -165,6 +158,7 @@ class _SideEvent:
 @dataclass(slots=True)
 class _RoutedItems:
     main: list[_SideEvent] = field(default_factory=list)
+    defender: list[_SideEvent] = field(default_factory=list)
     reviewer: list[_SideEvent] = field(default_factory=list)
     arbitrator: list[_SideEvent] = field(default_factory=list)
     continuation_side: Side = Side.MAIN
@@ -172,6 +166,8 @@ class _RoutedItems:
     def side(self, side: Side) -> list[_SideEvent]:
         if side == Side.MAIN:
             return self.main
+        if side == Side.DEFENDER:
+            return self.defender
         if side == Side.REVIEWER:
             return self.reviewer
         return self.arbitrator
@@ -180,6 +176,7 @@ class _RoutedItems:
 @dataclass(slots=True)
 class _AssociatedQueues:
     main: _MainQueue
+    defender: _PrivateSideQueue
     reviewer: _PrivateSideQueue
     arbitrator: _PrivateSideQueue
     cursors: dict[str, int]
@@ -559,23 +556,14 @@ class _MainQueue(_QueueBase):
         self._cursors = cursors
         self._seed_rows: list[ChatMessageSpan] = []
         self._stable_rows: list[ChatMessageSpan] = []
-        self._temp_rows: list[SideMessage] = []
 
     @property
     def context_rows(self) -> list[ChatMessageSpan]:
         return [*self._seed_rows, *self._stable_rows]
 
     @property
-    def context_temp_rows(self) -> list[SideMessage]:
-        return self._temp_rows
-
-    @property
     def stable_rows(self) -> list[ChatMessageSpan]:
         return self._stable_rows
-
-    @property
-    def temp_rows(self) -> list[SideMessage]:
-        return self._temp_rows
 
     def add_existing_row(self, row: ChatMessageSpan) -> None:
         self._seed_rows.append(row)
@@ -627,7 +615,7 @@ class _MainQueue(_QueueBase):
         *,
         allow_pending: bool = False,
         temp: bool = False,
-    ) -> ChatMessageSpan | SideMessage:
+    ) -> ChatMessageSpan:
         if not allow_pending:
             self._ensure_no_pending_tool_calls()
         self._ensure_deferred_reasoning_tool_outputs_settled(
@@ -636,21 +624,20 @@ class _MainQueue(_QueueBase):
         )
         self._assert_message_matches_pending_reasoning_patch(message)
         if temp:
-            entry = SideMessage(message=message)
-            self._temp_rows.append(entry)
-        else:
-            try:
-                row = append_main_context_row(self._stable_rows, self._cursors, message)
-            except ValueError as exc:
-                raise _tool_replay_error(
-                    reason="function_call_output_without_main_segment",
-                    private_message="function_call_output requires a preceding main segment",
-                    cause=exc,
-                ) from exc
-            self._remember_entry(row)
-            return row
-        self._remember_entry(entry)
-        return entry
+            raise _input_replay_error(
+                reason="main_temp_debate_replay_unsupported",
+                private_message="main temp debate replay is no longer supported",
+            )
+        try:
+            row = append_main_context_row(self._stable_rows, self._cursors, message)
+        except ValueError as exc:
+            raise _tool_replay_error(
+                reason="function_call_output_without_main_segment",
+                private_message="function_call_output requires a preceding main segment",
+                cause=exc,
+            ) from exc
+        self._remember_entry(row)
+        return row
 
 
 class _PrivateSideQueue(_QueueBase):
@@ -720,10 +707,9 @@ def _last_compaction_index(input_items: list[object]) -> int | None:
 
 def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) -> list[_DecodedItem]:
     decoded: list[_DecodedItem] = []
-    in_temp_debate = False
     for item in input_items:
         if isinstance(item, RequestMessageItem):
-            decoded.append(_DecodedItem(item=item, resets_temp_debate=in_temp_debate))
+            decoded.append(_DecodedItem(item=item))
             continue
         if isinstance(item, RequestReasoningItem):
             payload = _open_reasoning_item(item, keyring=keyring)
@@ -734,18 +720,14 @@ def _decode_sealed_items(input_items: list[object], *, keyring: SealingKeyring) 
                     temp_related=payload.temp,
                 )
             )
-            in_temp_debate = payload.temp
             continue
         if isinstance(item, RequestFunctionCallItem | RequestFunctionCallOutputItem):
             call_id = _open_call_id_or_none(item.call_id, keyring=keyring)
-            temp_related = call_id is not None and call_id.temp
-            resets_temp_debate = in_temp_debate and (call_id is None or not call_id.temp)
             decoded.append(
                 _DecodedItem(
                     item=item,
                     call_id=call_id,
-                    temp_related=temp_related,
-                    resets_temp_debate=resets_temp_debate,
+                    temp_related=call_id is not None and call_id.temp,
                 )
             )
     return decoded
@@ -757,6 +739,10 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
             reason="unsealed_reasoning_input_untrusted", private_message="unsealed reasoning input is not trusted"
         )
     return open_reasoning_payload(item.encrypted_content, keyring=keyring)
+
+
+def _is_hoistable_interleaved_non_temp(item: _DecodedItem) -> bool:
+    return not item.temp_related and item.reasoning is None
 
 
 def _hoist_interleaved_reset_candidates_before_temp_debate(items: list[_DecodedItem]) -> list[_DecodedItem]:
@@ -783,7 +769,7 @@ def _hoist_interleaved_reset_candidates_before_temp_debate(items: list[_DecodedI
                 temp_items.append(item)
                 index += 1
                 continue
-            if item.resets_temp_debate:
+            if _is_hoistable_interleaved_non_temp(item):
                 tail_messages.append(item)
                 index += 1
                 continue
@@ -799,7 +785,7 @@ def _hoist_interleaved_reset_candidates_before_temp_debate(items: list[_DecodedI
 def _prune_temp_debate_globally(items: list[_DecodedItem]) -> list[_DecodedItem]:
     retained: list[_DecodedItem] = []
     for item in items:
-        if item.resets_temp_debate or (item.reasoning is not None and not item.reasoning.temp):
+        if not item.temp_related:
             retained = [candidate for candidate in retained if not candidate.temp_related]
         retained.append(item)
     return retained
@@ -814,7 +800,7 @@ def _route_items_by_side(items: list[_DecodedItem]) -> _RoutedItems:
             routed.main.append(_SideEvent(kind=_EventKind.MESSAGE, item=item.item))
             continue
         if item.reasoning is not None:
-            routed.continuation_side = item.reasoning.continuation_side or item.reasoning.side
+            routed.continuation_side = item.reasoning.continuation_side
             routed.side(item.reasoning.side).append(_SideEvent(kind=_EventKind.REASONING, reasoning=item.reasoning))
             continue
         if isinstance(item.item, RequestFunctionCallItem):
@@ -870,6 +856,7 @@ def _associate_side_queues(
     cursors = _initial_cursors(compaction)
     queues = _AssociatedQueues(
         main=_MainQueue(cursors),
+        defender=_PrivateSideQueue(Side.DEFENDER),
         reviewer=_PrivateSideQueue(Side.REVIEWER),
         arbitrator=_PrivateSideQueue(Side.ARBITRATOR),
         cursors=cursors,
@@ -878,6 +865,7 @@ def _associate_side_queues(
         for span in compaction.active:
             queues.main.add_existing_row(span)
     _apply_side_events(queues.main, routed.main)
+    _apply_side_events(queues.defender, routed.defender)
     _apply_side_events(queues.reviewer, routed.reviewer)
     _apply_side_events(queues.arbitrator, routed.arbitrator)
     _assert_no_pending_tool_calls(queues)
@@ -927,6 +915,7 @@ def _apply_side_events(queue: _QueueBase, events: list[_SideEvent]) -> None:
 
 def _assert_no_pending_tool_calls(queues: _AssociatedQueues) -> None:
     queues.main.assert_no_pending_tool_calls()
+    queues.defender.assert_no_pending_tool_calls()
     queues.reviewer.assert_no_pending_tool_calls()
     queues.arbitrator.assert_no_pending_tool_calls()
 

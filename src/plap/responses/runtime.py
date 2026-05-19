@@ -27,10 +27,8 @@ from plap.llms.chat import (
 from plap.llms.errors import ChatCompletionContextLengthExceededError
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.compact import (
-    CompactionLevel,
     CompactionOutcome,
     Compactor,
-    compaction_level_for_token_count,
     resolve_compaction_settings,
 )
 from plap.responses.contracts import (
@@ -56,6 +54,7 @@ from plap.responses.ingest.sealing import (
 from plap.responses.io import ReasoningDraft, ResponseEventIO
 from plap.responses.models import (
     MutableQueues,
+    Side,
     StateMessage,
     StateToolCall,
     UsageLedger,
@@ -502,6 +501,7 @@ def _stream_draft_payload(candidate: StateMessage) -> ReasoningPayload:
     return ReasoningPayload(
         side="main",
         temp=False,
+        continuation_side=Side.MAIN,
         messages=(candidate, *_stream_stub_tool_output_rows(candidate)),
     )
 
@@ -806,7 +806,6 @@ async def run_response(
         model=request.model,
         requested_reasoning_effort=request.reasoning.effort if request.reasoning else None,
         reasoning_summary_mode=_reasoning_summary_mode(request),
-        soft_compact_threshold=profile.soft_compact_threshold,
         tool_count=len(base_tools),
     )
     log_payload(logger, "response.runtime.start.payload", request=request.model_dump(mode="json", exclude_none=True))
@@ -835,7 +834,7 @@ async def run_response(
         effective_server_executors = dict(base_server_executors)
         main_developer_message = _main_developer_message(profile=profile, request=request)
 
-        if state.in_temp_debate:
+        if state.continuation_side != Side.MAIN:
             debate_result = await continue_debate(
                 state=state,
                 out=out,
@@ -860,13 +859,13 @@ async def run_response(
         response_format = _chat_response_format(request)
 
         messages: list[ChatMessage] = [main_developer_message.to_chat_message()]
-        messages.extend(state.render_effective_main_context(include_citation=False))
+        messages.extend(row.render_for_model(include_citation=False) for row in state.main_context)
 
         main_cap = usage_ledger.cap_for(profile.main.public_usage)
         log_debug(
             logger,
             "response.runtime.turn",
-            in_temp_debate=state.in_temp_debate,
+            continuation_side=state.continuation_side,
             main_cap=main_cap,
             tool_count=len(effective_tools),
         )
@@ -887,27 +886,28 @@ async def run_response(
         )
 
         preflight_token_count = measure_request_tokens(model_request, actor_config=profile.main)
-        preflight_level = compaction_level_for_token_count(preflight_token_count, settings=compaction_settings)
-        compaction_level = CompactionLevel.HARD if authoritative_context_length_error is not None else preflight_level
-
-        log_debug(
-            logger,
-            "response.compaction.preflight",
-            authoritative_context_length_exceeded=authoritative_context_length_error is not None,
-            compact_threshold=compaction_settings.compact_threshold,
-            preflight_level=preflight_level,
-            preflight_token_count=preflight_token_count,
-            soft_compact_threshold=compaction_settings.soft_compact_threshold,
-            token_count=preflight_token_count,
-            triggered_level=compaction_level,
+        should_compact = authoritative_context_length_error is not None or (
+            compaction_settings.compact_threshold is not None and preflight_token_count >= compaction_settings.compact_threshold
         )
 
-        compaction_result = await compactor.compact(
-            compaction_level,
-            tools=model_request.tools,
-            response_format=model_request.response_format,
-            reasoning_effort=model_request.reasoning_effort,
-        )
+        if should_compact:
+            log_debug(
+                logger,
+                "response.compaction.preflight",
+                authoritative_context_length_exceeded=authoritative_context_length_error is not None,
+                compact_threshold=compaction_settings.compact_threshold,
+                preflight_token_count=preflight_token_count,
+                token_count=preflight_token_count,
+            )
+
+            compaction_result = await compactor.compact(
+                tools=model_request.tools,
+                response_format=model_request.response_format,
+                reasoning_effort=model_request.reasoning_effort,
+            )
+        else:
+            compaction_result = CompactionOutcome.NOT_NEEDED
+
         if compaction_result == CompactionOutcome.INCOMPLETE:
             return
         if authoritative_context_length_error is not None:
@@ -1077,7 +1077,7 @@ async def run_response(
             client_call_indexes = []
 
         if candidate.content is not None or candidate.tool_calls or candidate.reasoning_content or candidate.reasoning_details:
-            state.append_main_stable(candidate, content_hash=published.assistant_hash)
+            state.append_main(candidate, content_hash=published.assistant_hash)
 
         for index, output in server_outputs.items():
             tool_message = StateMessage(
@@ -1085,7 +1085,7 @@ async def run_response(
                 tool_call_id=tool_calls[index].id,
                 content=output,
             )
-            state.append_main_stable(tool_message)
+            state.append_main(tool_message)
 
         if server_outputs and not client_call_indexes:
             usage_ledger.record_hidden(profile.main.public_usage, result.usage)

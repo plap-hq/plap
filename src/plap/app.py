@@ -330,7 +330,7 @@ def _runtime_profile_actors(settings: Settings) -> Iterable[tuple[str, str, obje
     for profile_name, profile in settings.runtime_model_profiles.items():
         yield profile_name, "main", profile.main
         yield profile_name, "compactor", profile.compactor
-        yield profile_name, "main_debate", profile.main_debate
+        yield profile_name, "defender", profile.defender
         yield profile_name, "reviewer", profile.reviewer
         yield profile_name, "arbitrator", profile.arbitrator
         yield profile_name, "reasoning_summarizer", profile.reasoning_summarizer

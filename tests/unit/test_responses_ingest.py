@@ -42,7 +42,7 @@ from plap.responses.ingest.sealing import (
     COMPACTION_PURPOSE,
     PAYLOAD_FORMAT_VERSION,
 )
-from plap.responses.models import ReasoningMessagePatch, StateMessage
+from plap.responses.models import Actor, ReasoningMessagePatch, StateMessage
 
 
 async def ingest_response_request(
@@ -75,10 +75,8 @@ def _assert_plap_error(
 
 def _main_transcript(
     queues: IngestedQueues,
-    *,
-    token_budget: int = 0,
 ) -> tuple[ChatMessageSpan, ...]:
-    return MutableQueues.from_ingested(queues).main_transcript(token_budget=token_budget)
+    return tuple(queues.main_context)
 
 
 async def test_ingestion_preserves_last_compaction_spans() -> None:
@@ -112,18 +110,18 @@ async def test_ingestion_preserves_last_compaction_spans() -> None:
 def test_mutable_queues_append_helpers() -> None:
     queues = MutableQueues(
         main_context=[],
-        main_context_temp=[],
+        defender=[],
         reviewer=[],
         arbitrator=[],
         cursors={"m": 0},
         continuation_side="main",
-        in_temp_debate=False,
     )
 
-    stable = queues.append_main_stable(StateMessage(role="user", content="stable"), content_hash="stable-hash")
-    temp = queues.append_main_temp(StateMessage(role="assistant", content="temp"))
-    hidden_tool = queues.append_main_temp(StateMessage(role="tool", tool_call_id="call_1", content="tool output"))
-    next_stable = queues.append_main_stable(StateMessage(role="assistant", content="after temp"), content_hash="after-temp-hash")
+    stable = queues.append_main(StateMessage(role="user", content="stable"), content_hash="stable-hash")
+    next_stable = queues.append_main(StateMessage(role="assistant", content="after temp"), content_hash="after-temp-hash")
+    temp = queues.append_side("defender", StateMessage(role="assistant", content="temp"))
+    hidden_tool = queues.append_side("defender", StateMessage(role="tool", tool_call_id="call_1", content="tool output"))
+    defender = queues.append_side("defender", StateMessage(role="assistant", content="defend"), content_hash="defend-hash")
     reviewer = queues.append_side("reviewer", StateMessage(role="assistant", content="review"), content_hash="review-hash")
     arbitrator = queues.append_side("arbitrator", StateMessage(role="assistant", content="decide"))
 
@@ -131,10 +129,15 @@ def test_mutable_queues_append_helpers() -> None:
     assert temp.message.content == "temp"
     assert hidden_tool.message.tool_call_id == "call_1"
     assert (next_stable.start, next_stable.end, next_stable.content_hash) == (1, 1, "after-temp-hash")
+    assert defender.content_hash == "defend-hash"
+    assert defender.message.content == "defend"
     assert reviewer.content_hash == "review-hash"
     assert reviewer.message.content == "review"
     assert arbitrator.message.content == "decide"
+    assert [row.message.content for row in queues.defender] == ["temp", "tool output", "defend"]
     assert queues.cursors == {"m": 2}
+    queues.set_continuation("defender")
+    assert queues.current_actor() == Actor.DEFENDER
 
     with pytest.raises(ValueError, match="append_side does not accept main"):
         queues.append_side("main", StateMessage(role="assistant", content="bad"))
@@ -234,7 +237,7 @@ async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_wh
         _request(
             input=[
                 _reasoning_item(
-                    "main",
+                    "defender",
                     True,
                     [{"role": "assistant", "content": "candidate mutation"}],
                     continuation_side="reviewer",
@@ -244,10 +247,28 @@ async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_wh
         keyring=_keyring(),
     )
 
-    assert [row.message.content for row in result.main_context_temp] == ["candidate mutation"]
+    assert [row.message.content for row in result.defender] == ["candidate mutation"]
     assert result.reviewer == ()
     assert result.continuation_side == "reviewer"
-    assert result.in_temp_debate is True
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "defender",
+                    True,
+                    [{"role": "assistant", "content": "candidate defense"}],
+                    continuation_side="defender",
+                )
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.content for row in result.defender] == ["candidate defense"]
+    assert result.reviewer == ()
+    assert result.arbitrator == ()
+    assert result.continuation_side == "defender"
 
     result = await ingest_response_request(
         _request(
@@ -294,11 +315,10 @@ async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
     )
 
     assert [row.message.content for row in result.main_context] == ["final debate result"]
-    assert result.main_context_temp == ()
+    assert result.defender == ()
     assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
-    assert result.in_temp_debate is False
 
 
 async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
@@ -327,14 +347,13 @@ async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
     )
 
     assert [row.message.content for row in result.main_context] == ["new mainline request"]
-    assert result.main_context_temp == ()
+    assert result.defender == ()
     assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
-    assert result.in_temp_debate is False
 
 
-async def test_ingestion_public_sealed_pair_after_temp_main_reasoning_prunes_temp_debate() -> None:
+async def test_ingestion_public_sealed_pair_after_temp_defender_reasoning_prunes_temp_debate() -> None:
     temp_assistant = {
         "role": "assistant",
         "content": " ",
@@ -352,7 +371,7 @@ async def test_ingestion_public_sealed_pair_after_temp_main_reasoning_prunes_tem
         _request(
             input=[
                 _reasoning_item(
-                    "main",
+                    "defender",
                     True,
                     [
                         temp_assistant,
@@ -379,9 +398,8 @@ async def test_ingestion_public_sealed_pair_after_temp_main_reasoning_prunes_tem
         },
         {"role": "tool", "tool_call_id": "up_temp_0", "content": "public output"},
     ]
-    assert result.main_context_temp == ()
+    assert result.defender == ()
     assert result.continuation_side == "main"
-    assert result.in_temp_debate is False
 
 
 async def test_ingestion_message_after_temp_prunes_forward_reasoning_refs_too() -> None:
@@ -408,10 +426,9 @@ async def test_ingestion_message_after_temp_prunes_forward_reasoning_refs_too() 
     )
 
     assert [row.message.to_primitive() for row in result.main_context] == [target]
-    assert result.main_context_temp == ()
+    assert result.defender == ()
     assert result.reviewer == ()
     assert result.continuation_side == "main"
-    assert result.in_temp_debate is False
 
 
 async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None:
@@ -454,19 +471,18 @@ async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None
             "content": "client output",
         },
     ]
-    assert result.main_context_temp == ()
+    assert result.defender == ()
     assert result.main_context == _main_transcript(result)
     assert result.reviewer == ()
     assert result.continuation_side == "main"
-    assert result.in_temp_debate is False
 
 
-async def test_ingestion_exposes_active_temp_debate_state() -> None:
+async def test_ingestion_exposes_active_defender_state() -> None:
     result = await ingest_response_request(
         _request(
             input=[
                 _reasoning_item(
-                    "main",
+                    "defender",
                     True,
                     [{"role": "assistant", "content": "temp debate tail"}],
                 )
@@ -476,10 +492,9 @@ async def test_ingestion_exposes_active_temp_debate_state() -> None:
     )
 
     assert result.main_context == ()
-    assert [row.message.content for row in result.main_context_temp] == ["temp debate tail"]
+    assert [row.message.content for row in result.defender] == ["temp debate tail"]
     assert _main_transcript(result) == ()
-    assert result.continuation_side == "main"
-    assert result.in_temp_debate is True
+    assert result.continuation_side == "defender"
 
 
 async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
@@ -551,7 +566,6 @@ async def test_ingestion_hoists_interleaved_assistant_message_before_temp_review
         {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
     ]
     assert result.continuation_side == "reviewer"
-    assert result.in_temp_debate is True
 
 
 async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_continuation() -> None:
@@ -591,7 +605,6 @@ async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_co
         {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
     ]
     assert result.continuation_side == "reviewer"
-    assert result.in_temp_debate is True
 
 
 async def test_ingestion_hoists_interleaved_fabricated_pair_before_temp_reviewer_continuation() -> None:
@@ -655,7 +668,6 @@ async def test_ingestion_hoists_interleaved_fabricated_pair_before_temp_reviewer
         {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
     ]
     assert result.continuation_side == "reviewer"
-    assert result.in_temp_debate is True
 
 
 async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> None:
@@ -955,6 +967,39 @@ async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
             "content": "reasoning output",
         },
     ]
+
+
+async def test_ingestion_reproduces_public_tool_only_anchor_message_interleaving_target_missing() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [_tool_call("up_public_0")],
+    }
+    call_id = _call_id(
+        side="main",
+        content_hash_value=_message_hash(assistant),
+        upstream_tool_call_id="up_public_0",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            _request(
+                input=[
+                    _reasoning_item("main", False, [assistant]),
+                    _message("assistant", "plugin reminder"),
+                    _function_call(call_id),
+                    _function_output(call_id, "public output"),
+                ]
+            ),
+            keyring=_keyring(),
+        )
+
+    _assert_plap_error(
+        exc_info.value,
+        code="invalid_tool_replay",
+        param="input",
+        private_reason="sealed_function_call_content_hash_target_missing",
+    )
 
 
 async def test_ingestion_accepts_reasoning_patch_with_hidden_tool_output_before_public_output() -> None:
@@ -1346,15 +1391,11 @@ def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
         start=0,
         end=0,
         message=_state_message({"role": "user"}),
-        token_count=1,
     )
     range_span = ChatMessageSpan(
         start=0,
         end=7,
         message=_state_message({"role": "assistant"}),
-        token_count=1,
-        children_pruned=True,
-        summary_fidelity=3,
     )
 
     assert leaf.citation == "[~0]"
@@ -1387,7 +1428,6 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
                     start=5,
                     end=5,
                     message=_state_message({"role": "user", "content": "bad"}),
-                    token_count=1,
                 ),
             ),
             cursors={"m": 1},
@@ -1403,30 +1443,7 @@ def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
     )
 
 
-def test_sealed_compaction_requires_token_count() -> None:
-    token = _seal_raw_payload(
-        COMPACTION_PURPOSE,
-        {
-            "version": PAYLOAD_FORMAT_VERSION,
-            "type": "compaction",
-            "active": [
-                {
-                    "start": 0,
-                    "end": 0,
-                    "message": {"role": "user", "content": "missing count"},
-                }
-            ],
-            "cursors": {"m": 1},
-        },
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
-
-    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_payload_invalid")
-
-
-def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None:
+def test_sealed_compaction_accepts_summary_spans_with_children_only() -> None:
     token = _seal_raw_payload(
         COMPACTION_PURPOSE,
         {
@@ -1437,21 +1454,16 @@ def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None
                     "start": 0,
                     "end": 1,
                     "message": {"role": "assistant", "content": "summary"},
-                    "token_count": 1,
-                    "children_token_count": 2,
-                    "expanded_token_count": 2,
                     "children": [
                         {
                             "start": 0,
                             "end": 0,
                             "message": {"role": "user", "content": "a"},
-                            "token_count": 1,
                         },
                         {
                             "start": 1,
                             "end": 1,
                             "message": {"role": "user", "content": "b"},
-                            "token_count": 1,
                         },
                     ],
                 }
@@ -1460,12 +1472,9 @@ def test_sealed_compaction_requires_summary_fidelity_for_summary_spans() -> None
         },
     )
 
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
+    payload = open_compaction_payload(token, keyring=_keyring())
 
-    _assert_plap_error(
-        exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_summary_fidelity_missing"
-    )
+    assert [(row.start, row.end, row.message.content) for row in payload.active] == [(0, 1, "summary")]
 
 
 def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
@@ -1476,15 +1485,11 @@ def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
                     start=0,
                     end=1,
                     message=_state_message({"role": "user", "content": "first"}),
-                    token_count=1,
-                    children_pruned=True,
-                    summary_fidelity=3,
                 ),
                 ChatMessageSpan(
                     start=1,
                     end=1,
                     message=_state_message({"role": "user", "content": "second"}),
-                    token_count=1,
                 ),
             ),
             cursors={"m": 2},
@@ -1512,13 +1517,11 @@ def test_sealed_compaction_rejects_tool_output_starting_new_segment() -> None:
                             "tool_calls": [_tool_call("call_1")],
                         }
                     ),
-                    token_count=1,
                 ),
                 ChatMessageSpan(
                     start=1,
                     end=1,
                     message=_state_message({"role": "tool", "tool_call_id": "call_1", "content": "old result"}),
-                    token_count=1,
                 ),
             ),
             cursors={"m": 2},
@@ -1542,20 +1545,16 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
         start=0,
         end=1,
         message=_state_message({"role": "assistant", "content": "summary 0-1"}),
-        token_count=1,
-        summary_fidelity=4,
         children=(
             ChatMessageSpan(
                 start=0,
                 end=0,
                 message=_state_message({"role": "user", "content": "m0"}),
-                token_count=2,
             ),
             ChatMessageSpan(
                 start=1,
                 end=1,
                 message=_state_message({"role": "assistant", "content": "m1"}),
-                token_count=3,
             ),
         ),
     )
@@ -1563,20 +1562,16 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
         start=2,
         end=3,
         message=_state_message({"role": "assistant", "content": "summary 2-3"}),
-        token_count=1,
-        summary_fidelity=2,
         children=(
             ChatMessageSpan(
                 start=2,
                 end=2,
                 message=_state_message({"role": "user", "content": "m2"}),
-                token_count=2,
             ),
             ChatMessageSpan(
                 start=3,
                 end=3,
                 message=_state_message({"role": "assistant", "content": "m3"}),
-                token_count=3,
             ),
         ),
     )
@@ -1597,12 +1592,7 @@ async def test_ingestion_main_context_active_transcript_budgeted() -> None:
     )
 
     assert [row.citation for row in result.main_context] == ["[~0_1]", "[~2_3]"]
-    assert [row.summary_fidelity for row in result.main_context] == [4, 2]
-    assert [row.citation for row in _main_transcript(result, token_budget=6)] == [
-        "[~0_1]",
-        "[~2]",
-        "[~3]",
-    ]
+    assert [row.citation for row in _main_transcript(result)] == ["[~0_1]", "[~2_3]"]
 
 
 async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
@@ -1610,20 +1600,16 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
         start=0,
         end=1,
         message=_state_message({"role": "assistant", "content": "summary 0-1"}),
-        token_count=1,
-        summary_fidelity=3,
         children=(
             ChatMessageSpan(
                 start=0,
                 end=0,
                 message=_state_message({"role": "user", "content": "m0"}),
-                token_count=2,
             ),
             ChatMessageSpan(
                 start=1,
                 end=1,
                 message=_state_message({"role": "assistant", "content": "m1"}),
-                token_count=3,
             ),
         ),
     )
@@ -1631,20 +1617,16 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
         start=2,
         end=3,
         message=_state_message({"role": "assistant", "content": "summary 2-3"}),
-        token_count=1,
-        summary_fidelity=3,
         children=(
             ChatMessageSpan(
                 start=2,
                 end=2,
                 message=_state_message({"role": "user", "content": "m2"}),
-                token_count=2,
             ),
             ChatMessageSpan(
                 start=3,
                 end=3,
                 message=_state_message({"role": "assistant", "content": "m3"}),
-                token_count=3,
             ),
         ),
     )
@@ -1661,11 +1643,7 @@ async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
         keyring=_keyring(),
     )
 
-    assert [row.citation for row in _main_transcript(result, token_budget=6)] == [
-        "[~0_1]",
-        "[~2]",
-        "[~3]",
-    ]
+    assert [row.citation for row in _main_transcript(result)] == ["[~0_1]", "[~2_3]"]
 
 
 def test_call_id_binary_encoding_is_compact_and_roundtrips() -> None:
@@ -1714,7 +1692,6 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
                     "content": (f"{label} source" if ordinal == 0 else f"{label} summarized source"),
                 }
             ),
-            token_count=1,
         )
         for ordinal in range(cursor)
     )
@@ -1727,8 +1704,6 @@ def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
                 start=1,
                 end=cursor - 1,
                 message=_state_message({"role": "assistant", "content": f"{label} summary"}),
-                token_count=1,
-                summary_fidelity=3,
                 children=source[1:],
             )
         )
@@ -1754,7 +1729,7 @@ def _reasoning_item(
         side=side,
         temp=temp,
         messages=tuple(_reasoning_message(message) for message in messages),
-        continuation_side=continuation_side,
+        continuation_side=continuation_side or side,
     )
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),

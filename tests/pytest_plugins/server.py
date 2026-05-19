@@ -133,10 +133,7 @@ class _StaticChatCompletionClient(IChatCompletionClient):
                         ChatToolCall(
                             id="compact_call_1",
                             name="compact",
-                            arguments=(
-                                '{"action":"apply","ranges":[{"start":"[~0]","end":"[~0]","summary":"brief",'
-                                '"summary_fidelity":5}]}'
-                            ),
+                            arguments='{"ranges":[{"start":"[~0]","end":"[~0]","summary":"brief"}]}',
                         )
                     ],
                 ),

@@ -38,7 +38,7 @@ _CALL_ID_TEMP_MASK = 0x08
 _CALL_ID_FLAGS_MASK = 0x07
 _CALL_ID_SIDE_MASK = 0x1F
 _CALL_ID_SIDE_RESERVED_MASK = 0xE0
-_SIDE_CODES: dict[Side, int] = {Side.MAIN: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
+_SIDE_CODES: dict[Side, int] = {Side.MAIN: 1, Side.DEFENDER: 2, Side.REVIEWER: 3, Side.ARBITRATOR: 4}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
 
 
@@ -311,7 +311,7 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
     if value.get("version") != PAYLOAD_FORMAT_VERSION or value.get("type") != REASONING_PAYLOAD_TYPE:
         raise _reasoning_replay_error(reason="unsupported_reasoning_payload", private_message="unsupported reasoning payload")
     side = value.get("side")
-    if side not in {Side.MAIN, Side.REVIEWER, Side.ARBITRATOR, "main", "reviewer", "arbitrator"}:
+    if side not in {Side.MAIN, Side.DEFENDER, Side.REVIEWER, Side.ARBITRATOR, "main", "defender", "reviewer", "arbitrator"}:
         raise _reasoning_replay_error(reason="invalid_reasoning_side", private_message="invalid reasoning side")
     temp = value.get("temp")
     if not isinstance(temp, bool):
@@ -330,7 +330,7 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
 
 
 def _pack_call_id(value: SealedCallID) -> bytes:
-    if value.side not in {Side.MAIN, Side.REVIEWER, Side.ARBITRATOR}:
+    if value.side not in {Side.MAIN, Side.DEFENDER, Side.REVIEWER, Side.ARBITRATOR}:
         raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
     if len(value.content_hash_prefix) != CALL_ID_CONTENT_HASH_PREFIX_BYTES:
         raise _tool_replay_error(
@@ -528,44 +528,8 @@ def _validate_span_rows(
 
 def _validate_span_node(row: ChatMessageSpan, *, cursors: dict[str, int]) -> None:
     if row.children:
-        if row.summary_fidelity is None:
-            raise _compaction_replay_error(
-                reason="compaction_summary_fidelity_missing", private_message="compaction summary_fidelity is required"
-            )
-        if row.children_pruned:
-            raise _compaction_replay_error(
-                reason="compaction_span_children_and_pruned", private_message="compaction span cannot have children and be pruned"
-            )
         _validate_span_rows(row.children, cursors=cursors, parent=row)
-        children_token_count = sum(child.token_count for child in row.children)
-        expanded_token_count = sum(child.expanded_token_count for child in row.children)
-        if row.children_token_count != children_token_count:
-            raise _compaction_replay_error(
-                reason="compaction_children_token_count_invalid", private_message="compaction children_token_count is invalid"
-            )
-        if row.expanded_token_count != expanded_token_count:
-            raise _compaction_replay_error(
-                reason="compaction_expanded_token_count_invalid", private_message="compaction expanded_token_count is invalid"
-            )
         return
-
-    if row.is_leaf:
-        if row.summary_fidelity is not None:
-            raise _compaction_replay_error(
-                reason="compaction_leaf_has_summary_fidelity", private_message="compaction leaf span cannot have summary_fidelity"
-            )
-        if row.children_pruned:
-            raise _compaction_replay_error(reason="compaction_leaf_pruned", private_message="compaction leaf span cannot be pruned")
-        return
-
-    if row.summary_fidelity is None:
-        raise _compaction_replay_error(
-            reason="compaction_summary_fidelity_missing", private_message="compaction summary_fidelity is required"
-        )
-    if not row.children_pruned:
-        raise _compaction_replay_error(
-            reason="compaction_summary_span_has_no_children", private_message="compaction summary span has no children"
-        )
 
 
 def _rows_from_json(value: object) -> tuple[ChatMessageSpan, ...]:

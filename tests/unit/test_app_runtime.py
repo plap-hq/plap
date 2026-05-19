@@ -167,7 +167,7 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
         runtime_model_profiles={
             "plap/glm": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/glm-4.7-flash",
                 arbitrator_model="crof/glm-4.7-flash",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -185,7 +185,7 @@ def test_app_runtime_validates_canopywave_provider_prefix() -> None:
         runtime_model_profiles={
             "plap/deepseek": _profile_config(
                 main_model="canopywave/example-model",
-                main_debate_model="canopywave/example-model",
+                defender_model="canopywave/example-model",
                 reviewer_model="canopywave/example-model",
                 arbitrator_model="canopywave/example-model",
                 reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
@@ -202,7 +202,7 @@ def test_app_runtime_validates_gmicloud_provider_prefix() -> None:
         runtime_model_profiles={
             "plap/gmi": _profile_config(
                 main_model="gmicloud/openai/gpt-oss-120b",
-                main_debate_model="gmicloud/openai/gpt-oss-120b",
+                defender_model="gmicloud/openai/gpt-oss-120b",
                 reviewer_model="gmicloud/openai/gpt-oss-120b",
                 arbitrator_model="gmicloud/openai/gpt-oss-120b",
                 reasoning_summarizer_model="gmicloud/openai/gpt-oss-120b",
@@ -475,7 +475,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="lightning/lightning-ai/gpt-oss-20b",
-                main_debate_model="lightning/lightning-ai/gpt-oss-120b",
+                defender_model="lightning/lightning-ai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
@@ -495,7 +495,7 @@ def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="gmicloud/deepseek-ai/DeepSeek-V4-Flash",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -512,7 +512,7 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="lightning/lightning-ai/gpt-oss-20b",
-                main_debate_model="openai/gpt-oss-120b",
+                defender_model="openai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
@@ -533,7 +533,7 @@ def test_app_runtime_rejects_unrouted_runtime_profile_fallback_entry() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b,lightning/lightning-ai/gpt-oss-20b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -555,7 +555,7 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -563,9 +563,8 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
                     "priority": RuntimeProfileOverride(
                         main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
-                        reviewer_transcript_token_budget=4096,
-                        arbitrator_transcript_token_budget=2048,
-                        soft_compact_threshold=4096,
+                        reviewer_max_transcript_tokens=4096,
+                        arbitrator_max_transcript_tokens=2048,
                         compact_threshold=8192,
                         compact_max_rounds=1,
                         debate_max_rounds=1,
@@ -584,7 +583,7 @@ def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -607,12 +606,12 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="lightning/lightning-ai/gpt-oss-20b",
-                main_debate_model="lightning/lightning-ai/gpt-oss-120b",
+                defender_model="lightning/lightning-ai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
                 reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
-                reviewer_transcript_token_budget=1024,
-                arbitrator_transcript_token_budget=768,
+                reviewer_max_transcript_tokens=1024,
+                arbitrator_max_transcript_tokens=768,
             )
         },
     )
@@ -620,8 +619,8 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
     profile = settings.resolve_runtime_model_profile("plap/standard")
 
     assert profile is settings.runtime_model_profiles["plap/standard"]
-    assert profile.reviewer_transcript_token_budget == 1024
-    assert profile.arbitrator_transcript_token_budget == 768
+    assert profile.reviewer_max_transcript_tokens == 1024
+    assert profile.arbitrator_max_transcript_tokens == 768
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="default")) is profile
     assert settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(service_tier="auto")) is profile
     with pytest.raises(PlapError) as exc_info:
@@ -644,7 +643,7 @@ def test_app_runtime_rejects_unsupported_service_tier() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -666,7 +665,7 @@ def test_app_runtime_rejects_unsupported_reasoning_effort() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -687,7 +686,7 @@ def test_runtime_profile_rejects_service_tier_overrides_without_supported_parame
     with pytest.raises(ValueError, match="service_tier overrides require"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
+            defender_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -702,7 +701,7 @@ def test_runtime_profile_rejects_reasoning_effort_overrides_without_supported_pa
     with pytest.raises(ValueError, match="reasoning_effort overrides require"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
+            defender_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -718,11 +717,10 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-                soft_compact_threshold=2000,
                 compact_threshold=3000,
                 compact_max_rounds=2,
                 debate_max_rounds=2,
@@ -730,9 +728,8 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
                     "priority": RuntimeProfileOverride(
                         main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                         reviewer=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
-                        reviewer_transcript_token_budget=8192,
-                        arbitrator_transcript_token_budget=4096,
-                        soft_compact_threshold=5000,
+                        reviewer_max_transcript_tokens=8192,
+                        arbitrator_max_transcript_tokens=4096,
                         compact_threshold=6000,
                         compact_max_rounds=1,
                         debate_max_rounds=1,
@@ -749,15 +746,13 @@ def test_app_runtime_resolves_runtime_profile_variants() -> None:
     assert priority.main.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.reviewer.model == "lightning/lightning-ai/gpt-oss-120b"
     assert priority.compactor.model == "crof/qwen3.5-9b"
-    assert priority.main_debate.model == "crof/qwen3.5-9b"
+    assert priority.defender.model == "crof/qwen3.5-9b"
     assert priority.arbitrator.model == "crof/qwen3.5-9b"
-    assert priority.reviewer_transcript_token_budget == 8192
-    assert priority.arbitrator_transcript_token_budget == 4096
-    assert priority.soft_compact_threshold == 5000
+    assert priority.reviewer_max_transcript_tokens == 8192
+    assert priority.arbitrator_max_transcript_tokens == 4096
     assert priority.compact_threshold == 6000
     assert priority.compact_max_rounds == 1
     assert priority.debate_max_rounds == 1
-    assert base.soft_compact_threshold == 2000
     assert base.compact_threshold == 3000
     assert base.compact_max_rounds == 2
     assert base.debate_max_rounds == 2
@@ -774,14 +769,14 @@ def test_app_runtime_resolves_reasoning_effort_variant() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
                 by_reasoning_effort={
                     "high": RuntimeProfileOverride(
                         main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
-                        main_debate=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
+                        defender=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b"),
                     )
                 },
             )
@@ -791,7 +786,7 @@ def test_app_runtime_resolves_reasoning_effort_variant() -> None:
     profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
 
     assert profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert profile.main_debate.model == "lightning/lightning-ai/gpt-oss-120b"
+    assert profile.defender.model == "lightning/lightning-ai/gpt-oss-120b"
     assert profile.reviewer.model == "crof/qwen3.5-9b"
 
 
@@ -800,7 +795,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -825,7 +820,7 @@ def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -849,7 +844,7 @@ def test_runtime_profile_rejects_default_reasoning_effort_without_matching_overr
     with pytest.raises(ValueError, match="default_reasoning_effort"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
+            defender_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -862,7 +857,7 @@ def test_app_runtime_resolves_model_info_overrides() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -897,7 +892,7 @@ def test_app_runtime_resolves_reasoning_to_output_override() -> None:
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
-                main_debate_model="crof/qwen3.5-9b",
+                defender_model="crof/qwen3.5-9b",
                 reviewer_model="crof/qwen3.5-9b",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -917,7 +912,7 @@ def test_runtime_profile_rejects_conflicting_service_and_reasoning_overrides() -
     with pytest.raises(ValueError, match="both set"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
+            defender_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
@@ -930,25 +925,12 @@ def test_runtime_profile_rejects_conflicting_reasoning_to_output_overrides() -> 
     with pytest.raises(ValueError, match="reasoning_to_output"):
         _profile_config(
             main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
+            defender_model="crof/qwen3.5-9b",
             reviewer_model="crof/qwen3.5-9b",
             arbitrator_model="crof/qwen3.5-9b",
             reasoning_summarizer_model="crof/qwen3.5-9b",
             by_service_tier={"priority": RuntimeProfileOverride(reasoning_to_output=1.2)},
             by_reasoning_effort={"high": RuntimeProfileOverride(reasoning_to_output=1.4)},
-        )
-
-
-def test_runtime_profile_rejects_invalid_compaction_thresholds() -> None:
-    with pytest.raises(ValueError, match="compact threshold"):
-        _profile_config(
-            main_model="crof/qwen3.5-9b",
-            main_debate_model="crof/qwen3.5-9b",
-            reviewer_model="crof/qwen3.5-9b",
-            arbitrator_model="crof/qwen3.5-9b",
-            reasoning_summarizer_model="crof/qwen3.5-9b",
-            soft_compact_threshold=1000,
-            compact_threshold=1000,
         )
 
 
@@ -968,13 +950,12 @@ def _profile_config(
     display_name: str = "Test Model",
     main_model: str,
     compactor_model: str | None = None,
-    main_debate_model: str,
+    defender_model: str,
     reviewer_model: str,
     arbitrator_model: str,
     reasoning_summarizer_model: str,
-    reviewer_transcript_token_budget: int = 0,
-    arbitrator_transcript_token_budget: int = 0,
-    soft_compact_threshold: int | None = None,
+    reviewer_max_transcript_tokens: int = 0,
+    arbitrator_max_transcript_tokens: int = 0,
     compact_threshold: int | None = None,
     compact_max_rounds: int = 3,
     debate_max_rounds: int = 2,
@@ -1015,13 +996,12 @@ def _profile_config(
         ),
         main=RuntimeActorConfig(model=main_model),
         compactor=RuntimeActorConfig(model=compactor_model or main_model),
-        main_debate=RuntimeActorConfig(model=main_debate_model),
+        defender=RuntimeActorConfig(model=defender_model),
         reviewer=RuntimeActorConfig(model=reviewer_model),
         arbitrator=RuntimeActorConfig(model=arbitrator_model),
         reasoning_summarizer=RuntimeActorConfig(model=reasoning_summarizer_model),
-        reviewer_transcript_token_budget=reviewer_transcript_token_budget,
-        arbitrator_transcript_token_budget=arbitrator_transcript_token_budget,
-        soft_compact_threshold=soft_compact_threshold,
+        reviewer_max_transcript_tokens=reviewer_max_transcript_tokens,
+        arbitrator_max_transcript_tokens=arbitrator_max_transcript_tokens,
         compact_threshold=compact_threshold,
         compact_max_rounds=compact_max_rounds,
         debate_max_rounds=debate_max_rounds,

@@ -88,6 +88,7 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
         llm_crof_api_key="test-crof-key",
         llm_lightning_api_key="test-lightning-key",
+        llm_openrouter_api_key="test-openrouter-key",
         mcp_servers=[],
         runtime_model_profiles={
             "plap/test": RuntimeModelProfileConfig(
@@ -120,12 +121,12 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
                 ),
                 main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 compactor=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                main_debate=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+                defender=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
                 reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                reviewer_transcript_token_budget=0,
-                arbitrator_transcript_token_budget=0,
+                reviewer_max_transcript_tokens=0,
+                arbitrator_max_transcript_tokens=0,
                 debate_max_rounds=0,
             )
         },
