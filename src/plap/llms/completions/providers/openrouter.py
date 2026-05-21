@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from plap.llms.client import Provider, Quirk
-from plap.llms.errors import ChatCompletionUnsupportedRequestError
-from plap.llms.providers.openai import OpenAIProvider
-from plap.llms.quirks import ExtraBody, Only, RenameOutput, Set, SystemRole
+from plap.llms.completions.client import Provider, Quirk
+from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.providers.openai import OpenAIProvider
+from plap.llms.completions.quirks import ExtraBody, Only, RenameOutput, Set, SystemRole
 
 OPENROUTER_OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(

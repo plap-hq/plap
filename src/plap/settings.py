@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
-from plap.llms.chat import ReasoningEffort, ServiceTier
+from plap.llms.completions.chat import ReasoningEffort, ServiceTier
 from plap.responses.contracts import ModelInfoObject, ModelInfoPricingObject, ModelObject
 
 

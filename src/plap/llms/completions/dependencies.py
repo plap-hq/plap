@@ -5,7 +5,7 @@ from typing import Any
 from litestar import Request
 from litestar.connection import WebSocket
 
-from plap.llms.chat import IChatCompletionClient
+from plap.llms.completions.chat import IChatCompletionClient
 
 
 def provide_request_chat_completion_client(

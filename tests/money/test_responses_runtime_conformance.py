@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from plap.app import _create_mcp_tool_providers, create_app
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
-from plap.llms.chat import ReasoningEffort
+from plap.llms.completions.chat import ReasoningEffort
 from plap.persistence import create_database_engine, create_session_maker
 from plap.persistence.models import (
     Organization,

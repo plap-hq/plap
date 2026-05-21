@@ -11,7 +11,7 @@ from plap.app import (
     _validate_runtime_profile_tokenizers,
 )
 from plap.errors import PlapError
-from plap.llms.router import (
+from plap.llms.completions.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
 )

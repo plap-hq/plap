@@ -12,7 +12,7 @@ import structlog
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionResult,
     ChatFinishReason,
@@ -24,7 +24,7 @@ from plap.llms.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.llms.errors import ChatCompletionContextLengthExceededError
+from plap.llms.completions.errors import ChatCompletionContextLengthExceededError
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.compact import (
     CompactionOutcome,

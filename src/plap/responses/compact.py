@@ -10,7 +10,7 @@ import structlog
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
     ChatFinishReason,
@@ -22,7 +22,12 @@ from plap.llms.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
-from plap.llms.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair, parse_json_value_with_repair
+from plap.responses.json_utils import (
+    JSONInvalidError,
+    JSONNotObjectError,
+    parse_json_object_with_repair,
+    parse_json_value_with_repair,
+)
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     CompactedResponseObject,

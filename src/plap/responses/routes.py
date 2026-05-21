@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import IChatCompletionClient
+from plap.llms.completions.chat import IChatCompletionClient
 from plap.logging import log_debug, log_payload
 from plap.responses.compact import run_explicit_compaction
 from plap.responses.contracts import (

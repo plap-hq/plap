@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from plap.llms.client import Provider
-from plap.llms.providers.fireworks import build_fireworks_provider
-from plap.llms.providers.openai import (
+from plap.llms.completions.client import Provider
+from plap.llms.completions.providers.fireworks import build_fireworks_provider
+from plap.llms.completions.providers.openai import (
     CROF_OPENAI_BASE_URL,
     GMICLOUD_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
@@ -14,7 +14,7 @@ from plap.llms.providers.openai import (
     build_lightning_provider,
     build_novita_provider,
 )
-from plap.llms.providers.openrouter import (
+from plap.llms.completions.providers.openrouter import (
     OPENROUTER_OPENAI_BASE_URL,
     OpenRouterProvider,
     build_openrouter_provider,

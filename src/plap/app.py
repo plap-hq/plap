@@ -12,12 +12,12 @@ from litestar.exceptions import HTTPException, NotAuthorizedException, Validatio
 from plap.auth import APIKeyManager
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.client import ChatCompletionClient, Provider
-from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
-from plap.llms.chat import ChatMessage as LLMChatMessage
-from plap.llms.errors import ChatCompletionUnsupportedRequestError
-from plap.llms.providers import build_providers
-from plap.llms.router import (
+from plap.llms.completions.client import ChatCompletionClient, Provider
+from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
+from plap.llms.completions.chat import ChatMessage as LLMChatMessage
+from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.providers import build_providers
+from plap.llms.completions.router import (
     ModelRoute,
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,

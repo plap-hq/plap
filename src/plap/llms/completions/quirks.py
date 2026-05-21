@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatResponseFormatType,
     ChatToolChoiceFunction,
 )
-from plap.llms.client import Call, Quirk
-from plap.llms.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.client import Call, Quirk
+from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 
 
 def _merge_dicts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:

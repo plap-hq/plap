@@ -7,10 +7,14 @@ from typing import Any
 import msgspec
 import tiktoken
 
-from plap.llms.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
-from plap.llms.chat import ChatMessage as LLMChatMessage
-from plap.llms.chat import ChatToolCall as LLMChatToolCall
-from plap.llms.json_utils import JSONInvalidError, normalize_json_text_with_repair_or_original, parse_json_value_with_repair
+from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
+from plap.llms.completions.chat import ChatMessage as LLMChatMessage
+from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
+from plap.responses.json_utils import (
+    JSONInvalidError,
+    normalize_json_text_with_repair_or_original,
+    parse_json_value_with_repair,
+)
 from plap.responses.encoding_dsv4 import encode_messages as encode_dsv4_messages
 from plap.settings import RuntimeActorConfig
 

@@ -9,10 +9,10 @@ from math import ceil
 import blake3
 import msgspec
 
-from plap.llms.chat import ChatMessage as LLMChatMessage
-from plap.llms.chat import ChatRole, ChatUsage
-from plap.llms.chat import ChatToolCall as LLMChatToolCall
-from plap.llms.json_utils import JSONInvalidError, normalize_json_text_with_repair, parse_json_value_with_repair
+from plap.llms.completions.chat import ChatMessage as LLMChatMessage
+from plap.llms.completions.chat import ChatRole, ChatUsage
+from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
+from plap.responses.json_utils import JSONInvalidError, normalize_json_text_with_repair, parse_json_value_with_repair
 from plap.responses.contracts import (
     ResponseUsage,
     ResponseUsageInputTokensDetails,

@@ -12,9 +12,9 @@ from fireworks.client.error import (
     RateLimitError,
 )
 
-from plap.llms.client import Call, Provider, Quirk
-from plap.llms.common import to_data
-from plap.llms.errors import (
+from plap.llms.completions.client import Call, Provider, Quirk
+from plap.llms.completions.common import to_data
+from plap.llms.completions.errors import (
     ChatCompletionAuthenticationError,
     ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
@@ -22,7 +22,7 @@ from plap.llms.errors import (
     ChatCompletionRateLimitError,
     is_context_length_exceeded_error,
 )
-from plap.llms.quirks import Only, SystemRole
+from plap.llms.completions.quirks import Only, SystemRole
 
 
 def _fireworks_context_length_exceeded_error(exc: InvalidRequestError) -> ChatCompletionContextLengthExceededError | None:

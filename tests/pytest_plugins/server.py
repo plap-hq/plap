@@ -11,7 +11,7 @@ import pytest
 import uvicorn
 
 from plap.app import create_app
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,

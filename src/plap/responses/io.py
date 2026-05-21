@@ -13,7 +13,7 @@ from anyio.abc import ObjectSendStream, TaskGroup
 
 from plap.errors import ErrorLevel, PlapError, PrivateError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import ReasoningEffort, ServiceTier
+from plap.llms.completions.chat import ReasoningEffort, ServiceTier
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     ConversationReference,

@@ -13,7 +13,7 @@ from plap.auth.dependencies import (
     provide_socket_auth_context,
 )
 from plap.keyring import SealingKeyring
-from plap.llms.dependencies import (
+from plap.llms.completions.dependencies import (
     provide_request_chat_completion_client,
     provide_socket_chat_completion_client,
 )

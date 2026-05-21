@@ -9,8 +9,10 @@ import pytest
 from fireworks.client.error import InvalidRequestError
 from openai import BadRequestError
 
-import plap.llms.router as router_module
-from plap.llms.chat import (
+import plap.llms.completions.router as router_module
+from plap.llms.accumulator import Accumulator, Snapshot
+from plap.llms.completions.chat import (
+    ChatCompletionDelta,
     ChatCompletionRequest,
     ChatFunctionTool,
     ChatMessage,
@@ -19,18 +21,19 @@ from plap.llms.chat import (
     ChatStreamOptions,
     ChatTool,
     ChatToolCall,
+    ChatToolCallDelta,
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
-from plap.llms.client import Call, ChatCompletionClient
-from plap.llms.common import build_chat_body
-from plap.llms.errors import (
+from plap.llms.completions.client import Call, ChatCompletionClient
+from plap.llms.completions.common import build_chat_body
+from plap.llms.completions.errors import (
     ChatCompletionContextLengthExceededError,
     ChatCompletionProviderError,
     ChatCompletionUnsupportedRequestError,
     is_context_length_exceeded_error,
 )
-from plap.llms.providers import (
+from plap.llms.completions.providers import (
     CROF_OPENAI_BASE_URL,
     GMICLOUD_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
@@ -44,9 +47,9 @@ from plap.llms.providers import (
     build_novita_provider,
     build_openrouter_provider,
 )
-from plap.llms.providers.fireworks import FireworksProvider
-from plap.llms.providers.openai import OpenAIProvider
-from plap.llms.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
+from plap.llms.completions.providers.fireworks import FireworksProvider
+from plap.llms.completions.providers.openai import OpenAIProvider
+from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
 from plap.settings import Settings
 
 
@@ -304,7 +307,7 @@ def _body_for(provider, request: ChatCompletionRequest, *, stream: bool) -> dict
 
 
 def _completion_result(model: str, content: str):
-    from plap.llms.chat import ChatCompletionResult, ChatMessage, ChatUsage
+    from plap.llms.completions.chat import ChatCompletionResult, ChatMessage, ChatUsage
 
     return ChatCompletionResult(
         id="chatcmpl_test",
@@ -317,7 +320,7 @@ def _completion_result(model: str, content: str):
 
 
 def _delta(model: str, *, content_delta: str | None = None, finish_reason: str | None = None):
-    from plap.llms.chat import ChatCompletionDelta
+    from plap.llms.completions.chat import ChatCompletionDelta
 
     return ChatCompletionDelta(
         id="chatcmpl_test",
@@ -327,6 +330,153 @@ def _delta(model: str, *, content_delta: str | None = None, finish_reason: str |
         content_delta=content_delta,
         finish_reason=finish_reason,
     )
+
+
+def test_chat_tool_call_keeps_raw_arguments() -> None:
+    call = ChatToolCall(id="call_1", name="lookup", arguments="{'q':'x'}")
+
+    assert call.arguments == "{'q':'x'}"
+
+
+def test_accumulator_assembles_streamed_tool_call_and_final_result() -> None:
+    from plap.llms.completions.chat import ChatCompletionDelta, ChatToolCallDelta, ChatUsage
+
+    accumulator = Accumulator()
+    first = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_1",
+                name="lookup",
+                arguments_delta="{'n':",
+            ),
+        )
+    )
+    second = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model=None,
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                arguments_delta="'4','x':1}",
+            ),
+            finish_reason="tool_calls",
+            usage=ChatUsage(input_tokens=3, output_tokens=5, total_tokens=8),
+        )
+    )
+
+    assert first == Snapshot(delta=first.delta, message=first.message, result=None)
+    assert second.result is not None
+    assert first.message.tool_calls is not None
+    assert first.message.tool_calls[0].arguments == '{"n":""}'
+    assert second.message.tool_calls is not None
+    assert second.message.tool_calls[0].arguments == '{"n":"4","x":1}'
+    assert second.result.model == "model-a"
+    assert second.result.finish_reason == "tool_calls"
+
+
+def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
+    accumulator = Accumulator()
+
+    first = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            content_delta="hello",
+        )
+    )
+    second = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            finish_reason="stop",
+        )
+    )
+
+    assert first == Snapshot(delta=first.delta, message=first.message, result=None)
+    assert first.message.content == "hello"
+    assert second.result is not None
+    assert second.result.model == "model-a"
+    assert second.result.message.content == "hello"
+
+
+def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="lookup",
+            parameters={
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"],
+                "additionalProperties": False,
+            },
+        )
+    )
+    accumulator = Accumulator(tools=(tool,))
+    accumulator.apply(_delta(model="model-a", content_delta=""))
+    final = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model=None,
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_1",
+                name="lookup",
+                arguments_delta="{'n':'4','x':1}",
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    assert final.message.tool_calls is not None
+    assert final.message.tool_calls[0].arguments == '{"n":4}'
+    assert final.result is not None
+    assert final.result.message.tool_calls is not None
+    assert final.result.message.tool_calls[0].arguments == '{"n":4}'
+
+
+async def test_completions_client_fills_missing_result_and_delta_models() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            {
+                **_completion_response(model="ignored-model", content="ok"),
+                "model": None,
+            },
+            _AsyncListStream(
+                [
+                    {
+                        **_chunk(model="ignored-model", content="ok"),
+                        "model": None,
+                    },
+                    {
+                        **_chunk(model="ignored-model", finish_reason="stop"),
+                        "model": None,
+                    },
+                ]
+            ),
+        ],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert result.model == "openai/gpt-oss-20b"
+    assert deltas[0].model == "openai/gpt-oss-20b"
+    assert deltas[1].model == "openai/gpt-oss-20b"
 
 
 def _lightning_provider(*, client: Any | None = None) -> OpenAIProvider:

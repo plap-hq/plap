@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     IChatCompletionClient,

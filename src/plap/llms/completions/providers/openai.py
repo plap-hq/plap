@@ -11,9 +11,9 @@ from openai import (
     RateLimitError,
 )
 
-from plap.llms.client import Call, Provider, Quirk
-from plap.llms.common import close_stream_object, to_data
-from plap.llms.errors import (
+from plap.llms.completions.client import Call, Provider, Quirk
+from plap.llms.completions.common import close_stream_object, to_data
+from plap.llms.completions.errors import (
     ChatCompletionAuthenticationError,
     ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
@@ -22,7 +22,7 @@ from plap.llms.errors import (
     is_context_length_exceeded_code,
     is_context_length_exceeded_error,
 )
-from plap.llms.quirks import (
+from plap.llms.completions.quirks import (
     DropIf,
     ExtraBody,
     ForceRequiredTool,

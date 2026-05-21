@@ -7,7 +7,7 @@ from typing import Any
 
 import msgspec
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -22,7 +22,7 @@ from plap.llms.chat import (
     ChatToolChoice,
     ChatUsage,
 )
-from plap.llms.errors import ChatCompletionProviderError
+from plap.llms.completions.errors import ChatCompletionProviderError
 
 
 def _set(target: dict[str, Any], key: str, value: Any) -> None:
@@ -224,12 +224,16 @@ def _usage_from_data(usage: Any) -> ChatUsage | None:
     )
 
 
-def completion_result_from_data(response: dict[str, Any]) -> ChatCompletionResult:
+def completion_result_from_data(
+    response: dict[str, Any],
+    *,
+    request: ChatCompletionRequest,
+) -> ChatCompletionResult:
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message") or {}
     return ChatCompletionResult(
         id=_get(response, "id"),
-        model=_get(response, "model"),
+        model=_get(response, "model") or request.model,
         created_at=_float_or_none(_get(response, "created")),
         message=ChatMessage(
             role="assistant",
@@ -246,14 +250,18 @@ def completion_result_from_data(response: dict[str, Any]) -> ChatCompletionResul
     )
 
 
-def delta_from_data(chunk: dict[str, Any]) -> ChatCompletionDelta:
+def delta_from_data(
+    chunk: dict[str, Any],
+    *,
+    request: ChatCompletionRequest,
+) -> ChatCompletionDelta:
     choice = _first(_get(chunk, "choices"))
     delta = _get(choice, "delta") or {}
     tool_call_delta = _first(_get(delta, "tool_calls"))
     function = _get(tool_call_delta, "function")
     return ChatCompletionDelta(
         id=_get(chunk, "id"),
-        model=_get(chunk, "model"),
+        model=_get(chunk, "model") or request.model,
         created_at=_float_or_none(_get(chunk, "created")),
         choice_index=_get(choice, "index") or 0,
         content_delta=_get(delta, "content"),
@@ -275,8 +283,12 @@ def delta_from_data(chunk: dict[str, Any]) -> ChatCompletionDelta:
     )
 
 
-def response_to_stream_chunks(response: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    result = completion_result_from_data(response)
+def response_to_stream_chunks(
+    response: dict[str, Any],
+    *,
+    request: ChatCompletionRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = completion_result_from_data(response, request=request)
     return (
         {
             "id": result.id,

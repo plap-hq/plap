@@ -7,13 +7,17 @@ from dataclasses import dataclass, replace
 import anyio
 import structlog
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
     IChatCompletionClient,
 )
-from plap.llms.errors import ChatCompletionProviderError, ChatCompletionTimeoutError, ChatCompletionUnsupportedRequestError
+from plap.llms.completions.errors import (
+    ChatCompletionProviderError,
+    ChatCompletionTimeoutError,
+    ChatCompletionUnsupportedRequestError,
+)
 from plap.logging import log_debug
 
 logger = structlog.get_logger(__name__)

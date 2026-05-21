@@ -6,7 +6,13 @@ from typing import Protocol, runtime_checkable
 
 import structlog
 
-from plap.llms.chat import ChatCompletionRequest, ChatMessage, IChatCompletionClient, ReasoningEffort, ServiceTier
+from plap.llms.completions.chat import (
+    ChatCompletionRequest,
+    ChatMessage,
+    IChatCompletionClient,
+    ReasoningEffort,
+    ServiceTier,
+)
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import ReasoningSummary
 

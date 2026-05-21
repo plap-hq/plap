@@ -4,20 +4,20 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
     IChatCompletionClient,
 )
-from plap.llms.common import (
+from plap.llms.completions.common import (
     StreamState,
     build_chat_body,
     completion_result_from_data,
     delta_from_data,
     raise_incomplete_stream_error,
 )
-from plap.llms.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 
 type NextComplete = Callable[[ChatCompletionRequest | None], Awaitable[dict[str, Any]]]
 type NextStream = Callable[[ChatCompletionRequest | None], AsyncIterator[dict[str, Any]]]
@@ -117,7 +117,7 @@ class ChatCompletionClient(IChatCompletionClient):
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         raw = await self._complete_request(request, self._quirks(request.model), 0)
-        return completion_result_from_data(raw)
+        return completion_result_from_data(raw, request=request)
 
     async def _stream_from_call(
         self,
@@ -162,7 +162,7 @@ class ChatCompletionClient(IChatCompletionClient):
             quirks = self._quirks(request.model)
             state = StreamState()
             async for raw in self._stream_request(request, quirks, 0):
-                delta = delta_from_data(raw)
+                delta = delta_from_data(raw, request=request)
                 state.apply(delta)
                 yield delta
             inferred_delta = state.inferred_terminal_delta()

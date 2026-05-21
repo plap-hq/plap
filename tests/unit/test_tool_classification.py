@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from plap.errors import PlapError
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,

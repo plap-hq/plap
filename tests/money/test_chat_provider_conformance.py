@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatFunctionTool,
@@ -20,16 +20,16 @@ from plap.llms.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
-from plap.llms.client import ChatCompletionClient
-from plap.llms.errors import ChatCompletionProviderError
-from plap.llms.providers import (
+from plap.llms.completions.client import ChatCompletionClient
+from plap.llms.completions.errors import ChatCompletionProviderError
+from plap.llms.completions.providers import (
     build_crof_provider,
     build_fireworks_provider,
     build_gmicloud_provider,
     build_lightning_provider,
     build_novita_provider,
 )
-from plap.llms.router import ModelRoute, RoutingChatCompletionClient
+from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
 from plap.settings import Settings
 
 pytestmark = pytest.mark.money

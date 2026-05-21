@@ -8,7 +8,7 @@ import blake3
 import msgspec
 import structlog
 
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
     ChatFunctionTool,
@@ -16,7 +16,7 @@ from plap.llms.chat import (
     ChatTool,
     IChatCompletionClient,
 )
-from plap.llms.json_utils import parse_json_object_with_repair
+from plap.responses.json_utils import parse_json_object_with_repair
 from plap.logging import log_debug, log_payload
 from plap.responses.tools.policy import (
     EffectClass,

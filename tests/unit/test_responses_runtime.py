@@ -11,7 +11,7 @@ import plap.responses.compact as compact_module
 from plap.auth import AuthContext
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
-from plap.llms.chat import (
+from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -22,7 +22,7 @@ from plap.llms.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.llms.errors import ChatCompletionContextLengthExceededError
+from plap.llms.completions.errors import ChatCompletionContextLengthExceededError
 from plap.responses.compact import (
     COMPACT_TOOL_NAME,
     DUPLICATE_TOOL_OUTPUT_TOMBSTONE,

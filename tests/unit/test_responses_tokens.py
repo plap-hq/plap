@@ -4,7 +4,7 @@ import json
 
 import transformers
 
-from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatMessage, ChatResponseFormat, ChatTool, ChatToolCall
+from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatMessage, ChatResponseFormat, ChatTool, ChatToolCall
 from plap.responses import tokens as tokens_module
 from plap.responses.tokens import measure_prompt_tokens, measure_request_tokens
 from plap.settings import RuntimeActorConfig
