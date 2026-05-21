@@ -14,12 +14,6 @@ class JSONNotObjectError(ValueError):
     pass
 
 
-def stringify_json_value(value: Any) -> str | None:
-    if value is None or isinstance(value, str):
-        return value
-    return msgspec.json.encode(value).decode()
-
-
 def parse_json_value_with_repair(value: str) -> object:
     try:
         return msgspec.json.decode(value.encode())

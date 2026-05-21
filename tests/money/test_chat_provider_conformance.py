@@ -20,70 +20,93 @@ from plap.llms.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
-from plap.llms.crof import CrofChatCompletionClient
+from plap.llms.client import ChatCompletionClient
 from plap.llms.errors import ChatCompletionProviderError
-from plap.llms.fireworks import FireworksChatCompletionClient
-from plap.llms.gmicloud import GMICloudChatCompletionClient
-from plap.llms.lightning import LightningChatCompletionClient
-from plap.llms.novita import NovitaChatCompletionClient
+from plap.llms.providers import (
+    build_crof_provider,
+    build_fireworks_provider,
+    build_gmicloud_provider,
+    build_lightning_provider,
+    build_novita_provider,
+)
 from plap.llms.router import ModelRoute, RoutingChatCompletionClient
+from plap.settings import Settings
 
 pytestmark = pytest.mark.money
 
 
+def _settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "api_key_pepper": "pepper",
+        "database_url": "postgresql+asyncpg://example/test",
+        "sealing_keys": ["a" * 43],
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 def _lightning_client(api_key: str) -> IChatCompletionClient:
+    provider = build_lightning_provider(_settings(llm_lightning_api_key=api_key))
+    assert provider is not None
     return RoutingChatCompletionClient(
         [
             ModelRoute(
                 prefix="lightning/",
-                client=LightningChatCompletionClient(api_key=api_key),
+                client=ChatCompletionClient(provider),
             )
         ]
     )
 
 
 def _novita_client(api_key: str) -> IChatCompletionClient:
+    provider = build_novita_provider(_settings(llm_novita_api_key=api_key))
+    assert provider is not None
     return RoutingChatCompletionClient(
         [
             ModelRoute(
                 prefix="novita/",
-                client=NovitaChatCompletionClient(api_key=api_key),
+                client=ChatCompletionClient(provider),
             )
         ]
     )
 
 
 def _gmicloud_client(api_key: str) -> IChatCompletionClient:
+    provider = build_gmicloud_provider(_settings(llm_gmicloud_api_key=api_key))
+    assert provider is not None
     return RoutingChatCompletionClient(
         [
             ModelRoute(
                 prefix="gmicloud/",
-                client=GMICloudChatCompletionClient(api_key=api_key),
+                client=ChatCompletionClient(provider),
             )
         ]
     )
 
 
 def _fireworks_client(api_key: str) -> IChatCompletionClient:
+    provider = build_fireworks_provider(_settings(llm_fireworks_api_key=api_key))
+    assert provider is not None
     return RoutingChatCompletionClient(
         [
             ModelRoute(
                 prefix="fireworks/",
-                client=FireworksChatCompletionClient(api_key=api_key),
+                client=ChatCompletionClient(provider),
             )
         ]
     )
 
 
 def _crof_client(api_key: str) -> IChatCompletionClient:
-    return RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=CrofChatCompletionClient(api_key=api_key))])
+    provider = build_crof_provider(_settings(llm_crof_api_key=api_key))
+    assert provider is not None
+    return RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=ChatCompletionClient(provider))])
 
 
 LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
 LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning/lightning-ai/llama-3.3-70b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
-GMICLOUD_DEEPSEEK_V4_FLASH_MODEL = "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
 GMICLOUD_MIMO_V25_PRO_MODEL = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
 FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
 CROF_QWEN_3_5_9B_MODEL = "crof/qwen3.5-9b"
@@ -145,10 +168,10 @@ TOOL_PROVIDERS = (
         ProviderCase(
             name="gmicloud",
             api_key_env="GMICLOUD_API_KEY",
-            model=GMICLOUD_DEEPSEEK_V4_FLASH_MODEL,
+            model=GMICLOUD_MIMO_V25_PRO_MODEL,
             client_factory=_gmicloud_client,
         ),
-        id="gmicloud-deepseek-v4-flash",
+        id="gmicloud-mimo-v2.5-pro",
     ),
     GPT_OSS_PROVIDERS[2],
     pytest.param(

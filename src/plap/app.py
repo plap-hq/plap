@@ -12,16 +12,11 @@ from litestar.exceptions import HTTPException, NotAuthorizedException, Validatio
 from plap.auth import APIKeyManager
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.canopywave import CanopyWaveChatCompletionClient
+from plap.llms.client import ChatCompletionClient, Provider
 from plap.llms.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
 from plap.llms.chat import ChatMessage as LLMChatMessage
-from plap.llms.crof import CrofChatCompletionClient
 from plap.llms.errors import ChatCompletionUnsupportedRequestError
-from plap.llms.fireworks import FireworksChatCompletionClient
-from plap.llms.gmicloud import GMICloudChatCompletionClient
-from plap.llms.lightning import LightningChatCompletionClient
-from plap.llms.novita import NovitaChatCompletionClient
-from plap.llms.openrouter import OpenRouterChatCompletionClient
+from plap.llms.providers import build_providers
 from plap.llms.router import (
     ModelRoute,
     RoutingChatCompletionClient,
@@ -196,52 +191,38 @@ async def _shutdown_database(app: Litestar) -> None:
     await app.state.database.dispose_all()
 
 
-def _create_chat_completion_client(settings: Settings) -> IChatCompletionClient:
-    routes = list(_chat_completion_routes(settings))
+def _create_chat_completion_client(
+    settings: Settings,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> IChatCompletionClient:
+    routes = list(_chat_completion_routes(settings, providers=providers))
     if not routes:
         return UnavailableChatCompletionClient()
     return RoutingChatCompletionClient(routes)
 
 
-def _chat_completion_routes(settings: Settings) -> Iterable[ModelRoute]:
-    if settings.llm_lightning_api_key:
-        client = LightningChatCompletionClient(api_key=settings.llm_lightning_api_key)
-        yield ModelRoute(prefix="lightning/", client=client)
-
-    if settings.llm_canopywave_api_key:
-        client = CanopyWaveChatCompletionClient(api_key=settings.llm_canopywave_api_key)
-        yield ModelRoute(prefix="canopywave/", client=client)
-
-    if settings.llm_gmicloud_api_key:
-        client = GMICloudChatCompletionClient(api_key=settings.llm_gmicloud_api_key)
-        yield ModelRoute(prefix="gmicloud/", client=client)
-
-    if settings.llm_novita_api_key:
-        client = NovitaChatCompletionClient(api_key=settings.llm_novita_api_key)
-        yield ModelRoute(prefix="novita/", client=client)
-
-    if settings.llm_fireworks_api_key:
-        client = FireworksChatCompletionClient(api_key=settings.llm_fireworks_api_key)
-        yield ModelRoute(prefix="fireworks/", client=client)
-
-    if settings.llm_crof_api_key:
-        client = CrofChatCompletionClient(api_key=settings.llm_crof_api_key)
-        yield ModelRoute(prefix="crof/", client=client)
-
-    if settings.llm_openrouter_api_key:
-        client = OpenRouterChatCompletionClient(api_key=settings.llm_openrouter_api_key)
-        yield ModelRoute(prefix="openrouter/", client=client)
+def _chat_completion_routes(
+    settings: Settings,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> Iterable[ModelRoute]:
+    for prefix, provider in _configured_chat_completion_providers(settings, providers=providers).items():
+        yield ModelRoute(prefix=prefix, client=ChatCompletionClient(provider))
 
 
 def _create_tool_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
+    *,
+    providers: dict[str, Provider] | None = None,
 ) -> IToolClassifier:
     classifier_model = settings.tool_effect_classifier_model
     classifier_cache_model = settings.tool_effect_classifier_cache_model
     if not _has_configured_chat_completion_route(
         settings,
         classifier_model,
+        providers=providers,
     ):
         raise PlapError(
             public=None,
@@ -264,12 +245,15 @@ def _create_tool_classifier(
 def _create_tool_call_classifier(
     settings: Settings,
     chat_completion_client: IChatCompletionClient,
+    *,
+    providers: dict[str, Provider] | None = None,
 ) -> IToolCallClassifier:
     classifier_model = settings.tool_call_effect_classifier_model
     classifier_cache_model = settings.tool_call_effect_classifier_cache_model
     if not _has_configured_chat_completion_route(
         settings,
         classifier_model,
+        providers=providers,
     ):
         raise PlapError(
             public=None,
@@ -310,10 +294,14 @@ def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
     return MCPToolProvider(server.name, transport, tools=server.tools)
 
 
-def _validate_runtime_model_profiles(settings: Settings) -> None:
+def _validate_runtime_model_profiles(
+    settings: Settings,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> None:
     for name, profile in settings.runtime_model_profiles.items():
         for model in profile.all_models():
-            if not _has_configured_chat_completion_route(settings, model):
+            if not _has_configured_chat_completion_route(settings, model, providers=providers):
                 raise PlapError(
                     public=None,
                     private=PrivateError(
@@ -393,30 +381,74 @@ def _validate_runtime_profile_tokenizers(settings: Settings) -> None:
         validated.add(tokenizer_key)
 
 
-def _configured_chat_completion_prefixes(settings: Settings) -> Iterable[str]:
-    if settings.llm_lightning_api_key:
-        yield "lightning/"
-    if settings.llm_canopywave_api_key:
-        yield "canopywave/"
-    if settings.llm_gmicloud_api_key:
-        yield "gmicloud/"
-    if settings.llm_novita_api_key:
-        yield "novita/"
-    if settings.llm_fireworks_api_key:
-        yield "fireworks/"
-    if settings.llm_crof_api_key:
-        yield "crof/"
-    if settings.llm_openrouter_api_key:
-        yield "openrouter/"
+def _configured_chat_completion_providers(
+    settings: Settings,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> dict[str, Provider]:
+    if providers is not None:
+        return providers
+    return build_providers(settings)
 
 
-def _has_configured_chat_completion_route_entry(settings: Settings, model: str) -> bool:
-    return any(model.startswith(prefix) for prefix in _configured_chat_completion_prefixes(settings))
+def _configured_chat_completion_prefixes(
+    settings: Settings,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> Iterable[str]:
+    yield from _configured_chat_completion_providers(settings, providers=providers)
 
 
-def _has_configured_chat_completion_route(settings: Settings, model: str) -> bool:
+def _configured_chat_completion_provider(
+    settings: Settings,
+    model: str,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> tuple[str, Provider] | None:
+    best: tuple[str, Provider] | None = None
+    for prefix, provider in _configured_chat_completion_providers(settings, providers=providers).items():
+        if not model.startswith(prefix):
+            continue
+        if best is None or len(prefix) > len(best[0]):
+            best = (prefix, provider)
+    return best
+
+
+def _has_configured_chat_completion_route_entry(
+    settings: Settings,
+    model: str,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> bool:
+    configured = _configured_chat_completion_provider(settings, model, providers=providers)
+    if configured is None:
+        return False
+    prefix, provider = configured
+    provider_model = model.removeprefix(prefix)
+    if not provider_model:
+        return False
     try:
-        return all(_has_configured_chat_completion_route_entry(settings, attempt) for attempt in _model_attempts(model))
+        provider.lookup(provider_model)
+    except ChatCompletionUnsupportedRequestError:
+        return False
+    return True
+
+
+def _has_configured_chat_completion_route(
+    settings: Settings,
+    model: str,
+    *,
+    providers: dict[str, Provider] | None = None,
+) -> bool:
+    try:
+        return all(
+            _has_configured_chat_completion_route_entry(
+                settings,
+                attempt,
+                providers=providers,
+            )
+            for attempt in _model_attempts(model)
+        )
     except ChatCompletionUnsupportedRequestError:
         return False
 
@@ -424,19 +456,28 @@ def _has_configured_chat_completion_route(settings: Settings, model: str) -> boo
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings)
+    providers = _configured_chat_completion_providers(resolved_settings)
     try:
-        chat_completion_client = _create_chat_completion_client(resolved_settings)
+        chat_completion_client = _create_chat_completion_client(
+            resolved_settings,
+            providers=providers,
+        )
         reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
         tool_classifier = _create_tool_classifier(
             resolved_settings,
             chat_completion_client,
+            providers=providers,
         )
         tool_call_classifier = _create_tool_call_classifier(
             resolved_settings,
             chat_completion_client,
+            providers=providers,
         )
         mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
-        _validate_runtime_model_profiles(resolved_settings)
+        _validate_runtime_model_profiles(
+            resolved_settings,
+            providers=providers,
+        )
         _validate_runtime_profile_tokenizers(resolved_settings)
     except PlapError as exc:
         exc.log(logger)
@@ -448,7 +489,12 @@ def create_app(settings: Settings | None = None) -> Litestar:
         log_file=resolved_settings.log_file,
         log_json=resolved_settings.log_json,
         mcp_servers=[server.name for server in resolved_settings.mcp_servers],
-        provider_routes=sorted(_configured_chat_completion_prefixes(resolved_settings)),
+        provider_routes=sorted(
+            _configured_chat_completion_prefixes(
+                resolved_settings,
+                providers=providers,
+            )
+        ),
         runtime_models=sorted(resolved_settings.runtime_model_profiles),
     )
     state = State(

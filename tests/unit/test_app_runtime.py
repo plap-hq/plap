@@ -49,7 +49,6 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     client = _create_chat_completion_client(
         _settings(
             llm_lightning_api_key="lightning-key",
-            llm_canopywave_api_key="canopywave-key",
             llm_gmicloud_api_key="gmicloud-key",
             llm_novita_api_key="novita-key",
             llm_crof_api_key="crof-key",
@@ -79,7 +78,6 @@ def test_runtime_actor_config_rejects_trust_remote_code_without_repo() -> None:
 
 def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
-        llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
         llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
@@ -100,7 +98,6 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
-        llm_canopywave_api_key="canopywave-key",
         llm_crof_api_key="crof-key",
         llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
@@ -171,24 +168,6 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
                 reviewer_model="crof/glm-4.7-flash",
                 arbitrator_model="crof/glm-4.7-flash",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
-            )
-        },
-    )
-
-    _validate_runtime_model_profiles(settings)
-
-
-def test_app_runtime_validates_canopywave_provider_prefix() -> None:
-    settings = _settings(
-        llm_canopywave_api_key="canopywave-key",
-        llm_lightning_api_key="lightning-key",
-        runtime_model_profiles={
-            "plap/deepseek": _profile_config(
-                main_model="canopywave/example-model",
-                defender_model="canopywave/example-model",
-                reviewer_model="canopywave/example-model",
-                arbitrator_model="canopywave/example-model",
-                reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-120b",
             )
         },
     )
@@ -273,8 +252,8 @@ def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
 def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
     settings = _settings(
         llm_gmicloud_api_key="gmicloud-key",
-        tool_call_effect_classifier_model="gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-        tool_call_effect_classifier_cache_model="deepseek-v4-flash",
+        tool_call_effect_classifier_model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+        tool_call_effect_classifier_cache_model="mimo-v2.5-pro",
     )
     client = _create_chat_completion_client(settings)
 
@@ -282,8 +261,8 @@ def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
 
     assert isinstance(classifier, LLMToolCallClassifier)
     assert classifier.classifier == TOOL_CALL_EFFECT_CLASSIFIER_NAME
-    assert classifier.classifier_model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
-    assert classifier.classifier_cache_model == "deepseek-v4-flash"
+    assert classifier.classifier_model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert classifier.classifier_cache_model == "mimo-v2.5-pro"
 
 
 def test_app_runtime_rejects_unrouted_tool_call_classifier_route() -> None:
@@ -494,9 +473,9 @@ def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
         llm_gmicloud_api_key="gmicloud-key",
         runtime_model_profiles={
             "plap/standard": _profile_config(
-                main_model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+                main_model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 defender_model="crof/qwen3.5-9b",
-                reviewer_model="gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+                reviewer_model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
                 arbitrator_model="crof/qwen3.5-9b",
                 reasoning_summarizer_model="crof/qwen3.5-9b",
             )
@@ -802,7 +781,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
                 default_reasoning_effort="medium",
                 by_reasoning_effort={
                     "medium": RuntimeProfileOverride(main=RuntimeActorOverride(model="lightning/lightning-ai/gpt-oss-120b")),
-                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="gmicloud/deepseek-ai/DeepSeek-V4-Flash")),
+                    "high": RuntimeProfileOverride(main=RuntimeActorOverride(model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro")),
                 },
             )
         },
@@ -812,7 +791,7 @@ def test_app_runtime_resolves_default_reasoning_effort_variant() -> None:
     high_profile = settings.resolve_runtime_model_profile("plap/standard", selector=RuntimeSelector(reasoning_effort="high"))
 
     assert default_profile.main.model == "lightning/lightning-ai/gpt-oss-120b"
-    assert high_profile.main.model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
+    assert high_profile.main.model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
 
 
 def test_app_runtime_rejects_missing_reasoning_effort_variant() -> None:

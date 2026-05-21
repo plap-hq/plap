@@ -1,4 +1,3 @@
-from plap.llms.canopywave import CanopyWaveChatCompletionClient
 from plap.llms.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -22,7 +21,7 @@ from plap.llms.chat import (
     ReasoningEffort,
     ServiceTier,
 )
-from plap.llms.crof import CrofChatCompletionClient
+from plap.llms.client import Call, ChatCompletionClient, Provider, Quirk
 from plap.llms.errors import (
     ChatCompletionAuthenticationError,
     ChatCompletionContextLengthExceededError,
@@ -32,18 +31,14 @@ from plap.llms.errors import (
     ChatCompletionRateLimitError,
     ChatCompletionUnsupportedRequestError,
 )
-from plap.llms.gmicloud import GMICloudChatCompletionClient
-from plap.llms.novita import NovitaChatCompletionClient
-from plap.llms.openrouter import OpenRouterChatCompletionClient
-from plap.llms.router import (
-    ModelRoute,
-    RoutingChatCompletionClient,
-    UnavailableChatCompletionClient,
-)
+from plap.llms.providers.fireworks import FireworksProvider
+from plap.llms.providers.openai import OpenAIProvider
+from plap.llms.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
 
 __all__ = [
-    "CanopyWaveChatCompletionClient",
+    "Call",
     "ChatCompletionAuthenticationError",
+    "ChatCompletionClient",
     "ChatCompletionContextLengthExceededError",
     "ChatCompletionDelta",
     "ChatCompletionError",
@@ -68,12 +63,12 @@ __all__ = [
     "ChatToolChoiceFunction",
     "ChatToolChoiceMode",
     "ChatUsage",
-    "CrofChatCompletionClient",
-    "GMICloudChatCompletionClient",
+    "FireworksProvider",
     "IChatCompletionClient",
     "ModelRoute",
-    "NovitaChatCompletionClient",
-    "OpenRouterChatCompletionClient",
+    "OpenAIProvider",
+    "Provider",
+    "Quirk",
     "ReasoningEffort",
     "RoutingChatCompletionClient",
     "ServiceTier",

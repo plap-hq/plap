@@ -617,10 +617,10 @@ def _mutation_tool_definition() -> dict[str, object]:
 def _runtime_profile(
     *,
     main_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
-    compactor_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+    compactor_model: str = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
     defender_model: str = "openrouter/stepfun/step-3.5-flash:nitro",
-    reviewer_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-    arbitrator_model: str = "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
+    reviewer_model: str = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+    arbitrator_model: str = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
     reasoning_summarizer_model: str = "lightning/lightning-ai/gpt-oss-20b",
     reviewer_max_transcript_tokens: int = 500_000,
     arbitrator_max_transcript_tokens: int = 500_000,

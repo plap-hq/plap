@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
-from types import SimpleNamespace
+from typing import Any
 
 import anyio
 import httpx
@@ -11,16 +10,8 @@ from fireworks.client.error import InvalidRequestError
 from openai import BadRequestError
 
 import plap.llms.router as router_module
-from plap.llms.canopywave import (
-    CANOPYWAVE_OPENAI_BASE_URL,
-    CanopyWaveChatCompletionClient,
-    to_canopywave_chat_params,
-)
 from plap.llms.chat import (
-    ChatCompletionDelta,
     ChatCompletionRequest,
-    ChatCompletionResult,
-    ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
     ChatPrediction,
@@ -29,2167 +20,54 @@ from plap.llms.chat import (
     ChatTool,
     ChatToolCall,
     ChatToolChoiceFunction,
+    IChatCompletionClient,
 )
-from plap.llms.crof import CrofChatCompletionClient, to_crof_chat_params
+from plap.llms.client import Call, ChatCompletionClient
+from plap.llms.common import build_chat_body
 from plap.llms.errors import (
     ChatCompletionContextLengthExceededError,
     ChatCompletionProviderError,
     ChatCompletionUnsupportedRequestError,
     is_context_length_exceeded_error,
 )
-from plap.llms.fireworks import FireworksChatCompletionClient, to_fireworks_chat_params
-from plap.llms.gmicloud import GMICLOUD_OPENAI_BASE_URL, GMICloudChatCompletionClient, to_gmicloud_chat_params
-from plap.llms.lightning import (
+from plap.llms.providers import (
+    CROF_OPENAI_BASE_URL,
+    GMICLOUD_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
-    LightningChatCompletionClient,
-    to_lightning_chat_params,
+    NOVITA_OPENAI_BASE_URL,
+    OPENROUTER_OPENAI_BASE_URL,
+    OpenRouterProvider,
+    build_crof_provider,
+    build_fireworks_provider,
+    build_gmicloud_provider,
+    build_lightning_provider,
+    build_novita_provider,
+    build_openrouter_provider,
 )
-from plap.llms.novita import NovitaChatCompletionClient, to_novita_chat_params
-from plap.llms.openai import (
-    OpenAICompatibleChatCompletionClient,
-    to_openai_chat_params,
-)
-from plap.llms.openrouter import OPENROUTER_OPENAI_BASE_URL, OpenRouterChatCompletionClient, to_openrouter_chat_params
-from plap.llms.router import (
-    ModelRoute,
-    RoutingChatCompletionClient,
-    UnavailableChatCompletionClient,
-)
+from plap.llms.providers.fireworks import FireworksProvider
+from plap.llms.providers.openai import OpenAIProvider
+from plap.llms.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
+from plap.settings import Settings
 
 
 def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
 
-    def _record(_logger: object, event: str, /, **context: object) -> None:
+    def record(_logger: object, event: str, /, **context: object) -> None:
         events.append({"event": event, **context})
 
-    monkeypatch.setattr(router_module, "log_debug", _record)
+    monkeypatch.setattr(router_module, "log_debug", record)
     return events
 
 
-def test_openai_params_preserve_chat_completion_controls() -> None:
-    request = _request()
-
-    params = to_openai_chat_params(request, stream=True)
-
-    assert params["model"] == "model-a"
-    assert params["messages"][0] == {"role": "developer", "content": "be precise"}
-    assert params["messages"][1] == {
-        "role": "user",
-        "content": "hello",
-        "name": "caller",
+def _settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "api_key_pepper": "pepper",
+        "database_url": "postgresql+asyncpg://example/test",
+        "sealing_keys": ["a" * 43],
     }
-    assert params["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {"type": "object"},
-                "strict": True,
-                "description": "look something up",
-            },
-        }
-    ]
-    assert params["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
-    assert params["parallel_tool_calls"] is True
-    assert params["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {"type": "object"},
-            "strict": True,
-            "description": "answer schema",
-        },
-    }
-    assert params["max_completion_tokens"] == 128
-    assert params["reasoning_effort"] == "low"
-    assert params["prompt_cache_key"] == "cache-a"
-    assert params["metadata"] == {"k": "v"}
-    assert params["service_tier"] == "flex"
-    assert params["prediction"] == {"type": "content", "content": "expected"}
-    assert params["stream_options"] == {"include_usage": True}
-    assert "top_k" not in params
-    assert "prompt_cache_retention" not in params
-    assert "safety_identifier" not in params
-    assert "store" not in params
-    assert "verbosity" not in params
-
-
-def test_openai_params_preserve_assistant_reasoning_metadata() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "openai-responses-v1",
-            "index": 0,
-            "text": "hidden chain",
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="model-a",
-        messages=[
-            ChatMessage(
-                role="assistant",
-                content="answer",
-                reasoning_content="hidden chain",
-                reasoning_details=reasoning_details,
-            )
-        ],
-    )
-
-    params = to_openai_chat_params(request, stream=False)
-
-    assert params["messages"] == [
-        {
-            "role": "assistant",
-            "content": "answer",
-            "reasoning_content": "hidden chain",
-            "reasoning_details": reasoning_details,
-        }
-    ]
-
-
-def test_openai_params_can_downgrade_developer_role() -> None:
-    params = to_openai_chat_params(_request(), stream=False, developer_role="system")
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert "stream_options" not in params
-
-
-def test_chat_completion_request_rejects_boolean_reasoning_effort() -> None:
-    with pytest.raises(ValueError, match="reasoning_effort"):
-        ChatCompletionRequest(
-            model="model-a",
-            messages=[ChatMessage(role="user", content="hello")],
-            reasoning_effort=True,
-        )
-
-
-async def test_routing_client_strips_route_prefix_for_completion() -> None:
-    client = _RecordingChatCompletionClient("crof")
-    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=client)])
-
-    result = await router.complete(
-        ChatCompletionRequest(
-            model="crof/qwen3.5-9b",
-            messages=[ChatMessage(role="user", content="hello")],
-        )
-    )
-
-    assert result.model == "crof/qwen3.5-9b"
-    assert result.message.content == "crof"
-    assert client.complete_requests[0].model == "qwen3.5-9b"
-
-
-async def test_routing_client_strips_route_prefix_for_stream() -> None:
-    client = _RecordingChatCompletionClient("fireworks")
-    router = RoutingChatCompletionClient([ModelRoute(prefix="fireworks/", client=client)])
-
-    deltas = [
-        delta
-        async for delta in router.stream(
-            ChatCompletionRequest(
-                model="fireworks/accounts/fireworks/models/gpt-oss-20b",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-    ]
-
-    assert deltas[0].model == "fireworks/accounts/fireworks/models/gpt-oss-20b"
-    assert deltas[0].content_delta == "fireworks"
-    assert client.stream_requests[0].model == "accounts/fireworks/models/gpt-oss-20b"
-
-
-async def test_routing_client_falls_back_to_later_model_for_completion() -> None:
-    class _FailingCompletionClient:
-        def __init__(self) -> None:
-            self.complete_requests: list[ChatCompletionRequest] = []
-
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            self.complete_requests.append(request)
-            raise ChatCompletionProviderError("primary failed")
-
-    primary_client = _FailingCompletionClient()
-    fallback_client = _RecordingChatCompletionClient("gmicloud")
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=primary_client),
-            ModelRoute(prefix="gmicloud/", client=fallback_client),
-        ]
-    )
-
-    result = await router.complete(
-        ChatCompletionRequest(
-            model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            messages=[ChatMessage(role="user", content="hello")],
-        )
-    )
-
-    assert result.model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
-    assert result.message.content == "gmicloud"
-    assert primary_client.complete_requests[0].model == "qwen3.5-9b"
-    assert fallback_client.complete_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
-
-
-async def test_routing_client_falls_back_to_later_model_for_stream() -> None:
-    class _FailingStreamClient:
-        def __init__(self) -> None:
-            self.stream_requests: list[ChatCompletionRequest] = []
-
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise AssertionError("complete() should not be used in this test")
-
-        async def stream(self, request: ChatCompletionRequest):
-            self.stream_requests.append(request)
-            raise ChatCompletionProviderError("primary failed")
-            yield  # pragma: no cover
-
-    primary_client = _FailingStreamClient()
-    fallback_client = _RecordingChatCompletionClient("gmicloud")
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=primary_client),
-            ModelRoute(prefix="gmicloud/", client=fallback_client),
-        ]
-    )
-
-    deltas = [
-        delta
-        async for delta in router.stream(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-    ]
-
-    assert deltas[0].model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
-    assert deltas[0].content_delta == "gmicloud"
-    assert primary_client.stream_requests[0].model == "qwen3.5-9b"
-    assert fallback_client.stream_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
-
-
-async def test_routing_client_logs_completion_fallback_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FailingCompletionClient:
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise ChatCompletionProviderError("primary failed")
-
-    events = _capture_router_logs(monkeypatch)
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=_FailingCompletionClient()),
-            ModelRoute(prefix="gmicloud/", client=_RecordingChatCompletionClient("gmicloud")),
-        ]
-    )
-
-    await router.complete(
-        ChatCompletionRequest(
-            model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            messages=[ChatMessage(role="user", content="hello")],
-        )
-    )
-
-    assert events == [
-        {
-            "event": "llm.router.attempt_failed",
-            "attempt_count": 2,
-            "attempt_index": 1,
-            "attempt_model": "crof/qwen3.5-9b",
-            "error_message": "primary failed",
-            "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": False,
-        },
-        {
-            "event": "llm.router.fallback_succeeded",
-            "attempt_count": 2,
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": False,
-            "winner_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "winning_attempt_index": 2,
-        },
-    ]
-
-
-async def test_routing_client_logs_stream_fallback_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FailingStreamClient:
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise AssertionError("complete() should not be used in this test")
-
-        async def stream(self, request: ChatCompletionRequest):
-            _ = request
-            raise ChatCompletionProviderError("primary failed")
-            yield  # pragma: no cover
-
-    events = _capture_router_logs(monkeypatch)
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=_FailingStreamClient()),
-            ModelRoute(prefix="gmicloud/", client=_RecordingChatCompletionClient("gmicloud")),
-        ]
-    )
-
-    _ = [
-        delta
-        async for delta in router.stream(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-    ]
-
-    assert events == [
-        {
-            "event": "llm.router.attempt_failed",
-            "attempt_count": 2,
-            "attempt_index": 1,
-            "attempt_model": "crof/qwen3.5-9b",
-            "error_message": "primary failed",
-            "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": True,
-        },
-        {
-            "event": "llm.router.fallback_succeeded",
-            "attempt_count": 2,
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": True,
-            "winner_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "winning_attempt_index": 2,
-        },
-    ]
-
-
-async def test_routing_client_falls_back_when_first_stream_delta_times_out() -> None:
-    class _NeverStartingStreamClient:
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise AssertionError("complete() should not be used in this test")
-
-        async def stream(self, request: ChatCompletionRequest):
-            _ = request
-            await anyio.sleep_forever()
-            yield  # pragma: no cover
-
-    fallback_client = _RecordingChatCompletionClient("gmicloud")
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=_NeverStartingStreamClient()),
-            ModelRoute(prefix="gmicloud/", client=fallback_client),
-        ],
-        stream_first_delta_timeout_seconds=0.01,
-    )
-
-    deltas = [
-        delta
-        async for delta in router.stream(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-    ]
-
-    assert deltas[0].model == "gmicloud/deepseek-ai/DeepSeek-V4-Flash"
-    assert deltas[0].content_delta == "gmicloud"
-    assert fallback_client.stream_requests[0].model == "deepseek-ai/DeepSeek-V4-Flash"
-
-
-async def test_routing_client_logs_exhausted_fallback_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FailingCompletionClient:
-        def __init__(self, message: str) -> None:
-            self.message = message
-
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise ChatCompletionProviderError(self.message)
-
-    events = _capture_router_logs(monkeypatch)
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=_FailingCompletionClient("primary failed")),
-            ModelRoute(prefix="gmicloud/", client=_FailingCompletionClient("fallback failed")),
-        ]
-    )
-
-    with pytest.raises(ChatCompletionProviderError, match="fallback failed"):
-        await router.complete(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-    assert events == [
-        {
-            "event": "llm.router.attempt_failed",
-            "attempt_count": 2,
-            "attempt_index": 1,
-            "attempt_model": "crof/qwen3.5-9b",
-            "error_message": "primary failed",
-            "error_type": "ChatCompletionProviderError",
-            "next_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": False,
-        },
-        {
-            "event": "llm.router.fallback_exhausted",
-            "attempt_count": 2,
-            "error_message": "fallback failed",
-            "error_type": "ChatCompletionProviderError",
-            "final_attempt_model": "gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "request_model": "crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-            "streaming": False,
-        },
-    ]
-
-
-async def test_routing_client_does_not_switch_providers_after_stream_yields() -> None:
-    class _PartialStreamClient:
-        def __init__(self) -> None:
-            self.stream_requests: list[ChatCompletionRequest] = []
-
-        async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-            _ = request
-            raise AssertionError("complete() should not be used in this test")
-
-        async def stream(self, request: ChatCompletionRequest):
-            self.stream_requests.append(request)
-            yield ChatCompletionDelta(
-                id="partial",
-                model=request.model,
-                created_at=None,
-                choice_index=0,
-                content_delta="partial",
-            )
-            raise ChatCompletionProviderError("stream failed")
-
-    primary_client = _PartialStreamClient()
-    fallback_client = _RecordingChatCompletionClient("novita")
-    router = RoutingChatCompletionClient(
-        [
-            ModelRoute(prefix="crof/", client=primary_client),
-            ModelRoute(prefix="novita/", client=fallback_client),
-        ]
-    )
-    received: list[ChatCompletionDelta] = []
-
-    with pytest.raises(ChatCompletionProviderError, match="stream failed"):
-        async for delta in router.stream(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,gmicloud/deepseek-ai/DeepSeek-V4-Flash",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        ):
-            received.extend((delta,))
-
-    assert received == [
-        ChatCompletionDelta(
-            id="partial",
-            model="crof/qwen3.5-9b",
-            created_at=None,
-            choice_index=0,
-            content_delta="partial",
-        )
-    ]
-    assert fallback_client.stream_requests == []
-
-
-async def test_routing_client_rejects_unmatched_model() -> None:
-    router = RoutingChatCompletionClient([ModelRoute(prefix="openai/", client=_RecordingChatCompletionClient("openai"))])
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
-        await router.complete(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-20b",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-
-async def test_routing_client_rejects_unmatched_primary_fallback_model() -> None:
-    client = _RecordingChatCompletionClient("crof")
-    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=client)])
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
-        await router.complete(
-            ChatCompletionRequest(
-                model="openai/model-a,crof/qwen3.5-9b",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-    assert client.complete_requests == []
-
-
-async def test_routing_client_rejects_empty_provider_model() -> None:
-    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))])
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No provider"):
-        await router.complete(
-            ChatCompletionRequest(
-                model="crof/",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-
-async def test_routing_client_rejects_empty_fallback_model_entry() -> None:
-    router = RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=_RecordingChatCompletionClient("crof"))])
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="empty model entry"):
-        await router.complete(
-            ChatCompletionRequest(
-                model="crof/qwen3.5-9b,",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-
-async def test_unavailable_client_rejects_completion() -> None:
-    client = UnavailableChatCompletionClient()
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
-        await client.complete(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-20b",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        )
-
-
-async def test_unavailable_client_rejects_stream() -> None:
-    client = UnavailableChatCompletionClient()
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat"):
-        async for _delta in client.stream(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-20b",
-                messages=[ChatMessage(role="user", content="hello")],
-            )
-        ):
-            pass
-
-
-def test_lightning_params_preserve_conformance_backed_fields() -> None:
-    params = to_lightning_chat_params(_request(), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["max_completion_tokens"] == 128
-    assert params["parallel_tool_calls"] is True
-    assert params["reasoning_effort"] == "low"
-    assert params["metadata"] == {"k": "v"}
-    assert "prompt_cache_key" not in params
-    assert "prediction" not in params
-    assert "service_tier" not in params
-
-
-def test_fireworks_params_preserve_supported_provider_hints() -> None:
-    params = to_fireworks_chat_params(_request(), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {"type": "object"},
-            "strict": True,
-            "description": "answer schema",
-        },
-    }
-    assert params["max_completion_tokens"] == 128
-    assert params["top_k"] == 17
-    assert params["reasoning_effort"] == "low"
-    assert params["prompt_cache_key"] == "cache-a"
-    assert params["metadata"] == {"k": "v"}
-    assert params["service_tier"] == "flex"
-    assert params["prediction"] == {"type": "content", "content": "expected"}
-
-
-def test_fireworks_params_omit_stream_options_without_stream() -> None:
-    params = to_fireworks_chat_params(_request(), stream=False)
-
-    assert params["stream"] is False
-    assert "stream_options" not in params
-
-
-def test_gmicloud_params_map_supported_provider_fields() -> None:
-    params = to_gmicloud_chat_params(_request_for_model("openai/gpt-oss-120b"), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["extra_body"] == {"context_length_exceeded_behavior": "error"}
-    assert params["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {"type": "object"},
-                "strict": True,
-                "description": "look something up",
-            },
-        }
-    ]
-    assert params["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
-    assert params["parallel_tool_calls"] is True
-    assert params["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {"type": "object"},
-            "strict": True,
-            "description": "answer schema",
-        },
-    }
-    assert params["max_tokens"] == 128
-    assert params["temperature"] == 0.2
-    assert params["top_p"] == 0.9
-    assert params["top_k"] == 17
-    assert params["frequency_penalty"] == 0.1
-    assert params["presence_penalty"] == 0.2
-    assert params["logit_bias"] == {"1": -10}
-    assert params["stop"] == ["END"]
-    assert params["seed"] == 7
-    assert params["n"] == 1
-    assert params["reasoning_effort"] == "low"
-    assert "max_completion_tokens" not in params
-    assert "logprobs" not in params
-    assert "top_logprobs" not in params
-    assert "prompt_cache_key" not in params
-    assert "metadata" not in params
-    assert "prediction" not in params
-    assert "service_tier" not in params
-    assert "user" not in params
-
-
-def test_gmicloud_deepseek_params_enable_thinking_and_keep_reasoning_effort() -> None:
-    request = replace(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), reasoning_effort="xhigh")
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert params["max_tokens"] == 128
-    assert params["reasoning_effort"] == "xhigh"
-    assert params["extra_body"] == {
-        "context_length_exceeded_behavior": "error",
-        "thinking": {"type": "enabled"},
-    }
-
-
-def test_gmicloud_deepseek_params_disable_thinking_for_none_effort() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek-ai/DeepSeek-V4-Flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="none",
-    )
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert "reasoning_effort" not in params
-    assert params["extra_body"] == {
-        "context_length_exceeded_behavior": "error",
-        "thinking": {"type": "disabled"},
-    }
-
-
-def test_gmicloud_deepseek_params_translate_tool_replay_shape() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek-ai/DeepSeek-V4-Flash",
-        messages=[
-            ChatMessage(role="developer", content="be precise"),
-            ChatMessage(
-                role="assistant",
-                content="",
-                reasoning_content="think first",
-                tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments='{"q":"hi"}')],
-            ),
-            ChatMessage(role="tool", tool_call_id="call_1", content="tool result"),
-        ],
-        reasoning_effort="high",
-    )
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert params["messages"] == [
-        {"role": "user", "content": "be precise"},
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "think first"},
-                {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"q": "hi"}},
-            ],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "tool result"}],
-        },
-    ]
-
-
-def test_gmicloud_deepseek_params_group_consecutive_tool_results() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek-ai/DeepSeek-V4-Flash",
-        messages=[
-            ChatMessage(
-                role="assistant",
-                content="",
-                reasoning_content="need two results",
-                tool_calls=[
-                    ChatToolCall(id="call_1", name="lookup", arguments='{"q":"hi"}'),
-                    ChatToolCall(id="call_2", name="lookup", arguments='{"q":"bye"}'),
-                ],
-            ),
-            ChatMessage(role="tool", tool_call_id="call_1", content="result one"),
-            ChatMessage(role="tool", tool_call_id="call_2", content="result two"),
-        ],
-        reasoning_effort="high",
-    )
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert params["messages"][1] == {
-        "role": "user",
-        "content": [
-            {"type": "tool_result", "tool_use_id": "call_1", "content": "result one"},
-            {"type": "tool_result", "tool_use_id": "call_2", "content": "result two"},
-        ],
-    }
-
-
-def test_gmicloud_mimo_params_map_supported_reasoning_effort_values() -> None:
-    request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="medium")
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "medium"
-    assert params["extra_body"] == {"context_length_exceeded_behavior": "error"}
-
-
-def test_gmicloud_mimo_params_pass_minimal_and_xhigh_effort_through() -> None:
-    minimal_request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="minimal")
-    xhigh_request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="xhigh")
-
-    minimal_params = to_gmicloud_chat_params(minimal_request, stream=False)
-    xhigh_params = to_gmicloud_chat_params(xhigh_request, stream=False)
-
-    assert minimal_params["reasoning_effort"] == "minimal"
-    assert xhigh_params["reasoning_effort"] == "xhigh"
-
-
-def test_gmicloud_mimo_params_omit_none_effort() -> None:
-    request = ChatCompletionRequest(
-        model="XiaomiMiMo/MiMo-V2.5-Pro",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="none",
-    )
-
-    params = to_gmicloud_chat_params(request, stream=False)
-
-    assert "reasoning_effort" not in params
-
-
-def test_gmicloud_deepseek_params_map_forced_function_tool_choice_to_required() -> None:
-    params = to_gmicloud_chat_params(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), stream=False)
-
-    assert params["tool_choice"] == "required"
-
-
-def test_gmicloud_deepseek_params_reject_unsupported_forced_function_tool_choice_shape() -> None:
-    request = replace(
-        _request_for_model("deepseek-ai/DeepSeek-V4-Flash"),
-        tools=[
-            ChatTool(function=ChatFunctionTool(name="lookup")),
-            ChatTool(function=ChatFunctionTool(name="other")),
-        ],
-        tool_choice=ChatToolChoiceFunction(name="lookup"),
-    )
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="forced function tool_choice"):
-        to_gmicloud_chat_params(request, stream=False)
-
-
-def test_novita_params_map_supported_provider_fields() -> None:
-    params = to_novita_chat_params(_request_for_model("openai/gpt-oss-20b"), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["max_tokens"] == 128
-    assert params["top_k"] == 17
-    assert params["parallel_tool_calls"] is True
-    assert params["reasoning_effort"] == "low"
-    assert "max_completion_tokens" not in params
-    assert "extra_body" not in params
-    assert "prompt_cache_key" not in params
-    assert "metadata" not in params
-    assert "prediction" not in params
-    assert "service_tier" not in params
-    assert "top_logprobs" not in params
-    assert "user" not in params
-
-
-def test_novita_params_omit_reasoning_controls_when_effort_is_none() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek/deepseek-v4-flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort=None,
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert "reasoning_effort" not in params
-    assert "extra_body" not in params
-
-
-def test_novita_params_pass_reasoning_effort_for_unknown_models() -> None:
-    request = ChatCompletionRequest(
-        model="model-a",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="low",
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "low"
-    assert "extra_body" not in params
-
-
-def test_novita_gpt_oss_params_use_reasoning_effort() -> None:
-    request = ChatCompletionRequest(
-        model="openai/gpt-oss-20b",
-        messages=[ChatMessage(role="user", content="hello")],
-        parallel_tool_calls=True,
-        reasoning_effort="high",
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert params["parallel_tool_calls"] is True
-    assert params["reasoning_effort"] == "high"
-    assert "extra_body" not in params
-
-
-def test_novita_gpt_oss_params_pass_reasoning_effort_without_validation() -> None:
-    request = ChatCompletionRequest(
-        model="openai/gpt-oss-20b",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="xhigh",
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "xhigh"
-    assert "extra_body" not in params
-
-
-def test_novita_deepseek_v4_params_use_thinking_control() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek/deepseek-v4-flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="high",
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "high"
-    assert params["extra_body"] == {"thinking": {"type": "enabled"}}
-
-
-def test_novita_deepseek_v4_params_disable_thinking_for_none() -> None:
-    request = ChatCompletionRequest(
-        model="deepseek/deepseek-v4-flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="none",
-    )
-
-    params = to_novita_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "none"
-    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
-
-
-def test_novita_deepseek_v4_maps_single_forced_tool_choice_to_required() -> None:
-    params = to_novita_chat_params(_request_for_model("deepseek/deepseek-v4-flash"), stream=False)
-
-    assert params["tool_choice"] == "required"
-
-
-def test_novita_deepseek_v4_rejects_ambiguous_forced_tool_choice() -> None:
-    request = replace(
-        _request_for_model("deepseek/deepseek-v4-flash"),
-        tools=[
-            ChatTool(function=ChatFunctionTool(name="lookup")),
-            ChatTool(function=ChatFunctionTool(name="calculate")),
-        ],
-    )
-
-    with pytest.raises(ChatCompletionUnsupportedRequestError, match="forced function"):
-        to_novita_chat_params(request, stream=False)
-
-
-def test_canopywave_params_preserve_openai_compatible_fields() -> None:
-    params = to_canopywave_chat_params(_request(), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["max_completion_tokens"] == 128
-    assert "top_k" not in params
-    assert params["parallel_tool_calls"] is True
-    assert params["reasoning_effort"] == "low"
-    assert params["prompt_cache_key"] == "cache-a"
-    assert params["metadata"] == {"k": "v"}
-    assert params["service_tier"] == "flex"
-    assert params["prediction"] == {"type": "content", "content": "expected"}
-
-
-def test_canopywave_params_strip_tool_schema_patterns_without_mutating_request() -> None:
-    schema = {
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "pattern": "^[a-z]+$",
-            },
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "pattern": "^[0-9]+$",
-                },
-            },
-        },
-    }
-    request = ChatCompletionRequest(
-        model="model-a",
-        messages=[ChatMessage(role="user", content="hello")],
-        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters=schema, strict=True))],
-    )
-
-    params = to_canopywave_chat_params(request, stream=False)
-    parameters = params["tools"][0]["function"]["parameters"]
-
-    assert "pattern" not in parameters["properties"]["id"]
-    assert "pattern" not in parameters["properties"]["items"]["items"]
-    assert schema["properties"]["id"]["pattern"] == "^[a-z]+$"
-    assert schema["properties"]["items"]["items"]["pattern"] == "^[0-9]+$"
-
-
-def test_canopywave_client_defaults_to_canopywave_base_url() -> None:
-    client = CanopyWaveChatCompletionClient(api_key="test-key")
-
-    assert str(client._client.base_url).rstrip("/") == CANOPYWAVE_OPENAI_BASE_URL
-
-
-def test_crof_params_map_supported_provider_fields() -> None:
-    request = replace(_request_for_model("glm-4.7-flash"), reasoning_effort=None)
-
-    params = to_crof_chat_params(request, stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["max_tokens"] == 128
-    assert params["parallel_tool_calls"] is True
-    assert "reasoning_effort" not in params
-    assert "max_completion_tokens" not in params
-    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert "prompt_cache_key" not in params
-    assert "metadata" not in params
-    assert "prediction" not in params
-    assert "service_tier" not in params
-    assert "top_logprobs" not in params
-    assert "user" not in params
-
-
-def test_crof_params_keep_thinking_for_explicit_reasoning_effort() -> None:
-    request = ChatCompletionRequest(
-        model="glm-4.7-flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="high",
-    )
-
-    params = to_crof_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "high"
-    assert "extra_body" not in params
-
-
-def test_crof_params_disable_thinking_for_none_effort() -> None:
-    request = ChatCompletionRequest(
-        model="glm-4.7-flash",
-        messages=[ChatMessage(role="user", content="hello")],
-        reasoning_effort="none",
-    )
-
-    params = to_crof_chat_params(request, stream=False)
-
-    assert params["reasoning_effort"] == "none"
-    assert params["extra_body"] == {"thinking": {"type": "disabled"}}
-
-
-def test_crof_qwen_params_use_native_response_format() -> None:
-    params = to_crof_chat_params(_request_for_model("qwen3.5-9b"), stream=False)
-
-    assert params["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {"type": "object"},
-            "strict": True,
-            "description": "answer schema",
-        },
-    }
-    assert "extra_body" not in params
-
-
-def test_crof_newer_glm_params_do_not_use_flash_thinking_quirk() -> None:
-    request = ChatCompletionRequest(
-        model="glm-5.1",
-        messages=[ChatMessage(role="user", content="hello")],
-    )
-
-    params = to_crof_chat_params(request, stream=False)
-
-    assert "extra_body" not in params
-
-
-def test_openrouter_params_preserve_openai_compatible_fields() -> None:
-    params = to_openrouter_chat_params(_request(), stream=True)
-
-    assert params["messages"][0] == {"role": "system", "content": "be precise"}
-    assert params["stream"] is True
-    assert params["stream_options"] == {"include_usage": True}
-    assert params["max_completion_tokens"] == 128
-    assert params["parallel_tool_calls"] is True
-    assert params["reasoning_effort"] == "low"
-    assert params["top_k"] == 17
-    assert params["prompt_cache_key"] == "cache-a"
-    assert params["metadata"] == {"k": "v"}
-    assert params["service_tier"] == "flex"
-    assert params["prediction"] == {"type": "content", "content": "expected"}
-    assert "extra_body" not in params
-
-
-def test_openrouter_params_route_provider_order_from_suffixes() -> None:
-    params = to_openrouter_chat_params(_request_for_model("deepseek/deepseek-v4-flash:provider1:provider2"), stream=False)
-
-    assert params["model"] == "deepseek/deepseek-v4-flash"
-    assert params["extra_body"] == {
-        "provider": {
-            "order": ["provider1", "provider2"],
-            "allow_fallbacks": False,
-        }
-    }
-
-
-def test_openrouter_params_preserve_special_suffix_without_provider_order() -> None:
-    params = to_openrouter_chat_params(_request_for_model("stepfun/step-3.5-flash:nitro"), stream=False)
-
-    assert params["model"] == "stepfun/step-3.5-flash:nitro"
-    assert "extra_body" not in params
-
-
-def test_openrouter_params_allow_special_suffix_with_provider_order() -> None:
-    params = to_openrouter_chat_params(_request_for_model("meta-llama/llama-3.3-70b-instruct:free:provider1"), stream=False)
-
-    assert params["model"] == "meta-llama/llama-3.3-70b-instruct:free"
-    assert params["extra_body"] == {
-        "provider": {
-            "order": ["provider1"],
-            "allow_fallbacks": False,
-        }
-    }
-
-
-def test_openrouter_client_defaults_to_openrouter_base_url() -> None:
-    client = OpenRouterChatCompletionClient(api_key="test-key")
-
-    assert str(client._client.base_url).rstrip("/") == OPENROUTER_OPENAI_BASE_URL
-
-
-async def test_openrouter_client_uses_openai_create_with_provider_order_extra_body() -> None:
-    fake_completion = _FakeOpenAICompletion(_completion_response(model="deepseek/deepseek-v4-flash", content="ok"))
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = OpenRouterChatCompletionClient(client=fake_client)
-
-    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash:nitro:provider1:provider2"))
-
-    assert fake_completion.calls[0]["stream"] is False
-    assert fake_completion.calls[0]["model"] == "deepseek/deepseek-v4-flash:nitro"
-    assert fake_completion.calls[0]["extra_body"] == {
-        "provider": {
-            "order": ["provider1", "provider2"],
-            "allow_fallbacks": False,
-        }
-    }
-    assert result.message.content == "ok"
-
-
-async def test_openrouter_client_aliases_reasoning_to_reasoning_content() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "unknown",
-            "index": 0,
-            "text": "because",
-        }
-    ]
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model="deepseek/deepseek-v4-flash",
-            content="ok",
-            reasoning="because",
-            reasoning_details=reasoning_details,
-        )
-    )
-    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
-
-    assert result.message.reasoning_content == "because"
-    assert result.message.reasoning_details == reasoning_details
-
-
-async def test_openrouter_client_prefers_reasoning_content_over_reasoning_alias() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model="deepseek/deepseek-v4-flash",
-            content="ok",
-            reasoning_content="primary",
-            reasoning="secondary",
-        )
-    )
-    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
-
-    assert result.message.reasoning_content == "primary"
-
-
-async def test_openrouter_client_aliases_reasoning_stream_deltas() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "unknown",
-            "index": 0,
-            "text": "because",
-        }
-    ]
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="deepseek/deepseek-v4-flash",
-                    created=10,
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content="ok",
-                                refusal=None,
-                                reasoning="because",
-                                reasoning_details=reasoning_details,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                ),
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="deepseek/deepseek-v4-flash",
-                    created=10,
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason="stop",
-                            delta=SimpleNamespace(
-                                content=None,
-                                refusal=None,
-                                reasoning=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                ),
-            ]
-        )
-    )
-    client = OpenRouterChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [delta async for delta in client.stream(_request_for_model("deepseek/deepseek-v4-flash"))]
-
-    assert deltas[0].content_delta == "ok"
-    assert deltas[0].reasoning_delta == "because"
-    assert deltas[0].reasoning_details_delta == reasoning_details
-    assert deltas[1].finish_reason == "stop"
-
-
-async def test_openai_client_normalizes_completion_result() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "openai-responses-v1",
-            "index": 0,
-            "text": "because",
-        }
-    ]
-    fake_completion = _FakeOpenAICompletion(
-        SimpleNamespace(
-            id="chatcmpl_1",
-            model="model-a",
-            created=10,
-            system_fingerprint="fp_1",
-            service_tier="default",
-            choices=[
-                SimpleNamespace(
-                    finish_reason="tool_calls",
-                    message=SimpleNamespace(
-                        content="answer",
-                        refusal=None,
-                        reasoning_content="because",
-                        reasoning_details=reasoning_details,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="call_1",
-                                function=SimpleNamespace(name="lookup", arguments={"q": "x"}),
-                            )
-                        ],
-                    ),
-                )
-            ],
-            usage=SimpleNamespace(
-                prompt_tokens=3,
-                completion_tokens=5,
-                total_tokens=8,
-                prompt_tokens_details=SimpleNamespace(cached_tokens=2),
-                completion_tokens_details=SimpleNamespace(reasoning_tokens=1),
-            ),
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(_request())
-
-    assert result.id == "chatcmpl_1"
-    assert result.message.role == "assistant"
-    assert result.message.content == "answer"
-    assert result.message.reasoning_content == "because"
-    assert result.message.reasoning_details == reasoning_details
-    assert result.message.tool_calls == [ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}')]
-    assert result.finish_reason == "tool_calls"
-    assert result.usage is not None
-    assert result.usage.cached_tokens == 2
-    assert result.usage.reasoning_tokens == 1
-
-
-async def test_openai_client_repairs_completion_tool_call_arguments() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        SimpleNamespace(
-            id="chatcmpl_1",
-            model="model-a",
-            created=10,
-            choices=[
-                SimpleNamespace(
-                    finish_reason="tool_calls",
-                    message=SimpleNamespace(
-                        content="answer",
-                        refusal=None,
-                        reasoning_content=None,
-                        reasoning_details=None,
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="call_1",
-                                function=SimpleNamespace(name="lookup", arguments="{'q':'x'}"),
-                            )
-                        ],
-                    ),
-                )
-            ],
-            usage=None,
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(_request())
-
-    assert result.message.tool_calls is not None
-    assert result.message.tool_calls[0].arguments == '{"q":"x"}'
-
-
-async def test_openai_client_reads_top_level_reasoning_tokens() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        SimpleNamespace(
-            id="chatcmpl_1",
-            model="model-a",
-            created=10,
-            choices=[
-                SimpleNamespace(
-                    finish_reason="stop",
-                    message=SimpleNamespace(
-                        content="answer",
-                        refusal=None,
-                        reasoning_content=None,
-                        tool_calls=None,
-                    ),
-                )
-            ],
-            usage=SimpleNamespace(
-                prompt_tokens=3,
-                completion_tokens=5,
-                total_tokens=8,
-                reasoning_tokens=4,
-            ),
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(_request())
-
-    assert result.usage is not None
-    assert result.usage.reasoning_tokens == 4
-
-
-async def test_openai_client_normalizes_context_length_exceeded_errors() -> None:
-    error = BadRequestError(
-        "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
-        response=httpx.Response(
-            400,
-            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
-        ),
-        body={
-            "error": {
-                "code": "context_length_exceeded",
-                "message": "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
-                "type": "invalid_request_error",
-            }
-        },
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(error)))
-
-    with pytest.raises(ChatCompletionContextLengthExceededError, match="maximum context length"):
-        await client.complete(_request())
-
-
-async def test_openai_client_normalizes_context_length_exceeded_type_aliases() -> None:
-    error = BadRequestError(
-        "Request rejected.",
-        response=httpx.Response(
-            400,
-            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
-        ),
-        body={
-            "error": {
-                "type": "max-context-length-exceeded",
-                "detail": "Requested 128001 tokens; maximum context length is 128000 tokens.",
-            }
-        },
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(error)))
-
-    with pytest.raises(ChatCompletionContextLengthExceededError, match="Request rejected"):
-        await client.complete(_request())
-
-
-def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
-    assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
-    assert is_context_length_exceeded_error(
-        {"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."}
-    )
-    assert is_context_length_exceeded_error(
-        {"response": {"body": {"message": "Input token count exceeds the maximum allowed token limit."}}}
-    )
-
-
-def test_context_length_classifier_does_not_treat_generic_payload_size_as_context_overflow() -> None:
-    assert not is_context_length_exceeded_error({"error": {"code": "payload_too_large", "message": "Payload too large."}})
-
-
-async def test_openai_client_normalizes_stream_chunks() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "openai-responses-v1",
-            "index": 0,
-            "text": "because",
-        }
-    ]
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="model-a",
-                    created=10,
-                    system_fingerprint="fp_1",
-                    service_tier="default",
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content="hel",
-                                refusal=None,
-                                reasoning_content="because",
-                                reasoning_details=reasoning_details,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                ),
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="model-a",
-                    created=10,
-                    system_fingerprint="fp_1",
-                    service_tier="default",
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason="tool_calls",
-                            delta=SimpleNamespace(
-                                content=None,
-                                refusal=None,
-                                reasoning_content=None,
-                                tool_calls=[
-                                    SimpleNamespace(
-                                        index=0,
-                                        id="call_1",
-                                        function=SimpleNamespace(name="lookup", arguments='{"q"'),
-                                    )
-                                ],
-                            ),
-                        )
-                    ],
-                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
-                ),
-            ]
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [delta async for delta in client.stream(_request())]
-
-    assert deltas[0].content_delta == "hel"
-    assert deltas[0].reasoning_delta == "because"
-    assert deltas[0].reasoning_details_delta == reasoning_details
-    assert deltas[1].finish_reason == "tool_calls"
-    assert deltas[1].tool_call_delta is not None
-    assert deltas[1].tool_call_delta.name == "lookup"
-    assert deltas[1].usage is not None
-    assert deltas[1].usage.total_tokens == 3
-
-
-async def test_openai_client_infers_stop_finish_reason_on_clean_eof_after_content() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="model-a",
-                    created=10,
-                    system_fingerprint="fp_1",
-                    service_tier="default",
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content="hel",
-                                refusal=None,
-                                reasoning_content=None,
-                                reasoning_details=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                )
-            ]
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [delta async for delta in client.stream(_request())]
-
-    assert deltas[0].content_delta == "hel"
-    assert deltas[1].finish_reason == ChatFinishReason.STOP
-    assert deltas[1].content_delta is None
-
-
-async def test_openai_client_infers_tool_calls_finish_reason_on_clean_eof_after_tool_call_delta() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="model-a",
-                    created=10,
-                    system_fingerprint="fp_1",
-                    service_tier="default",
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content=None,
-                                refusal=None,
-                                reasoning_content=None,
-                                reasoning_details=None,
-                                tool_calls=[
-                                    SimpleNamespace(
-                                        index=0,
-                                        id="call_1",
-                                        function=SimpleNamespace(name="lookup", arguments='{"q":"x"}'),
-                                    )
-                                ],
-                            ),
-                        )
-                    ],
-                    usage=None,
-                )
-            ]
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [delta async for delta in client.stream(_request())]
-
-    assert deltas[0].tool_call_delta is not None
-    assert deltas[0].tool_call_delta.name == "lookup"
-    assert deltas[1].finish_reason == ChatFinishReason.TOOL_CALLS
-
-
-async def test_openai_client_rejects_clean_eof_without_finish_reason_when_only_reasoning_streamed() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="model-a",
-                    created=10,
-                    system_fingerprint="fp_1",
-                    service_tier="default",
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content=None,
-                                refusal=None,
-                                reasoning_content="because",
-                                reasoning_details=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                )
-            ]
-        )
-    )
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    with pytest.raises(ChatCompletionProviderError, match="stream ended without finish_reason"):
-        _ = [delta async for delta in client.stream(_request())]
-
-
-async def test_openai_client_closes_underlying_stream_when_consumer_stops_early() -> None:
-    class _ClosableStream:
-        def __init__(self) -> None:
-            self.closed = False
-            self._yielded = False
-
-        def __aiter__(self) -> _ClosableStream:
-            return self
-
-        async def __anext__(self) -> object:
-            if self._yielded:
-                raise StopAsyncIteration
-            self._yielded = True
-            return SimpleNamespace(
-                id="chatcmpl_1",
-                model="model-a",
-                created=10,
-                system_fingerprint=None,
-                service_tier=None,
-                choices=[
-                    SimpleNamespace(
-                        index=0,
-                        finish_reason="stop",
-                        delta=SimpleNamespace(
-                            content="ok",
-                            refusal=None,
-                            reasoning_content=None,
-                            reasoning_details=None,
-                            tool_calls=None,
-                        ),
-                    )
-                ],
-                usage=None,
-            )
-
-        async def close(self) -> None:
-            self.closed = True
-
-    stream = _ClosableStream()
-    client = OpenAICompatibleChatCompletionClient(client=_FakeOpenAIClient(_FakeOpenAICompletion(stream)))
-
-    iterator = client.stream(_request())
-    first = await anext(iterator)
-    await iterator.aclose()
-
-    assert first.content_delta == "ok"
-    assert stream.closed is True
-
-
-async def test_fireworks_client_uses_acreate_and_normalizes_response() -> None:
-    fireworks = _FakeFireworksClient(
-        SimpleNamespace(
-            id="fw_1",
-            model="model-a",
-            created=10,
-            choices=[
-                SimpleNamespace(
-                    finish_reason="stop",
-                    message=SimpleNamespace(
-                        content="ok",
-                        refusal=None,
-                        reasoning_content=None,
-                        tool_calls=None,
-                    ),
-                )
-            ],
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-        )
-    )
-    client = FireworksChatCompletionClient(client=fireworks)
-
-    result = await client.complete(_request())
-
-    assert result.id == "fw_1"
-    assert result.message.content == "ok"
-    assert fireworks.chat.completions.calls[0]["stream"] is False
-    assert fireworks.chat.completions.calls[0]["max_completion_tokens"] == 128
-
-
-async def test_fireworks_client_normalizes_context_length_exceeded_errors() -> None:
-    fireworks = _FakeFireworksClient(
-        InvalidRequestError("This prompt is too long for the model context window."),
-    )
-    client = FireworksChatCompletionClient(client=fireworks)
-
-    with pytest.raises(ChatCompletionContextLengthExceededError, match="context window"):
-        await client.complete(_request())
-
-
-def test_gmicloud_client_defaults_to_gmicloud_openai_base_url() -> None:
-    client = GMICloudChatCompletionClient(api_key="test-key")
-
-    assert str(client._client.base_url).rstrip("/") == GMICLOUD_OPENAI_BASE_URL
-
-
-async def test_gmicloud_client_uses_openai_create_with_gmicloud_params() -> None:
-    fake_completion = _FakeOpenAICompletion(_completion_response(model="openai/gpt-oss-120b", content="ok"))
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = GMICloudChatCompletionClient(client=fake_client)
-
-    result = await client.complete(_request_for_model("openai/gpt-oss-120b"))
-
-    assert fake_completion.calls[0]["stream"] is False
-    assert fake_completion.calls[0]["model"] == "openai/gpt-oss-120b"
-    assert fake_completion.calls[0]["max_tokens"] == 128
-    assert fake_completion.calls[0]["extra_body"] == {"context_length_exceeded_behavior": "error"}
-    assert fake_completion.calls[0]["top_k"] == 17
-    assert fake_completion.calls[0]["reasoning_effort"] == "low"
-    assert fake_completion.calls[0]["messages"][0] == {
-        "role": "system",
-        "content": "be precise",
-    }
-    assert "max_completion_tokens" not in fake_completion.calls[0]
-    assert result.message.content == "ok"
-
-
-async def test_gmicloud_client_uses_thinking_controls_for_deepseek_v4_flash() -> None:
-    fake_completion = _FakeOpenAICompletion(_completion_response(model="deepseek-ai/DeepSeek-V4-Flash", content="ok"))
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = GMICloudChatCompletionClient(client=fake_client)
-
-    await client.complete(replace(_request_for_model("deepseek-ai/DeepSeek-V4-Flash"), reasoning_effort="xhigh"))
-
-    assert fake_completion.calls[0]["reasoning_effort"] == "xhigh"
-    assert fake_completion.calls[0]["extra_body"] == {
-        "context_length_exceeded_behavior": "error",
-        "thinking": {"type": "enabled"},
-    }
-
-
-async def test_lightning_client_maps_developer_role_to_system() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        SimpleNamespace(
-            id="chatcmpl_1",
-            model="model-a",
-            created=10,
-            choices=[
-                SimpleNamespace(
-                    finish_reason="stop",
-                    message=SimpleNamespace(
-                        content="ok",
-                        refusal=None,
-                        reasoning_content=None,
-                        tool_calls=None,
-                    ),
-                )
-            ],
-            usage=None,
-        )
-    )
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = LightningChatCompletionClient(client=fake_client)
-
-    await client.complete(_request())
-
-    assert fake_completion.calls[0]["messages"][0] == {
-        "role": "system",
-        "content": "be precise",
-    }
-
-
-def test_lightning_client_defaults_to_lightning_openai_base_url() -> None:
-    client = LightningChatCompletionClient(api_key="test-key")
-
-    assert str(client._client.base_url).rstrip("/") == LIGHTNING_OPENAI_BASE_URL
-
-
-async def test_lightning_120b_response_format_fallback_omits_native_field() -> None:
-    fake_completion = _FakeOpenAICompletion(_completion_response(model="lightning-ai/gpt-oss-120b", content='{"ok":true}'))
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(
-        ChatCompletionRequest(
-            model="lightning-ai/gpt-oss-120b",
-            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-            response_format=ChatResponseFormat(type="json_object"),
-            max_completion_tokens=128,
-        )
-    )
-
-    assert result.message.content == '{"ok":true}'
-    call = fake_completion.calls[0]
-    assert "response_format" not in call
-    assert call["messages"][0]["role"] == "system"
-    assert call["messages"][1] == {
-        "role": "user",
-        "content": 'Return {"ok": true}.',
-    }
-
-
-async def test_lightning_120b_response_format_fallback_repairs_invalid_json_without_retry() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model="lightning-ai/gpt-oss-120b",
-            content="{'ok':true,'answer':4}",
-        )
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(
-        ChatCompletionRequest(
-            model="lightning-ai/gpt-oss-120b",
-            messages=[ChatMessage(role="user", content='Return {"ok": true, "answer": 4}.')],
-            response_format=ChatResponseFormat(type="json_object"),
-            max_completion_tokens=128,
-        )
-    )
-
-    assert json.loads(result.message.content or "") == {"ok": True, "answer": 4}
-    assert len(fake_completion.calls) == 1
-
-
-async def test_lightning_120b_response_format_fallback_retries_schema_errors() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        [
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content='{"ok":"no"}',
-            ),
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content='{"ok":true}',
-            ),
-        ]
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(
-        ChatCompletionRequest(
-            model="lightning-ai/gpt-oss-120b",
-            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-            response_format=ChatResponseFormat(
-                type="json_schema",
-                name="ok_response",
-                schema={
-                    "type": "object",
-                    "properties": {"ok": {"type": "boolean"}},
-                    "required": ["ok"],
-                    "additionalProperties": False,
-                },
-                strict=True,
-            ),
-            max_completion_tokens=128,
-        )
-    )
-
-    assert result.message.content == '{"ok":true}'
-    assert len(fake_completion.calls) == 2
-    assert "response_format" not in fake_completion.calls[0]
-    assert "response_format" not in fake_completion.calls[1]
-    assert fake_completion.calls[1]["messages"][-2] == {
-        "role": "assistant",
-        "content": '{"ok":"no"}',
-    }
-    assert fake_completion.calls[1]["messages"][-1]["role"] == "user"
-
-
-async def test_lightning_120b_response_format_fallback_raises_after_retry() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        [
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content="not json",
-            ),
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content="still not json",
-            ),
-        ]
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    with pytest.raises(ChatCompletionProviderError, match="invalid JSON"):
-        await client.complete(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-120b",
-                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-                response_format=ChatResponseFormat(type="json_object"),
-            )
-        )
-
-
-async def test_lightning_120b_response_format_fallback_streams_result() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model="lightning-ai/gpt-oss-120b",
-            content='{"ok":true}',
-            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
-        )
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [
-        delta
-        async for delta in client.stream(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-120b",
-                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-                response_format=ChatResponseFormat(type="json_object"),
-            )
-        )
-    ]
-
-    assert len(deltas) == 2
-    assert deltas[0].content_delta == '{"ok":true}'
-    assert deltas[0].finish_reason is None
-    assert deltas[0].usage is None
-    assert deltas[1].content_delta is None
-    assert deltas[1].finish_reason == "stop"
-    assert deltas[1].usage is not None
-    assert deltas[1].usage.total_tokens == 8
-    assert fake_completion.calls[0]["stream"] is False
-    assert "response_format" not in fake_completion.calls[0]
-
-
-async def test_lightning_120b_response_format_fallback_stream_repairs_invalid_json_without_retry() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model="lightning-ai/gpt-oss-120b",
-            content="{'ok':true,'answer':4}",
-            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
-        )
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [
-        delta
-        async for delta in client.stream(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-120b",
-                messages=[ChatMessage(role="user", content='Return {"ok": true, "answer": 4}.')],
-                response_format=ChatResponseFormat(type="json_object"),
-            )
-        )
-    ]
-
-    assert json.loads(deltas[0].content_delta or "") == {"ok": True, "answer": 4}
-    assert len(fake_completion.calls) == 1
-
-
-async def test_lightning_120b_response_format_fallback_stream_retries() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        [
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content='{"ok":"no"}',
-            ),
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content='{"ok":true}',
-            ),
-        ]
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [
-        delta
-        async for delta in client.stream(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-120b",
-                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-                response_format=ChatResponseFormat(
-                    type="json_schema",
-                    schema={
-                        "type": "object",
-                        "properties": {"ok": {"type": "boolean"}},
-                        "required": ["ok"],
-                        "additionalProperties": False,
-                    },
-                ),
-            )
-        )
-    ]
-
-    assert [delta.content_delta for delta in deltas] == ['{"ok":true}', None]
-    assert len(fake_completion.calls) == 2
-    assert fake_completion.calls[1]["messages"][-2] == {
-        "role": "assistant",
-        "content": '{"ok":"no"}',
-    }
-    assert fake_completion.calls[1]["messages"][-1]["role"] == "user"
-
-
-async def test_lightning_120b_fallback_stream_raises_before_yield() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        [
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content="not json",
-            ),
-            _completion_response(
-                model="lightning-ai/gpt-oss-120b",
-                content="still not json",
-            ),
-        ]
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    with pytest.raises(ChatCompletionProviderError, match="invalid JSON"):
-        await anext(
-            client.stream(
-                ChatCompletionRequest(
-                    model="lightning-ai/gpt-oss-120b",
-                    messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-                    response_format=ChatResponseFormat(type="json_object"),
-                )
-            )
-        )
-
-
-async def test_lightning_non_fallback_response_format_streams_from_provider() -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _async_iter(
-            [
-                SimpleNamespace(
-                    id="chatcmpl_1",
-                    model="lightning-ai/gpt-oss-20b",
-                    created=10,
-                    system_fingerprint=None,
-                    service_tier=None,
-                    choices=[
-                        SimpleNamespace(
-                            index=0,
-                            finish_reason=None,
-                            delta=SimpleNamespace(
-                                content='{"ok":true}',
-                                refusal=None,
-                                reasoning_content=None,
-                                tool_calls=None,
-                            ),
-                        )
-                    ],
-                    usage=None,
-                )
-            ]
-        )
-    )
-    client = LightningChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    deltas = [
-        delta
-        async for delta in client.stream(
-            ChatCompletionRequest(
-                model="lightning-ai/gpt-oss-20b",
-                messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-                response_format=ChatResponseFormat(type="json_object"),
-            )
-        )
-    ]
-
-    assert deltas[0].content_delta == '{"ok":true}'
-    assert fake_completion.calls[0]["stream"] is True
-    assert fake_completion.calls[0]["response_format"] == {"type": "json_object"}
-
-
-async def test_crof_client_uses_openai_create_with_crof_params() -> None:
-    fake_completion = _FakeOpenAICompletion(_completion_response(model="glm-4.7-flash", content="ok"))
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = CrofChatCompletionClient(client=fake_client)
-
-    result = await client.complete(
-        ChatCompletionRequest(
-            model="glm-4.7-flash",
-            messages=[ChatMessage(role="developer", content="be precise")],
-            max_completion_tokens=128,
-        )
-    )
-
-    assert fake_completion.calls[0]["stream"] is False
-    assert fake_completion.calls[0]["max_tokens"] == 128
-    assert fake_completion.calls[0]["messages"][0] == {
-        "role": "system",
-        "content": "be precise",
-    }
-    assert fake_completion.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert "max_completion_tokens" not in fake_completion.calls[0]
-    assert result.message.content == "ok"
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        "deepseek-v3.2",
-        "gemma-4-31b-it",
-        "glm-4.7",
-        "glm-4.7-flash",
-        "glm-5",
-        "minimax-m2.5",
-        "qwen3.5-397b-a17b",
-    ],
-)
-async def test_crof_compensates_schema_json_from_reasoning_content(model: str) -> None:
-    fake_completion = _FakeOpenAICompletion(
-        _completion_response(
-            model=model,
-            content="",
-            reasoning_content='{"ok":true}',
-        )
-    )
-    client = CrofChatCompletionClient(client=_FakeOpenAIClient(fake_completion))
-
-    result = await client.complete(
-        ChatCompletionRequest(
-            model=model,
-            messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
-            response_format=ChatResponseFormat(
-                type="json_schema",
-                name="answer",
-                schema={
-                    "type": "object",
-                    "properties": {"ok": {"type": "boolean"}},
-                    "required": ["ok"],
-                    "additionalProperties": False,
-                },
-                strict=True,
-            ),
-            max_completion_tokens=128,
-        )
-    )
-
-    assert result.message.content == '{"ok":true}'
-    assert result.message.reasoning_content == '{"ok":true}'
-    assert fake_completion.calls[0]["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "answer",
-            "schema": {
-                "type": "object",
-                "properties": {"ok": {"type": "boolean"}},
-                "required": ["ok"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        },
-    }
-
-
-async def test_novita_client_uses_openai_create_with_novita_params() -> None:
-    reasoning_details = [
-        {
-            "type": "reasoning.text",
-            "format": "openai-responses-v1",
-            "index": 0,
-            "text": "because",
-        }
-    ]
-    fake_completion = _FakeOpenAICompletion(
-        SimpleNamespace(
-            id="novita_1",
-            model="model-a",
-            created=10,
-            choices=[
-                SimpleNamespace(
-                    finish_reason="stop",
-                    message=SimpleNamespace(
-                        content="ok",
-                        refusal=None,
-                        reasoning_content=None,
-                        reasoning_details=reasoning_details,
-                        tool_calls=None,
-                    ),
-                )
-            ],
-            usage=None,
-        )
-    )
-    fake_client = _FakeOpenAIClient(fake_completion)
-    client = NovitaChatCompletionClient(client=fake_client)
-
-    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
-
-    assert fake_completion.calls[0]["stream"] is False
-    assert fake_completion.calls[0]["max_tokens"] == 128
-    assert fake_completion.calls[0]["messages"][0] == {
-        "role": "system",
-        "content": "be precise",
-    }
-    assert fake_completion.calls[0]["reasoning_effort"] == "low"
-    assert "extra_body" not in fake_completion.calls[0]
-    assert "max_completion_tokens" not in fake_completion.calls[0]
-    assert result.id == "novita_1"
-    assert result.message.reasoning_details == reasoning_details
+    values.update(overrides)
+    return Settings(**values)
 
 
 def _request() -> ChatCompletionRequest:
@@ -2226,13 +104,13 @@ def _request() -> ChatCompletionRequest:
         presence_penalty=0.2,
         logit_bias={"1": -10},
         logprobs=True,
-        top_logprobs=2,
+        top_logprobs=3,
         stop=["END"],
         seed=7,
         n=1,
         reasoning_effort="low",
         stream_options=ChatStreamOptions(include_usage=True),
-        user="user-a",
+        user="user-1",
         prompt_cache_key="cache-a",
         metadata={"k": "v"},
         service_tier="flex",
@@ -2244,103 +122,688 @@ def _request_for_model(model: str) -> ChatCompletionRequest:
     return replace(_request(), model=model)
 
 
-class _FakeOpenAIClient:
-    def __init__(self, completion: _FakeOpenAICompletion) -> None:
-        self.chat = SimpleNamespace(completions=completion)
-
-
 def _completion_response(
     *,
-    model: str = "model-a",
-    content: str = "ok",
+    model: str,
+    content: str | None,
+    finish_reason: str = "stop",
     reasoning_content: str | None = None,
     reasoning: str | None = None,
-    reasoning_details: object | None = None,
-    usage: object | None = None,
-) -> object:
-    return SimpleNamespace(
-        id="chatcmpl_1",
-        model=model,
-        created=10,
-        choices=[
-            SimpleNamespace(
-                finish_reason="stop",
-                message=SimpleNamespace(
-                    content=content,
-                    refusal=None,
-                    reasoning_content=reasoning_content,
-                    reasoning=reasoning,
-                    reasoning_details=reasoning_details,
-                    tool_calls=None,
-                ),
-            )
+    reasoning_details: list[dict[str, Any]] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "content": content,
+        "refusal": None,
+        "reasoning_content": reasoning_content,
+        "reasoning_details": reasoning_details,
+        "tool_calls": tool_calls,
+    }
+    if reasoning is not None:
+        message["reasoning"] = reasoning
+    return {
+        "id": "chatcmpl_1",
+        "model": model,
+        "created": 10,
+        "system_fingerprint": "fp_1",
+        "service_tier": "default",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason,
+                "message": message,
+            }
         ],
-        usage=usage,
-    )
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "total_tokens": 8,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    }
 
 
-class _FakeOpenAICompletion:
-    def __init__(self, response: object | list[object]) -> None:
-        self.responses = response if isinstance(response, list) else [response]
-        self.calls: list[dict[str, object]] = []
+def _chunk(
+    *,
+    model: str,
+    content: str | None = None,
+    reasoning_content: str | None = None,
+    reasoning: str | None = None,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {
+        "content": content,
+        "refusal": None,
+        "reasoning_content": reasoning_content,
+        "tool_calls": None,
+    }
+    if reasoning is not None:
+        delta["reasoning"] = reasoning
+    return {
+        "id": "chatcmpl_1",
+        "model": model,
+        "created": 10,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason,
+                "delta": delta,
+            }
+        ],
+        "usage": None,
+    }
 
-    async def create(self, **kwargs: object) -> object:
+
+class _AsyncListStream:
+    def __init__(self, items: list[Any]) -> None:
+        self._items = list(items)
+        self.closed = False
+
+    def __aiter__(self) -> _AsyncListStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if not self._items:
+            raise StopAsyncIteration
+        item = self._items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _next_result(results: list[Any]) -> Any:
+    if not results:
+        raise AssertionError("no fake result available")
+    result = results.pop(0)
+    if isinstance(result, Exception):
+        raise result
+    return result
+
+
+class _FakeOpenAICompletions:
+    def __init__(self, results: list[Any]) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._results = list(results)
+
+    async def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
-        response = self.responses[0] if len(self.responses) == 1 else self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
+        return _next_result(self._results)
 
 
-class _RecordingChatCompletionClient:
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.complete_requests: list[ChatCompletionRequest] = []
-        self.stream_requests: list[ChatCompletionRequest] = []
-
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        self.complete_requests.append(request)
-        return ChatCompletionResult(
-            id=self.name,
-            model=request.model,
-            created_at=None,
-            message=ChatMessage(role="assistant", content=self.name),
-            finish_reason="stop",
-        )
-
-    async def stream(self, request: ChatCompletionRequest):
-        self.stream_requests.append(request)
-        yield ChatCompletionDelta(
-            id=self.name,
-            model=request.model,
-            created_at=None,
-            choice_index=0,
-            content_delta=self.name,
-        )
-
-
-class _FakeFireworksClient:
-    def __init__(self, response: object) -> None:
-        self.chat = SimpleNamespace(completions=_FakeFireworksCompletions(response))
+class _FakeOpenAIClient:
+    def __init__(self, results: list[Any], *, base_url: str = "https://example.com/v1") -> None:
+        self.chat = type("Chat", (), {"completions": _FakeOpenAICompletions(results)})()
+        self.base_url = base_url
 
 
 class _FakeFireworksCompletions:
-    def __init__(self, response: object) -> None:
-        self.response = response
-        self.calls: list[dict[str, object]] = []
+    def __init__(self, *, complete_result: Any, stream_result: Any) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._complete_result = complete_result
+        self._stream_result = stream_result
 
-    def acreate(self, **kwargs: object) -> object:
+    def acreate(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         if kwargs.get("stream"):
-            return _async_iter([self.response])
-        return self._complete()
+            if isinstance(self._stream_result, Exception):
+                async def raise_stream() -> Any:
+                    raise self._stream_result
+                    yield
+                return raise_stream()
+            return _AsyncListStream(list(self._stream_result))
 
-    async def _complete(self) -> object:
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+        async def complete() -> Any:
+            if isinstance(self._complete_result, Exception):
+                raise self._complete_result
+            return self._complete_result
+
+        return complete()
 
 
-async def _async_iter(values: list[object]):
-    for value in values:
-        yield value
+class _FakeFireworksClient:
+    def __init__(self, *, complete_result: Any, stream_result: Any, base_url: str = "https://example.com/v1") -> None:
+        self.chat = type("Chat", (), {"completions": _FakeFireworksCompletions(complete_result=complete_result, stream_result=stream_result)})()
+        self.base_url = base_url
+
+
+class _StubChatClient(IChatCompletionClient):
+    def __init__(self, *, complete_result: Any = None, stream_result: list[Any] | None = None) -> None:
+        self.complete_requests: list[ChatCompletionRequest] = []
+        self.stream_requests: list[ChatCompletionRequest] = []
+        self._complete_result = complete_result
+        self._stream_result = list(stream_result or [])
+
+    async def complete(self, request: ChatCompletionRequest):
+        self.complete_requests.append(request)
+        if isinstance(self._complete_result, Exception):
+            raise self._complete_result
+        return self._complete_result
+
+    def stream(self, request: ChatCompletionRequest):
+        self.stream_requests.append(request)
+
+        async def run():
+            for item in self._stream_result:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+
+        return run()
+
+
+def _body_for(provider, request: ChatCompletionRequest, *, stream: bool) -> dict[str, Any]:
+    quirks = (*provider.quirks, *provider.lookup(request.model))
+    call = Call(request=request, body=build_chat_body(request, stream=stream))
+    for quirk in quirks:
+        quirk.request(call)
+    return call.body
+
+
+def _completion_result(model: str, content: str):
+    from plap.llms.chat import ChatCompletionResult, ChatMessage, ChatUsage
+
+    return ChatCompletionResult(
+        id="chatcmpl_test",
+        model=model,
+        created_at=None,
+        message=ChatMessage(role="assistant", content=content),
+        finish_reason="stop",
+        usage=ChatUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+    )
+
+
+def _delta(model: str, *, content_delta: str | None = None, finish_reason: str | None = None):
+    from plap.llms.chat import ChatCompletionDelta
+
+    return ChatCompletionDelta(
+        id="chatcmpl_test",
+        model=model,
+        created_at=None,
+        choice_index=0,
+        content_delta=content_delta,
+        finish_reason=finish_reason,
+    )
+
+
+def _lightning_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_lightning_provider(_settings(llm_lightning_api_key="lightning-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def _gmicloud_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_gmicloud_provider(_settings(llm_gmicloud_api_key="gmicloud-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def _novita_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_novita_provider(_settings(llm_novita_api_key="novita-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def _crof_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_crof_provider(_settings(llm_crof_api_key="crof-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def _openrouter_provider(*, client: Any | None = None) -> OpenRouterProvider:
+    provider = build_openrouter_provider(_settings(llm_openrouter_api_key="openrouter-key"))
+    assert isinstance(provider, OpenRouterProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def _fireworks_provider(*, client: Any | None = None) -> FireworksProvider:
+    provider = build_fireworks_provider(_settings(llm_fireworks_api_key="fireworks-key"))
+    assert isinstance(provider, FireworksProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
+def test_build_chat_body_preserves_full_request_shape() -> None:
+    body = build_chat_body(_request(), stream=True)
+
+    assert body["model"] == "model-a"
+    assert body["messages"][0] == {"role": "developer", "content": "be precise"}
+    assert body["messages"][1] == {"role": "user", "content": "hello", "name": "caller"}
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+                "strict": True,
+                "description": "look something up",
+            },
+        }
+    ]
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert body["parallel_tool_calls"] is True
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object"},
+            "strict": True,
+            "description": "answer schema",
+        },
+    }
+    assert body["max_completion_tokens"] == 128
+    assert body["top_k"] == 17
+    assert body["reasoning_effort"] == "low"
+    assert body["prompt_cache_key"] == "cache-a"
+    assert body["metadata"] == {"k": "v"}
+    assert body["service_tier"] == "flex"
+    assert body["prediction"] == {"type": "content", "content": "expected"}
+    assert body["stream_options"] == {"include_usage": True}
+
+
+def test_lightning_request_quirks_keep_supported_fields_and_map_role() -> None:
+    body = _body_for(_lightning_provider(), _request_for_model("lightning-ai/gpt-oss-20b"), stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_completion_tokens"] == 128
+    assert body["reasoning_effort"] == "low"
+    assert "top_k" not in body
+    assert "prompt_cache_key" not in body
+    assert "service_tier" not in body
+    assert "prediction" not in body
+
+
+def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
+    request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="none")
+
+    body = _body_for(_gmicloud_provider(), request, stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_tokens"] == 128
+    assert body["extra_body"] == {"context_length_exceeded_behavior": "error"}
+    assert "max_completion_tokens" not in body
+    assert "reasoning_effort" not in body
+    assert "logprobs" not in body
+    assert "service_tier" not in body
+
+
+def test_gmicloud_provider_is_strict_and_rejects_deepseek_models() -> None:
+    provider = _gmicloud_provider()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="unsupported gmicloud model"):
+        provider.lookup("deepseek-ai/DeepSeek-V4-Flash")
+
+
+def test_novita_request_quirks_map_forced_tool_choice() -> None:
+    request = replace(_request_for_model("deepseek/deepseek-v4-flash"), reasoning_effort="high")
+
+    body = _body_for(_novita_provider(), request, stream=False)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_tokens"] == 128
+    assert body["tool_choice"] == "required"
+    assert "max_completion_tokens" not in body
+    assert "extra_body" not in body
+
+
+def test_crof_request_quirks_map_max_tokens_for_flash_model() -> None:
+    request = replace(_request_for_model("glm-4.7-flash"), reasoning_effort="none", response_format=None)
+
+    body = _body_for(_crof_provider(), request, stream=False)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_tokens"] == 128
+    assert "max_completion_tokens" not in body
+    assert "extra_body" not in body
+
+
+def test_openrouter_lookup_keeps_special_suffix_and_routes_provider_order() -> None:
+    body = _body_for(
+        _openrouter_provider(),
+        _request_for_model("meta-llama/llama-3.3-70b-instruct:free:provider1"),
+        stream=False,
+    )
+
+    assert body["model"] == "meta-llama/llama-3.3-70b-instruct:free"
+    assert body["extra_body"] == {
+        "provider": {
+            "order": ["provider1"],
+            "allow_fallbacks": False,
+        }
+    }
+
+
+def test_openrouter_lookup_rejects_unknown_base_model_even_with_suffixes() -> None:
+    provider = _openrouter_provider()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="unsupported openrouter model"):
+        provider.lookup("unknown/model:nitro:provider1")
+
+
+async def test_openrouter_client_aliases_reasoning_on_complete_and_stream() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(model="deepseek/deepseek-v4-flash", content="ok", reasoning="because"),
+            _AsyncListStream(
+                [
+                    _chunk(model="deepseek/deepseek-v4-flash", content="ok", reasoning="because"),
+                    _chunk(model="deepseek/deepseek-v4-flash", finish_reason="stop"),
+                ]
+            ),
+        ],
+        base_url=OPENROUTER_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_openrouter_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
+    deltas = [delta async for delta in client.stream(_request_for_model("deepseek/deepseek-v4-flash"))]
+
+    assert result.message.reasoning_content == "because"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[1].finish_reason == "stop"
+
+
+async def test_chat_completion_client_parses_openai_like_responses() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(
+                model="openai/gpt-oss-20b",
+                content="answer",
+                reasoning_content="because",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "function": {"name": "lookup", "arguments": {"q": "x"}},
+                    }
+                ],
+            )
+        ],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+
+    assert result.message.content == "answer"
+    assert result.message.reasoning_content == "because"
+    assert result.message.tool_calls == [ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}')]
+    assert result.usage is not None
+    assert result.usage.cached_tokens == 2
+    assert result.usage.reasoning_tokens == 1
+
+
+async def test_openai_provider_normalizes_context_length_errors() -> None:
+    error = BadRequestError(
+        "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
+        response=httpx.Response(400, request=httpx.Request("POST", "https://example.com/v1/chat/completions")),
+        body={
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "This model's maximum context length is 128000 tokens. However, you requested 128001 tokens.",
+                "type": "invalid_request_error",
+            }
+        },
+    )
+    fake_client = _FakeOpenAIClient([error], base_url=LIGHTNING_OPENAI_BASE_URL)
+    client = ChatCompletionClient(_lightning_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionContextLengthExceededError, match="maximum context length"):
+        await client.complete(_request_for_model("lightning-ai/gpt-oss-20b"))
+
+
+def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
+    assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
+    assert is_context_length_exceeded_error(
+        {"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."}
+    )
+    assert is_context_length_exceeded_error(
+        {"response": {"body": {"message": "Input token count exceeds the maximum allowed token limit."}}}
+    )
+    assert not is_context_length_exceeded_error({"error": {"code": "payload_too_large", "message": "Payload too large."}})
+
+
+async def test_lightning_gpt_oss_120b_rejects_response_format() -> None:
+    fake_client = _FakeOpenAIClient([], base_url=LIGHTNING_OPENAI_BASE_URL)
+    client = ChatCompletionClient(_lightning_provider(client=fake_client))
+    request = ChatCompletionRequest(
+        model="lightning-ai/gpt-oss-120b",
+        messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+        response_format=ChatResponseFormat(type="json_object"),
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="response_format is not supported"):
+        await client.complete(request)
+
+    assert fake_client.chat.completions.calls == []
+
+
+async def test_lightning_gpt_oss_120b_stream_rejects_response_format() -> None:
+    fake_client = _FakeOpenAIClient([], base_url=LIGHTNING_OPENAI_BASE_URL)
+    client = ChatCompletionClient(_lightning_provider(client=fake_client))
+    request = ChatCompletionRequest(
+        model="lightning-ai/gpt-oss-120b",
+        messages=[ChatMessage(role="user", content='Return {"ok": true}.')],
+        response_format=ChatResponseFormat(type="json_object"),
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="response_format is not supported"):
+        [delta async for delta in client.stream(request)]
+
+    assert fake_client.chat.completions.calls == []
+
+
+async def test_crof_glm_4_7_flash_rejects_response_format() -> None:
+    fake_client = _FakeOpenAIClient([], base_url=CROF_OPENAI_BASE_URL)
+    client = ChatCompletionClient(_crof_provider(client=fake_client))
+    request = ChatCompletionRequest(
+        model="glm-4.7-flash",
+        messages=[ChatMessage(role="user", content="hello")],
+        response_format=ChatResponseFormat(type="json_object"),
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="response_format is not supported"):
+        await client.complete(request)
+
+    assert fake_client.chat.completions.calls == []
+
+
+async def test_fireworks_provider_uses_its_own_sdk_and_shared_parser() -> None:
+    fake_client = _FakeFireworksClient(
+        complete_result=_completion_response(model="accounts/fireworks/models/gpt-oss-20b", content="ok"),
+        stream_result=[
+            _chunk(model="accounts/fireworks/models/gpt-oss-20b", content="ok"),
+            _chunk(model="accounts/fireworks/models/gpt-oss-20b", finish_reason="stop"),
+        ],
+    )
+    provider = _fireworks_provider(client=fake_client)
+    client = ChatCompletionClient(provider)
+
+    result = await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
+    deltas = [
+        delta
+        async for delta in client.stream(
+            replace(_request_for_model("accounts/fireworks/models/gpt-oss-20b"), stream_options=ChatStreamOptions(include_usage=True))
+        )
+    ]
+
+    assert result.message.content == "ok"
+    assert deltas[0].content_delta == "ok"
+    assert deltas[1].finish_reason == "stop"
+    assert fake_client.chat.completions.calls[0]["stream"] is False
+    assert fake_client.chat.completions.calls[1]["stream"] is True
+
+
+async def test_fireworks_provider_normalizes_context_length_errors() -> None:
+    fake_client = _FakeFireworksClient(
+        complete_result=InvalidRequestError("This prompt is too long for the model context window."),
+        stream_result=[],
+    )
+    client = ChatCompletionClient(_fireworks_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionContextLengthExceededError, match="context window"):
+        await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
+
+
+async def test_router_complete_falls_back_before_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    primary = _StubChatClient(complete_result=ChatCompletionProviderError("boom"))
+    fallback = _StubChatClient(
+        complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    result = await router.complete(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert result.model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert primary.complete_requests[0].model == "qwen3.5-9b"
+    assert fallback.complete_requests[0].model == "XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_router_stream_falls_back_before_first_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    primary = _StubChatClient(stream_result=[ChatCompletionProviderError("boom")])
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="ok"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert primary.stream_requests[0].model == "qwen3.5-9b"
+    assert fallback.stream_requests[0].model == "XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_router_stream_does_not_fallback_after_first_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    primary = _StubChatClient(
+        stream_result=[
+            _delta("crof/qwen3.5-9b", content_delta="first"),
+            ChatCompletionProviderError("boom"),
+        ]
+    )
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="fallback"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    with pytest.raises(ChatCompletionProviderError, match="boom"):
+        [
+            delta
+            async for delta in router.stream(
+                ChatCompletionRequest(
+                    model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                    messages=[ChatMessage(role="user", content="hello")],
+                )
+            )
+        ]
+
+    assert fallback.stream_requests == []
+    assert events == []
+
+
+async def test_router_stream_falls_back_after_first_delta_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+
+    class SlowClient(IChatCompletionClient):
+        async def complete(self, request: ChatCompletionRequest):
+            raise AssertionError(f"unexpected complete for {request.model}")
+
+        def stream(self, request: ChatCompletionRequest):
+            async def run():
+                await anyio.sleep(0.05)
+                yield _delta(request.model, content_delta="late")
+            return run()
+
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="ok"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=SlowClient()),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ],
+        stream_first_delta_timeout_seconds=0.01,
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_unavailable_chat_client_rejects_unknown_models() -> None:
+    client = UnavailableChatCompletionClient()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat completion provider configured"):
+        await client.complete(_request())
