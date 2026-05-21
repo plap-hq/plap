@@ -196,9 +196,9 @@ CROF_FIELDS = (
 )
 
 LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "lightning-ai/llama-3.3-70b": (),
     "lightning-ai/gpt-oss-20b": (),
     "lightning-ai/gpt-oss-120b": (RejectResponseFormat(),),
-    "lightning-ai/llama-3.3-70b": (),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),
@@ -208,17 +208,29 @@ NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
 GMICLOUD_MODELS: dict[str, tuple[Quirk, ...]] = {
     "XiaomiMiMo/MiMo-V2.5": (),
     "XiaomiMiMo/MiMo-V2.5-Pro": (),
+    "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
 }
 CROF_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "deepseek-v4-flash": (RejectResponseFormat("json_schema"),),
+    "deepseek-v4-pro": (RejectResponseFormat("json_schema"),),
+    "deepseek-v4-pro-precision": (RejectResponseFormat("json_schema"),),
     "deepseek-v3.2": (RejectResponseFormat(),),
     "gemma-4-31b-it": (RejectResponseFormat(),),
+    "greg": (RejectResponseFormat("json_object"),),
     "glm-4.7": (RejectResponseFormat(),),
     "glm-4.7-flash": (RejectResponseFormat(),),
     "glm-5": (RejectResponseFormat(),),
-    "glm-5.1": (),
+    "glm-5.1": (RejectResponseFormat("json_schema"),),
+    "glm-5.1-precision": (RejectResponseFormat("json_schema"),),
+    "kimi-k2.5": (RejectResponseFormat(),),
+    "kimi-k2.5-lightning": (),
+    "kimi-k2.6": (RejectResponseFormat("json_schema"),),
+    "kimi-k2.6-precision": (RejectResponseFormat("json_schema"),),
     "minimax-m2.5": (RejectResponseFormat(),),
-    "mimo-v2.5-pro-precision": (),
+    "mimo-v2.5-pro": (RejectResponseFormat("json_schema"),),
+    "mimo-v2.5-pro-precision": (RejectResponseFormat("json_schema"),),
+    "qwen3.6-27b": (RejectResponseFormat(),),
     "qwen3.5-397b-a17b": (RejectResponseFormat(),),
     "qwen3.5-9b": (),
 }

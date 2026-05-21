@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from plap.llms.chat import (
+    ChatResponseFormatType,
     ChatToolChoiceFunction,
 )
 from plap.llms.client import Call, Quirk
@@ -157,11 +158,21 @@ class RenameOutput(Quirk):
 
 
 class RejectResponseFormat(Quirk):
+    def __init__(self, *types: str) -> None:
+        self._types = frozenset(ChatResponseFormatType(value) for value in types)
+
     def request(self, call: Call) -> None:
-        if call.request.response_format is None:
+        response_format = call.request.response_format
+        if response_format is None:
             return
+        if self._types and response_format.type not in self._types:
+            return
+        if not self._types:
+            raise ChatCompletionUnsupportedRequestError(
+                f"response_format is not supported for model {call.request.model!r}"
+            )
         raise ChatCompletionUnsupportedRequestError(
-            f"response_format is not supported for model {call.request.model!r}"
+            f"response_format is not supported for model {call.request.model!r} when type is {response_format.type.value!r}"
         )
 
 
