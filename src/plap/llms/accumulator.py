@@ -19,9 +19,9 @@ from plap.llms.completions.chat import (
 
 @dataclass(frozen=True)
 class Snapshot:
-    delta: ChatCompletionDelta
-    message: ChatMessage
-    result: ChatCompletionResult | None = None
+    messages: tuple[ChatMessage, ...]
+    results: tuple[ChatCompletionResult, ...]
+    delta: ChatCompletionDelta | None = None
 
 
 @dataclass(slots=True)
@@ -111,7 +111,11 @@ class Accumulator:
         self._apply(delta)
         result = self._result() if delta.finish_reason is not None else None
         message = result.message if result is not None else self._message(partial=True)
-        return Snapshot(delta=delta, message=message, result=result)
+        return Snapshot(
+            messages=(message,),
+            results=(result,) if result is not None else (),
+            delta=delta,
+        )
 
     def _apply(self, delta: ChatCompletionDelta) -> None:
         if delta.id is not None:

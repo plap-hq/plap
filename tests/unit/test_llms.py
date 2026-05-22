@@ -13,6 +13,7 @@ import plap.llms.completions.router as router_module
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
+    ChatCompletionResult,
     ChatCompletionRequest,
     ChatFunctionTool,
     ChatMessage,
@@ -50,6 +51,7 @@ from plap.llms.completions.providers import (
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
+from plap.llms.retry import RETRY_TOOL_PLACEHOLDER, complete as retry_complete, stream as retry_stream
 from plap.settings import Settings
 
 
@@ -371,14 +373,14 @@ def test_accumulator_assembles_streamed_tool_call_and_final_result() -> None:
         )
     )
 
-    assert first == Snapshot(delta=first.delta, message=first.message, result=None)
-    assert second.result is not None
-    assert first.message.tool_calls is not None
-    assert first.message.tool_calls[0].arguments == '{"n":""}'
-    assert second.message.tool_calls is not None
-    assert second.message.tool_calls[0].arguments == '{"n":"4","x":1}'
-    assert second.result.model == "model-a"
-    assert second.result.finish_reason == "tool_calls"
+    assert first == Snapshot(messages=first.messages, results=(), delta=first.delta)
+    assert first.messages[0].tool_calls is not None
+    assert first.messages[0].tool_calls[0].arguments == '{"n":""}'
+    assert second.results
+    assert second.messages[0].tool_calls is not None
+    assert second.messages[0].tool_calls[0].arguments == '{"n":"4","x":1}'
+    assert second.results[0].model == "model-a"
+    assert second.results[0].finish_reason == "tool_calls"
 
 
 def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
@@ -403,11 +405,11 @@ def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
         )
     )
 
-    assert first == Snapshot(delta=first.delta, message=first.message, result=None)
-    assert first.message.content == "hello"
-    assert second.result is not None
-    assert second.result.model == "model-a"
-    assert second.result.message.content == "hello"
+    assert first == Snapshot(messages=first.messages, results=(), delta=first.delta)
+    assert first.messages[0].content == "hello"
+    assert second.results
+    assert second.results[0].model == "model-a"
+    assert second.results[0].message.content == "hello"
 
 
 def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
@@ -440,11 +442,127 @@ def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
         )
     )
 
-    assert final.message.tool_calls is not None
-    assert final.message.tool_calls[0].arguments == '{"n":4}'
-    assert final.result is not None
-    assert final.result.message.tool_calls is not None
-    assert final.result.message.tool_calls[0].arguments == '{"n":4}'
+    assert final.messages[0].tool_calls is not None
+    assert final.messages[0].tool_calls[0].arguments == '{"n":4}'
+    assert final.results
+    assert final.results[0].message.tool_calls is not None
+    assert final.results[0].message.tool_calls[0].arguments == '{"n":4}'
+
+
+class _RetryStreamClient(IChatCompletionClient):
+    def __init__(self, attempts: list[list[ChatCompletionDelta]]) -> None:
+        self._attempts = [list(attempt) for attempt in attempts]
+        self.requests: list[ChatCompletionRequest] = []
+
+    async def complete(self, request: ChatCompletionRequest):
+        raise AssertionError(f"unexpected complete for {request.model}")
+
+    def stream(self, request: ChatCompletionRequest):
+        self.requests.append(request)
+        if not self._attempts:
+            raise AssertionError("no retry attempt available")
+        items = self._attempts.pop(0)
+
+        async def run():
+            for item in items:
+                yield item
+
+        return run()
+
+
+async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
+    attempts = [
+        [
+            ChatCompletionDelta(
+                id="chatcmpl_1",
+                model="model-a",
+                created_at=10,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=0,
+                    id="call_1",
+                    name="lookup",
+                    arguments_delta='{"q":"x"}',
+                ),
+                finish_reason="tool_calls",
+            )
+        ],
+        [
+            ChatCompletionDelta(
+                id="chatcmpl_2",
+                model="model-a",
+                created_at=11,
+                choice_index=0,
+                content_delta="fixed",
+            ),
+            ChatCompletionDelta(
+                id="chatcmpl_2",
+                model="model-a",
+                created_at=11,
+                choice_index=0,
+                finish_reason="stop",
+            ),
+        ],
+    ]
+    client = _RetryStreamClient(attempts)
+
+    def validate(result: ChatCompletionResult) -> str | None:
+        if result.finish_reason == "tool_calls":
+            return "Your previous answer could not be used. Reply again without tool calls."
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+            tools=[],
+        )
+
+    items = [
+        item
+        async for item in retry_stream(
+            client,
+            next_request=next_request,
+            validate=validate,
+            max_attempts=2,
+        )
+    ]
+
+    assert len(items) == 4
+    assert items[0].messages[-1].tool_calls is not None
+    assert items[0].results and items[0].results[0].finish_reason == "tool_calls"
+    assert items[1].results and items[1].results[0].finish_reason == "tool_calls"
+    assert items[2].messages[-3].content == RETRY_TOOL_PLACEHOLDER
+    assert items[2].messages[-2].role == "user"
+    assert items[3].messages[-1].content == "fixed"
+    assert len(items[3].results) == 2
+    assert client.requests[1].messages[-3].tool_calls is not None
+    assert client.requests[1].messages[-2].content == RETRY_TOOL_PLACEHOLDER
+    assert client.requests[1].messages[-1].role == "user"
+
+
+async def test_retry_complete_returns_final_snapshot() -> None:
+    client = _RetryStreamClient(
+        [[ChatCompletionDelta(id="chatcmpl_1", model="model-a", created_at=10, choice_index=0, finish_reason="stop")]]
+    )
+
+    def validate(result: ChatCompletionResult) -> str | None:
+        _ = result
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+        )
+
+    final = await retry_complete(
+        client,
+        next_request=next_request,
+        validate=validate,
+    )
+
+    assert final.results and final.results[0].finish_reason == "stop"
 
 
 async def test_completions_client_fills_missing_result_and_delta_models() -> None:
