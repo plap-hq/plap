@@ -22,6 +22,7 @@ from plap.logging import log_debug
 
 logger = structlog.get_logger(__name__)
 DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS = 60.0
+SAME_MODEL_RETRIES_BEFORE_FALLBACK = 1
 
 
 def _model_attempts(model: str) -> tuple[str, ...]:
@@ -66,6 +67,32 @@ def _log_router_attempt_failed(
     )
 
 
+def _log_router_same_model_retry(
+    *,
+    request_model: str,
+    attempt_model: str,
+    attempt_index: int,
+    attempt_count: int,
+    same_model_try_index: int,
+    same_model_try_count: int,
+    exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
+    streaming: bool,
+) -> None:
+    log_debug(
+        logger,
+        "llm.router.same_model_retry",
+        attempt_count=attempt_count,
+        attempt_index=attempt_index,
+        attempt_model=attempt_model,
+        error_message=str(exc),
+        error_type=type(exc).__name__,
+        request_model=request_model,
+        same_model_try_count=same_model_try_count,
+        same_model_try_index=same_model_try_index,
+        streaming=streaming,
+    )
+
+
 def _log_router_fallback_succeeded(
     *,
     request_model: str,
@@ -83,6 +110,14 @@ def _log_router_fallback_succeeded(
         winner_model=winner_model,
         winning_attempt_index=winning_attempt_index,
     )
+
+
+def _should_retry_same_model(
+    exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
+) -> bool:
+    if isinstance(exc, ChatCompletionTimeoutError):
+        return True
+    return type(exc) is ChatCompletionProviderError
 
 
 def _log_router_fallback_exhausted(
@@ -132,36 +167,51 @@ class RoutingChatCompletionClient(IChatCompletionClient):
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         attempts = _model_attempts(request.model)
         attempt_count = len(attempts)
+        same_model_try_count = SAME_MODEL_RETRIES_BEFORE_FALLBACK + 1
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
-            try:
-                result = await route.client.complete(replace(request, model=provider_model))
-            except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
-                last_error = exc
-                last_attempt_model = attempt_model
-                if attempt_index < attempt_count:
-                    _log_router_attempt_failed(
+            attempt_request = replace(request, model=provider_model)
+            for same_model_try_index in range(1, same_model_try_count + 1):
+                try:
+                    result = await route.client.complete(attempt_request)
+                except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
+                    last_error = exc
+                    last_attempt_model = attempt_model
+                    if same_model_try_index < same_model_try_count and _should_retry_same_model(exc):
+                        _log_router_same_model_retry(
+                            request_model=request.model,
+                            attempt_model=attempt_model,
+                            attempt_index=attempt_index,
+                            attempt_count=attempt_count,
+                            same_model_try_index=same_model_try_index,
+                            same_model_try_count=same_model_try_count,
+                            exc=exc,
+                            streaming=False,
+                        )
+                        continue
+                    if attempt_index < attempt_count:
+                        _log_router_attempt_failed(
+                            request_model=request.model,
+                            attempt_model=attempt_model,
+                            attempt_index=attempt_index,
+                            attempt_count=attempt_count,
+                            next_attempt_model=attempts[attempt_index],
+                            exc=exc,
+                            streaming=False,
+                        )
+                    break
+                if attempt_index > 1:
+                    _log_router_fallback_succeeded(
                         request_model=request.model,
-                        attempt_model=attempt_model,
-                        attempt_index=attempt_index,
+                        winner_model=attempt_model,
+                        winning_attempt_index=attempt_index,
                         attempt_count=attempt_count,
-                        next_attempt_model=attempts[attempt_index],
-                        exc=exc,
                         streaming=False,
                     )
-                continue
-            if attempt_index > 1:
-                _log_router_fallback_succeeded(
-                    request_model=request.model,
-                    winner_model=attempt_model,
-                    winning_attempt_index=attempt_index,
-                    attempt_count=attempt_count,
-                    streaming=False,
-                )
-            return replace(result, model=attempt_model)
+                return replace(result, model=attempt_model)
 
         if last_error is None:
             raise _unsupported_model(request.model)
@@ -181,51 +231,66 @@ class RoutingChatCompletionClient(IChatCompletionClient):
     ) -> AsyncIterator[ChatCompletionDelta]:
         attempts = _model_attempts(request.model)
         attempt_count = len(attempts)
+        same_model_try_count = SAME_MODEL_RETRIES_BEFORE_FALLBACK + 1
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
-            yielded = False
-            iterator = None
-            try:
-                iterator = route.client.stream(replace(request, model=provider_model)).__aiter__()
-                first_delta = await _first_stream_delta(
-                    iterator,
-                    timeout_seconds=self._stream_first_delta_timeout_seconds,
-                    attempt_model=attempt_model,
-                )
-                yielded = True
-                yield replace(first_delta, model=attempt_model)
-                async for delta in iterator:
-                    yielded = True
-                    yield replace(delta, model=attempt_model)
-            except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
-                if yielded:
-                    raise
-                last_error = exc
-                last_attempt_model = attempt_model
-                if attempt_index < attempt_count:
-                    _log_router_attempt_failed(
-                        request_model=request.model,
+            attempt_request = replace(request, model=provider_model)
+            for same_model_try_index in range(1, same_model_try_count + 1):
+                yielded = False
+                iterator = None
+                try:
+                    iterator = route.client.stream(attempt_request).__aiter__()
+                    first_delta = await _first_stream_delta(
+                        iterator,
+                        timeout_seconds=self._stream_first_delta_timeout_seconds,
                         attempt_model=attempt_model,
-                        attempt_index=attempt_index,
-                        attempt_count=attempt_count,
-                        next_attempt_model=attempts[attempt_index],
-                        exc=exc,
-                        streaming=True,
                     )
-                continue
-            else:
-                if attempt_index > 1:
-                    _log_router_fallback_succeeded(
-                        request_model=request.model,
-                        winner_model=attempt_model,
-                        winning_attempt_index=attempt_index,
-                        attempt_count=attempt_count,
-                        streaming=True,
-                    )
-                return
+                    yielded = True
+                    yield replace(first_delta, model=attempt_model)
+                    async for delta in iterator:
+                        yielded = True
+                        yield replace(delta, model=attempt_model)
+                except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
+                    if yielded:
+                        raise
+                    last_error = exc
+                    last_attempt_model = attempt_model
+                    if same_model_try_index < same_model_try_count and _should_retry_same_model(exc):
+                        _log_router_same_model_retry(
+                            request_model=request.model,
+                            attempt_model=attempt_model,
+                            attempt_index=attempt_index,
+                            attempt_count=attempt_count,
+                            same_model_try_index=same_model_try_index,
+                            same_model_try_count=same_model_try_count,
+                            exc=exc,
+                            streaming=True,
+                        )
+                        continue
+                    if attempt_index < attempt_count:
+                        _log_router_attempt_failed(
+                            request_model=request.model,
+                            attempt_model=attempt_model,
+                            attempt_index=attempt_index,
+                            attempt_count=attempt_count,
+                            next_attempt_model=attempts[attempt_index],
+                            exc=exc,
+                            streaming=True,
+                        )
+                    break
+                else:
+                    if attempt_index > 1:
+                        _log_router_fallback_succeeded(
+                            request_model=request.model,
+                            winner_model=attempt_model,
+                            winning_attempt_index=attempt_index,
+                            attempt_count=attempt_count,
+                            streaming=True,
+                        )
+                    return
 
         if last_error is None:
             raise _unsupported_model(request.model)
