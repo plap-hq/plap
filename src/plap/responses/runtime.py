@@ -35,6 +35,7 @@ from plap.responses.contracts import (
     FunctionTool,
     ReasoningSummary,
     ResponseCreateRequest,
+    ResponseObject,
     ResponseReasoningItem,
     ResponseStreamEvent,
     TextFormatJSONObject,
@@ -679,6 +680,52 @@ async def _handle_stream_disconnect(lifecycle: _StreamLifecycle) -> None:
         await lifecycle.producer_done.wait()
 
 
+async def _shielded_cancel_response(
+    *,
+    response_store,
+    prepared,
+    response: ResponseObject,
+) -> BaseException | None:
+    with anyio.CancelScope(shield=True):
+        try:
+            await response_store.cancel_response(prepared, response)
+        except BaseException as exc:
+            return exc
+    return None
+
+
+async def _shielded_fail_response(
+    *,
+    response_store,
+    prepared,
+    response_id: str,
+) -> BaseException | None:
+    with anyio.CancelScope(shield=True):
+        try:
+            await response_store.fail_response(prepared, response_id)
+        except BaseException as exc:
+            return exc
+    return None
+
+
+def _attach_secondary_errors(primary: BaseException, secondary_errors: Sequence[BaseException]) -> None:
+    for secondary in secondary_errors:
+        primary.add_note(f"Secondary teardown error: {type(secondary).__name__}: {secondary}")
+
+
+def _raise_with_teardown_errors(
+    run_error: BaseException | None,
+    teardown_errors: Sequence[BaseException],
+) -> NoReturn:
+    if run_error is not None:
+        if teardown_errors:
+            _attach_secondary_errors(run_error, teardown_errors)
+        raise run_error
+    if len(teardown_errors) == 1:
+        raise teardown_errors[0]
+    raise ExceptionGroup("stream teardown failed", list(teardown_errors))
+
+
 async def _run_main_completion(
     *,
     out: ResponseEventIO,
@@ -1180,43 +1227,62 @@ async def stream_response_events(
                     response_id=out.response_id,
                     runtime_profile=profile.display_name,
                 ):
-                    async with anyio.create_task_group() as commit_group:
-                        out.start(commit_group)
+                    run_error: BaseException | None = None
+                    teardown_errors: list[BaseException] = []
+                    with anyio.CancelScope(shield=True):
                         try:
-                            with anyio.CancelScope() as cancel_scope:
-                                lifecycle.generation_cancel_scope = cancel_scope
-                                if lifecycle.client_disconnected:
-                                    cancel_scope.cancel()
+                            async with anyio.create_task_group() as commit_group:
+                                out.start(commit_group)
                                 try:
-                                    await run_response(
-                                        out,
-                                        prepared.execution_request,
-                                        profile=profile,
-                                        debug_debate_summaries=settings.debug_debate_summaries,
-                                        sealing_keyring=sealing_keyring,
-                                        tool_policy_resolver=tool_policy_resolver,
-                                        tool_call_policy_resolver=tool_call_policy_resolver,
-                                        chat_completion_client=chat_completion_client,
-                                        mcp_tool_providers=mcp_tool_providers,
-                                        prompt_cache_key_base=prompt_cache_key_base,
-                                    )
-                                except cancelled_exc:
-                                    if lifecycle.client_disconnected:
-                                        lifecycle.generation_cancelled_by_disconnect = True
-                                    else:
-                                        raise
+                                    with anyio.CancelScope() as cancel_scope:
+                                        lifecycle.generation_cancel_scope = cancel_scope
+                                        if lifecycle.client_disconnected:
+                                            cancel_scope.cancel()
+                                        try:
+                                            await run_response(
+                                                out,
+                                                prepared.execution_request,
+                                                profile=profile,
+                                                debug_debate_summaries=settings.debug_debate_summaries,
+                                                sealing_keyring=sealing_keyring,
+                                                tool_policy_resolver=tool_policy_resolver,
+                                                tool_call_policy_resolver=tool_call_policy_resolver,
+                                                chat_completion_client=chat_completion_client,
+                                                mcp_tool_providers=mcp_tool_providers,
+                                                prompt_cache_key_base=prompt_cache_key_base,
+                                            )
+                                        except cancelled_exc as exc:
+                                            if lifecycle.client_disconnected:
+                                                lifecycle.generation_cancelled_by_disconnect = True
+                                            else:
+                                                run_error = exc
+                                        except BaseException as exc:
+                                            run_error = exc
                                 finally:
                                     lifecycle.generation_cancel_scope = None
-                        finally:
-                            with anyio.CancelScope(shield=True):
-                                await out.aclose()
-                    if lifecycle.generation_cancelled_by_disconnect:
-                        with anyio.CancelScope(shield=True):
-                            await response_store.cancel_response(prepared, out.cancelled_response())
+                                    await out.aclose()
+                            if lifecycle.generation_cancelled_by_disconnect:
+                                cancel_error = await _shielded_cancel_response(
+                                    response_store=response_store,
+                                    prepared=prepared,
+                                    response=out.cancelled_response(),
+                                )
+                                if cancel_error is not None:
+                                    teardown_errors.append(cancel_error)
+                        except BaseException as exc:
+                            teardown_errors.append(exc)
+                    if run_error is not None or teardown_errors:
+                        _raise_with_teardown_errors(run_error, teardown_errors)
             except Exception as exc:
                 root = exc.exceptions[0] if isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1 else exc
                 if prepared is not None and out is not None:
-                    await response_store.fail_response(prepared, out.response_id)
+                    fail_error = await _shielded_fail_response(
+                        response_store=response_store,
+                        prepared=prepared,
+                        response_id=out.response_id,
+                    )
+                    if fail_error is not None:
+                        _attach_secondary_errors(root, [fail_error])
                 producer_error = _response_error(root)
             finally:
                 lifecycle.producer_done.set()

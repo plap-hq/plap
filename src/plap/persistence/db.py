@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
+import anyio
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -11,6 +12,21 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+
+@asynccontextmanager
+async def _shielded_exit[T](cm: AbstractAsyncContextManager[T]) -> AsyncIterator[T]:
+    resource = await cm.__aenter__()
+    try:
+        yield resource
+    except BaseException as exc:
+        with anyio.CancelScope(shield=True):
+            suppress = await cm.__aexit__(type(exc), exc, exc.__traceback__)
+        if not suppress:
+            raise
+    else:
+        with anyio.CancelScope(shield=True):
+            await cm.__aexit__(None, None, None)
 
 
 def create_database_engine(database_url: str) -> AsyncEngine:
@@ -43,22 +59,22 @@ class Database:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        async with self.session_maker()() as session:
+        async with _shielded_exit(self.session_maker()()) as session:
             yield session
 
     @asynccontextmanager
     async def session_transaction(self) -> AsyncIterator[AsyncSession]:
-        async with self.session_maker().begin() as session:
+        async with _shielded_exit(self.session_maker().begin()) as session:
             yield session
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[AsyncConnection]:
-        async with self.engine().connect() as connection:
+        async with _shielded_exit(self.engine().connect()) as connection:
             yield connection
 
     @asynccontextmanager
     async def connection_transaction(self) -> AsyncIterator[AsyncConnection]:
-        async with self.engine().begin() as connection:
+        async with _shielded_exit(self.engine().begin()) as connection:
             yield connection
 
     def engine(self) -> AsyncEngine:

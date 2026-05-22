@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from uuid import UUID
@@ -73,6 +74,7 @@ from plap.responses.models import SideMessage, StateMessage, StateToolCall
 from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.runtime import (
     STREAM_ABORTED_TOOL_PLACEHOLDER,
+    _shielded_fail_response,
     _take_summary_fragment,
     prepare_tools,
     resolve_tool_calls,
@@ -2421,6 +2423,88 @@ async def test_stream_response_events_marks_persisted_response_cancelled_on_disc
     assert len(response_store.begin_response_ids) == 1
     assert response_store.cancelled_response_ids == response_store.begin_response_ids
     assert response_store.failed_response_ids == []
+
+
+async def test_stream_response_events_disconnect_drains_blocked_append_before_cancel() -> None:
+    response_store = _BlockingAppendResponseStore()
+    client = _YieldThenBlockChatClient()
+
+    events = _stream_response_events(
+        ResponseCreateRequest(model="plap/test", input="hello", reasoning={"summary": "auto"}),
+        transport="stream",
+        auth_context=_auth_context(),
+        settings=_settings(),
+        sealing_keyring=_keyring(),
+        tool_policy_resolver=_RecordingResolver(),
+        tool_call_policy_resolver=_RecordingCallResolver(),
+        chat_completion_client=client,
+        reasoning_summarizer=_FakeReasoningSummarizer(),
+        response_store=response_store,
+    )
+
+    assert (await anext(events)).type == "response.created"
+    assert (await anext(events)).type == "response.in_progress"
+    await client.stream_started.wait()
+    await response_store.append_started.wait()
+
+    release_triggered = anyio.Event()
+
+    async def release_append_later() -> None:
+        await anyio.sleep(0.05)
+        release_triggered.set()
+        response_store.release_append.set()
+
+    release_task = asyncio.create_task(release_append_later())
+    try:
+        await events.aclose()
+    finally:
+        await release_task
+
+    await client.stream_closed.wait()
+
+    assert len(response_store.begin_response_ids) == 1
+    assert response_store.cancelled_response_ids == response_store.begin_response_ids
+    assert response_store.failed_response_ids == []
+    assert release_triggered.is_set() is True
+    assert response_store.operation_order == ["append_output_item", "cancel_response"]
+
+
+async def test_shielded_fail_response_ignores_outer_cancellation() -> None:
+    response_store = _BlockingFailResponseStore()
+    prepared = PreparedRequest(
+        scope_id=UUID("00000000-0000-0000-0000-000000000001"),
+        response_request=ResponseCreateRequest(model="plap/test", input="hello"),
+        execution_request=ResponseCreateRequest(model="plap/test", input="hello"),
+        current_input_items=[],
+        parent_response_id=None,
+        conversation_id=None,
+        persist_response=True,
+    )
+    result: dict[str, object] = {}
+    done = anyio.Event()
+
+    async def runner() -> None:
+        try:
+            with anyio.CancelScope() as cancel_scope:
+                cancel_scope.cancel()
+                result["value"] = await _shielded_fail_response(
+                    response_store=response_store,
+                    prepared=prepared,
+                    response_id="resp_test",
+                )
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            done.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(runner)
+        await response_store.fail_started.wait()
+        response_store.release_fail.set()
+        await done.wait()
+
+    assert result == {"value": None}
+    assert response_store.failed_response_ids == ["resp_test"]
 
 
 async def test_stream_response_events_executes_batched_compaction() -> None:
@@ -5293,6 +5377,40 @@ class _RecordingResponseStore(_NoopResponseStore):
         _ = prepared
         self.cancelled_response_ids.append(response.id)
         return True
+
+
+class _BlockingFailResponseStore(_RecordingResponseStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_started = anyio.Event()
+        self.release_fail = anyio.Event()
+
+    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
+        _ = prepared
+        self.fail_started.set()
+        await self.release_fail.wait()
+        self.failed_response_ids.append(response_id)
+        return True
+
+
+class _BlockingAppendResponseStore(_RecordingResponseStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_started = anyio.Event()
+        self.release_append = anyio.Event()
+        self.operation_order: list[str] = []
+
+    async def append_output_item(self, *args, **kwargs) -> None:
+        _ = args
+        _ = kwargs
+        self.append_started.set()
+        await self.release_append.wait()
+        self.operation_order.append("append_output_item")
+
+    async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
+        result = await super().cancel_response(prepared, response)
+        self.operation_order.append("cancel_response")
+        return result
 
 
 class _YieldThenRaiseChatClient(IChatCompletionClient):
