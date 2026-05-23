@@ -129,6 +129,20 @@ class DropIf(Quirk):
             call.body.pop(self._name, None)
 
 
+class EnsureAssistantReasoningContent(Quirk):
+    def request(self, call: Call) -> None:
+        messages = call.body.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") != "assistant":
+                continue
+            if message.get("reasoning_content") is None:
+                message["reasoning_content"] = ""
+
+
 class ForceRequiredTool(Quirk):
     def request(self, call: Call) -> None:
         if not isinstance(call.request.tool_choice, ChatToolChoiceFunction):
@@ -178,6 +192,7 @@ class RejectResponseFormat(Quirk):
 
 __all__ = [
     "DropIf",
+    "EnsureAssistantReasoningContent",
     "ExtraBody",
     "ForceRequiredTool",
     "Only",

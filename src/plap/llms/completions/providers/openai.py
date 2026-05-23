@@ -24,6 +24,7 @@ from plap.llms.completions.errors import (
 )
 from plap.llms.completions.quirks import (
     DropIf,
+    EnsureAssistantReasoningContent,
     ExtraBody,
     ForceRequiredTool,
     Only,
@@ -258,6 +259,7 @@ def build_gmicloud_provider(settings: Any) -> Provider | None:
         quirks=(
             SystemRole(),
             Only(*GMICLOUD_FIELDS),
+            EnsureAssistantReasoningContent(),
             Rename("max_completion_tokens", "max_tokens"),
             DropIf("reasoning_effort", "none"),
             ExtraBody({"context_length_exceeded_behavior": "error"}),

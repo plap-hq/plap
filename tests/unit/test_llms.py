@@ -816,6 +816,29 @@ def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
     assert "service_tier" not in body
 
 
+def test_gmicloud_request_quirks_fill_missing_assistant_reasoning_content() -> None:
+    request = replace(
+        _request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"),
+        messages=[
+            ChatMessage(role="developer", content="be precise"),
+            ChatMessage(role="user", content="hello"),
+            ChatMessage(role="assistant", content="draft"),
+            ChatMessage(role="assistant", content="with reasoning", reasoning_content="because"),
+        ],
+    )
+
+    body = _body_for(_gmicloud_provider(), request, stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["messages"][1] == {"role": "user", "content": "hello"}
+    assert body["messages"][2] == {"role": "assistant", "content": "draft", "reasoning_content": ""}
+    assert body["messages"][3] == {
+        "role": "assistant",
+        "content": "with reasoning",
+        "reasoning_content": "because",
+    }
+
+
 def test_gmicloud_provider_is_strict_and_rejects_deepseek_models() -> None:
     provider = _gmicloud_provider()
 
