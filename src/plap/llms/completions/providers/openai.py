@@ -23,6 +23,7 @@ from plap.llms.completions.errors import (
     is_context_length_exceeded_error,
 )
 from plap.llms.completions.quirks import (
+    DropMessageName,
     DropIf,
     EnsureAssistantReasoningContent,
     ExtraBody,
@@ -30,6 +31,8 @@ from plap.llms.completions.quirks import (
     Only,
     RejectResponseFormat,
     Rename,
+    RenameOutput,
+    Set,
     SystemRole,
 )
 
@@ -104,6 +107,7 @@ class OpenAIProvider(Provider):
         return run()
 
 LIGHTNING_OPENAI_BASE_URL = "https://lightning.ai/api/v1"
+GROQ_OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
 GMICLOUD_OPENAI_BASE_URL = "https://api.gmi-serving.com/v1"
 NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
 CROF_OPENAI_BASE_URL = "https://crof.ai/v1"
@@ -154,6 +158,27 @@ NOVITA_FIELDS = (
     "logprobs",
     "reasoning_effort",
 )
+GROQ_FIELDS = (
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "seed",
+    "n",
+    "reasoning_effort",
+    "user",
+    "service_tier",
+)
 GMICLOUD_FIELDS = (
     "model",
     "messages",
@@ -201,6 +226,16 @@ LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
     "lightning-ai/gpt-oss-120b": (RejectResponseFormat(),),
     "lightning-ai/nvidia-nemotron-3-super-120b-a12b": (),
     "lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b": (),
+}
+GROQ_NO_PARALLEL_TOOL_CALLS: tuple[Quirk, ...] = (Set("parallel_tool_calls", False),)
+GROQ_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "openai/gpt-oss-20b": GROQ_NO_PARALLEL_TOOL_CALLS,
+    "openai/gpt-oss-safeguard-20b": GROQ_NO_PARALLEL_TOOL_CALLS,
+    "openai/gpt-oss-120b": GROQ_NO_PARALLEL_TOOL_CALLS,
+    "meta-llama/llama-4-scout-17b-16e-instruct": (),
+    "qwen/qwen3-32b": (RejectResponseFormat("json_schema"),),
+    "llama-3.3-70b-versatile": (RejectResponseFormat("json_schema"),),
+    "llama-3.1-8b-instant": (RejectResponseFormat("json_schema"),),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),
@@ -269,6 +304,24 @@ def build_gmicloud_provider(settings: Any) -> Provider | None:
     )
 
 
+def build_groq_provider(settings: Any) -> Provider | None:
+    if not settings.llm_groq_api_key:
+        return None
+    return OpenAIProvider(
+        name="groq",
+        api_key=settings.llm_groq_api_key,
+        base_url=GROQ_OPENAI_BASE_URL,
+        quirks=(
+            SystemRole(),
+            Only(*GROQ_FIELDS),
+            DropMessageName(),
+            ExtraBody({"include_reasoning": True}),
+            RenameOutput("reasoning", "reasoning_content"),
+        ),
+        models=GROQ_MODELS,
+    )
+
+
 def build_novita_provider(settings: Any) -> Provider | None:
     if not settings.llm_novita_api_key:
         return None
@@ -296,11 +349,13 @@ def build_crof_provider(settings: Any) -> Provider | None:
 __all__ = [
     "CROF_OPENAI_BASE_URL",
     "GMICLOUD_OPENAI_BASE_URL",
+    "GROQ_OPENAI_BASE_URL",
     "LIGHTNING_OPENAI_BASE_URL",
     "NOVITA_OPENAI_BASE_URL",
     "OpenAIProvider",
     "build_crof_provider",
     "build_gmicloud_provider",
+    "build_groq_provider",
     "build_lightning_provider",
     "build_novita_provider",
     "normalize_openai_error",

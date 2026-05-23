@@ -107,6 +107,16 @@ class SystemRole(Quirk):
                 message["role"] = "system"
 
 
+class DropMessageName(Quirk):
+    def request(self, call: Call) -> None:
+        messages = call.body.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if isinstance(message, dict):
+                message.pop("name", None)
+
+
 class ExtraBody(Quirk):
     def __init__(self, value: dict[str, Any]) -> None:
         self._value = value
@@ -191,6 +201,7 @@ class RejectResponseFormat(Quirk):
 
 
 __all__ = [
+    "DropMessageName",
     "DropIf",
     "EnsureAssistantReasoningContent",
     "ExtraBody",

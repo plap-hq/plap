@@ -1009,6 +1009,7 @@ class Settings(BaseSettings):
     log_json: bool = False
     log_file: str | None = None
     llm_lightning_api_key: str | None = None
+    llm_groq_api_key: str | None = None
     llm_gmicloud_api_key: str | None = None
     llm_novita_api_key: str | None = None
     llm_fireworks_api_key: str | None = None

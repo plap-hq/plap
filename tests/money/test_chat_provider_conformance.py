@@ -26,6 +26,7 @@ from plap.llms.completions.providers import (
     build_crof_provider,
     build_fireworks_provider,
     build_gmicloud_provider,
+    build_groq_provider,
     build_lightning_provider,
     build_novita_provider,
 )
@@ -84,6 +85,19 @@ def _gmicloud_client(api_key: str) -> IChatCompletionClient:
     )
 
 
+def _groq_client(api_key: str) -> IChatCompletionClient:
+    provider = build_groq_provider(_settings(llm_groq_api_key=api_key))
+    assert provider is not None
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="groq/",
+                client=ChatCompletionClient(provider),
+            )
+        ]
+    )
+
+
 def _fireworks_client(api_key: str) -> IChatCompletionClient:
     provider = build_fireworks_provider(_settings(llm_fireworks_api_key=api_key))
     assert provider is not None
@@ -105,6 +119,8 @@ def _crof_client(api_key: str) -> IChatCompletionClient:
 
 LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
+GROQ_GPT_OSS_20B_MODEL = "groq/openai/gpt-oss-20b"
+GROQ_GPT_OSS_120B_MODEL = "groq/openai/gpt-oss-120b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
 GMICLOUD_MIMO_V25_PRO_MODEL = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
 FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
@@ -130,6 +146,15 @@ GPT_OSS_PROVIDERS = (
             client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-20b",
+    ),
+    pytest.param(
+        ProviderCase(
+            name="groq",
+            api_key_env="GROQ_API_KEY",
+            model=GROQ_GPT_OSS_20B_MODEL,
+            client_factory=_groq_client,
+        ),
+        id="groq-gpt-oss-20b",
     ),
     pytest.param(
         ProviderCase(
@@ -162,6 +187,15 @@ TOOL_PROVIDERS = (
             client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-120b",
+    ),
+    pytest.param(
+        ProviderCase(
+            name="groq",
+            api_key_env="GROQ_API_KEY",
+            model=GROQ_GPT_OSS_120B_MODEL,
+            client_factory=_groq_client,
+        ),
+        id="groq-gpt-oss-120b",
     ),
     pytest.param(
         ProviderCase(
@@ -305,6 +339,57 @@ async def test_live_gpt_oss_reasoning_request(provider: ProviderCase) -> None:
     )
 
     assert _message_has_output(result.message)
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        pytest.param(ChatResponseFormat(type="json_object"), id="json-object"),
+        pytest.param(
+            ChatResponseFormat(
+                type="json_schema",
+                name="ok_response",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
+            id="json-schema",
+        ),
+    ],
+)
+async def test_live_groq_gpt_oss_20b_response_format(
+    response_format: ChatResponseFormat,
+) -> None:
+    provider = ProviderCase(
+        name="groq",
+        api_key_env="GROQ_API_KEY",
+        model=GROQ_GPT_OSS_20B_MODEL,
+        client_factory=_groq_client,
+    )
+
+    result = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content="You are a strict JSON API. Output valid JSON only.",
+                ),
+                ChatMessage(role="user", content='Return exactly {"ok": true}.'),
+            ],
+            response_format=response_format,
+            max_completion_tokens=128,
+            temperature=0,
+        ),
+    )
+
+    parsed = json.loads(result.message.content or "")
+    assert parsed == {"ok": True}
 
 
 async def test_live_gmicloud_deepseek_v4_flash_basic_reasoning_request() -> None:

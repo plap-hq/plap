@@ -49,6 +49,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     client = _create_chat_completion_client(
         _settings(
             llm_lightning_api_key="lightning-key",
+            llm_groq_api_key="groq-key",
             llm_gmicloud_api_key="gmicloud-key",
             llm_novita_api_key="novita-key",
             llm_crof_api_key="crof-key",
@@ -66,6 +67,13 @@ def test_app_runtime_builds_gmicloud_route_from_provider_prefix_setting() -> Non
     assert [route.prefix for route in client._routes] == ["gmicloud/"]
 
 
+def test_app_runtime_builds_groq_route_from_provider_prefix_setting() -> None:
+    client = _create_chat_completion_client(_settings(llm_groq_api_key="groq-key"))
+
+    assert isinstance(client, RoutingChatCompletionClient)
+    assert [route.prefix for route in client._routes] == ["groq/"]
+
+
 def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
     with pytest.raises(ValueError, match="tokenizer_revision requires tokenizer_hf_repo"):
         RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_revision="main")
@@ -79,6 +87,7 @@ def test_runtime_actor_config_rejects_trust_remote_code_without_repo() -> None:
 def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
+        llm_groq_api_key="groq-key",
         llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
         llm_novita_api_key="novita-key",
@@ -99,6 +108,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
 def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
         llm_crof_api_key="crof-key",
+        llm_groq_api_key="groq-key",
         llm_gmicloud_api_key="gmicloud-key",
         llm_lightning_api_key="lightning-key",
         llm_novita_api_key="novita-key",

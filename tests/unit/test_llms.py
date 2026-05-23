@@ -39,6 +39,7 @@ from plap.llms.completions.errors import (
 from plap.llms.completions.providers import (
     CROF_OPENAI_BASE_URL,
     GMICLOUD_OPENAI_BASE_URL,
+    GROQ_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
     NOVITA_OPENAI_BASE_URL,
     OPENROUTER_OPENAI_BASE_URL,
@@ -46,6 +47,7 @@ from plap.llms.completions.providers import (
     build_crof_provider,
     build_fireworks_provider,
     build_gmicloud_provider,
+    build_groq_provider,
     build_lightning_provider,
     build_novita_provider,
     build_openrouter_provider,
@@ -720,6 +722,14 @@ def _gmicloud_provider(*, client: Any | None = None) -> OpenAIProvider:
     return provider
 
 
+def _groq_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_groq_provider(_settings(llm_groq_api_key="groq-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
 def _novita_provider(*, client: Any | None = None) -> OpenAIProvider:
     provider = build_novita_provider(_settings(llm_novita_api_key="novita-key"))
     assert isinstance(provider, OpenAIProvider)
@@ -807,6 +817,34 @@ def test_lightning_provider_accepts_nemotron_models() -> None:
 
     assert provider.lookup("lightning-ai/nvidia-nemotron-3-super-120b-a12b") == ()
     assert provider.lookup("lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b") == ()
+
+
+def test_groq_request_quirks_drop_unsupported_fields_and_enable_reasoning() -> None:
+    request = _request_for_model("openai/gpt-oss-20b")
+
+    body = _body_for(_groq_provider(), request, stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["messages"][1] == {"role": "user", "content": "hello"}
+    assert body["parallel_tool_calls"] is False
+    assert body["extra_body"] == {"include_reasoning": True}
+    assert "logprobs" not in body
+    assert "logit_bias" not in body
+    assert "top_logprobs" not in body
+    assert "prompt_cache_key" not in body
+    assert "metadata" not in body
+
+
+def test_groq_provider_accepts_supported_models() -> None:
+    provider = _groq_provider()
+
+    assert provider.lookup("openai/gpt-oss-20b")
+    assert provider.lookup("openai/gpt-oss-safeguard-20b")
+    assert provider.lookup("openai/gpt-oss-120b")
+    assert provider.lookup("meta-llama/llama-4-scout-17b-16e-instruct") == ()
+    assert provider.lookup("qwen/qwen3-32b")
+    assert provider.lookup("llama-3.3-70b-versatile")
+    assert provider.lookup("llama-3.1-8b-instant")
 
 
 def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
@@ -916,6 +954,29 @@ async def test_openrouter_client_aliases_reasoning_on_complete_and_stream() -> N
 
     result = await client.complete(_request_for_model("deepseek/deepseek-v4-flash"))
     deltas = [delta async for delta in client.stream(_request_for_model("deepseek/deepseek-v4-flash"))]
+
+    assert result.message.reasoning_content == "because"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[1].finish_reason == "stop"
+
+
+async def test_groq_client_aliases_reasoning_on_complete_and_stream() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(model="openai/gpt-oss-20b", content="ok", reasoning="because"),
+            _AsyncListStream(
+                [
+                    _chunk(model="openai/gpt-oss-20b", content="ok", reasoning="because"),
+                    _chunk(model="openai/gpt-oss-20b", finish_reason="stop"),
+                ]
+            ),
+        ],
+        base_url=GROQ_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_groq_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
 
     assert result.message.reasoning_content == "because"
     assert deltas[0].reasoning_delta == "because"
