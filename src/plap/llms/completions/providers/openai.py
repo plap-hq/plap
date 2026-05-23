@@ -3,8 +3,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
+import msgspec
+import structlog
 from openai import (
+    APIConnectionError,
     APIStatusError,
+    APITimeoutError,
     AsyncOpenAI,
     AuthenticationError,
     BadRequestError,
@@ -19,6 +24,7 @@ from plap.llms.completions.errors import (
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
     ChatCompletionRateLimitError,
+    ChatCompletionTimeoutError,
     is_context_length_exceeded_code,
     is_context_length_exceeded_error,
 )
@@ -35,6 +41,9 @@ from plap.llms.completions.quirks import (
     Set,
     SystemRole,
 )
+from plap.logging import log_debug
+
+logger = structlog.get_logger(__name__)
 
 
 def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletionContextLengthExceededError | None:
@@ -53,9 +62,122 @@ def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletio
     return None
 
 
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        cause = current.__cause__
+        if cause is not None:
+            current = cause
+            continue
+        context = current.__context__
+        if context is not None and not current.__suppress_context__:
+            current = context
+            continue
+        current = None
+    return tuple(chain)
+
+
+def _request_body_bytes(body: object) -> int | None:
+    try:
+        return len(msgspec.json.encode(body))
+    except Exception:
+        return None
+
+
+def _timeout_phase(exc: BaseException) -> str | None:
+    for current in _exception_chain(exc):
+        if isinstance(current, httpx.ConnectTimeout):
+            return "connect"
+        if isinstance(current, httpx.ReadTimeout):
+            return "read"
+        if isinstance(current, httpx.WriteTimeout):
+            return "write"
+        if isinstance(current, httpx.PoolTimeout):
+            return "pool"
+    return None
+
+
+def _timeout_value(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _timeout_config(timeout: object) -> dict[str, float | None] | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, (int, float)):
+        seconds = float(timeout)
+        return {
+            "connect": seconds,
+            "read": seconds,
+            "write": seconds,
+            "pool": seconds,
+        }
+    return {
+        "connect": _timeout_value(getattr(timeout, "connect", None)),
+        "read": _timeout_value(getattr(timeout, "read", None)),
+        "write": _timeout_value(getattr(timeout, "write", None)),
+        "pool": _timeout_value(getattr(timeout, "pool", None)),
+    }
+
+
+def _timeout_error_message(exc: BaseException) -> str:
+    phase = _timeout_phase(exc)
+    if phase is None:
+        return str(exc)
+    return f"{exc} (phase: {phase})"
+
+
+def _log_transport_error(*, provider: str, client: Any, call: Call, exc: Exception, streaming: bool) -> None:
+    if not isinstance(exc, (APITimeoutError, APIConnectionError, httpx.RequestError)):
+        return
+    request = getattr(exc, "request", None)
+    chain = _exception_chain(exc)
+    root_cause = chain[-1] if len(chain) > 1 else None
+    timeout = _timeout_config(getattr(client, "timeout", None))
+    messages = call.body.get("messages")
+    tools = call.body.get("tools")
+    base_url = getattr(client, "base_url", None)
+    log_debug(
+        logger,
+        "llm.provider.request_error",
+        provider=provider,
+        base_url=str(base_url) if base_url is not None else None,
+        stream=streaming,
+        request_model=call.request.model,
+        wire_model=call.body.get("model"),
+        sdk_error_type=type(exc).__name__,
+        sdk_error_message=str(exc),
+        timeout_phase=_timeout_phase(exc),
+        cause_chain_types=[type(current).__name__ for current in chain],
+        root_cause_type=type(root_cause).__name__ if root_cause is not None else None,
+        root_cause_message=str(root_cause) if root_cause is not None else None,
+        request_method=getattr(request, "method", None),
+        request_url=str(request.url) if request is not None else None,
+        client_max_retries=getattr(client, "max_retries", None),
+        timeout_connect_seconds=timeout.get("connect") if timeout is not None else None,
+        timeout_read_seconds=timeout.get("read") if timeout is not None else None,
+        timeout_write_seconds=timeout.get("write") if timeout is not None else None,
+        timeout_pool_seconds=timeout.get("pool") if timeout is not None else None,
+        message_count=len(messages) if isinstance(messages, list) else None,
+        tool_count=len(tools) if isinstance(tools, list) else None,
+        request_body_bytes=_request_body_bytes(call.body),
+    )
+
+
 def normalize_openai_error(exc: Exception) -> ChatCompletionProviderError:
     if isinstance(exc, ChatCompletionProviderError):
         return exc
+    if isinstance(exc, (APITimeoutError, httpx.TimeoutException)):
+        return ChatCompletionTimeoutError(_timeout_error_message(exc))
     if isinstance(exc, AuthenticationError):
         return ChatCompletionAuthenticationError(str(exc))
     if isinstance(exc, RateLimitError):
@@ -88,6 +210,7 @@ class OpenAIProvider(Provider):
         try:
             response = await self._client.chat.completions.create(**call.body)
         except Exception as exc:
+            _log_transport_error(provider=self.name, client=self._client, call=call, exc=exc, streaming=False)
             raise normalize_openai_error(exc) from exc
         return to_data(response)
 
@@ -99,6 +222,7 @@ class OpenAIProvider(Provider):
                 async for chunk in stream:
                     yield to_data(chunk)
             except Exception as exc:
+                _log_transport_error(provider=self.name, client=self._client, call=call, exc=exc, streaming=True)
                 raise normalize_openai_error(exc) from exc
             finally:
                 if stream is not None:

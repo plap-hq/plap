@@ -7,9 +7,10 @@ import anyio
 import httpx
 import pytest
 from fireworks.client.error import InvalidRequestError
-from openai import BadRequestError
+from openai import APITimeoutError, BadRequestError
 
 import plap.llms.completions.router as router_module
+import plap.llms.completions.providers.openai as openai_provider_module
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
@@ -66,6 +67,16 @@ def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, obje
         events.append({"event": event, **context})
 
     monkeypatch.setattr(router_module, "log_debug", record)
+    return events
+
+
+def _capture_openai_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+
+    def record(_logger: object, event: str, /, **context: object) -> None:
+        events.append({"event": event, **context})
+
+    monkeypatch.setattr(openai_provider_module, "log_debug", record)
     return events
 
 
@@ -1029,6 +1040,48 @@ async def test_openai_provider_normalizes_context_length_errors() -> None:
 
     with pytest.raises(ChatCompletionContextLengthExceededError, match="maximum context length"):
         await client.complete(_request_for_model("lightning-ai/gpt-oss-20b"))
+
+
+async def test_openai_provider_normalizes_timeout_errors_and_logs_timeout_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "https://lightning.ai/api/v1/chat/completions")
+    error = APITimeoutError(request=request)
+    error.__cause__ = httpx.ConnectTimeout("connect timed out", request=request)
+    events = _capture_openai_provider_logs(monkeypatch)
+    fake_client = _FakeOpenAIClient([error], base_url=LIGHTNING_OPENAI_BASE_URL)
+    fake_client.max_retries = 2
+    fake_client.timeout = httpx.Timeout(timeout=600, connect=5.0)
+    client = ChatCompletionClient(_lightning_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionTimeoutError, match=r"Request timed out\. \(phase: connect\)"):
+        await client.complete(_request_for_model("lightning-ai/gpt-oss-20b"))
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event"] == "llm.provider.request_error"
+    assert event["provider"] == "lightning"
+    assert event["base_url"] == LIGHTNING_OPENAI_BASE_URL
+    assert event["stream"] is False
+    assert event["request_model"] == "lightning-ai/gpt-oss-20b"
+    assert event["wire_model"] == "lightning-ai/gpt-oss-20b"
+    assert event["sdk_error_type"] == "APITimeoutError"
+    assert event["sdk_error_message"] == "Request timed out."
+    assert event["timeout_phase"] == "connect"
+    assert event["cause_chain_types"] == ["APITimeoutError", "ConnectTimeout"]
+    assert event["root_cause_type"] == "ConnectTimeout"
+    assert event["root_cause_message"] == "connect timed out"
+    assert event["request_method"] == "POST"
+    assert event["request_url"] == "https://lightning.ai/api/v1/chat/completions"
+    assert event["client_max_retries"] == 2
+    assert event["timeout_connect_seconds"] == 5.0
+    assert event["timeout_read_seconds"] == 600.0
+    assert event["timeout_write_seconds"] == 600.0
+    assert event["timeout_pool_seconds"] == 600.0
+    assert event["message_count"] == 2
+    assert event["tool_count"] == 1
+    assert isinstance(event["request_body_bytes"], int)
+    assert event["request_body_bytes"] > 0
 
 
 def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
