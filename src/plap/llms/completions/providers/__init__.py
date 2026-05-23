@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
 
 from plap.llms.completions.client import Provider
 from plap.llms.completions.providers.fireworks import build_fireworks_provider
@@ -25,41 +25,29 @@ from plap.llms.completions.providers.openrouter import (
 )
 
 
-def build_providers(settings: Any) -> dict[str, Provider]:
+type ProviderBuilder = Callable[..., Provider]
+
+
+PROVIDER_BUILDERS: dict[str, ProviderBuilder] = {
+    "lightning": build_lightning_provider,
+    "cerebras": build_cerebras_provider,
+    "groq": build_groq_provider,
+    "gmicloud": build_gmicloud_provider,
+    "novita": build_novita_provider,
+    "fireworks": build_fireworks_provider,
+    "crof": build_crof_provider,
+    "openrouter": build_openrouter_provider,
+}
+
+
+def build_providers(settings) -> dict[str, Provider]:
     providers: dict[str, Provider] = {}
 
-    lightning = build_lightning_provider(settings)
-    if lightning is not None:
-        providers["lightning/"] = lightning
-
-    cerebras = build_cerebras_provider(settings)
-    if cerebras is not None:
-        providers["cerebras/"] = cerebras
-
-    groq = build_groq_provider(settings)
-    if groq is not None:
-        providers["groq/"] = groq
-
-    gmicloud = build_gmicloud_provider(settings)
-    if gmicloud is not None:
-        providers["gmicloud/"] = gmicloud
-
-    novita = build_novita_provider(settings)
-    if novita is not None:
-        providers["novita/"] = novita
-
-    fireworks = build_fireworks_provider(settings)
-    if fireworks is not None:
-        providers["fireworks/"] = fireworks
-
-    crof = build_crof_provider(settings)
-    if crof is not None:
-        providers["crof/"] = crof
-
-    openrouter = build_openrouter_provider(settings)
-    if openrouter is not None:
-        providers["openrouter/"] = openrouter
-
+    for slug, build in PROVIDER_BUILDERS.items():
+        api_key = settings.llm_api_keys.get(slug)
+        if not api_key:
+            continue
+        providers[f"{slug}/"] = build(api_key=api_key)
     return providers
 
 
@@ -72,6 +60,7 @@ __all__ = [
     "NOVITA_OPENAI_BASE_URL",
     "OPENROUTER_OPENAI_BASE_URL",
     "OpenRouterProvider",
+    "PROVIDER_BUILDERS",
     "build_cerebras_provider",
     "build_crof_provider",
     "build_fireworks_provider",

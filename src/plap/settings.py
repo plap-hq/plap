@@ -997,6 +997,18 @@ def _default_mcp_servers() -> list[MCPServerConfig]:
     return [jina_server]
 
 
+def _default_llm_api_keys() -> dict[str, str]:
+    keys: dict[str, str] = {}
+    prefix = "PLAP_LLM_"
+    suffix = "_API_KEY"
+    for name, value in os.environ.items():
+        if not name.startswith(prefix) or not name.endswith(suffix) or not value:
+            continue
+        slug = name.removeprefix(prefix).removesuffix(suffix).lower().replace("_", "-")
+        keys[slug] = value
+    return keys
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PLAP_", extra="ignore")
 
@@ -1008,14 +1020,7 @@ class Settings(BaseSettings):
     debug_debate_summaries: bool = False
     log_json: bool = False
     log_file: str | None = None
-    llm_lightning_api_key: str | None = None
-    llm_cerebras_api_key: str | None = None
-    llm_groq_api_key: str | None = None
-    llm_gmicloud_api_key: str | None = None
-    llm_novita_api_key: str | None = None
-    llm_fireworks_api_key: str | None = None
-    llm_crof_api_key: str | None = None
-    llm_openrouter_api_key: str | None = None
+    llm_api_keys: dict[str, str] = Field(default_factory=_default_llm_api_keys)
     tool_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
     tool_call_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
     tool_effect_classifier_cache_model: str = "gpt-oss-120b"

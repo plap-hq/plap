@@ -424,24 +424,20 @@ CROF_MODELS: dict[str, tuple[Quirk, ...]] = {
 }
 
 
-def build_lightning_provider(settings: Any) -> Provider | None:
-    if not settings.llm_lightning_api_key:
-        return None
+def build_lightning_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="lightning",
-        api_key=settings.llm_lightning_api_key,
+        api_key=api_key,
         base_url=LIGHTNING_OPENAI_BASE_URL,
         quirks=(SystemRole(), Only(*LIGHTNING_FIELDS)),
         models=LIGHTNING_MODELS,
     )
 
 
-def build_gmicloud_provider(settings: Any) -> Provider | None:
-    if not settings.llm_gmicloud_api_key:
-        return None
+def build_gmicloud_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="gmicloud",
-        api_key=settings.llm_gmicloud_api_key,
+        api_key=api_key,
         base_url=GMICLOUD_OPENAI_BASE_URL,
         quirks=(
             SystemRole(),
@@ -455,12 +451,10 @@ def build_gmicloud_provider(settings: Any) -> Provider | None:
     )
 
 
-def build_groq_provider(settings: Any) -> Provider | None:
-    if not settings.llm_groq_api_key:
-        return None
+def build_groq_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="groq",
-        api_key=settings.llm_groq_api_key,
+        api_key=api_key,
         base_url=GROQ_OPENAI_BASE_URL,
         quirks=(
             SystemRole(),
@@ -473,12 +467,10 @@ def build_groq_provider(settings: Any) -> Provider | None:
     )
 
 
-def build_cerebras_provider(settings: Any) -> Provider | None:
-    if not settings.llm_cerebras_api_key:
-        return None
+def build_cerebras_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="cerebras",
-        api_key=settings.llm_cerebras_api_key,
+        api_key=api_key,
         base_url=CEREBRAS_OPENAI_BASE_URL,
         quirks=(
             SystemRole(),
@@ -489,24 +481,20 @@ def build_cerebras_provider(settings: Any) -> Provider | None:
     )
 
 
-def build_novita_provider(settings: Any) -> Provider | None:
-    if not settings.llm_novita_api_key:
-        return None
+def build_novita_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="novita",
-        api_key=settings.llm_novita_api_key,
+        api_key=api_key,
         base_url=NOVITA_OPENAI_BASE_URL,
         quirks=(SystemRole(), Only(*NOVITA_FIELDS), Rename("max_completion_tokens", "max_tokens")),
         models=NOVITA_MODELS,
     )
 
 
-def build_crof_provider(settings: Any) -> Provider | None:
-    if not settings.llm_crof_api_key:
-        return None
+def build_crof_provider(*, api_key: str) -> Provider:
     return OpenAIProvider(
         name="crof",
-        api_key=settings.llm_crof_api_key,
+        api_key=api_key,
         base_url=CROF_OPENAI_BASE_URL,
         quirks=(SystemRole(), Only(*CROF_FIELDS), Rename("max_completion_tokens", "max_tokens")),
         models=CROF_MODELS,

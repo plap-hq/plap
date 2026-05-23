@@ -86,9 +86,11 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
     return Settings(
         api_key_pepper="test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
-        llm_crof_api_key="test-crof-key",
-        llm_lightning_api_key="test-lightning-key",
-        llm_openrouter_api_key="test-openrouter-key",
+        llm_api_keys={
+            "crof": "test-crof-key",
+            "lightning": "test-lightning-key",
+            "openrouter": "test-openrouter-key",
+        },
         mcp_servers=[],
         runtime_model_profiles={
             "plap/test": RuntimeModelProfileConfig(

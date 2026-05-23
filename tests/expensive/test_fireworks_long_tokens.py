@@ -9,7 +9,6 @@ from plap.llms.completions.client import ChatCompletionClient
 from plap.llms.completions.chat import ChatCompletionRequest, ChatMessage
 from plap.llms.completions.errors import ChatCompletionProviderError
 from plap.llms.completions.providers import build_fireworks_provider
-from plap.settings import Settings
 
 pytestmark = pytest.mark.expensive
 
@@ -72,15 +71,7 @@ def _fireworks_client() -> ChatCompletionClient:
     api_key = os.getenv("FIREWORKS_API_KEY")
     if not api_key:
         pytest.skip("FIREWORKS_API_KEY is not set")
-    provider = build_fireworks_provider(
-        Settings(
-            api_key_pepper="pepper",
-            database_url="postgresql+asyncpg://example/test",
-            sealing_keys=["a" * 43],
-            llm_fireworks_api_key=api_key,
-        )
-    )
-    assert provider is not None
+    provider = build_fireworks_provider(api_key=api_key)
     return ChatCompletionClient(provider)
 
 

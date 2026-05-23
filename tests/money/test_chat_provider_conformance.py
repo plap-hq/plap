@@ -48,7 +48,7 @@ def _settings(**overrides: object) -> Settings:
 
 
 def _lightning_client(api_key: str) -> IChatCompletionClient:
-    provider = build_lightning_provider(_settings(llm_lightning_api_key=api_key))
+    provider = build_lightning_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -61,7 +61,7 @@ def _lightning_client(api_key: str) -> IChatCompletionClient:
 
 
 def _cerebras_client(api_key: str) -> IChatCompletionClient:
-    provider = build_cerebras_provider(_settings(llm_cerebras_api_key=api_key))
+    provider = build_cerebras_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -74,7 +74,7 @@ def _cerebras_client(api_key: str) -> IChatCompletionClient:
 
 
 def _novita_client(api_key: str) -> IChatCompletionClient:
-    provider = build_novita_provider(_settings(llm_novita_api_key=api_key))
+    provider = build_novita_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -87,7 +87,7 @@ def _novita_client(api_key: str) -> IChatCompletionClient:
 
 
 def _gmicloud_client(api_key: str) -> IChatCompletionClient:
-    provider = build_gmicloud_provider(_settings(llm_gmicloud_api_key=api_key))
+    provider = build_gmicloud_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -100,7 +100,7 @@ def _gmicloud_client(api_key: str) -> IChatCompletionClient:
 
 
 def _groq_client(api_key: str) -> IChatCompletionClient:
-    provider = build_groq_provider(_settings(llm_groq_api_key=api_key))
+    provider = build_groq_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -113,7 +113,7 @@ def _groq_client(api_key: str) -> IChatCompletionClient:
 
 
 def _fireworks_client(api_key: str) -> IChatCompletionClient:
-    provider = build_fireworks_provider(_settings(llm_fireworks_api_key=api_key))
+    provider = build_fireworks_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient(
         [
@@ -126,7 +126,7 @@ def _fireworks_client(api_key: str) -> IChatCompletionClient:
 
 
 def _crof_client(api_key: str) -> IChatCompletionClient:
-    provider = build_crof_provider(_settings(llm_crof_api_key=api_key))
+    provider = build_crof_provider(api_key=api_key)
     assert provider is not None
     return RoutingChatCompletionClient([ModelRoute(prefix="crof/", client=ChatCompletionClient(provider))])
 

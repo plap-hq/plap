@@ -48,13 +48,15 @@ def test_app_runtime_uses_unavailable_chat_client_without_provider_keys() -> Non
 def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
     client = _create_chat_completion_client(
         _settings(
-            llm_lightning_api_key="lightning-key",
-            llm_cerebras_api_key="cerebras-key",
-            llm_groq_api_key="groq-key",
-            llm_gmicloud_api_key="gmicloud-key",
-            llm_novita_api_key="novita-key",
-            llm_crof_api_key="crof-key",
-            llm_openrouter_api_key="openrouter-key",
+            llm_api_keys=_provider_keys(
+                "lightning",
+                "cerebras",
+                "groq",
+                "gmicloud",
+                "novita",
+                "crof",
+                "openrouter",
+            ),
         )
     )
 
@@ -62,21 +64,21 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
 
 
 def test_app_runtime_builds_gmicloud_route_from_provider_prefix_setting() -> None:
-    client = _create_chat_completion_client(_settings(llm_gmicloud_api_key="gmicloud-key"))
+    client = _create_chat_completion_client(_settings(llm_api_keys=_provider_keys("gmicloud")))
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["gmicloud/"]
 
 
 def test_app_runtime_builds_cerebras_route_from_provider_prefix_setting() -> None:
-    client = _create_chat_completion_client(_settings(llm_cerebras_api_key="cerebras-key"))
+    client = _create_chat_completion_client(_settings(llm_api_keys=_provider_keys("cerebras")))
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["cerebras/"]
 
 
 def test_app_runtime_builds_groq_route_from_provider_prefix_setting() -> None:
-    client = _create_chat_completion_client(_settings(llm_groq_api_key="groq-key"))
+    client = _create_chat_completion_client(_settings(llm_api_keys=_provider_keys("groq")))
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["groq/"]
@@ -94,13 +96,15 @@ def test_runtime_actor_config_rejects_trust_remote_code_without_repo() -> None:
 
 def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
-        llm_cerebras_api_key="cerebras-key",
-        llm_groq_api_key="groq-key",
-        llm_gmicloud_api_key="gmicloud-key",
-        llm_lightning_api_key="lightning-key",
-        llm_novita_api_key="novita-key",
-        llm_openrouter_api_key="openrouter-key",
+        llm_api_keys=_provider_keys(
+            "crof",
+            "cerebras",
+            "groq",
+            "gmicloud",
+            "lightning",
+            "novita",
+            "openrouter",
+        ),
     )
 
     _validate_runtime_model_profiles(settings)
@@ -116,13 +120,15 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
-        llm_cerebras_api_key="cerebras-key",
-        llm_groq_api_key="groq-key",
-        llm_gmicloud_api_key="gmicloud-key",
-        llm_lightning_api_key="lightning-key",
-        llm_novita_api_key="novita-key",
-        llm_openrouter_api_key="openrouter-key",
+        llm_api_keys=_provider_keys(
+            "crof",
+            "cerebras",
+            "groq",
+            "gmicloud",
+            "lightning",
+            "novita",
+            "openrouter",
+        ),
     )
 
     _validate_runtime_model_profiles(settings)
@@ -180,7 +186,7 @@ def test_app_runtime_rejects_invalid_runtime_profile_tokenizer(monkeypatch: pyte
 
 def test_app_runtime_validates_crof_provider_prefix() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
+        llm_api_keys=_provider_keys("crof"),
         runtime_model_profiles={
             "plap/glm": _profile_config(
                 main_model="crof/qwen3.5-9b",
@@ -197,7 +203,7 @@ def test_app_runtime_validates_crof_provider_prefix() -> None:
 
 def test_app_runtime_validates_gmicloud_provider_prefix() -> None:
     settings = _settings(
-        llm_gmicloud_api_key="gmicloud-key",
+        llm_api_keys=_provider_keys("gmicloud"),
         runtime_model_profiles={
             "plap/gmi": _profile_config(
                 main_model="gmicloud/openai/gpt-oss-120b",
@@ -224,8 +230,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
 
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_lightning_api_key="lightning-key",
-        llm_openrouter_api_key="openrouter-key",
+        llm_api_keys=_provider_keys("lightning", "openrouter"),
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -240,7 +245,7 @@ def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
 
 def test_app_runtime_builds_tool_classifier_for_configured_model() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
+        llm_api_keys=_provider_keys("crof"),
         tool_effect_classifier_model="crof/qwen3.5-9b",
         tool_effect_classifier_cache_model="qwen3.5-9b",
     )
@@ -256,8 +261,7 @@ def test_app_runtime_builds_tool_classifier_for_configured_model() -> None:
 
 def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_lightning_api_key="lightning-key",
-        llm_openrouter_api_key="openrouter-key",
+        llm_api_keys=_provider_keys("lightning", "openrouter"),
     )
     client = _create_chat_completion_client(settings)
 
@@ -271,7 +275,7 @@ def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
 
 def test_app_runtime_builds_tool_call_classifier_for_configured_model() -> None:
     settings = _settings(
-        llm_gmicloud_api_key="gmicloud-key",
+        llm_api_keys=_provider_keys("gmicloud"),
         tool_call_effect_classifier_model="gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
         tool_call_effect_classifier_cache_model="mimo-v2.5-pro",
     )
@@ -470,7 +474,7 @@ def test_app_runtime_includes_builtin_jina_provider_when_api_key_present(monkeyp
 
 def test_app_runtime_validates_synthetic_model_profiles() -> None:
     settings = _settings(
-        llm_lightning_api_key="lightning-key",
+        llm_api_keys=_provider_keys("lightning"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="lightning/lightning-ai/gpt-oss-20b",
@@ -489,8 +493,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
 
 def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
-        llm_gmicloud_api_key="gmicloud-key",
+        llm_api_keys=_provider_keys("crof", "gmicloud"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
@@ -507,7 +510,7 @@ def test_app_runtime_validates_runtime_profile_fallback_chain() -> None:
 
 def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
     settings = _settings(
-        llm_lightning_api_key="lightning-key",
+        llm_api_keys=_provider_keys("lightning"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="lightning/lightning-ai/gpt-oss-20b",
@@ -528,7 +531,7 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
 
 def test_app_runtime_rejects_unrouted_runtime_profile_fallback_entry() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
+        llm_api_keys=_provider_keys("crof"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b,lightning/lightning-ai/gpt-oss-20b",
@@ -549,8 +552,7 @@ def test_app_runtime_rejects_unrouted_runtime_profile_fallback_entry() -> None:
 
 def test_app_runtime_validates_runtime_profile_variants() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
-        llm_lightning_api_key="lightning-key",
+        llm_api_keys=_provider_keys("crof", "lightning"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
@@ -578,7 +580,7 @@ def test_app_runtime_validates_runtime_profile_variants() -> None:
 
 def test_app_runtime_rejects_unrouted_runtime_profile_variant() -> None:
     settings = _settings(
-        llm_crof_api_key="crof-key",
+        llm_api_keys=_provider_keys("crof"),
         runtime_model_profiles={
             "plap/standard": _profile_config(
                 main_model="crof/qwen3.5-9b",
@@ -931,6 +933,10 @@ def test_runtime_profile_rejects_conflicting_reasoning_to_output_overrides() -> 
             by_service_tier={"priority": RuntimeProfileOverride(reasoning_to_output=1.2)},
             by_reasoning_effort={"high": RuntimeProfileOverride(reasoning_to_output=1.4)},
         )
+
+
+def _provider_keys(*slugs: str) -> dict[str, str]:
+    return {slug: f"{slug}-key" for slug in slugs}
 
 
 def _settings(**overrides: object) -> Settings:

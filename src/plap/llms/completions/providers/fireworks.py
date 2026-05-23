@@ -111,12 +111,10 @@ FIREWORKS_MODELS: dict[str, tuple[Quirk, ...]] = {
 }
 
 
-def build_fireworks_provider(settings: Any) -> Provider | None:
-    if not settings.llm_fireworks_api_key:
-        return None
+def build_fireworks_provider(*, api_key: str) -> Provider:
     return FireworksProvider(
         name="fireworks",
-        api_key=settings.llm_fireworks_api_key,
+        api_key=api_key,
         quirks=(SystemRole(), Only(*FIREWORKS_FIELDS)),
         models=FIREWORKS_MODELS,
     )

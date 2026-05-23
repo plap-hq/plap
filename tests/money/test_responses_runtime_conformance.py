@@ -58,6 +58,7 @@ class _MoneyProviderKeys:
     gmicloud_api_key: str
     openrouter_api_key: str
     lightning_api_key: str
+    cerebras_api_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,7 @@ def money_provider_keys() -> _MoneyProviderKeys:
     if missing:
         pytest.skip(f"missing money provider env keys: {', '.join(missing)}")
     return _MoneyProviderKeys(
+        cerebras_api_key=os.environ.get("CEREBRAS_API_KEY"),
         gmicloud_api_key=os.environ["GMICLOUD_API_KEY"],
         openrouter_api_key=os.environ["OPENROUTER_API_KEY"],
         lightning_api_key=os.environ["LIGHTNING_API_KEY"],
@@ -92,9 +94,16 @@ def money_settings(
     return Settings(
         api_key_pepper="money-test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
-        llm_lightning_api_key=money_provider_keys.lightning_api_key,
-        llm_gmicloud_api_key=money_provider_keys.gmicloud_api_key,
-        llm_openrouter_api_key=money_provider_keys.openrouter_api_key,
+        llm_api_keys={
+            key: value
+            for key, value in {
+                "cerebras": money_provider_keys.cerebras_api_key,
+                "gmicloud": money_provider_keys.gmicloud_api_key,
+                "lightning": money_provider_keys.lightning_api_key,
+                "openrouter": money_provider_keys.openrouter_api_key,
+            }.items()
+            if value is not None
+        },
         runtime_model_profiles={
             RUNTIME_PROFILE: _runtime_profile(),
             COMPACTION_PROFILE: _runtime_profile(

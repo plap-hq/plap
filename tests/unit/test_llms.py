@@ -720,64 +720,56 @@ async def test_completions_client_fills_missing_result_and_delta_models() -> Non
 
 
 def _lightning_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_lightning_provider(_settings(llm_lightning_api_key="lightning-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_lightning_provider(api_key="lightning-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _cerebras_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_cerebras_provider(_settings(llm_cerebras_api_key="cerebras-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_cerebras_provider(api_key="cerebras-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _gmicloud_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_gmicloud_provider(_settings(llm_gmicloud_api_key="gmicloud-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_gmicloud_provider(api_key="gmicloud-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _groq_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_groq_provider(_settings(llm_groq_api_key="groq-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_groq_provider(api_key="groq-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _novita_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_novita_provider(_settings(llm_novita_api_key="novita-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_novita_provider(api_key="novita-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _crof_provider(*, client: Any | None = None) -> OpenAIProvider:
-    provider = build_crof_provider(_settings(llm_crof_api_key="crof-key"))
-    assert isinstance(provider, OpenAIProvider)
+    provider = build_crof_provider(api_key="crof-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _openrouter_provider(*, client: Any | None = None) -> OpenRouterProvider:
-    provider = build_openrouter_provider(_settings(llm_openrouter_api_key="openrouter-key"))
-    assert isinstance(provider, OpenRouterProvider)
+    provider = build_openrouter_provider(api_key="openrouter-key")
     if client is not None:
         provider._client = client
     return provider
 
 
 def _fireworks_provider(*, client: Any | None = None) -> FireworksProvider:
-    provider = build_fireworks_provider(_settings(llm_fireworks_api_key="fireworks-key"))
-    assert isinstance(provider, FireworksProvider)
+    provider = build_fireworks_provider(api_key="fireworks-key")
     if client is not None:
         provider._client = client
     return provider

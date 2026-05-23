@@ -25,6 +25,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from plap.auth import APIKeyManager, normalize_email  # noqa: E402
+from plap.llms.completions.providers import PROVIDER_BUILDERS  # noqa: E402
 from plap.persistence.db import create_database_engine, create_session_maker  # noqa: E402
 from plap.persistence.models import Organization, OrganizationMembership, User, UserEmail  # noqa: E402
 from plap.settings import Settings, _default_runtime_model_profiles  # noqa: E402
@@ -61,25 +62,27 @@ DEFAULT_POSTGRES_PORT = 55432
 DEFAULT_MODEL = "plap-ai/wisp-mini"
 DEFAULT_LOG_FILE = (REPO_ROOT / ".dev" / "plap.log.jsonl").resolve()
 SERVER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
+
+def _provider_env_suffix(slug: str) -> str:
+    return slug.upper().replace("-", "_")
+
+
+def _provider_env_var(slug: str) -> str:
+    return f"PLAP_LLM_{_provider_env_suffix(slug)}_API_KEY"
+
+
+def _provider_env_alias(slug: str) -> str:
+    return f"{_provider_env_suffix(slug)}_API_KEY"
+
+
 ROUTE_ENV_VARS = {
-    "lightning/": "PLAP_LLM_LIGHTNING_API_KEY",
-    "cerebras/": "PLAP_LLM_CEREBRAS_API_KEY",
-    "groq/": "PLAP_LLM_GROQ_API_KEY",
-    "gmicloud/": "PLAP_LLM_GMICLOUD_API_KEY",
-    "novita/": "PLAP_LLM_NOVITA_API_KEY",
-    "fireworks/": "PLAP_LLM_FIREWORKS_API_KEY",
-    "crof/": "PLAP_LLM_CROF_API_KEY",
-    "openrouter/": "PLAP_LLM_OPENROUTER_API_KEY",
+    f"{slug}/": _provider_env_var(slug)
+    for slug in PROVIDER_BUILDERS
 }
 PROVIDER_ENV_ALIASES = {
-    "PLAP_LLM_OPENROUTER_API_KEY": "OPENROUTER_API_KEY",
-    "PLAP_LLM_LIGHTNING_API_KEY": "LIGHTNING_API_KEY",
-    "PLAP_LLM_CEREBRAS_API_KEY": "CEREBRAS_API_KEY",
-    "PLAP_LLM_GROQ_API_KEY": "GROQ_API_KEY",
-    "PLAP_LLM_GMICLOUD_API_KEY": "GMICLOUD_API_KEY",
-    "PLAP_LLM_CROF_API_KEY": "CROF_API_KEY",
-    "PLAP_LLM_NOVITA_API_KEY": "NOVITA_API_KEY",
-    "PLAP_LLM_FIREWORKS_API_KEY": "FIREWORKS_API_KEY",
+    _provider_env_var(slug): _provider_env_alias(slug)
+    for slug in PROVIDER_BUILDERS
 }
 
 

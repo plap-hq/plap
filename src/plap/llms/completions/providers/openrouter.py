@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from plap.llms.completions.client import Provider, Quirk
 from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.completions.providers.openai import OpenAIProvider
@@ -49,6 +47,7 @@ OPENROUTER_FIELDS = (
 )
 OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (),
+    "meta-llama/llama-3.1-8b-instruct": (),
     "meta-llama/llama-3.3-70b-instruct": (),
     "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
@@ -99,12 +98,10 @@ class OpenRouterProvider(OpenAIProvider):
         return (*quirks, *model_quirks)
 
 
-def build_openrouter_provider(settings: Any) -> Provider | None:
-    if not settings.llm_openrouter_api_key:
-        return None
+def build_openrouter_provider(*, api_key: str) -> Provider:
     return OpenRouterProvider(
         name="openrouter",
-        api_key=settings.llm_openrouter_api_key,
+        api_key=api_key,
         base_url=OPENROUTER_OPENAI_BASE_URL,
         quirks=(SystemRole(), Only(*OPENROUTER_FIELDS), RenameOutput("reasoning", "reasoning_content")),
         models=OPENROUTER_MODELS,
