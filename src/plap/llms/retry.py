@@ -5,6 +5,7 @@ from typing import TypeAlias
 
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatMessage, IChatCompletionClient
+from plap.llms.completions.errors import ChatCompletionProviderError
 
 RETRY_TOOL_PLACEHOLDER = (
     "This tool call was not executed because the assistant attempt was rejected "
@@ -42,15 +43,26 @@ async def stream(
 
         accumulator = Accumulator(tools=tuple(request.tools))
         last: Snapshot | None = None
+        stream_error: ChatCompletionProviderError | None = None
 
-        async for delta in client.stream(request):
-            current = accumulator.apply(delta)
-            last = Snapshot(
-                messages=(*history.messages, *current.messages),
-                results=(*history.results, *current.results),
-                delta=current.delta,
-            )
-            yield last
+        try:
+            async for delta in client.stream(request):
+                current = accumulator.apply(delta)
+                last = Snapshot(
+                    messages=(*history.messages, *current.messages),
+                    results=(*history.results, *current.results),
+                    delta=current.delta,
+                )
+                yield last
+        except ChatCompletionProviderError as exc:
+            stream_error = exc
+
+        if stream_error is not None:
+            if last is None:
+                raise stream_error
+            if not last.results:
+                yield history
+                continue
 
         if last is None or not last.results:
             raise RuntimeError("stream ended without final result")

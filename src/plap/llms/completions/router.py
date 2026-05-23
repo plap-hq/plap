@@ -22,6 +22,7 @@ from plap.logging import log_debug
 
 logger = structlog.get_logger(__name__)
 DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS = 60.0
+DEFAULT_STREAM_IDLE_DELTA_TIMEOUT_SECONDS = 60.0
 SAME_MODEL_RETRIES_BEFORE_FALLBACK = 1
 
 
@@ -250,7 +251,15 @@ class RoutingChatCompletionClient(IChatCompletionClient):
                     )
                     yielded = True
                     yield replace(first_delta, model=attempt_model)
-                    async for delta in iterator:
+                    while True:
+                        delta = await _next_stream_delta(
+                            iterator,
+                            timeout_seconds=DEFAULT_STREAM_IDLE_DELTA_TIMEOUT_SECONDS,
+                            attempt_model=attempt_model,
+                            timeout_label="delta",
+                        )
+                        if delta is None:
+                            break
                         yielded = True
                         yield replace(delta, model=attempt_model)
                 except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
@@ -324,18 +333,36 @@ async def _first_stream_delta(
     timeout_seconds: float | None,
     attempt_model: str,
 ) -> ChatCompletionDelta:
+    delta = await _next_stream_delta(
+        iterator,
+        timeout_seconds=timeout_seconds,
+        attempt_model=attempt_model,
+        timeout_label="first delta",
+    )
+    if delta is not None:
+        return delta
+    await _close_async_iterator(iterator)
+    raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta")
+
+
+async def _next_stream_delta(
+    iterator: AsyncIterator[ChatCompletionDelta],
+    *,
+    timeout_seconds: float | None,
+    attempt_model: str,
+    timeout_label: str,
+) -> ChatCompletionDelta | None:
     try:
         if timeout_seconds is None:
             return await anext(iterator)
         with anyio.fail_after(timeout_seconds):
             return await anext(iterator)
-    except StopAsyncIteration as exc:
-        await _close_async_iterator(iterator)
-        raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta") from exc
+    except StopAsyncIteration:
+        return None
     except TimeoutError as exc:
         await _close_async_iterator(iterator)
         raise ChatCompletionTimeoutError(
-            f"stream for model {attempt_model!r} produced no first delta within {timeout_seconds} seconds"
+            f"stream for model {attempt_model!r} produced no {timeout_label} within {timeout_seconds} seconds"
         ) from exc
 
 

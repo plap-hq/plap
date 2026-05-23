@@ -32,6 +32,7 @@ from plap.llms.completions.errors import (
     ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
+    ChatCompletionTimeoutError,
     ChatCompletionUnsupportedRequestError,
     is_context_length_exceeded_error,
 )
@@ -451,7 +452,7 @@ def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
 
 
 class _RetryStreamClient(IChatCompletionClient):
-    def __init__(self, attempts: list[list[ChatCompletionDelta]]) -> None:
+    def __init__(self, attempts: list[list[object]]) -> None:
         self._attempts = [list(attempt) for attempt in attempts]
         self.requests: list[ChatCompletionRequest] = []
 
@@ -466,6 +467,8 @@ class _RetryStreamClient(IChatCompletionClient):
 
         async def run():
             for item in items:
+                if isinstance(item, Exception):
+                    raise item
                 yield item
 
         return run()
@@ -564,6 +567,109 @@ async def test_retry_complete_returns_final_snapshot() -> None:
     )
 
     assert final.results and final.results[0].finish_reason == "stop"
+
+
+async def test_retry_stream_retries_after_partial_stream_timeout_without_persisting_partial_message() -> None:
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    content_delta="partial",
+                ),
+                ChatCompletionTimeoutError("idle timeout"),
+            ],
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    content_delta="fixed",
+                ),
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    finish_reason="stop",
+                ),
+            ],
+        ]
+    )
+
+    def validate(result: ChatCompletionResult) -> str | None:
+        _ = result
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+        )
+
+    items = [
+        item
+        async for item in retry_stream(
+            client,
+            next_request=next_request,
+            validate=validate,
+            max_attempts=2,
+        )
+    ]
+
+    assert items[0].messages[-1].content == "partial"
+    assert items[1] == Snapshot(messages=(), results=(), delta=None)
+    assert items[-1].results and items[-1].results[-1].finish_reason == "stop"
+    assert items[-1].messages[-1].content == "fixed"
+    assert client.requests[1].messages == [ChatMessage(role="developer", content="be precise")]
+
+
+async def test_retry_complete_accepts_final_result_when_stream_times_out_after_finish_reason() -> None:
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    content_delta="done",
+                ),
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    finish_reason="stop",
+                ),
+                ChatCompletionTimeoutError("idle timeout"),
+            ]
+        ]
+    )
+
+    def validate(result: ChatCompletionResult) -> str | None:
+        _ = result
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+        )
+
+    final = await retry_complete(
+        client,
+        next_request=next_request,
+        validate=validate,
+    )
+
+    assert final.results and final.results[-1].finish_reason == "stop"
+    assert final.messages[-1].content == "done"
+    assert len(client.requests) == 1
 
 
 async def test_completions_client_fills_missing_result_and_delta_models() -> None:
@@ -1053,6 +1159,57 @@ async def test_router_stream_does_not_fallback_after_first_delta(monkeypatch: py
             )
         ]
 
+    assert fallback.stream_requests == []
+    assert events == []
+
+
+async def test_router_stream_times_out_between_deltas_without_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    monkeypatch.setattr(router_module, "DEFAULT_STREAM_IDLE_DELTA_TIMEOUT_SECONDS", 0.01)
+
+    class SlowSecondDeltaClient(IChatCompletionClient):
+        def __init__(self) -> None:
+            self.requests: list[ChatCompletionRequest] = []
+
+        async def complete(self, request: ChatCompletionRequest):
+            raise AssertionError(f"unexpected complete for {request.model}")
+
+        def stream(self, request: ChatCompletionRequest):
+            self.requests.append(request)
+
+            async def run():
+                yield _delta(request.model, content_delta="first")
+                await anyio.sleep(0.05)
+                yield _delta(request.model, finish_reason="stop")
+
+            return run()
+
+    primary = SlowSecondDeltaClient()
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="fallback"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    with pytest.raises(ChatCompletionTimeoutError, match="produced no delta within"):
+        [
+            delta
+            async for delta in router.stream(
+                ChatCompletionRequest(
+                    model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                    messages=[ChatMessage(role="user", content="hello")],
+                )
+            )
+        ]
+
+    assert [request.model for request in primary.requests] == ["qwen3.5-9b"]
     assert fallback.stream_requests == []
     assert events == []
 
