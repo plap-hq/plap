@@ -105,7 +105,6 @@ def _crof_client(api_key: str) -> IChatCompletionClient:
 
 LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
-LIGHTNING_LLAMA_3_3_70B_MODEL = "lightning/lightning-ai/llama-3.3-70b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
 GMICLOUD_MIMO_V25_PRO_MODEL = "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
 FIREWORKS_GPT_OSS_20B_MODEL = "fireworks/accounts/fireworks/models/gpt-oss-20b"
@@ -285,57 +284,6 @@ async def test_live_json_object_response_format(provider: ProviderCase) -> None:
     content = result.message.content or ""
     parsed = json.loads(content)
     assert isinstance(parsed, dict)
-
-
-@pytest.mark.parametrize(
-    "response_format",
-    [
-        pytest.param(ChatResponseFormat(type="json_object"), id="json-object"),
-        pytest.param(
-            ChatResponseFormat(
-                type="json_schema",
-                name="ok_response",
-                schema={
-                    "type": "object",
-                    "properties": {"ok": {"type": "boolean"}},
-                    "required": ["ok"],
-                    "additionalProperties": False,
-                },
-                strict=True,
-            ),
-            id="json-schema",
-        ),
-    ],
-)
-async def test_live_lightning_llama_3_3_70b_response_format(
-    response_format: ChatResponseFormat,
-) -> None:
-    provider = ProviderCase(
-        name="lightning",
-        api_key_env="LIGHTNING_API_KEY",
-        model=LIGHTNING_LLAMA_3_3_70B_MODEL,
-        client_factory=_lightning_client,
-    )
-
-    result = await _complete(
-        provider,
-        ChatCompletionRequest(
-            model=provider.model,
-            messages=[
-                ChatMessage(
-                    role="system",
-                    content="You are a strict JSON API. Output valid JSON only.",
-                ),
-                ChatMessage(role="user", content='Return exactly {"ok": true}.'),
-            ],
-            response_format=response_format,
-            max_completion_tokens=128,
-            temperature=0,
-        ),
-    )
-
-    parsed = json.loads(result.message.content or "")
-    assert parsed == {"ok": True}
 
 
 @pytest.mark.parametrize("provider", GPT_OSS_PROVIDERS)

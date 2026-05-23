@@ -197,9 +197,10 @@ CROF_FIELDS = (
 )
 
 LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "lightning-ai/llama-3.3-70b": (),
     "lightning-ai/gpt-oss-20b": (),
     "lightning-ai/gpt-oss-120b": (RejectResponseFormat(),),
+    "lightning-ai/nvidia-nemotron-3-super-120b-a12b": (),
+    "lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b": (),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),

@@ -457,7 +457,7 @@ def test_app_runtime_validates_synthetic_model_profiles() -> None:
                 defender_model="lightning/lightning-ai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
+                reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-20b",
             )
         },
     )
@@ -494,7 +494,7 @@ def test_app_runtime_rejects_runtime_profile_with_unrouted_model() -> None:
                 defender_model="openai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
+                reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-20b",
             )
         },
     )
@@ -588,7 +588,7 @@ def test_app_runtime_resolves_only_explicit_synthetic_models() -> None:
                 defender_model="lightning/lightning-ai/gpt-oss-120b",
                 reviewer_model="lightning/lightning-ai/gpt-oss-20b",
                 arbitrator_model="lightning/lightning-ai/gpt-oss-120b",
-                reasoning_summarizer_model="lightning/lightning-ai/llama-3.3-70b",
+                reasoning_summarizer_model="lightning/lightning-ai/gpt-oss-20b",
                 reviewer_max_transcript_tokens=1024,
                 arbitrator_max_transcript_tokens=768,
             )

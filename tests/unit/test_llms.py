@@ -802,6 +802,13 @@ def test_lightning_request_quirks_keep_supported_fields_and_map_role() -> None:
     assert "prediction" not in body
 
 
+def test_lightning_provider_accepts_nemotron_models() -> None:
+    provider = _lightning_provider()
+
+    assert provider.lookup("lightning-ai/nvidia-nemotron-3-super-120b-a12b") == ()
+    assert provider.lookup("lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b") == ()
+
+
 def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
     request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="none")
 
