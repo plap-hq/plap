@@ -38,6 +38,7 @@ from plap.llms.completions.errors import (
     is_context_length_exceeded_error,
 )
 from plap.llms.completions.providers import (
+    CEREBRAS_OPENAI_BASE_URL,
     CROF_OPENAI_BASE_URL,
     GMICLOUD_OPENAI_BASE_URL,
     GROQ_OPENAI_BASE_URL,
@@ -45,6 +46,7 @@ from plap.llms.completions.providers import (
     NOVITA_OPENAI_BASE_URL,
     OPENROUTER_OPENAI_BASE_URL,
     OpenRouterProvider,
+    build_cerebras_provider,
     build_crof_provider,
     build_fireworks_provider,
     build_gmicloud_provider,
@@ -725,6 +727,14 @@ def _lightning_provider(*, client: Any | None = None) -> OpenAIProvider:
     return provider
 
 
+def _cerebras_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_cerebras_provider(_settings(llm_cerebras_api_key="cerebras-key"))
+    assert isinstance(provider, OpenAIProvider)
+    if client is not None:
+        provider._client = client
+    return provider
+
+
 def _gmicloud_provider(*, client: Any | None = None) -> OpenAIProvider:
     provider = build_gmicloud_provider(_settings(llm_gmicloud_api_key="gmicloud-key"))
     assert isinstance(provider, OpenAIProvider)
@@ -828,6 +838,24 @@ def test_lightning_provider_accepts_nemotron_models() -> None:
 
     assert provider.lookup("lightning-ai/nvidia-nemotron-3-super-120b-a12b") == ()
     assert provider.lookup("lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b") == ()
+
+
+def test_cerebras_request_quirks_preserve_supported_fields_and_glm_thinking() -> None:
+    body = _body_for(_cerebras_provider(), _request_for_model("zai-glm-4.7"), stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_completion_tokens"] == 128
+    assert body["reasoning_effort"] == "low"
+    assert body["extra_body"] == {"clear_thinking": False}
+    assert "service_tier" not in body
+    assert "prediction" not in body
+
+
+def test_cerebras_provider_accepts_supported_models() -> None:
+    provider = _cerebras_provider()
+
+    assert provider.lookup("gpt-oss-120b") == ()
+    assert provider.lookup("zai-glm-4.7")
 
 
 def test_groq_request_quirks_drop_unsupported_fields_and_enable_reasoning() -> None:
@@ -988,6 +1016,29 @@ async def test_groq_client_aliases_reasoning_on_complete_and_stream() -> None:
 
     result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
     deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert result.message.reasoning_content == "because"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[1].finish_reason == "stop"
+
+
+async def test_cerebras_client_aliases_reasoning_on_complete_and_stream() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(model="gpt-oss-120b", content="ok", reasoning="because"),
+            _AsyncListStream(
+                [
+                    _chunk(model="gpt-oss-120b", content="ok", reasoning="because"),
+                    _chunk(model="gpt-oss-120b", finish_reason="stop"),
+                ]
+            ),
+        ],
+        base_url=CEREBRAS_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_cerebras_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("gpt-oss-120b"))
+    deltas = [delta async for delta in client.stream(_request_for_model("gpt-oss-120b"))]
 
     assert result.message.reasoning_content == "because"
     assert deltas[0].reasoning_delta == "because"

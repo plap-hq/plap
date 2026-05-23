@@ -232,6 +232,7 @@ class OpenAIProvider(Provider):
 
 LIGHTNING_OPENAI_BASE_URL = "https://lightning.ai/api/v1"
 GROQ_OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
+CEREBRAS_OPENAI_BASE_URL = "https://api.cerebras.ai/v1"
 GMICLOUD_OPENAI_BASE_URL = "https://api.gmi-serving.com/v1"
 NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
 CROF_OPENAI_BASE_URL = "https://crof.ai/v1"
@@ -303,6 +304,28 @@ GROQ_FIELDS = (
     "user",
     "service_tier",
 )
+CEREBRAS_FIELDS = (
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "stop",
+    "seed",
+    "n",
+    "reasoning_effort",
+    "user",
+    "metadata",
+)
 GMICLOUD_FIELDS = (
     "model",
     "messages",
@@ -360,6 +383,10 @@ GROQ_MODELS: dict[str, tuple[Quirk, ...]] = {
     "qwen/qwen3-32b": (RejectResponseFormat("json_schema"),),
     "llama-3.3-70b-versatile": (RejectResponseFormat("json_schema"),),
     "llama-3.1-8b-instant": (RejectResponseFormat("json_schema"),),
+}
+CEREBRAS_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "gpt-oss-120b": (),
+    "zai-glm-4.7": (ExtraBody({"clear_thinking": False}),),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),
@@ -446,6 +473,22 @@ def build_groq_provider(settings: Any) -> Provider | None:
     )
 
 
+def build_cerebras_provider(settings: Any) -> Provider | None:
+    if not settings.llm_cerebras_api_key:
+        return None
+    return OpenAIProvider(
+        name="cerebras",
+        api_key=settings.llm_cerebras_api_key,
+        base_url=CEREBRAS_OPENAI_BASE_URL,
+        quirks=(
+            SystemRole(),
+            Only(*CEREBRAS_FIELDS),
+            RenameOutput("reasoning", "reasoning_content"),
+        ),
+        models=CEREBRAS_MODELS,
+    )
+
+
 def build_novita_provider(settings: Any) -> Provider | None:
     if not settings.llm_novita_api_key:
         return None
@@ -471,12 +514,14 @@ def build_crof_provider(settings: Any) -> Provider | None:
 
 
 __all__ = [
+    "CEREBRAS_OPENAI_BASE_URL",
     "CROF_OPENAI_BASE_URL",
     "GMICLOUD_OPENAI_BASE_URL",
     "GROQ_OPENAI_BASE_URL",
     "LIGHTNING_OPENAI_BASE_URL",
     "NOVITA_OPENAI_BASE_URL",
     "OpenAIProvider",
+    "build_cerebras_provider",
     "build_crof_provider",
     "build_gmicloud_provider",
     "build_groq_provider",

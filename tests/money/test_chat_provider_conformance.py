@@ -23,6 +23,7 @@ from plap.llms.completions.chat import (
 from plap.llms.completions.client import ChatCompletionClient
 from plap.llms.completions.errors import ChatCompletionProviderError
 from plap.llms.completions.providers import (
+    build_cerebras_provider,
     build_crof_provider,
     build_fireworks_provider,
     build_gmicloud_provider,
@@ -53,6 +54,19 @@ def _lightning_client(api_key: str) -> IChatCompletionClient:
         [
             ModelRoute(
                 prefix="lightning/",
+                client=ChatCompletionClient(provider),
+            )
+        ]
+    )
+
+
+def _cerebras_client(api_key: str) -> IChatCompletionClient:
+    provider = build_cerebras_provider(_settings(llm_cerebras_api_key=api_key))
+    assert provider is not None
+    return RoutingChatCompletionClient(
+        [
+            ModelRoute(
+                prefix="cerebras/",
                 client=ChatCompletionClient(provider),
             )
         ]
@@ -119,6 +133,8 @@ def _crof_client(api_key: str) -> IChatCompletionClient:
 
 LIGHTNING_GPT_OSS_20B_MODEL = "lightning/lightning-ai/gpt-oss-20b"
 LIGHTNING_GPT_OSS_120B_MODEL = "lightning/lightning-ai/gpt-oss-120b"
+CEREBRAS_GPT_OSS_120B_MODEL = "cerebras/gpt-oss-120b"
+CEREBRAS_GLM_4_7_MODEL = "cerebras/zai-glm-4.7"
 GROQ_GPT_OSS_20B_MODEL = "groq/openai/gpt-oss-20b"
 GROQ_GPT_OSS_120B_MODEL = "groq/openai/gpt-oss-120b"
 NOVITA_GPT_OSS_120B_MODEL = "novita/openai/gpt-oss-120b"
@@ -146,6 +162,15 @@ GPT_OSS_PROVIDERS = (
             client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-20b",
+    ),
+    pytest.param(
+        ProviderCase(
+            name="cerebras",
+            api_key_env="CEREBRAS_API_KEY",
+            model=CEREBRAS_GPT_OSS_120B_MODEL,
+            client_factory=_cerebras_client,
+        ),
+        id="cerebras-gpt-oss-120b",
     ),
     pytest.param(
         ProviderCase(
@@ -187,6 +212,15 @@ TOOL_PROVIDERS = (
             client_factory=_lightning_client,
         ),
         id="lightning-gpt-oss-120b",
+    ),
+    pytest.param(
+        ProviderCase(
+            name="cerebras",
+            api_key_env="CEREBRAS_API_KEY",
+            model=CEREBRAS_GLM_4_7_MODEL,
+            client_factory=_cerebras_client,
+        ),
+        id="cerebras-zai-glm-4.7",
     ),
     pytest.param(
         ProviderCase(
@@ -383,6 +417,7 @@ async def test_live_groq_gpt_oss_20b_response_format(
                 ChatMessage(role="user", content='Return exactly {"ok": true}.'),
             ],
             response_format=response_format,
+            reasoning_effort="none",
             max_completion_tokens=128,
             temperature=0,
         ),
@@ -390,6 +425,86 @@ async def test_live_groq_gpt_oss_20b_response_format(
 
     parsed = json.loads(result.message.content or "")
     assert parsed == {"ok": True}
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        pytest.param(ChatResponseFormat(type="json_object"), id="json-object"),
+        pytest.param(
+            ChatResponseFormat(
+                type="json_schema",
+                name="ok_response",
+                schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                strict=True,
+            ),
+            id="json-schema",
+        ),
+    ],
+)
+async def test_live_cerebras_glm_4_7_response_format(
+    response_format: ChatResponseFormat,
+) -> None:
+    provider = ProviderCase(
+        name="cerebras",
+        api_key_env="CEREBRAS_API_KEY",
+        model=CEREBRAS_GLM_4_7_MODEL,
+        client_factory=_cerebras_client,
+    )
+
+    result = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content="You are a strict JSON API. Output valid JSON only.",
+                ),
+                ChatMessage(role="user", content='Return exactly {"ok": true}.'),
+            ],
+            response_format=response_format,
+            reasoning_effort="none",
+            max_completion_tokens=128,
+            temperature=0,
+        ),
+    )
+
+    parsed = json.loads(result.message.content or "")
+    assert parsed == {"ok": True}
+
+
+async def test_live_cerebras_glm_4_7_reasoning_request() -> None:
+    provider = ProviderCase(
+        name="cerebras",
+        api_key_env="CEREBRAS_API_KEY",
+        model=CEREBRAS_GLM_4_7_MODEL,
+        client_factory=_cerebras_client,
+    )
+
+    result = await _complete(
+        provider,
+        ChatCompletionRequest(
+            model=provider.model,
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content="Think through 17 + 25. Keep the final answer short.",
+                )
+            ],
+            reasoning_effort="high",
+            max_completion_tokens=256,
+            temperature=0,
+        ),
+    )
+
+    assert _message_has_output(result.message)
+    assert result.message.reasoning_content or result.message.reasoning_details
 
 
 async def test_live_gmicloud_deepseek_v4_flash_basic_reasoning_request() -> None:
