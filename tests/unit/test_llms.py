@@ -61,7 +61,7 @@ from plap.llms.completions.providers import (
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
-from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
+from plap.llms.retry import RETRY_TOOL_PLACEHOLDER, RetryLimitExceededError, RetryToolSchemaError, retry_on_unusable_tool_calls
 from plap.llms.retry import complete as retry_complete
 from plap.llms.retry import stream as retry_stream
 from plap.settings import Settings
@@ -577,7 +577,8 @@ async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
     ]
     client = _RetryStreamClient(attempts)
 
-    def validate(result: ChatCompletionResult) -> str | None:
+    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
         if result.finish_reason == "tool_calls":
             return "Your previous answer could not be used. Reply again without tool calls."
         return None
@@ -594,7 +595,7 @@ async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
         async for item in retry_stream(
             client,
             next_request=next_request,
-            validate=validate,
+            validators=(validate,),
             max_attempts=2,
         )
     ]
@@ -603,8 +604,8 @@ async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
     assert items[0].messages[-1].tool_calls is not None
     assert items[0].results and items[0].results[0].finish_reason == "tool_calls"
     assert items[1].results and items[1].results[0].finish_reason == "tool_calls"
-    assert items[2].messages[-3].content == RETRY_TOOL_PLACEHOLDER
-    assert items[2].messages[-2].role == "user"
+    assert items[1].messages[-2].content == RETRY_TOOL_PLACEHOLDER
+    assert items[1].messages[-1].role == "user"
     assert items[3].messages[-1].content == "fixed"
     assert len(items[3].results) == 2
     assert client.requests[1].messages[-3].tool_calls is not None
@@ -617,7 +618,8 @@ async def test_retry_complete_returns_final_snapshot() -> None:
         [[ChatCompletionDelta(id="chatcmpl_1", model="model-a", created_at=10, choice_index=0, finish_reason="stop")]]
     )
 
-    def validate(result: ChatCompletionResult) -> str | None:
+    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
         _ = result
         return None
 
@@ -630,7 +632,7 @@ async def test_retry_complete_returns_final_snapshot() -> None:
     final = await retry_complete(
         client,
         next_request=next_request,
-        validate=validate,
+        validators=(validate,),
     )
 
     assert final.results and final.results[0].finish_reason == "stop"
@@ -668,7 +670,8 @@ async def test_retry_stream_retries_after_partial_stream_timeout_without_persist
         ]
     )
 
-    def validate(result: ChatCompletionResult) -> str | None:
+    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
         _ = result
         return None
 
@@ -683,7 +686,7 @@ async def test_retry_stream_retries_after_partial_stream_timeout_without_persist
         async for item in retry_stream(
             client,
             next_request=next_request,
-            validate=validate,
+            validators=(validate,),
             max_attempts=2,
         )
     ]
@@ -718,7 +721,8 @@ async def test_retry_complete_accepts_final_result_when_stream_times_out_after_f
         ]
     )
 
-    def validate(result: ChatCompletionResult) -> str | None:
+    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
         _ = result
         return None
 
@@ -731,12 +735,310 @@ async def test_retry_complete_accepts_final_result_when_stream_times_out_after_f
     final = await retry_complete(
         client,
         next_request=next_request,
-        validate=validate,
+        validators=(validate,),
     )
 
     assert final.results and final.results[-1].finish_reason == "stop"
     assert final.messages[-1].content == "done"
     assert len(client.requests) == 1
+
+
+async def test_retry_stream_retries_on_non_object_tool_arguments() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="read_file",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+    )
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    tool_call_delta=ChatToolCallDelta(
+                        index=0,
+                        id="call_1",
+                        name="read_file",
+                        arguments_delta='["README.md"]',
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    content_delta="fixed",
+                ),
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    finish_reason="stop",
+                ),
+            ],
+        ]
+    )
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+            tools=[tool],
+        )
+
+    items = [
+        item
+        async for item in retry_stream(
+            client,
+            next_request=next_request,
+            validators=(retry_on_unusable_tool_calls,),
+            max_attempts=2,
+        )
+    ]
+
+    assert len(items) == 4
+    assert items[1].results and items[1].results[0].message.tool_calls is not None
+    assert items[1].messages[-2].content == RETRY_TOOL_PLACEHOLDER
+    assert items[1].messages[-1].role == "user"
+    assert client.requests[1].messages[-3].tool_calls is not None
+    assert client.requests[1].messages[-2].content == RETRY_TOOL_PLACEHOLDER
+    assert client.requests[1].messages[-1].role == "user"
+    assert items[-1].messages[-1].content == "fixed"
+
+
+async def test_retry_stream_retries_on_strict_tool_schema_mismatch() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="lookup",
+            parameters={
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+                "required": ["n"],
+                "additionalProperties": False,
+            },
+            strict=True,
+        )
+    )
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    tool_call_delta=ChatToolCallDelta(
+                        index=0,
+                        id="call_1",
+                        name="lookup",
+                        arguments_delta='{"n":null}',
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    content_delta="fixed",
+                ),
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    finish_reason="stop",
+                ),
+            ],
+        ]
+    )
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+            tools=[tool],
+        )
+
+    items = [
+        item
+        async for item in retry_stream(
+            client,
+            next_request=next_request,
+            validators=(retry_on_unusable_tool_calls,),
+            max_attempts=2,
+        )
+    ]
+
+    assert len(items) == 4
+    assert items[1].results and items[1].results[0].message.tool_calls is not None
+    assert items[1].messages[-2].content == RETRY_TOOL_PLACEHOLDER
+    assert items[1].messages[-1].role == "user"
+    assert items[-1].messages[-1].content == "fixed"
+
+
+async def test_retry_stream_raises_retry_limit_exceeded_when_attempts_are_exhausted() -> None:
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    finish_reason="tool_calls",
+                )
+            ]
+        ]
+    )
+
+    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
+        if result.finish_reason == "tool_calls":
+            return "Reply again without tool calls."
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+        )
+
+    stream = retry_stream(
+        client,
+        next_request=next_request,
+        validators=(validate,),
+        max_attempts=1,
+    )
+    items: list[Snapshot] = []
+    with pytest.raises(RetryLimitExceededError, match="retry limit reached"):
+        items.append(await anext(stream))
+        items.append(await anext(stream))
+        await anext(stream)
+
+    assert len(items) == 2
+    assert items[0].results and items[0].results[0].finish_reason == "tool_calls"
+    assert items[1].messages[-1].role == "user"
+
+
+def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_tool_name() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"}))],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="read_file", arguments='{"path":"README.md"}')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = retry_on_unusable_tool_calls(result, request)
+
+    assert retry_message is not None
+    assert "`read_file`" in retry_message
+    assert "`lookup`" in retry_message
+
+
+def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_object_arguments() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="read_file", parameters={"type": "object"}))],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="read_file", arguments='["README.md"]')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = retry_on_unusable_tool_calls(result, request)
+
+    assert retry_message is not None
+    assert "`read_file`" in retry_message
+    assert "JSON object" in retry_message
+
+
+def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_schema_mismatch() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[
+            ChatTool(
+                function=ChatFunctionTool(
+                    name="lookup",
+                    parameters={
+                        "type": "object",
+                        "properties": {"n": {"type": "integer"}},
+                        "required": ["n"],
+                        "additionalProperties": False,
+                    },
+                    strict=True,
+                )
+            )
+        ],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments='{"n":null}')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = retry_on_unusable_tool_calls(result, request)
+
+    assert retry_message is not None
+    assert "`lookup`" in retry_message
+    assert "data.n must be integer" in retry_message
+
+
+def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schema() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "wat"}, strict=True))],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments="{}")],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    with pytest.raises(RetryToolSchemaError, match="strict tool schema"):
+        retry_on_unusable_tool_calls(result, request)
 
 
 async def test_completions_client_fills_missing_result_and_delta_models() -> None:
