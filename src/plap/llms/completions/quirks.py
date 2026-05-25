@@ -63,6 +63,13 @@ def _rename_delta_field(raw: dict[str, Any], old: str, new: str) -> None:
     delta[new] = delta[old]
 
 
+def _body_messages(call: Call) -> tuple[dict[str, Any], ...]:
+    messages = call.body.get("messages")
+    if not isinstance(messages, list):
+        return ()
+    return tuple(message for message in messages if isinstance(message, dict))
+
+
 class Only(Quirk):
     def __init__(self, *names: str) -> None:
         self._names = frozenset(names)
@@ -97,24 +104,32 @@ class Set(Quirk):
 
 class SystemRole(Quirk):
     def request(self, call: Call) -> None:
-        messages = call.body.get("messages")
-        if not isinstance(messages, list):
-            return
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
+        for message in _body_messages(call):
             if message.get("role") == "developer":
                 message["role"] = "system"
 
 
 class DropMessageName(Quirk):
     def request(self, call: Call) -> None:
-        messages = call.body.get("messages")
-        if not isinstance(messages, list):
-            return
-        for message in messages:
-            if isinstance(message, dict):
-                message.pop("name", None)
+        for message in _body_messages(call):
+            message.pop("name", None)
+
+
+class RenameMessageField(Quirk):
+    def __init__(self, old: str, new: str, *, role: str | None = None) -> None:
+        self._old = old
+        self._new = new
+        self._role = role
+
+    def request(self, call: Call) -> None:
+        for message in _body_messages(call):
+            if self._role is not None and message.get("role") != self._role:
+                continue
+            if self._old not in message:
+                continue
+            if message.get(self._new) is None:
+                message[self._new] = message[self._old]
+            message.pop(self._old, None)
 
 
 class ExtraBody(Quirk):
@@ -141,12 +156,7 @@ class DropIf(Quirk):
 
 class EnsureAssistantReasoningContent(Quirk):
     def request(self, call: Call) -> None:
-        messages = call.body.get("messages")
-        if not isinstance(messages, list):
-            return
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
+        for message in _body_messages(call):
             if message.get("role") != "assistant":
                 continue
             if message.get("reasoning_content") is None:
@@ -209,6 +219,7 @@ __all__ = [
     "Only",
     "RejectResponseFormat",
     "Rename",
+    "RenameMessageField",
     "RenameOutput",
     "Set",
     "SystemRole",

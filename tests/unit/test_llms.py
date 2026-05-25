@@ -888,6 +888,33 @@ def test_groq_request_quirks_skip_include_reasoning_for_unsupported_models() -> 
     assert "extra_body" not in body
 
 
+@pytest.mark.parametrize(
+    ("provider_factory", "model"),
+    [
+        pytest.param(_groq_provider, "openai/gpt-oss-20b", id="groq"),
+        pytest.param(_cerebras_provider, "gpt-oss-120b", id="cerebras"),
+    ],
+)
+def test_provider_request_quirks_rename_assistant_reasoning_content_for_replay(
+    provider_factory,
+    model: str,
+) -> None:
+    request = replace(
+        _request_for_model(model),
+        messages=[
+            ChatMessage(role="developer", content="be precise"),
+            ChatMessage(role="user", content="hello", name="caller"),
+            ChatMessage(role="assistant", content="draft", reasoning_content="because"),
+        ],
+    )
+
+    body = _body_for(provider_factory(), request, stream=False)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["messages"][2] == {"role": "assistant", "content": "draft", "reasoning": "because"}
+    assert "reasoning_content" not in body["messages"][2]
+
+
 def test_groq_provider_accepts_supported_models() -> None:
     provider = _groq_provider()
 

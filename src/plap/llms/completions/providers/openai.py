@@ -37,6 +37,7 @@ from plap.llms.completions.quirks import (
     Only,
     RejectResponseFormat,
     Rename,
+    RenameMessageField,
     RenameOutput,
     Set,
     SystemRole,
@@ -462,6 +463,7 @@ def build_groq_provider(*, api_key: str) -> Provider:
             SystemRole(),
             Only(*GROQ_FIELDS),
             DropMessageName(),
+            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
             RenameOutput("reasoning", "reasoning_content"),
         ),
         models=GROQ_MODELS,
@@ -476,6 +478,7 @@ def build_cerebras_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*CEREBRAS_FIELDS),
+            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
             RenameOutput("reasoning", "reasoning_content"),
         ),
         models=CEREBRAS_MODELS,
