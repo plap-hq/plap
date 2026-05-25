@@ -6,31 +6,38 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 state_file="$repo_root/.dev/dev.env"
 default_log_file="$repo_root/.dev/plap.log.jsonl"
 
-logdy_version="${PLAP_LOGDY_VERSION:-v0.17.1}"
-logdy_port="${PLAP_LOGDY_PORT:-8080}"
-logdy_ui_ip="${PLAP_LOGDY_UI_IP:-127.0.0.1}"
-logdy_port_explicit="${PLAP_LOGDY_PORT:+1}"
-logdy_root="$repo_root/.dev/tools/logdy/$logdy_version"
-logdy_binary="$logdy_root/logdy"
+seq_image="${PLAP_SEQ_IMAGE:-datalust/seq:2025.2}"
+seq_port="${PLAP_SEQ_PORT:-5341}"
+seq_ui_ip="${PLAP_SEQ_UI_IP:-127.0.0.1}"
+seq_port_explicit="${PLAP_SEQ_PORT:+1}"
+seq_startup_timeout_seconds="${PLAP_SEQ_STARTUP_TIMEOUT_SECONDS:-30}"
+seq_batch_size="${PLAP_SEQ_BATCH_SIZE:-100}"
+seq_poll_interval_seconds="${PLAP_SEQ_POLL_INTERVAL_SECONDS:-0.25}"
+seq_container_name=""
+seq_data_volume=""
+cleanup_done=0
 
 usage() {
   cat <<'EOF'
 Usage: scripts/log-explorer.sh
 
-Run Logdy against plap's local JSON log file.
+Run an ephemeral Seq instance against plap's local JSON log file.
 
 Behavior:
-  - downloads a pinned Logdy release binary into .dev/tools/logdy/
-  - never installs globally
-  - never edits PATH
-  - runs in the foreground; stop it with Ctrl-C
+  - starts a temporary local Seq Docker container
+  - imports the full current log file on launch
+  - follows appended log lines live until you stop it
+  - removes the Seq container and its data when you exit
 
 Environment overrides:
-  PLAP_LOGDY_VERSION   Default: v0.17.1
-  PLAP_LOGDY_PORT      Default: 8080
-  PLAP_LOGDY_UI_IP     Default: 127.0.0.1
+  PLAP_SEQ_IMAGE                    Default: datalust/seq:2025.2
+  PLAP_SEQ_PORT                     Default: 5341
+  PLAP_SEQ_UI_IP                    Default: 127.0.0.1
+  PLAP_SEQ_STARTUP_TIMEOUT_SECONDS  Default: 30
+  PLAP_SEQ_BATCH_SIZE               Default: 100
+  PLAP_SEQ_POLL_INTERVAL_SECONDS    Default: 0.25
 
-If 8080 is already in use and you did not explicitly set PLAP_LOGDY_PORT,
+If 5341 is already in use and you did not explicitly set PLAP_SEQ_PORT,
 the script will auto-pick a free local port.
 
 Log file resolution:
@@ -40,11 +47,16 @@ EOF
 }
 
 load_state() {
+  local explicit_log_file="${PLAP_LOG_FILE-}"
+  local has_explicit_log_file="${PLAP_LOG_FILE+1}"
   if [[ -f "$state_file" ]]; then
     set -a
     # shellcheck disable=SC1090
     source "$state_file"
     set +a
+  fi
+  if [[ -n "$has_explicit_log_file" ]]; then
+    export PLAP_LOG_FILE="$explicit_log_file"
   fi
 }
 
@@ -58,7 +70,7 @@ resolve_log_file() {
 
 port_in_use() {
   local port="$1"
-  python3 - "$logdy_ui_ip" "$port" <<'PY'
+  python3 - "$seq_ui_ip" "$port" <<'PY'
 import socket
 import sys
 
@@ -75,7 +87,7 @@ PY
 }
 
 pick_free_port() {
-  python3 - "$logdy_ui_ip" <<'PY'
+  python3 - "$seq_ui_ip" <<'PY'
 import socket
 import sys
 
@@ -89,9 +101,9 @@ PY
 resolve_port() {
   local preferred_port="$1"
 
-  if [[ -n "$logdy_port_explicit" ]]; then
+  if [[ -n "$seq_port_explicit" ]]; then
     if port_in_use "$preferred_port"; then
-      printf 'Requested Logdy port %s is already in use on %s.\n' "$preferred_port" "$logdy_ui_ip" >&2
+      printf 'Requested Seq port %s is already in use on %s.\n' "$preferred_port" "$seq_ui_ip" >&2
       exit 1
     fi
     printf '%s\n' "$preferred_port"
@@ -101,7 +113,7 @@ resolve_port() {
   if port_in_use "$preferred_port"; then
     local picked_port
     picked_port="$(pick_free_port)"
-    printf 'Auto-picked Logdy port %s because %s was already in use on %s.\n' "$picked_port" "$preferred_port" "$logdy_ui_ip" >&2
+    printf 'Auto-picked Seq port %s because %s was already in use on %s.\n' "$picked_port" "$preferred_port" "$seq_ui_ip" >&2
     printf '%s\n' "$picked_port"
     return
   fi
@@ -109,61 +121,98 @@ resolve_port() {
   printf '%s\n' "$preferred_port"
 }
 
-detect_asset_name() {
-  local os arch
-  os="$(uname -s)"
-  arch="$(uname -m)"
-
-  case "$os" in
-    Linux) os="linux" ;;
-    Darwin) os="darwin" ;;
-    *)
-      printf 'Unsupported OS for Logdy wrapper: %s\n' "$os" >&2
-      exit 1
-      ;;
-  esac
-
-  case "$arch" in
-    x86_64|amd64) arch="amd64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    *)
-      printf 'Unsupported architecture for Logdy wrapper: %s\n' "$arch" >&2
-      exit 1
-      ;;
-  esac
-
-  printf 'logdy_%s_%s\n' "$os" "$arch"
-}
-
-download_logdy() {
-  local asset_name url tmp_file
-  asset_name="$(detect_asset_name)"
-  url="https://github.com/logdyhq/logdy-core/releases/download/${logdy_version}/${asset_name}"
-  tmp_file="$logdy_binary.tmp"
-
-  mkdir -p "$logdy_root"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --output "$tmp_file" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$tmp_file" "$url"
-  else
-    printf 'Need curl or wget to download Logdy locally.\n' >&2
+ensure_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    printf 'docker is required for the Seq log explorer.\n' >&2
     exit 1
   fi
-
-  mv "$tmp_file" "$logdy_binary"
-  chmod +x "$logdy_binary"
 }
 
-ensure_logdy_binary() {
-  if [[ -x "$logdy_binary" ]]; then
-    printf '%s\n' "$logdy_binary"
+ensure_seq_image() {
+  if docker image inspect "$seq_image" >/dev/null 2>&1; then
     return
   fi
+  printf 'Pulling Seq image: %s\n' "$seq_image"
+  docker pull "$seq_image" >/dev/null
+}
 
-  download_logdy
-  printf '%s\n' "$logdy_binary"
+create_seq_data_volume() {
+  printf 'plap-log-explorer-seq-data-%s-%s\n' "$$" "$RANDOM"
+}
+
+start_seq_container() {
+  local port="$1"
+  seq_container_name="plap-log-explorer-seq-$$-$RANDOM"
+  seq_data_volume="$(create_seq_data_volume)"
+  docker run \
+    --detach \
+    --rm \
+    --name "$seq_container_name" \
+    --env ACCEPT_EULA=Y \
+    --env SEQ_FIRSTRUN_NOAUTHENTICATION=true \
+    --volume "$seq_data_volume:/data" \
+    --publish "$port:80" \
+    "$seq_image" >/dev/null
+}
+
+wait_for_seq() {
+  local port="$1"
+  local timeout_seconds="$2"
+  python3 - "$seq_ui_ip" "$port" "$timeout_seconds" <<'PY'
+from __future__ import annotations
+
+import sys
+import time
+import urllib.error
+import urllib.request
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+deadline = time.monotonic() + float(sys.argv[3])
+url = f"http://{host}:{port}/health"
+
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            if 200 <= response.status < 300:
+                raise SystemExit(0)
+    except Exception:
+        time.sleep(0.25)
+
+raise SystemExit(1)
+PY
+}
+
+print_seq_logs_on_failure() {
+  if [[ -z "$seq_container_name" ]]; then
+    return
+  fi
+  if docker container inspect "$seq_container_name" >/dev/null 2>&1; then
+    printf '\nSeq container logs:\n' >&2
+    docker logs "$seq_container_name" >&2 || true
+  fi
+}
+
+cleanup() {
+  local exit_code="${1:-0}"
+  if [[ "$cleanup_done" -eq 1 ]]; then
+    return
+  fi
+  cleanup_done=1
+  trap - EXIT INT TERM
+  set +e
+  if [[ -n "$seq_container_name" ]] && docker container inspect "$seq_container_name" >/dev/null 2>&1; then
+    docker rm -f "$seq_container_name" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$seq_data_volume" ]] && docker volume inspect "$seq_data_volume" >/dev/null 2>&1; then
+    docker volume rm -f "$seq_data_volume" >/dev/null 2>&1 || true
+  fi
+  return
+}
+
+handle_interrupt() {
+  cleanup 130
+  exit 130
 }
 
 main() {
@@ -178,22 +227,41 @@ main() {
     exit 1
   fi
 
-  load_state
+  trap 'exit_code=$?; cleanup "$exit_code"; exit "$exit_code"' EXIT
+  trap handle_interrupt INT TERM
 
-  local log_file binary resolved_port
+  load_state
+  ensure_docker
+  ensure_seq_image
+
+  local log_file resolved_port seq_url
   log_file="$(resolve_log_file)"
   mkdir -p "$(dirname -- "$log_file")"
   touch "$log_file"
 
-  binary="$(ensure_logdy_binary)"
-  resolved_port="$(resolve_port "$logdy_port")"
+  resolved_port="$(resolve_port "$seq_port")"
+  start_seq_container "$resolved_port"
 
-  printf 'Using Logdy binary: %s\n' "$binary"
+  if ! wait_for_seq "$resolved_port" "$seq_startup_timeout_seconds"; then
+    printf 'Timed out waiting for Seq to start on http://%s:%s.\n' "$seq_ui_ip" "$resolved_port" >&2
+    print_seq_logs_on_failure
+    exit 1
+  fi
+
+  seq_url="http://$seq_ui_ip:$resolved_port"
+
+  printf 'Using Seq image: %s\n' "$seq_image"
   printf 'Reading log file: %s\n' "$log_file"
-  printf 'Web UI: http://%s:%s\n' "$logdy_ui_ip" "$resolved_port"
+  printf 'Web UI: %s\n' "$seq_url"
+  printf 'Seq data volume: %s\n' "$seq_data_volume"
+  printf 'Behavior: full import on launch, live tail while running, full cleanup on exit.\n'
   printf 'Stop with Ctrl-C.\n\n'
 
-  exec "$binary" follow --full-read --no-analytics --no-updates --ui-ip "$logdy_ui_ip" --port "$resolved_port" "$log_file"
+  python3 "$script_dir/seq_log_forwarder.py" \
+    --batch-size "$seq_batch_size" \
+    --log-file "$log_file" \
+    --poll-interval-seconds "$seq_poll_interval_seconds" \
+    --seq-url "$seq_url"
 }
 
 main "$@"
