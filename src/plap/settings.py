@@ -1025,7 +1025,7 @@ class Settings(BaseSettings):
     tool_call_effect_classifier_model: str = "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
     tool_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_call_effect_classifier_cache_model: str = "gpt-oss-120b"
-    tool_classifier_max_concurrency: int = 2
+    tool_classifier_max_concurrency: int = 16
     tool_policy_l1_maxsize: int = 4096
     tool_call_policy_l1_maxsize: int = 4096
     runtime_model_profiles: dict[str, RuntimeModelProfileConfig] = Field(default_factory=_default_runtime_model_profiles)
