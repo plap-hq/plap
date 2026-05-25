@@ -4261,6 +4261,72 @@ async def test_stream_response_events_patches_reasoning_to_unsealed_message() ->
     ]
 
 
+async def test_stream_response_events_patches_tool_calls_to_unsealed_message() -> None:
+    events = [
+        event
+        async for event in stream_response_events(
+            ResponseCreateRequest(
+                model="plap/test",
+                include=["reasoning.encrypted_content"],
+                reasoning=ReasoningConfig(summary="concise"),
+                stream=True,
+                tools=[_read_file_tool()],
+            ),
+            auth_context=_auth_context(),
+            settings=_settings(),
+            sealing_keyring=_keyring(),
+            tool_policy_resolver=_RecordingResolver({"read_file": "safe"}),
+            tool_call_policy_resolver=_RecordingCallResolver(),
+            chat_completion_client=_StreamingStaticChatClient(
+                (
+                    ChatCompletionDelta(
+                        id="chatcmpl_test",
+                        model="plap/test",
+                        created_at=None,
+                        choice_index=0,
+                        content_delta="answer",
+                    ),
+                    ChatCompletionDelta(
+                        id="chatcmpl_test",
+                        model="plap/test",
+                        created_at=None,
+                        choice_index=0,
+                        tool_call_delta=ChatToolCallDelta(
+                            index=0,
+                            id="upstream_call_1",
+                            name="read_file",
+                            arguments_delta='{"path":"README.md"}',
+                        ),
+                    ),
+                    ChatCompletionDelta(
+                        id="chatcmpl_test",
+                        model="plap/test",
+                        created_at=None,
+                        choice_index=0,
+                        finish_reason=ChatFinishReason.TOOL_CALLS,
+                        usage=ChatUsage(input_tokens=10, output_tokens=14, total_tokens=24, reasoning_tokens=6),
+                    ),
+                )
+            ),
+            reasoning_summarizer=_FakeReasoningSummarizer(),
+        )
+    ]
+
+    completed = events[-1].response
+    assert [item.type for item in completed.output] == ["reasoning", "message", "function_call"]
+    public_message = {"role": "assistant", "content": "answer"}
+    payload = open_reasoning_payload(
+        completed.output[0].encrypted_content,
+        keyring=_keyring(),
+    )
+    assert [message.to_primitive() for message in payload.messages] == [
+        {
+            "content_hash": content_hash(StateMessage.from_primitive(public_message)),
+            "tool_calls": [{"id": "upstream_call_1", "name": "read_file", "arguments": '{"path":"README.md"}'}],
+        }
+    ]
+
+
 async def test_stream_response_events_redacts_reasoning_encrypted_content_by_default() -> None:
     events = [
         event

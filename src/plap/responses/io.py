@@ -141,7 +141,7 @@ def _stable_reasoning_payload(
     anchor_hash: str,
     public_assistant: StateMessage | None,
 ) -> ReasoningPayload:
-    if public_assistant is not None and (candidate.reasoning_content or candidate.reasoning_details):
+    if public_assistant is not None:
         return ReasoningPayload(
             side="main",
             temp=False,
@@ -149,6 +149,7 @@ def _stable_reasoning_payload(
             messages=(
                 ReasoningMessagePatch(
                     content_hash=anchor_hash,
+                    tool_calls=tuple(candidate.tool_calls) or None,
                     reasoning_content=candidate.reasoning_content,
                     reasoning_details=tuple(candidate.reasoning_details) or None,
                 ),

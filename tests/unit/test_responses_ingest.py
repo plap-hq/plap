@@ -969,6 +969,45 @@ async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
     ]
 
 
+async def test_ingestion_accepts_reasoning_patch_tool_call_with_public_pair() -> None:
+    target = {"role": "assistant", "content": "patched target"}
+    call_id = _call_id(
+        side="main",
+        content_hash_value=_message_hash(target),
+        upstream_tool_call_id="up_visible_0",
+    )
+
+    result = await ingest_response_request(
+        _request(
+            input=[
+                _reasoning_item(
+                    "main",
+                    False,
+                    [
+                        {
+                            "content_hash": _message_hash(target),
+                            "tool_calls": [_tool_call("up_visible_0")],
+                        }
+                    ],
+                ),
+                _message("assistant", "patched target"),
+                _function_call(call_id),
+                _function_output(call_id, "visible output"),
+            ]
+        ),
+        keyring=_keyring(),
+    )
+
+    assert [row.message.to_primitive() for row in result.main_context] == [
+        {
+            "role": "assistant",
+            "content": "patched target",
+            "tool_calls": [_tool_call("up_visible_0")],
+        },
+        {"role": "tool", "tool_call_id": "up_visible_0", "content": "visible output"},
+    ]
+
+
 async def test_ingestion_reproduces_public_tool_only_anchor_message_interleaving_target_missing() -> None:
     assistant = {
         "role": "assistant",
