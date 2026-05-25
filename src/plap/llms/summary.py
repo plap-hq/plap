@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 import anyio
+from anyio.abc import ObjectReceiveStream
 
 from plap.llms.accumulator import Snapshot
 from plap.llms.completions.chat import (
@@ -328,24 +330,26 @@ async def _pump_summary(
             index += 1
 
 
+@asynccontextmanager
 async def with_summary(
     source: AsyncIterator[Snapshot],
     *,
     mode: SummaryMode,
     summarizer: IReasoningSummarizer,
-) -> AsyncIterator[SummaryItem]:
+) -> AsyncIterator[ObjectReceiveStream[SummaryItem]]:
     out_send, out_receive = anyio.create_memory_object_stream[SummaryItem](32)
     source_out = out_send.clone()
     summary_out = out_send.clone()
     await out_send.aclose()
     fragment_send, fragment_receive = anyio.create_memory_object_stream[str](8)
 
-    async with anyio.create_task_group() as task_group:
+    async with anyio.create_task_group() as task_group, out_receive:
         task_group.start_soon(_pump_source, source, source_out, fragment_send)
         task_group.start_soon(_pump_summary, mode, summarizer, fragment_receive, summary_out)
-        async with out_receive:
-            async for item in out_receive:
-                yield item
+        try:
+            yield out_receive
+        finally:
+            task_group.cancel_scope.cancel()
 
 
 async def collect_summary(source: AsyncIterator[SummaryItem]) -> SummaryResult:
@@ -382,11 +386,11 @@ __all__ = [
     "ChatReasoningSummarizer",
     "IReasoningSummarizer",
     "NullReasoningSummarizer",
-    "SummaryResult",
     "SummaryDelta",
     "SummaryDone",
     "SummaryItem",
     "SummaryMode",
+    "SummaryResult",
     "SummaryUpdate",
     "collect_summary",
     "with_summary",

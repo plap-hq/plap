@@ -90,6 +90,28 @@ class _BlockingSummarizer(IReasoningSummarizer):
         yield "summary"
 
 
+class _ClosingBlockingSummarizer(IReasoningSummarizer):
+    def __init__(self) -> None:
+        self.started = anyio.Event()
+        self.closed = anyio.Event()
+
+    async def stream(
+        self,
+        *,
+        mode: str,
+        prior_summary: str | None,
+        fragment: str,
+    ) -> AsyncIterator[str]:
+        _ = mode, prior_summary, fragment
+        self.started.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            self.closed.set()
+        if False:
+            yield ""
+
+
 class _StreamingChatClient(IChatCompletionClient):
     def __init__(self, deltas: tuple[str, ...]) -> None:
         self._deltas = deltas
@@ -116,20 +138,20 @@ class _StreamingChatClient(IChatCompletionClient):
 
 async def test_with_summary_forwards_snapshot_before_summary_finishes() -> None:
     summarizer = _BlockingSummarizer()
-    stream = with_summary(
+
+    async with with_summary(
         _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
         mode="concise",
         summarizer=summarizer,
-    )
+    ) as stream:
+        first = await anext(stream)
 
-    first = await anext(stream)
+        assert isinstance(first, Snapshot)
+        with anyio.fail_after(1):
+            await summarizer.started.wait()
+        summarizer.release.set()
 
-    assert isinstance(first, Snapshot)
-    with anyio.fail_after(1):
-        await summarizer.started.wait()
-    summarizer.release.set()
-
-    rest = [item async for item in stream]
+        rest = [item async for item in stream]
 
     assert rest == [SummaryDelta(index=0, text="summary"), SummaryDone(index=0)]
 
@@ -137,14 +159,12 @@ async def test_with_summary_forwards_snapshot_before_summary_finishes() -> None:
 async def test_with_summary_streams_summary_delta_then_done() -> None:
     summarizer = _SequenceSummarizer([("checked ", "answer")])
 
-    items = [
-        item
-        async for item in with_summary(
-            _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        items = [item async for item in stream]
 
     assert isinstance(items[0], Snapshot)
     assert items[1:] == [
@@ -154,20 +174,64 @@ async def test_with_summary_streams_summary_delta_then_done() -> None:
     ]
 
 
+async def test_with_summary_context_exit_cancels_background_tasks_cleanly() -> None:
+    summarizer = _BlockingSummarizer()
+
+    async with with_summary(
+        _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        first = await anext(stream)
+
+        assert isinstance(first, Snapshot)
+        with anyio.fail_after(1):
+            await summarizer.started.wait()
+
+
+async def test_with_summary_consumer_task_cancellation_cleans_background_tasks() -> None:
+    source_closed = anyio.Event()
+    summarizer = _ClosingBlockingSummarizer()
+
+    async def source() -> AsyncIterator[Snapshot]:
+        try:
+            yield _delta_snapshot(reasoning_delta="thinking", finish_reason="stop")
+            await anyio.sleep_forever()
+        finally:
+            source_closed.set()
+
+    async def consume() -> None:
+        async with with_summary(
+            source(),
+            mode="concise",
+            summarizer=summarizer,
+        ) as stream:
+            first = await anext(stream)
+            assert isinstance(first, Snapshot)
+            await anext(stream)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(consume)
+        with anyio.fail_after(1):
+            await summarizer.started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert source_closed.is_set() is True
+    assert summarizer.closed.is_set() is True
+
+
 async def test_with_summary_flushes_on_tool_boundary() -> None:
     summarizer = _SequenceSummarizer([("checked",)])
 
-    _ = [
-        item
-        async for item in with_summary(
-            _source(
-                _delta_snapshot(reasoning_delta="thinking"),
-                _delta_snapshot(tool_boundary=True),
-            ),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(
+            _delta_snapshot(reasoning_delta="thinking"),
+            _delta_snapshot(tool_boundary=True),
+        ),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        _ = [item async for item in stream]
 
     assert summarizer.calls == [("concise", None, "thinking")]
 
@@ -175,17 +239,15 @@ async def test_with_summary_flushes_on_tool_boundary() -> None:
 async def test_with_summary_flushes_on_retry_boundary() -> None:
     summarizer = _SequenceSummarizer([("checked",)])
 
-    _ = [
-        item
-        async for item in with_summary(
-            _source(
-                _delta_snapshot(reasoning_delta="thinking"),
-                _retry_boundary_snapshot(),
-            ),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(
+            _delta_snapshot(reasoning_delta="thinking"),
+            _retry_boundary_snapshot(),
+        ),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        _ = [item async for item in stream]
 
     assert summarizer.calls == [("concise", None, "thinking")]
 
@@ -193,18 +255,16 @@ async def test_with_summary_flushes_on_retry_boundary() -> None:
 async def test_with_summary_carries_prior_summary_between_fragments() -> None:
     summarizer = _SequenceSummarizer([("first",), ("second",)])
 
-    _ = [
-        item
-        async for item in with_summary(
-            _source(
-                _delta_snapshot(reasoning_delta="one"),
-                _delta_snapshot(tool_boundary=True),
-                _delta_snapshot(reasoning_delta="two", finish_reason="stop"),
-            ),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(
+            _delta_snapshot(reasoning_delta="one"),
+            _delta_snapshot(tool_boundary=True),
+            _delta_snapshot(reasoning_delta="two", finish_reason="stop"),
+        ),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        _ = [item async for item in stream]
 
     assert summarizer.calls == [
         ("concise", None, "one"),
@@ -215,14 +275,12 @@ async def test_with_summary_carries_prior_summary_between_fragments() -> None:
 async def test_with_summary_skips_empty_summary_output() -> None:
     summarizer = _SequenceSummarizer([()])
 
-    items = [
-        item
-        async for item in with_summary(
-            _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(_delta_snapshot(reasoning_delta="thinking", finish_reason="stop")),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        items = [item async for item in stream]
 
     assert len(items) == 1
     assert isinstance(items[0], Snapshot)
@@ -236,18 +294,16 @@ async def test_with_summary_closes_partial_summary_after_error_and_carries_it_fo
         ]
     )
 
-    items = [
-        item
-        async for item in with_summary(
-            _source(
-                _delta_snapshot(reasoning_delta="one"),
-                _delta_snapshot(tool_boundary=True),
-                _delta_snapshot(reasoning_delta="two", finish_reason="stop"),
-            ),
-            mode="concise",
-            summarizer=summarizer,
-        )
-    ]
+    async with with_summary(
+        _source(
+            _delta_snapshot(reasoning_delta="one"),
+            _delta_snapshot(tool_boundary=True),
+            _delta_snapshot(reasoning_delta="two", finish_reason="stop"),
+        ),
+        mode="concise",
+        summarizer=summarizer,
+    ) as stream:
+        items = [item async for item in stream]
 
     summary_items = [item for item in items if isinstance(item, (SummaryDelta, SummaryDone))]
 
@@ -296,13 +352,12 @@ async def test_chat_reasoning_summarizer_binds_request_config_once() -> None:
 async def test_collect_summary_returns_final_snapshot_and_joined_parts() -> None:
     final = _delta_snapshot(reasoning_delta="thinking", finish_reason="stop")
 
-    result = await collect_summary(
-        with_summary(
-            _source(final),
-            mode="concise",
-            summarizer=_SequenceSummarizer([("checked ", "answer")]),
-        )
-    )
+    async with with_summary(
+        _source(final),
+        mode="concise",
+        summarizer=_SequenceSummarizer([("checked ", "answer")]),
+    ) as stream:
+        result = await collect_summary(stream)
 
     assert result == SummaryResult(snapshot=final, summaries=("checked answer",))
     assert result.text == "checked answer"
@@ -313,13 +368,12 @@ async def test_collect_summary_waits_for_summary_after_final_snapshot() -> None:
     summarizer = _BlockingSummarizer()
 
     async def run() -> SummaryResult:
-        return await collect_summary(
-            with_summary(
-                _source(final),
-                mode="concise",
-                summarizer=summarizer,
-            )
-        )
+        async with with_summary(
+            _source(final),
+            mode="concise",
+            summarizer=summarizer,
+        ) as stream:
+            return await collect_summary(stream)
 
     async with anyio.create_task_group() as task_group:
         holder: dict[str, SummaryResult] = {}
