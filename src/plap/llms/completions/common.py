@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
-from types import SimpleNamespace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import msgspec
@@ -50,6 +49,19 @@ def _float_or_none(value: Any) -> float | None:
 
 def _finish_reason(value: Any) -> ChatFinishReason | None:
     return value
+
+
+def _terminal_finish_reason(
+    finish_reason: ChatFinishReason | None,
+    *,
+    saw_tool_calls: bool,
+    saw_content: bool,
+) -> ChatFinishReason | None:
+    if saw_tool_calls:
+        return ChatFinishReason.TOOL_CALLS
+    if saw_content and finish_reason in {None, ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}:
+        return ChatFinishReason.STOP
+    return finish_reason
 
 
 def _stringify_json_value(value: Any) -> str | None:
@@ -231,19 +243,26 @@ def completion_result_from_data(
 ) -> ChatCompletionResult:
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message") or {}
+    content = _get(message, "content")
+    tool_calls = _tool_calls_from_data(_get(message, "tool_calls"))
+    finish_reason = _terminal_finish_reason(
+        _finish_reason(_get(choice, "finish_reason")),
+        saw_tool_calls=bool(tool_calls),
+        saw_content=content is not None,
+    )
     return ChatCompletionResult(
         id=_get(response, "id"),
         model=_get(response, "model") or request.model,
         created_at=_float_or_none(_get(response, "created")),
         message=ChatMessage(
             role="assistant",
-            content=_get(message, "content"),
+            content=content,
             refusal=_get(message, "refusal"),
             reasoning_content=_get(message, "reasoning_content"),
             reasoning_details=_get(message, "reasoning_details"),
-            tool_calls=_tool_calls_from_data(_get(message, "tool_calls")),
+            tool_calls=tool_calls,
         ),
-        finish_reason=_finish_reason(_get(choice, "finish_reason")),
+        finish_reason=finish_reason,
         usage=_usage_from_data(_get(response, "usage")),
         system_fingerprint=_get(response, "system_fingerprint"),
         service_tier=_get(response, "service_tier"),
@@ -376,11 +395,12 @@ class StreamState:
     def inferred_terminal_delta(self) -> ChatCompletionDelta | None:
         if self.saw_finish_reason:
             return None
-        if self.saw_tool_calls:
-            finish_reason = ChatFinishReason.TOOL_CALLS
-        elif self.saw_content:
-            finish_reason = ChatFinishReason.STOP
-        else:
+        finish_reason = _terminal_finish_reason(
+            None,
+            saw_tool_calls=self.saw_tool_calls,
+            saw_content=self.saw_content,
+        )
+        if finish_reason is None:
             return None
         return ChatCompletionDelta(
             id=self.last_id,
@@ -391,6 +411,18 @@ class StreamState:
             system_fingerprint=self.last_system_fingerprint,
             service_tier=self.last_service_tier,
         )
+
+    def normalized_terminal_delta(self, delta: ChatCompletionDelta) -> ChatCompletionDelta:
+        if delta.finish_reason is None:
+            return delta
+        finish_reason = _terminal_finish_reason(
+            delta.finish_reason,
+            saw_tool_calls=self.saw_tool_calls,
+            saw_content=self.saw_content,
+        )
+        if finish_reason == delta.finish_reason:
+            return delta
+        return replace(delta, finish_reason=finish_reason)
 
 
 def raise_incomplete_stream_error() -> None:

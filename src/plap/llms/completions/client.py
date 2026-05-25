@@ -163,7 +163,7 @@ class ChatCompletionClient(IChatCompletionClient):
             async for raw in self._stream_request(request, quirks, 0):
                 delta = delta_from_data(raw, request=request)
                 state.apply(delta)
-                yield delta
+                yield state.normalized_terminal_delta(delta)
             inferred_delta = state.inferred_terminal_delta()
             if inferred_delta is not None:
                 yield inferred_delta
