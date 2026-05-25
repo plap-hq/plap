@@ -2578,8 +2578,8 @@ async def test_stream_response_events_skips_compaction_when_recount_drops_below_
     profile = profile.model_copy(update={"main": profile.main.model_copy(update={"tokenizer_hf_repo": "main-tokenizer"})})
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
-    def fake_measure_request_tokens(request, *, actor_config):
-        assert actor_config == profile.main
+    def fake_measure_request_tokens(request, *, tokenizer_config):
+        assert tokenizer_config == profile.main
         assert request.messages[0].role == "developer"
         assert request.messages[1].content == "alpha " * 40
         return 40
@@ -2770,7 +2770,8 @@ async def test_stream_response_events_compaction_recount_uses_main_request_measu
         ]
     )
 
-    def fake_measure_prompt_tokens(messages, *, actor_config, tools=(), response_format=None, reasoning_effort=None):
+    def fake_measure_prompt_tokens(messages, *, tokenizer_config, tools=(), response_format=None, reasoning_effort=None):
+        _ = tokenizer_config
         seen_calls.append(
             (
                 tuple(tool.function.name for tool in tools),
@@ -3758,7 +3759,7 @@ async def test_stream_response_events_starts_soft_compaction_run(monkeypatch: py
     )
     measured = iter((75, 40))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: next(measured))
 
     events = [
         event
@@ -3790,7 +3791,7 @@ async def test_stream_response_events_context_management_overrides_compaction_th
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
     measured = iter((75, 40))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: next(measured))
 
     events = [
         event
@@ -3843,7 +3844,7 @@ async def test_stream_response_events_hard_budget_continues_when_compaction_roun
 ) -> None:
     client = _StaticChatClient(ChatMessage(role="assistant", content="done"))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 125)
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: 125)
 
     events = [
         event
@@ -3892,7 +3893,7 @@ async def test_stream_response_events_hard_budget_continues_after_compaction_rou
     )
     measured = iter((125, 110))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: next(measured))
 
     events = [
         event
@@ -3969,7 +3970,7 @@ async def test_stream_response_events_upstream_oversize_triggers_hard_compaction
         ]
     )
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: 10)
 
     events = [
         event
@@ -4002,7 +4003,7 @@ async def test_stream_response_events_rejects_upstream_oversize_when_compaction_
 ) -> None:
     client = _StaticChatClient(ChatCompletionContextLengthExceededError("This model's maximum context length is 10 tokens."))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: 10)
 
     with pytest.raises(PlapError) as exc_info:
         _ = [
@@ -4057,7 +4058,7 @@ async def test_stream_response_events_rejects_upstream_oversize_after_compaction
         ]
     )
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: 10)
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: 10)
 
     with pytest.raises(PlapError) as exc_info:
         _ = [
@@ -4117,7 +4118,7 @@ async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch:
     )
     measured = iter((125, 40))
 
-    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, actor_config: next(measured))
+    monkeypatch.setattr("plap.responses.runtime.measure_request_tokens", lambda request, *, tokenizer_config: next(measured))
 
     _ = [
         event
@@ -4476,11 +4477,11 @@ async def test_run_explicit_compaction_validates_with_main_tokenizer_config(
         )
     )
 
-    def fake_measure_prompt_tokens(messages, *, actor_config, tools=(), response_format=None, reasoning_effort=None):
+    def fake_measure_prompt_tokens(messages, *, tokenizer_config, tools=(), response_format=None, reasoning_effort=None):
         assert tools == ()
         assert response_format is None
         assert reasoning_effort is None
-        seen_tokenizer_repos.append(actor_config.tokenizer_hf_repo)
+        seen_tokenizer_repos.append(tokenizer_config.tokenizer_hf_repo)
         return 10 * len(messages)
 
     monkeypatch.setattr(compact_module, "measure_prompt_tokens", fake_measure_prompt_tokens)
@@ -4526,8 +4527,8 @@ def test_budgeted_transcript_message_uses_actor_tokenizer_near_budget(
     actor_config = RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="reviewer-tokenizer")
     seen_tokenizer_repos: list[str | None] = []
 
-    def fake_measure_prompt_tokens(messages, *, actor_config):
-        seen_tokenizer_repos.append(actor_config.tokenizer_hf_repo)
+    def fake_measure_prompt_tokens(messages, *, tokenizer_config):
+        seen_tokenizer_repos.append(tokenizer_config.tokenizer_hf_repo)
         transcript = json.loads((messages[0].content or "").removeprefix("Conversation transcript:\n"))
         return 10 if transcript[1]["content"] == "alpha" else 9
 

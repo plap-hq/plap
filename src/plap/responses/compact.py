@@ -22,12 +22,7 @@ from plap.llms.completions.chat import (
     IChatCompletionClient,
     ReasoningEffort,
 )
-from plap.responses.json_utils import (
-    JSONInvalidError,
-    JSONNotObjectError,
-    parse_json_object_with_repair,
-    parse_json_value_with_repair,
-)
+from plap.llms.completions.tokens import measure_prompt_tokens
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     CompactedResponseObject,
@@ -38,6 +33,12 @@ from plap.responses.contracts import (
 from plap.responses.ingest import ChatMessageSpan, CompactionPayload, ingest_response_request
 from plap.responses.ingest.sealing import seal_compaction_payload
 from plap.responses.io import ResponseEventIO
+from plap.responses.json_utils import (
+    JSONInvalidError,
+    JSONNotObjectError,
+    parse_json_object_with_repair,
+    parse_json_value_with_repair,
+)
 from plap.responses.models import (
     MutableQueues,
     StateMessage,
@@ -45,7 +46,6 @@ from plap.responses.models import (
     build_response_usage,
     strip_leading_internal_citations,
 )
-from plap.responses.tokens import measure_prompt_tokens
 from plap.settings import RuntimeActorConfig, RuntimeModelProfileConfig
 
 logger = structlog.get_logger(__name__)
@@ -516,7 +516,7 @@ def _measure_compaction_messages(
     try:
         return measure_prompt_tokens(
             messages,
-            actor_config=actor_config,
+            tokenizer_config=actor_config,
             tools=tools,
             response_format=response_format,
             reasoning_effort=reasoning_effort,

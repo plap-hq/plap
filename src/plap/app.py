@@ -12,9 +12,9 @@ from litestar.exceptions import HTTPException, NotAuthorizedException, Validatio
 from plap.auth import APIKeyManager
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.client import ChatCompletionClient, Provider
 from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
 from plap.llms.completions.chat import ChatMessage as LLMChatMessage
+from plap.llms.completions.client import ChatCompletionClient, Provider
 from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.completions.providers import build_providers
 from plap.llms.completions.router import (
@@ -23,11 +23,11 @@ from plap.llms.completions.router import (
     UnavailableChatCompletionClient,
     _model_attempts,
 )
+from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
 from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
-from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     IToolCallClassifier,
     IToolClassifier,
@@ -356,7 +356,7 @@ def _validate_runtime_profile_tokenizers(settings: Settings) -> None:
         if tokenizer_key in validated:
             continue
         try:
-            measure_request_tokens(probe_request, actor_config=actor_config)
+            measure_request_tokens(probe_request, tokenizer_config=actor_config)
         except Exception as exc:
             raise PlapError(
                 public=None,

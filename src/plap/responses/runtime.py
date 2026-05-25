@@ -25,6 +25,7 @@ from plap.llms.completions.chat import (
     IChatCompletionClient,
 )
 from plap.llms.completions.errors import ChatCompletionContextLengthExceededError
+from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.compact import (
     CompactionOutcome,
@@ -63,7 +64,6 @@ from plap.responses.models import (
 from plap.responses.projection import ResponseProjection, ResponseTransport
 from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.store import PreparedRequest, ResponseStore
-from plap.responses.tokens import measure_request_tokens
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     IToolPolicyResolver,
@@ -930,7 +930,7 @@ async def run_response(
             max_completion_tokens=main_cap,
         )
 
-        preflight_token_count = measure_request_tokens(model_request, actor_config=profile.main)
+        preflight_token_count = measure_request_tokens(model_request, tokenizer_config=profile.main)
         should_compact = authoritative_context_length_error is not None or (
             compaction_settings.compact_threshold is not None and preflight_token_count >= compaction_settings.compact_threshold
         )

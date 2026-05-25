@@ -34,6 +34,7 @@ from plap.llms.completions.errors import (
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
+from plap.llms.completions.tokens import ITokenizerConfig, estimate_text_tokens, measure_prompt_tokens, measure_request_tokens
 
 __all__ = [
     "Call",
@@ -65,6 +66,7 @@ __all__ = [
     "ChatUsage",
     "FireworksProvider",
     "IChatCompletionClient",
+    "ITokenizerConfig",
     "ModelRoute",
     "OpenAIProvider",
     "Provider",
@@ -73,4 +75,7 @@ __all__ = [
     "RoutingChatCompletionClient",
     "ServiceTier",
     "UnavailableChatCompletionClient",
+    "estimate_text_tokens",
+    "measure_prompt_tokens",
+    "measure_request_tokens",
 ]

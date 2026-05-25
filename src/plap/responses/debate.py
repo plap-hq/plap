@@ -21,7 +21,7 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.responses.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
+from plap.llms.completions.tokens import measure_prompt_tokens
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
@@ -41,6 +41,7 @@ from plap.responses.ingest import (
     truncate_transcript,
 )
 from plap.responses.io import ReasoningDraft, ResponseEventIO
+from plap.responses.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 from plap.responses.models import (
     Actor,
     ChatMessageSpan,
@@ -53,7 +54,6 @@ from plap.responses.models import (
     TranscriptMessage,
     UsageLedger,
 )
-from plap.responses.tokens import measure_prompt_tokens
 from plap.responses.tools import (
     IToolCallPolicyResolver,
     ToolPolicy,
@@ -652,7 +652,7 @@ def _measure_budgeted_transcript_tokens(
     actor_config: RuntimeActorConfig,
 ) -> int:
     try:
-        return measure_prompt_tokens([_transcript_wrapper(transcript)], actor_config=actor_config)
+        return measure_prompt_tokens([_transcript_wrapper(transcript)], tokenizer_config=actor_config)
     except Exception as exc:
         raise _debate_unavailable_error(
             reason="debate_transcript_tokenizer_failed",

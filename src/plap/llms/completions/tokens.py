@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import Any
+from typing import Any, Protocol
 
 import msgspec
 import tiktoken
@@ -10,13 +10,14 @@ import tiktoken
 from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
 from plap.llms.completions.chat import ChatMessage as LLMChatMessage
 from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
-from plap.responses.json_utils import (
-    JSONInvalidError,
-    normalize_json_text_with_repair_or_original,
-    parse_json_value_with_repair,
-)
-from plap.responses.encoding_dsv4 import encode_messages as encode_dsv4_messages
-from plap.settings import RuntimeActorConfig
+from plap.llms.completions.encoding_dsv4 import encode_messages as encode_dsv4_messages
+
+
+class ITokenizerConfig(Protocol):
+    tokenizer_hf_repo: str | None
+    tokenizer_revision: str | None
+    tokenizer_trust_remote_code: bool
+
 
 _DEFAULT_ENCODING = "o200k_base"
 _DSV4_TOKENIZER_REPOS = frozenset({"deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro"})
@@ -38,8 +39,18 @@ def _json_text(value: object) -> str:
     return msgspec.json.encode(value, order="deterministic").decode()
 
 
+def _decoded_json_or_none(value: str) -> object | None:
+    try:
+        return msgspec.json.decode(value.encode())
+    except msgspec.DecodeError:
+        return None
+
+
 def _canonical_json_text(value: str) -> str:
-    return normalize_json_text_with_repair_or_original(value)
+    decoded = _decoded_json_or_none(value)
+    if decoded is None:
+        return value
+    return _json_text(decoded)
 
 
 def _tool_definition_value(tool: ChatTool) -> dict[str, object]:
@@ -70,9 +81,8 @@ def _tool_call_value(tool_call: LLMChatToolCall, *, arguments: object) -> dict[s
 
 
 def _template_tool_call(tool_call: LLMChatToolCall) -> dict[str, object]:
-    try:
-        arguments: object = parse_json_value_with_repair(tool_call.arguments)
-    except JSONInvalidError:
+    arguments = _decoded_json_or_none(tool_call.arguments)
+    if arguments is None:
         arguments = tool_call.arguments
     return _tool_call_value(tool_call, arguments=arguments)
 
@@ -120,15 +130,20 @@ def _fallback_message_value(message: LLMChatMessage) -> dict[str, object]:
     return value
 
 
-def _fallback_request_value(request: ChatCompletionRequest) -> dict[str, object]:
+def _fallback_request_value(
+    messages: Sequence[LLMChatMessage],
+    *,
+    tools: Sequence[ChatTool],
+    response_format: ChatResponseFormat | None,
+) -> dict[str, object]:
     value: dict[str, object] = {
-        "messages": [_fallback_message_value(message) for message in request.messages],
+        "messages": [_fallback_message_value(message) for message in messages],
     }
-    if request.tools:
-        value["tools"] = _tool_definitions_value(request.tools)
-    response_format = _response_format_value(request.response_format)
-    if response_format is not None:
-        value["response_format"] = response_format
+    if tools:
+        value["tools"] = _tool_definitions_value(tools)
+    rendered_response_format = _response_format_value(response_format)
+    if rendered_response_format is not None:
+        value["response_format"] = rendered_response_format
     return value
 
 
@@ -160,8 +175,8 @@ def _reasoning_value(message: LLMChatMessage) -> str | None:
     return _json_text(value)
 
 
-def _uses_dsv4_encoding(actor_config: RuntimeActorConfig) -> bool:
-    return actor_config.tokenizer_hf_repo in _DSV4_TOKENIZER_REPOS
+def _uses_dsv4_encoding(tokenizer_config: ITokenizerConfig) -> bool:
+    return tokenizer_config.tokenizer_hf_repo in _DSV4_TOKENIZER_REPOS
 
 
 def _dsv4_message(message: LLMChatMessage) -> dict[str, object] | None:
@@ -191,109 +206,58 @@ def _dsv4_message_target_index(messages: list[dict[str, object]]) -> int:
     return 0
 
 
-def _dsv4_messages(request: ChatCompletionRequest) -> list[dict[str, object]] | None:
-    messages: list[dict[str, object]] = []
-    for message in request.messages:
+def _dsv4_messages(
+    messages: Sequence[LLMChatMessage],
+    *,
+    tools: Sequence[ChatTool],
+    response_format: ChatResponseFormat | None,
+) -> list[dict[str, object]] | None:
+    rendered_messages: list[dict[str, object]] = []
+    for message in messages:
         rendered = _dsv4_message(message)
         if rendered is None:
             return None
-        messages.append(rendered)
-    tools = _tool_definitions_value(request.tools)
-    response_format = _response_format_value(request.response_format)
-    if tools or response_format is not None:
-        target = messages[_dsv4_message_target_index(messages)]
-        if tools:
-            target["tools"] = tools
-        if response_format is not None:
-            target["response_format"] = response_format
-    return messages
+        rendered_messages.append(rendered)
+    rendered_tools = _tool_definitions_value(tools)
+    rendered_response_format = _response_format_value(response_format)
+    if rendered_tools or rendered_response_format is not None:
+        target = rendered_messages[_dsv4_message_target_index(rendered_messages)]
+        if rendered_tools:
+            target["tools"] = rendered_tools
+        if rendered_response_format is not None:
+            target["response_format"] = rendered_response_format
+    return rendered_messages
 
 
-def _dsv4_thinking_mode(request: ChatCompletionRequest) -> str:
-    if request.reasoning_effort not in {None, "none"}:
+def _dsv4_thinking_mode(
+    messages: Sequence[LLMChatMessage],
+    *,
+    reasoning_effort: ReasoningEffort | None,
+) -> str:
+    if reasoning_effort not in {None, "none"}:
         return "thinking"
-    if any(message.reasoning_content is not None for message in request.messages):
+    if any(message.reasoning_content is not None for message in messages):
         return "thinking"
     return "chat"
 
 
-def _dsv4_reasoning_effort(request: ChatCompletionRequest) -> str | None:
-    if request.reasoning_effort == "xhigh":
+def _dsv4_reasoning_effort(reasoning_effort: ReasoningEffort | None) -> str | None:
+    if reasoning_effort == "xhigh":
         return "max"
-    if request.reasoning_effort == "high":
+    if reasoning_effort == "high":
         return "high"
     return None
 
 
-def _dsv4_has_tool_history(request: ChatCompletionRequest) -> bool:
-    if request.tools:
+def _dsv4_has_tool_history(messages: Sequence[LLMChatMessage], *, tools: Sequence[ChatTool]) -> bool:
+    if tools:
         return True
-    return any(message.tool_calls or message.role == ChatRole.TOOL for message in request.messages)
-
-
-def _tokenize_text_with_actor(text: str, *, actor_config: RuntimeActorConfig) -> int:
-    if actor_config.tokenizer_hf_repo is None:
-        return estimate_text_tokens(text)
-    tokenizer = _hf_tokenizer(
-        actor_config.tokenizer_hf_repo,
-        actor_config.tokenizer_revision,
-        actor_config.tokenizer_trust_remote_code,
-    )
-    return max(1, len(tokenizer.encode(text, add_special_tokens=False)))
-
-
-def _dsv4_request_token_count(
-    request: ChatCompletionRequest,
-    *,
-    actor_config: RuntimeActorConfig,
-) -> int | None:
-    if not _uses_dsv4_encoding(actor_config):
-        return None
-    messages = _dsv4_messages(request)
-    if messages is None:
-        return None
-    prompt = encode_dsv4_messages(
-        messages,
-        thinking_mode=_dsv4_thinking_mode(request),
-        drop_thinking=not _dsv4_has_tool_history(request),
-        reasoning_effort=_dsv4_reasoning_effort(request),
-    )
-    return _tokenize_text_with_actor(prompt, actor_config=actor_config)
+    return any(message.tool_calls or message.role == ChatRole.TOOL for message in messages)
 
 
 def _tokenizer_chat_template_supported(tokenizer: Any) -> bool:
     chat_template = getattr(tokenizer, "chat_template", None)
     return callable(getattr(tokenizer, "apply_chat_template", None)) and bool(chat_template)
-
-
-def _template_request_token_count(
-    request: ChatCompletionRequest,
-    *,
-    actor_config: RuntimeActorConfig,
-) -> int | None:
-    if actor_config.tokenizer_hf_repo is None:
-        return None
-    tokenizer = _hf_tokenizer(
-        actor_config.tokenizer_hf_repo,
-        actor_config.tokenizer_revision,
-        actor_config.tokenizer_trust_remote_code,
-    )
-    if not _tokenizer_chat_template_supported(tokenizer):
-        return None
-    token_ids = tokenizer.apply_chat_template(
-        [_template_message(message) for message in request.messages],
-        tools=_tool_definitions_value(request.tools) or None,
-        response_format=_response_format_value(request.response_format),
-        add_generation_prompt=False,
-        tokenize=True,
-    )
-    count = max(1, len(token_ids))
-    for message in request.messages:
-        reasoning_text = _reasoning_value(message)
-        if reasoning_text is None:
-            continue
-        count += _tokenize_text_with_actor(reasoning_text, actor_config=actor_config)
-    return count
 
 
 @lru_cache(maxsize=32)
@@ -319,35 +283,128 @@ def _hf_tokenizer(
     )
 
 
-def measure_prompt_tokens(
+def _tokenize_text_with_tokenizer_config(text: str, *, tokenizer_config: ITokenizerConfig) -> int:
+    if tokenizer_config.tokenizer_hf_repo is None:
+        return estimate_text_tokens(text)
+    tokenizer = _hf_tokenizer(
+        tokenizer_config.tokenizer_hf_repo,
+        tokenizer_config.tokenizer_revision,
+        tokenizer_config.tokenizer_trust_remote_code,
+    )
+    return max(1, len(tokenizer.encode(text, add_special_tokens=False)))
+
+
+def _dsv4_prompt_token_count(
     messages: Sequence[LLMChatMessage],
     *,
-    actor_config: RuntimeActorConfig,
+    tokenizer_config: ITokenizerConfig,
+    tools: Sequence[ChatTool],
+    response_format: ChatResponseFormat | None,
+    reasoning_effort: ReasoningEffort | None,
+) -> int | None:
+    if not _uses_dsv4_encoding(tokenizer_config):
+        return None
+    rendered_messages = _dsv4_messages(messages, tools=tools, response_format=response_format)
+    if rendered_messages is None:
+        return None
+    prompt = encode_dsv4_messages(
+        rendered_messages,
+        thinking_mode=_dsv4_thinking_mode(messages, reasoning_effort=reasoning_effort),
+        drop_thinking=not _dsv4_has_tool_history(messages, tools=tools),
+        reasoning_effort=_dsv4_reasoning_effort(reasoning_effort),
+    )
+    return _tokenize_text_with_tokenizer_config(prompt, tokenizer_config=tokenizer_config)
+
+
+def _template_prompt_token_count(
+    messages: Sequence[LLMChatMessage],
+    *,
+    tokenizer_config: ITokenizerConfig,
+    tools: Sequence[ChatTool],
+    response_format: ChatResponseFormat | None,
+) -> int | None:
+    if tokenizer_config.tokenizer_hf_repo is None:
+        return None
+    tokenizer = _hf_tokenizer(
+        tokenizer_config.tokenizer_hf_repo,
+        tokenizer_config.tokenizer_revision,
+        tokenizer_config.tokenizer_trust_remote_code,
+    )
+    if not _tokenizer_chat_template_supported(tokenizer):
+        return None
+    token_ids = tokenizer.apply_chat_template(
+        [_template_message(message) for message in messages],
+        tools=_tool_definitions_value(tools) or None,
+        response_format=_response_format_value(response_format),
+        add_generation_prompt=False,
+        tokenize=True,
+    )
+    count = max(1, len(token_ids))
+    for message in messages:
+        reasoning_text = _reasoning_value(message)
+        if reasoning_text is None:
+            continue
+        count += _tokenize_text_with_tokenizer_config(reasoning_text, tokenizer_config=tokenizer_config)
+    return count
+
+
+def _measure_prompt_surface_tokens(
+    messages: Sequence[LLMChatMessage],
+    *,
+    tokenizer_config: ITokenizerConfig,
     tools: Sequence[ChatTool] = (),
     response_format: ChatResponseFormat | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
-    return measure_request_tokens(
-        ChatCompletionRequest(
-            model=actor_config.model,
-            messages=list(messages),
-            tools=list(tools),
-            response_format=response_format,
-            reasoning_effort=reasoning_effort,
-        ),
-        actor_config=actor_config,
+    dsv4_count = _dsv4_prompt_token_count(
+        messages,
+        tokenizer_config=tokenizer_config,
+        tools=tools,
+        response_format=response_format,
+        reasoning_effort=reasoning_effort,
+    )
+    if dsv4_count is not None:
+        return dsv4_count
+    template_count = _template_prompt_token_count(
+        messages,
+        tokenizer_config=tokenizer_config,
+        tools=tools,
+        response_format=response_format,
+    )
+    if template_count is not None:
+        return template_count
+    return _tokenize_text_with_tokenizer_config(
+        _json_text(_fallback_request_value(messages, tools=tools, response_format=response_format)),
+        tokenizer_config=tokenizer_config,
+    )
+
+
+def measure_prompt_tokens(
+    messages: Sequence[LLMChatMessage],
+    *,
+    tokenizer_config: ITokenizerConfig,
+    tools: Sequence[ChatTool] = (),
+    response_format: ChatResponseFormat | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> int:
+    return _measure_prompt_surface_tokens(
+        messages,
+        tokenizer_config=tokenizer_config,
+        tools=tools,
+        response_format=response_format,
+        reasoning_effort=reasoning_effort,
     )
 
 
 def measure_request_tokens(
     request: ChatCompletionRequest,
     *,
-    actor_config: RuntimeActorConfig,
+    tokenizer_config: ITokenizerConfig,
 ) -> int:
-    dsv4_count = _dsv4_request_token_count(request, actor_config=actor_config)
-    if dsv4_count is not None:
-        return dsv4_count
-    template_count = _template_request_token_count(request, actor_config=actor_config)
-    if template_count is not None:
-        return template_count
-    return _tokenize_text_with_actor(_json_text(_fallback_request_value(request)), actor_config=actor_config)
+    return _measure_prompt_surface_tokens(
+        request.messages,
+        tokenizer_config=tokenizer_config,
+        tools=request.tools,
+        response_format=request.response_format,
+        reasoning_effort=request.reasoning_effort,
+    )

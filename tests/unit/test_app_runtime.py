@@ -149,14 +149,14 @@ def test_app_runtime_validates_runtime_profile_tokenizers(monkeypatch: pytest.Mo
     settings = _settings()
     seen: list[tuple[str, str | None, bool]] = []
 
-    def fake_measure_request_tokens(request, *, actor_config):
+    def fake_measure_request_tokens(request, *, tokenizer_config):
         assert request.messages[0].role == "developer"
         assert request.messages[1].role == "user"
         seen.append(
             (
-                actor_config.tokenizer_hf_repo,
-                actor_config.tokenizer_revision,
-                actor_config.tokenizer_trust_remote_code,
+                tokenizer_config.tokenizer_hf_repo,
+                tokenizer_config.tokenizer_revision,
+                tokenizer_config.tokenizer_trust_remote_code,
             )
         )
         return 1
@@ -174,9 +174,9 @@ def test_app_runtime_validates_runtime_profile_tokenizers(monkeypatch: pytest.Mo
 def test_app_runtime_rejects_invalid_runtime_profile_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings()
 
-    def fake_measure_request_tokens(request, *, actor_config):
+    def fake_measure_request_tokens(request, *, tokenizer_config):
         _ = request
-        if actor_config.tokenizer_hf_repo == "deepseek-ai/DeepSeek-V4-Flash":
+        if tokenizer_config.tokenizer_hf_repo == "deepseek-ai/DeepSeek-V4-Flash":
             raise AttributeError("missing max_position_embeddings")
         return 1
 

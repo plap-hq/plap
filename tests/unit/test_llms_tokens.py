@@ -4,9 +4,9 @@ import json
 
 import transformers
 
+import plap.llms.completions.tokens as tokens_module
 from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatMessage, ChatResponseFormat, ChatTool, ChatToolCall
-from plap.responses import tokens as tokens_module
-from plap.responses.tokens import measure_prompt_tokens, measure_request_tokens
+from plap.llms.completions.tokens import measure_prompt_tokens, measure_request_tokens
 from plap.settings import RuntimeActorConfig
 
 
@@ -18,7 +18,7 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
         captured_payloads.append(text)
         return len(text)
 
-    monkeypatch.setattr("plap.responses.tokens.estimate_text_tokens", fake_estimate_text_tokens)
+    monkeypatch.setattr("plap.llms.completions.tokens.estimate_text_tokens", fake_estimate_text_tokens)
 
     measure_prompt_tokens(
         [
@@ -31,7 +31,7 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
                 reasoning_details=[{"b": 2, "a": 1}],
             )
         ],
-        actor_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
     )
 
     assert len(captured_payloads) == 1
@@ -80,7 +80,7 @@ def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch
             encoded_reasoning.append(text)
             return [7, 8]
 
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_request_tokens(
         ChatCompletionRequest(
@@ -105,7 +105,7 @@ def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch
                 )
             ],
         ),
-        actor_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 5
@@ -130,6 +130,50 @@ def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch
         }
     ]
     assert [json.loads(text) for text in encoded_reasoning] == [{"reasoning_content": "kept thinking"}]
+
+
+def test_measure_request_tokens_keeps_invalid_template_tool_arguments_raw(monkeypatch) -> None:
+    captured_messages = None
+
+    class _FakeTokenizer:
+        chat_template = "fake-template"
+
+        def apply_chat_template(self, messages, *, tools, response_format, add_generation_prompt, tokenize):
+            nonlocal captured_messages
+            captured_messages = messages
+            assert tools is None
+            assert response_format is None
+            assert add_generation_prompt is False
+            assert tokenize is True
+            return [1]
+
+        def encode(self, text, add_special_tokens=False):
+            raise AssertionError("reasoning encoding should not run")
+
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+
+    count = measure_request_tokens(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b",
+            messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="answer",
+                    tool_calls=[ChatToolCall(id="call_1", name="search", arguments="{'query':'cats'}")],
+                )
+            ],
+        ),
+        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+    )
+
+    assert count == 1
+    assert captured_messages == [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{'query':'cats'}"}}],
+        }
+    ]
 
 
 def test_hf_tokenizer_uses_direct_fast_loader_for_step3p5(monkeypatch) -> None:
@@ -190,8 +234,8 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_flash(monkeypatch) -> None
             assert add_special_tokens is False
             return [1, 2, 3, 4]
 
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", fake_encode_messages)
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_request_tokens(
         ChatCompletionRequest(
@@ -216,7 +260,7 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_flash(monkeypatch) -> None
                 )
             ],
         ),
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 4
@@ -260,6 +304,48 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_flash(monkeypatch) -> None
     ]
 
 
+def test_measure_prompt_tokens_keeps_invalid_fallback_tool_arguments_raw(monkeypatch) -> None:
+    captured_payloads: list[str] = []
+
+    def fake_estimate_text_tokens(text: str | None) -> int:
+        assert text is not None
+        captured_payloads.append(text)
+        return len(text)
+
+    monkeypatch.setattr("plap.llms.completions.tokens.estimate_text_tokens", fake_estimate_text_tokens)
+
+    measure_prompt_tokens(
+        [
+            ChatMessage(
+                role="assistant",
+                content="visible content",
+                tool_calls=[ChatToolCall(id="tool_call_1", name="search", arguments="{'b':2,'a':1}")],
+            )
+        ],
+        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+    )
+
+    assert len(captured_payloads) == 1
+    assert json.loads(captured_payloads[0]) == {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "visible content",
+                "tool_calls": [
+                    {
+                        "id": "tool_call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": "{'b':2,'a':1}",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+
 def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkeypatch) -> None:
     encoded = []
 
@@ -271,8 +357,8 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkey
         def encode(self, text, add_special_tokens=False):
             return [1]
 
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", fake_encode_messages)
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_request_tokens(
         ChatCompletionRequest(
@@ -280,7 +366,7 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkey
             messages=[ChatMessage(role="user", content="hello")],
             reasoning_effort="xhigh",
         ),
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
     )
 
     assert count == 1
@@ -298,8 +384,8 @@ def test_measure_prompt_tokens_keeps_dsv4_thinking_for_tool_history_without_requ
         def encode(self, text, add_special_tokens=False):
             return [1]
 
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", fake_encode_messages)
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_prompt_tokens(
         [
@@ -313,7 +399,7 @@ def test_measure_prompt_tokens_keeps_dsv4_thinking_for_tool_history_without_requ
             ChatMessage(role="tool", content="cats found", tool_call_id="call_1"),
             ChatMessage(role="user", content="thanks"),
         ],
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1
@@ -354,8 +440,8 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_tools(monkeypa
         def encode(self, text, add_special_tokens=False):
             return [1]
 
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", fake_encode_messages)
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_request_tokens(
         ChatCompletionRequest(
@@ -371,7 +457,7 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_tools(monkeypa
                 )
             ],
         ),
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1
@@ -408,8 +494,8 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_response_forma
         def encode(self, text, add_special_tokens=False):
             return [1]
 
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", fake_encode_messages)
-    monkeypatch.setattr("plap.responses.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+    monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
     count = measure_request_tokens(
         ChatCompletionRequest(
@@ -427,7 +513,7 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_response_forma
                 strict=True,
             ),
         ),
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1
@@ -456,9 +542,12 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_response_forma
 
 
 def test_measure_request_tokens_falls_back_when_dsv4_only_has_reasoning_details(monkeypatch) -> None:
-    monkeypatch.setattr("plap.responses.tokens.encode_dsv4_messages", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(
+        "plap.llms.completions.tokens.encode_dsv4_messages", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError())
+    )
 
-    def fake_tokenize(text: str, *, actor_config):
+    def fake_tokenize(text: str, *, tokenizer_config):
+        _ = tokenizer_config
         assert json.loads(text) == {
             "messages": [
                 {
@@ -469,14 +558,14 @@ def test_measure_request_tokens_falls_back_when_dsv4_only_has_reasoning_details(
         }
         return 17
 
-    monkeypatch.setattr("plap.responses.tokens._tokenize_text_with_actor", fake_tokenize)
+    monkeypatch.setattr("plap.llms.completions.tokens._tokenize_text_with_tokenizer_config", fake_tokenize)
 
     count = measure_request_tokens(
         ChatCompletionRequest(
             model="deepseek/deepseek-v4-flash",
             messages=[ChatMessage(role="assistant", reasoning_details=[{"type": "reasoning.summary", "text": "hi"}])],
         ),
-        actor_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 17
