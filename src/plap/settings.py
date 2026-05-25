@@ -77,10 +77,10 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
-            reviewer_max_transcript_tokens=800_000,
-            arbitrator_max_transcript_tokens=300_000,
-            compact_threshold=250_000,
+            reasoning_summarizer=RuntimeActorConfig(model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"),
+            reviewer_max_transcript_tokens=256_000,
+            arbitrator_max_transcript_tokens=256_000,
+            compact_threshold=256_000,
             compact_max_rounds=0,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
@@ -178,10 +178,10 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:deepinfra"),
-            reviewer_max_transcript_tokens=800_000,
-            arbitrator_max_transcript_tokens=300_000,
-            compact_threshold=250_000,
+            reasoning_summarizer=RuntimeActorConfig(model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"),
+            reviewer_max_transcript_tokens=256_000,
+            arbitrator_max_transcript_tokens=256_000,
+            compact_threshold=256_000,
             compact_max_rounds=0,
             debate_max_rounds=2,
             default_reasoning_effort=ReasoningEffort.MEDIUM,
@@ -1021,8 +1021,8 @@ class Settings(BaseSettings):
     log_json: bool = False
     log_file: str | None = None
     llm_api_keys: dict[str, str] = Field(default_factory=_default_llm_api_keys)
-    tool_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
-    tool_call_effect_classifier_model: str = "lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:deepinfra"
+    tool_effect_classifier_model: str = "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
+    tool_call_effect_classifier_model: str = "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
     tool_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_call_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_classifier_max_concurrency: int = 2

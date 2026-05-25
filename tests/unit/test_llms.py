@@ -33,6 +33,7 @@ from plap.llms.completions.errors import (
     ChatCompletionContextLengthExceededError,
     ChatCompletionInvalidRequestError,
     ChatCompletionProviderError,
+    ChatCompletionRateLimitError,
     ChatCompletionTimeoutError,
     ChatCompletionUnsupportedRequestError,
     is_context_length_exceeded_error,
@@ -70,6 +71,16 @@ def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, obje
 
     monkeypatch.setattr(router_module, "log_debug", record)
     return events
+
+
+def _capture_router_retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    delays: list[float] = []
+
+    async def record(delay_seconds: float) -> None:
+        delays.append(delay_seconds)
+
+    monkeypatch.setattr(router_module, "_sleep_for_transient_retry", record)
+    return delays
 
 
 def _capture_openai_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
@@ -850,7 +861,7 @@ def test_cerebras_provider_accepts_supported_models() -> None:
     assert provider.lookup("zai-glm-4.7")
 
 
-def test_groq_request_quirks_drop_unsupported_fields_and_enable_reasoning() -> None:
+def test_groq_request_quirks_enable_reasoning_for_supported_models() -> None:
     request = _request_for_model("openai/gpt-oss-20b")
 
     body = _body_for(_groq_provider(), request, stream=True)
@@ -864,6 +875,17 @@ def test_groq_request_quirks_drop_unsupported_fields_and_enable_reasoning() -> N
     assert "top_logprobs" not in body
     assert "prompt_cache_key" not in body
     assert "metadata" not in body
+
+
+def test_groq_request_quirks_skip_include_reasoning_for_unsupported_models() -> None:
+    request = replace(_request_for_model("llama-3.1-8b-instant"), response_format=None)
+
+    body = _body_for(_groq_provider(), request, stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["messages"][1] == {"role": "user", "content": "hello"}
+    assert body["parallel_tool_calls"] is True
+    assert "extra_body" not in body
 
 
 def test_groq_provider_accepts_supported_models() -> None:
@@ -1127,6 +1149,14 @@ async def test_openai_provider_normalizes_timeout_errors_and_logs_timeout_phase(
     assert event["request_body_bytes"] > 0
 
 
+async def test_openai_provider_defaults_sdk_retries_to_zero() -> None:
+    provider = _lightning_provider()
+
+    assert provider._client.max_retries == 0
+
+    await provider._client.close()
+
+
 def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
     assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
     assert is_context_length_exceeded_error(
@@ -1220,8 +1250,9 @@ async def test_fireworks_provider_normalizes_context_length_errors() -> None:
         await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
 
 
-async def test_router_complete_retries_same_model_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_complete_retries_transient_errors_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
     primary = _StubChatClient(complete_result=ChatCompletionProviderError("boom"))
     fallback = _StubChatClient(
         complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
@@ -1241,16 +1272,20 @@ async def test_router_complete_retries_same_model_before_fallback(monkeypatch: p
     )
 
     assert result.model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
-    assert [request.model for request in primary.complete_requests] == ["qwen3.5-9b", "qwen3.5-9b"]
+    assert [request.model for request in primary.complete_requests] == ["qwen3.5-9b", "qwen3.5-9b", "qwen3.5-9b"]
     assert fallback.complete_requests[0].model == "XiaomiMiMo/MiMo-V2.5-Pro"
     assert [event["event"] for event in events] == [
-        "llm.router.same_model_retry",
+        "llm.router.attempt_retry",
+        "llm.router.attempt_retry",
         "llm.router.attempt_failed",
         "llm.router.fallback_succeeded",
     ]
+    assert len(delays) == 2
+    assert 0.25 <= delays[0] <= 0.5
+    assert 0.5 <= delays[1] <= 1.0
 
 
-async def test_router_complete_does_not_retry_same_model_for_invalid_request(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_complete_does_not_retry_current_attempt_for_invalid_request(monkeypatch: pytest.MonkeyPatch) -> None:
     events = _capture_router_logs(monkeypatch)
     primary = _StubChatClient(complete_result=ChatCompletionInvalidRequestError("bad request"))
     fallback = _StubChatClient(
@@ -1278,8 +1313,39 @@ async def test_router_complete_does_not_retry_same_model_for_invalid_request(mon
     ]
 
 
-async def test_router_stream_retries_same_model_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_complete_falls_back_immediately_for_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
+    primary = _StubChatClient(complete_result=ChatCompletionRateLimitError("rate limited"))
+    fallback = _StubChatClient(
+        complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    result = await router.complete(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert result.model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [request.model for request in primary.complete_requests] == ["qwen3.5-9b"]
+    assert delays == []
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_router_stream_retries_transient_errors_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
     primary = _StubChatClient(stream_result=[ChatCompletionProviderError("boom")])
     fallback = _StubChatClient(
         stream_result=[
@@ -1305,13 +1371,17 @@ async def test_router_stream_retries_same_model_before_fallback(monkeypatch: pyt
     ]
 
     assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
-    assert [request.model for request in primary.stream_requests] == ["qwen3.5-9b", "qwen3.5-9b"]
+    assert [request.model for request in primary.stream_requests] == ["qwen3.5-9b", "qwen3.5-9b", "qwen3.5-9b"]
     assert fallback.stream_requests[0].model == "XiaomiMiMo/MiMo-V2.5-Pro"
     assert [event["event"] for event in events] == [
-        "llm.router.same_model_retry",
+        "llm.router.attempt_retry",
+        "llm.router.attempt_retry",
         "llm.router.attempt_failed",
         "llm.router.fallback_succeeded",
     ]
+    assert len(delays) == 2
+    assert 0.25 <= delays[0] <= 0.5
+    assert 0.5 <= delays[1] <= 1.0
 
 
 async def test_router_stream_does_not_fallback_after_first_delta(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1403,6 +1473,7 @@ async def test_router_stream_times_out_between_deltas_without_fallback(monkeypat
 
 async def test_router_stream_falls_back_after_first_delta_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
 
     class SlowClient(IChatCompletionClient):
         def __init__(self) -> None:
@@ -1445,12 +1516,16 @@ async def test_router_stream_falls_back_after_first_delta_timeout(monkeypatch: p
     ]
 
     assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
-    assert [request.model for request in primary.requests] == ["qwen3.5-9b", "qwen3.5-9b"]
+    assert [request.model for request in primary.requests] == ["qwen3.5-9b", "qwen3.5-9b", "qwen3.5-9b"]
     assert [event["event"] for event in events] == [
-        "llm.router.same_model_retry",
+        "llm.router.attempt_retry",
+        "llm.router.attempt_retry",
         "llm.router.attempt_failed",
         "llm.router.fallback_succeeded",
     ]
+    assert len(delays) == 2
+    assert 0.25 <= delays[0] <= 0.5
+    assert 0.5 <= delays[1] <= 1.0
 
 
 async def test_unavailable_chat_client_rejects_unknown_models() -> None:

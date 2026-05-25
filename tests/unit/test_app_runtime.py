@@ -230,7 +230,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
 
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_api_keys=_provider_keys("lightning", "openrouter"),
+        llm_api_keys=_provider_keys("cerebras", "lightning", "openrouter"),
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -261,7 +261,7 @@ def test_app_runtime_builds_tool_classifier_for_configured_model() -> None:
 
 def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_api_keys=_provider_keys("lightning", "openrouter"),
+        llm_api_keys=_provider_keys("cerebras", "lightning", "openrouter"),
     )
     client = _create_chat_completion_client(settings)
 

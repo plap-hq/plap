@@ -204,7 +204,8 @@ class OpenAIProvider(Provider):
         models: dict[str, tuple] | None = None,
     ) -> None:
         super().__init__(name=name, quirks=quirks, models=models)
-        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # Keep retry ownership in our router so provider fallback and timing stay explicit.
+        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0)
 
     async def complete(self, call: Call) -> dict[str, Any]:
         try:
@@ -375,12 +376,13 @@ LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
     "lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b": (),
 }
 GROQ_NO_PARALLEL_TOOL_CALLS: tuple[Quirk, ...] = (Set("parallel_tool_calls", False),)
+GROQ_INCLUDE_REASONING: tuple[Quirk, ...] = (ExtraBody({"include_reasoning": True}),)
 GROQ_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "openai/gpt-oss-20b": GROQ_NO_PARALLEL_TOOL_CALLS,
-    "openai/gpt-oss-safeguard-20b": GROQ_NO_PARALLEL_TOOL_CALLS,
-    "openai/gpt-oss-120b": GROQ_NO_PARALLEL_TOOL_CALLS,
+    "openai/gpt-oss-20b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
+    "openai/gpt-oss-safeguard-20b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
+    "openai/gpt-oss-120b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
     "meta-llama/llama-4-scout-17b-16e-instruct": (),
-    "qwen/qwen3-32b": (RejectResponseFormat("json_schema"),),
+    "qwen/qwen3-32b": (RejectResponseFormat("json_schema"), *GROQ_INCLUDE_REASONING),
     "llama-3.3-70b-versatile": (RejectResponseFormat("json_schema"),),
     "llama-3.1-8b-instant": (RejectResponseFormat("json_schema"),),
 }
@@ -444,7 +446,7 @@ def build_gmicloud_provider(*, api_key: str) -> Provider:
             Only(*GMICLOUD_FIELDS),
             EnsureAssistantReasoningContent(),
             Rename("max_completion_tokens", "max_tokens"),
-            DropIf("reasoning_effort", "none"),
+            DropIf("reasoning_effort", "none"), #gmi does not have a real thinking disable switch
             ExtraBody({"context_length_exceeded_behavior": "error"}),
         ),
         models=GMICLOUD_MODELS,
@@ -460,7 +462,6 @@ def build_groq_provider(*, api_key: str) -> Provider:
             SystemRole(),
             Only(*GROQ_FIELDS),
             DropMessageName(),
-            ExtraBody({"include_reasoning": True}),
             RenameOutput("reasoning", "reasoning_content"),
         ),
         models=GROQ_MODELS,

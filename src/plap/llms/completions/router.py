@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import random
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
 
@@ -23,7 +24,9 @@ from plap.logging import log_debug
 logger = structlog.get_logger(__name__)
 DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS = 60.0
 DEFAULT_STREAM_IDLE_DELTA_TIMEOUT_SECONDS = 60.0
-SAME_MODEL_RETRIES_BEFORE_FALLBACK = 1
+TRANSIENT_RETRIES_BEFORE_FALLBACK = 2
+TRANSIENT_RETRY_INITIAL_DELAY_SECONDS = 0.5
+TRANSIENT_RETRY_MAX_DELAY_SECONDS = 8.0
 
 
 def _model_attempts(model: str) -> tuple[str, ...]:
@@ -42,6 +45,18 @@ def _provider_model(model: str, prefix: str) -> str:
 
 def _unsupported_model(model: str) -> ChatCompletionUnsupportedRequestError:
     return ChatCompletionUnsupportedRequestError(f"No chat completion provider configured for model {model!r}")
+
+
+def _transient_retry_delay_seconds(*, retry_index: int) -> float:
+    base_delay = min(
+        TRANSIENT_RETRY_INITIAL_DELAY_SECONDS * pow(2.0, retry_index - 1),
+        TRANSIENT_RETRY_MAX_DELAY_SECONDS,
+    )
+    return (base_delay / 2.0) + (random.random() * (base_delay / 2.0))
+
+
+async def _sleep_for_transient_retry(delay_seconds: float) -> None:
+    await anyio.sleep(delay_seconds)
 
 
 def _log_router_attempt_failed(
@@ -68,28 +83,30 @@ def _log_router_attempt_failed(
     )
 
 
-def _log_router_same_model_retry(
+def _log_router_attempt_retry(
     *,
     request_model: str,
     attempt_model: str,
     attempt_index: int,
     attempt_count: int,
-    same_model_try_index: int,
-    same_model_try_count: int,
+    retry_index: int,
+    retry_count: int,
+    retry_delay_seconds: float,
     exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
     streaming: bool,
 ) -> None:
     log_debug(
         logger,
-        "llm.router.same_model_retry",
+        "llm.router.attempt_retry",
         attempt_count=attempt_count,
         attempt_index=attempt_index,
         attempt_model=attempt_model,
         error_message=str(exc),
         error_type=type(exc).__name__,
         request_model=request_model,
-        same_model_try_count=same_model_try_count,
-        same_model_try_index=same_model_try_index,
+        retry_count=retry_count,
+        retry_delay_seconds=retry_delay_seconds,
+        retry_index=retry_index,
         streaming=streaming,
     )
 
@@ -113,7 +130,7 @@ def _log_router_fallback_succeeded(
     )
 
 
-def _should_retry_same_model(
+def _is_transient_retryable_error(
     exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
 ) -> bool:
     if isinstance(exc, ChatCompletionTimeoutError):
@@ -139,6 +156,66 @@ def _log_router_fallback_exhausted(
         request_model=request_model,
         streaming=streaming,
     )
+
+
+async def _close_async_iterator(iterator: AsyncIterator[ChatCompletionDelta]) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if callable(aclose):
+        try:
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+        return
+
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+
+
+async def _next_stream_delta(
+    iterator: AsyncIterator[ChatCompletionDelta],
+    *,
+    timeout_seconds: float | None,
+    attempt_model: str,
+    timeout_label: str,
+) -> ChatCompletionDelta | None:
+    try:
+        if timeout_seconds is None:
+            return await anext(iterator)
+        with anyio.fail_after(timeout_seconds):
+            return await anext(iterator)
+    except StopAsyncIteration:
+        return None
+    except TimeoutError as exc:
+        await _close_async_iterator(iterator)
+        raise ChatCompletionTimeoutError(
+            f"stream for model {attempt_model!r} produced no {timeout_label} within {timeout_seconds} seconds"
+        ) from exc
+
+
+async def _first_stream_delta(
+    iterator: AsyncIterator[ChatCompletionDelta],
+    *,
+    timeout_seconds: float | None,
+    attempt_model: str,
+) -> ChatCompletionDelta:
+    delta = await _next_stream_delta(
+        iterator,
+        timeout_seconds=timeout_seconds,
+        attempt_model=attempt_model,
+        timeout_label="first delta",
+    )
+    if delta is not None:
+        return delta
+    await _close_async_iterator(iterator)
+    raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta")
 
 
 @dataclass(frozen=True)
@@ -168,30 +245,34 @@ class RoutingChatCompletionClient(IChatCompletionClient):
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
         attempts = _model_attempts(request.model)
         attempt_count = len(attempts)
-        same_model_try_count = SAME_MODEL_RETRIES_BEFORE_FALLBACK + 1
+        attempt_try_count = TRANSIENT_RETRIES_BEFORE_FALLBACK + 1
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
             attempt_request = replace(request, model=provider_model)
-            for same_model_try_index in range(1, same_model_try_count + 1):
+            for attempt_try_index in range(1, attempt_try_count + 1):
                 try:
                     result = await route.client.complete(attempt_request)
                 except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
                     last_error = exc
                     last_attempt_model = attempt_model
-                    if same_model_try_index < same_model_try_count and _should_retry_same_model(exc):
-                        _log_router_same_model_retry(
+                    if attempt_try_index < attempt_try_count and _is_transient_retryable_error(exc):
+                        retry_index = attempt_try_index
+                        retry_delay_seconds = _transient_retry_delay_seconds(retry_index=retry_index)
+                        _log_router_attempt_retry(
                             request_model=request.model,
                             attempt_model=attempt_model,
                             attempt_index=attempt_index,
                             attempt_count=attempt_count,
-                            same_model_try_index=same_model_try_index,
-                            same_model_try_count=same_model_try_count,
+                            retry_index=retry_index,
+                            retry_count=TRANSIENT_RETRIES_BEFORE_FALLBACK,
+                            retry_delay_seconds=retry_delay_seconds,
                             exc=exc,
                             streaming=False,
                         )
+                        await _sleep_for_transient_retry(retry_delay_seconds)
                         continue
                     if attempt_index < attempt_count:
                         _log_router_attempt_failed(
@@ -232,14 +313,14 @@ class RoutingChatCompletionClient(IChatCompletionClient):
     ) -> AsyncIterator[ChatCompletionDelta]:
         attempts = _model_attempts(request.model)
         attempt_count = len(attempts)
-        same_model_try_count = SAME_MODEL_RETRIES_BEFORE_FALLBACK + 1
+        attempt_try_count = TRANSIENT_RETRIES_BEFORE_FALLBACK + 1
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
             route = self._route_for(attempt_model)
             provider_model = _provider_model(attempt_model, route.prefix)
             attempt_request = replace(request, model=provider_model)
-            for same_model_try_index in range(1, same_model_try_count + 1):
+            for attempt_try_index in range(1, attempt_try_count + 1):
                 yielded = False
                 iterator = None
                 try:
@@ -267,17 +348,21 @@ class RoutingChatCompletionClient(IChatCompletionClient):
                         raise
                     last_error = exc
                     last_attempt_model = attempt_model
-                    if same_model_try_index < same_model_try_count and _should_retry_same_model(exc):
-                        _log_router_same_model_retry(
+                    if attempt_try_index < attempt_try_count and _is_transient_retryable_error(exc):
+                        retry_index = attempt_try_index
+                        retry_delay_seconds = _transient_retry_delay_seconds(retry_index=retry_index)
+                        _log_router_attempt_retry(
                             request_model=request.model,
                             attempt_model=attempt_model,
                             attempt_index=attempt_index,
                             attempt_count=attempt_count,
-                            same_model_try_index=same_model_try_index,
-                            same_model_try_count=same_model_try_count,
+                            retry_index=retry_index,
+                            retry_count=TRANSIENT_RETRIES_BEFORE_FALLBACK,
+                            retry_delay_seconds=retry_delay_seconds,
                             exc=exc,
                             streaming=True,
                         )
+                        await _sleep_for_transient_retry(retry_delay_seconds)
                         continue
                     if attempt_index < attempt_count:
                         _log_router_attempt_failed(
@@ -326,65 +411,6 @@ class RoutingChatCompletionClient(IChatCompletionClient):
 
         raise ChatCompletionUnsupportedRequestError(f"No chat completion route configured for model {model!r}")
 
-
-async def _first_stream_delta(
-    iterator: AsyncIterator[ChatCompletionDelta],
-    *,
-    timeout_seconds: float | None,
-    attempt_model: str,
-) -> ChatCompletionDelta:
-    delta = await _next_stream_delta(
-        iterator,
-        timeout_seconds=timeout_seconds,
-        attempt_model=attempt_model,
-        timeout_label="first delta",
-    )
-    if delta is not None:
-        return delta
-    await _close_async_iterator(iterator)
-    raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta")
-
-
-async def _next_stream_delta(
-    iterator: AsyncIterator[ChatCompletionDelta],
-    *,
-    timeout_seconds: float | None,
-    attempt_model: str,
-    timeout_label: str,
-) -> ChatCompletionDelta | None:
-    try:
-        if timeout_seconds is None:
-            return await anext(iterator)
-        with anyio.fail_after(timeout_seconds):
-            return await anext(iterator)
-    except StopAsyncIteration:
-        return None
-    except TimeoutError as exc:
-        await _close_async_iterator(iterator)
-        raise ChatCompletionTimeoutError(
-            f"stream for model {attempt_model!r} produced no {timeout_label} within {timeout_seconds} seconds"
-        ) from exc
-
-
-async def _close_async_iterator(iterator: AsyncIterator[ChatCompletionDelta]) -> None:
-    aclose = getattr(iterator, "aclose", None)
-    if callable(aclose):
-        try:
-            result = aclose()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
-        return
-
-    close = getattr(iterator, "close", None)
-    if callable(close):
-        try:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
 
 class UnavailableChatCompletionClient(IChatCompletionClient):
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
