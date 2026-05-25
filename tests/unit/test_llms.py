@@ -56,6 +56,7 @@ from plap.llms.completions.providers import (
     build_lightning_provider,
     build_novita_provider,
     build_openrouter_provider,
+    build_qubrid_provider,
 )
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
@@ -812,6 +813,13 @@ def _crof_provider(*, client: Any | None = None) -> OpenAIProvider:
     return provider
 
 
+def _qubrid_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_qubrid_provider(api_key="qubrid-key")
+    if client is not None:
+        provider._client = client
+    return provider
+
+
 def _openrouter_provider(*, client: Any | None = None) -> OpenRouterProvider:
     provider = build_openrouter_provider(api_key="openrouter-key")
     if client is not None:
@@ -965,6 +973,45 @@ def test_groq_provider_accepts_supported_models() -> None:
     assert provider.lookup("qwen/qwen3-32b")
     assert provider.lookup("llama-3.3-70b-versatile")
     assert provider.lookup("llama-3.1-8b-instant")
+
+
+def test_qubrid_request_quirks_force_required_tool_for_deepseek_v4_flash() -> None:
+    body = _body_for(_qubrid_provider(), _request_for_model("deepseek-ai/DeepSeek-V4-Flash"), stream=False)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["tool_choice"] == "required"
+    assert body["parallel_tool_calls"] is True
+    assert body["tools"][0]["function"]["strict"] is True
+    assert "top_k" not in body
+    assert "logprobs" not in body
+    assert "top_logprobs" not in body
+    assert "service_tier" not in body
+    assert "prediction" not in body
+
+
+def test_qubrid_request_quirks_map_required_tool_choice_for_nemotron() -> None:
+    request = replace(
+        _request_for_model("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"),
+        tool_choice="required",
+    )
+
+    body = _body_for(_qubrid_provider(), request, stream=False)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert "parallel_tool_calls" not in body
+    assert body["tools"][0]["function"] == {
+        "name": "lookup",
+        "parameters": {"type": "object"},
+        "description": "look something up",
+    }
+
+
+def test_qubrid_provider_accepts_supported_models() -> None:
+    provider = _qubrid_provider()
+
+    assert provider.lookup("deepseek-ai/DeepSeek-V4-Flash")
+    assert provider.lookup("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8")
 
 
 async def test_rate_limit_quirk_blocks_n_plus_1_complete_within_window(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,6 +6,7 @@ from threading import Lock
 from typing import Any
 
 from plap.llms.completions.chat import (
+    ChatToolChoiceMode,
     ChatResponseFormatType,
     ChatToolChoiceFunction,
 )
@@ -73,6 +74,20 @@ def _body_messages(call: Call) -> tuple[dict[str, Any], ...]:
     return tuple(message for message in messages if isinstance(message, dict))
 
 
+def _body_tool_functions(call: Call) -> tuple[dict[str, Any], ...]:
+    tools = call.body.get("tools")
+    if not isinstance(tools, list):
+        return ()
+    functions: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict):
+            functions.append(function)
+    return tuple(functions)
+
+
 class Only(Quirk):
     def __init__(self, *names: str) -> None:
         self._names = frozenset(names)
@@ -92,6 +107,14 @@ class Rename(Quirk):
         call.body[self._new] = call.body.pop(self._old)
 
 
+class Drop(Quirk):
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def request(self, call: Call) -> None:
+        call.body.pop(self._name, None)
+
+
 class Set(Quirk):
     def __init__(self, name: str, value: Any) -> None:
         self._name = name
@@ -108,10 +131,13 @@ class SystemRole(Quirk):
                 message["role"] = "system"
 
 
-class DropMessageName(Quirk):
+class DropMessageField(Quirk):
+    def __init__(self, name: str) -> None:
+        self._name = name
+
     def request(self, call: Call) -> None:
         for message in _body_messages(call):
-            message.pop("name", None)
+            message.pop(self._name, None)
 
 
 class RenameMessageField(Quirk):
@@ -129,6 +155,15 @@ class RenameMessageField(Quirk):
             if message.get(self._new) is None:
                 message[self._new] = message[self._old]
             message.pop(self._old, None)
+
+
+class DropToolFunctionField(Quirk):
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def request(self, call: Call) -> None:
+        for function in _body_tool_functions(call):
+            function.pop(self._name, None)
 
 
 class ExtraBody(Quirk):
@@ -162,7 +197,7 @@ class EnsureAssistantReasoningContent(Quirk):
                 message["reasoning_content"] = ""
 
 
-class ForceRequiredTool(Quirk):
+class ForceRequiredToolChoice(Quirk):
     def request(self, call: Call) -> None:
         if not isinstance(call.request.tool_choice, ChatToolChoiceFunction):
             return
@@ -171,6 +206,21 @@ class ForceRequiredTool(Quirk):
             return
         raise ChatCompletionUnsupportedRequestError(
             "forced function tool_choice objects are unsupported here; use tool_choice='required' or provide exactly one matching tool"
+        )
+
+
+class ForceNamedToolChoice(Quirk):
+    def request(self, call: Call) -> None:
+        if call.request.tool_choice != ChatToolChoiceMode.REQUIRED:
+            return
+        if len(call.request.tools) == 1:
+            call.body["tool_choice"] = {
+                "type": "function",
+                "function": {"name": call.request.tools[0].function.name},
+            }
+            return
+        raise ChatCompletionUnsupportedRequestError(
+            "tool_choice='required' is unsupported here; provide exactly one tool so it can be named explicitly"
         )
 
 
@@ -246,11 +296,14 @@ class RateLimit(Quirk):
 
 
 __all__ = [
+    "Drop",
     "DropIf",
-    "DropMessageName",
+    "DropMessageField",
+    "DropToolFunctionField",
     "EnsureAssistantReasoningContent",
     "ExtraBody",
-    "ForceRequiredTool",
+    "ForceNamedToolChoice",
+    "ForceRequiredToolChoice",
     "Only",
     "RateLimit",
     "RejectResponseFormat",

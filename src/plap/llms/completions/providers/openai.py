@@ -29,11 +29,14 @@ from plap.llms.completions.errors import (
     is_context_length_exceeded_error,
 )
 from plap.llms.completions.quirks import (
+    Drop,
     DropIf,
-    DropMessageName,
+    DropMessageField,
+    DropToolFunctionField,
     EnsureAssistantReasoningContent,
     ExtraBody,
-    ForceRequiredTool,
+    ForceNamedToolChoice,
+    ForceRequiredToolChoice,
     Only,
     RateLimit,
     RejectResponseFormat,
@@ -240,6 +243,7 @@ CEREBRAS_OPENAI_BASE_URL = "https://api.cerebras.ai/v1"
 GMICLOUD_OPENAI_BASE_URL = "https://api.gmi-serving.com/v1"
 NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
 CROF_OPENAI_BASE_URL = "https://crof.ai/v1"
+QUBRID_OPENAI_BASE_URL = "https://platform.qubrid.com/v1"
 
 LIGHTNING_FIELDS = (
     "model",
@@ -371,6 +375,28 @@ CROF_FIELDS = (
     "n",
     "reasoning_effort",
 )
+QUBRID_FIELDS = (
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "stop",
+    "seed",
+    "n",
+    "reasoning_effort",
+    "user",
+    "metadata",
+)
 
 
 def _request_limits(*windows: tuple[int, float]) -> tuple[Quirk, ...]:
@@ -403,7 +429,7 @@ CEREBRAS_MODELS: dict[str, tuple[Quirk, ...]] = {
     "zai-glm-4.7": (ExtraBody({"clear_thinking": False}), *_request_limits((5, 60))),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),
+    "deepseek/deepseek-v4-flash": (ForceRequiredToolChoice(),),
     "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
 }
@@ -435,6 +461,14 @@ CROF_MODELS: dict[str, tuple[Quirk, ...]] = {
     "qwen3.6-27b": (RejectResponseFormat(),),
     "qwen3.5-397b-a17b": (RejectResponseFormat(),),
     "qwen3.5-9b": (),
+}
+QUBRID_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "deepseek-ai/DeepSeek-V4-Flash": (ForceRequiredToolChoice(),),
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": (
+        Drop("parallel_tool_calls"),
+        DropToolFunctionField("strict"),
+        ForceNamedToolChoice(),
+    ),
 }
 
 
@@ -473,7 +507,7 @@ def build_groq_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*GROQ_FIELDS),
-            DropMessageName(),
+            DropMessageField("name"),
             RenameMessageField("reasoning_content", "reasoning", role="assistant"),
             RenameOutput("reasoning", "reasoning_content"),
         ),
@@ -516,6 +550,16 @@ def build_crof_provider(*, api_key: str) -> Provider:
     )
 
 
+def build_qubrid_provider(*, api_key: str) -> Provider:
+    return OpenAIProvider(
+        name="qubrid",
+        api_key=api_key,
+        base_url=QUBRID_OPENAI_BASE_URL,
+        quirks=(SystemRole(), Only(*QUBRID_FIELDS)),
+        models=QUBRID_MODELS,
+    )
+
+
 __all__ = [
     "CEREBRAS_OPENAI_BASE_URL",
     "CROF_OPENAI_BASE_URL",
@@ -523,6 +567,7 @@ __all__ = [
     "GROQ_OPENAI_BASE_URL",
     "LIGHTNING_OPENAI_BASE_URL",
     "NOVITA_OPENAI_BASE_URL",
+    "QUBRID_OPENAI_BASE_URL",
     "OpenAIProvider",
     "build_cerebras_provider",
     "build_crof_provider",
@@ -530,5 +575,6 @@ __all__ = [
     "build_groq_provider",
     "build_lightning_provider",
     "build_novita_provider",
+    "build_qubrid_provider",
     "normalize_openai_error",
 ]

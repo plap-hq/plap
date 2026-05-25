@@ -55,6 +55,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
                 "gmicloud",
                 "novita",
                 "crof",
+                "qubrid",
                 "openrouter",
             ),
         )
@@ -82,6 +83,13 @@ def test_app_runtime_builds_groq_route_from_provider_prefix_setting() -> None:
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["groq/"]
+
+
+def test_app_runtime_builds_qubrid_route_from_provider_prefix_setting() -> None:
+    client = _create_chat_completion_client(_settings(llm_api_keys=_provider_keys("qubrid")))
+
+    assert isinstance(client, RoutingChatCompletionClient)
+    assert [route.prefix for route in client._routes] == ["qubrid/"]
 
 
 def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
