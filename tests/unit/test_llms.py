@@ -26,6 +26,7 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     ChatToolCallDelta,
     ChatToolChoiceFunction,
+    ChatUsage,
     IChatCompletionClient,
 )
 from plap.llms.completions.client import Call, ChatCompletionClient, Provider
@@ -378,8 +379,6 @@ def _body_for(provider, request: ChatCompletionRequest, *, stream: bool) -> dict
 
 
 def _completion_result(model: str, content: str):
-    from plap.llms.completions.chat import ChatCompletionResult, ChatMessage, ChatUsage
-
     return ChatCompletionResult(
         id="chatcmpl_test",
         model=model,
@@ -391,8 +390,6 @@ def _completion_result(model: str, content: str):
 
 
 def _delta(model: str, *, content_delta: str | None = None, finish_reason: str | None = None):
-    from plap.llms.completions.chat import ChatCompletionDelta
-
     return ChatCompletionDelta(
         id="chatcmpl_test",
         model=model,
@@ -414,8 +411,6 @@ def test_chat_tool_call_keeps_raw_arguments() -> None:
 
 
 def test_accumulator_assembles_streamed_tool_call_and_final_result() -> None:
-    from plap.llms.completions.chat import ChatCompletionDelta, ChatToolCallDelta, ChatUsage
-
     accumulator = Accumulator()
     first = accumulator.apply(
         ChatCompletionDelta(
