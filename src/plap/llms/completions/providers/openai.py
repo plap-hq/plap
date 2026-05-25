@@ -545,7 +545,7 @@ def build_crof_provider(*, api_key: str) -> Provider:
         name="crof",
         api_key=api_key,
         base_url=CROF_OPENAI_BASE_URL,
-        quirks=(SystemRole(), Only(*CROF_FIELDS), Rename("max_completion_tokens", "max_tokens")),
+        quirks=(Only(*CROF_FIELDS), Rename("max_completion_tokens", "max_tokens")),
         models=CROF_MODELS,
     )
 
