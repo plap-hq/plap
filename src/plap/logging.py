@@ -25,11 +25,7 @@ def configure_logging(settings: Any) -> None:
         _LOG_STREAM.close()
     _LOG_STREAM = _resolve_log_stream(getattr(settings, "log_file", None))
 
-    renderer = (
-        structlog.processors.JSONRenderer(sort_keys=True)
-        if log_json
-        else structlog.dev.ConsoleRenderer(colors=_LOG_STREAM.isatty())
-    )
+    renderer = structlog.processors.JSONRenderer(sort_keys=True) if log_json else structlog.dev.ConsoleRenderer(colors=_LOG_STREAM.isatty())
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,

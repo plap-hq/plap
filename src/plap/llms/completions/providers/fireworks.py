@@ -78,6 +78,7 @@ class FireworksProvider(Provider):
 
         return run()
 
+
 FIREWORKS_FIELDS = (
     "model",
     "messages",

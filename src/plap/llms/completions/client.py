@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from plap.llms.completions.chat import (
@@ -55,15 +56,13 @@ class Provider:
         models: dict[str, tuple[Quirk, ...]] | None = None,
     ) -> None:
         self.name = name
-        self.quirks = quirks
-        self.models = dict(models or {})
+        self.quirks = deepcopy(quirks)
+        self.models = deepcopy(dict(models or {}))
 
     def lookup(self, name: str) -> tuple[Quirk, ...]:
         quirks = self.models.get(name)
         if quirks is None:
-            raise ChatCompletionUnsupportedRequestError(
-                f"unsupported {self.name} model: {name}"
-            )
+            raise ChatCompletionUnsupportedRequestError(f"unsupported {self.name} model: {name}")
         return quirks
 
     async def complete(self, call: Call) -> dict[str, Any]:

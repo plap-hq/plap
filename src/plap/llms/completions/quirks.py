@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from collections import deque
+from threading import Lock
 from typing import Any
 
 from plap.llms.completions.chat import (
@@ -7,7 +10,7 @@ from plap.llms.completions.chat import (
     ChatToolChoiceFunction,
 )
 from plap.llms.completions.client import Call, Quirk
-from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.errors import ChatCompletionRateLimitError, ChatCompletionUnsupportedRequestError
 
 
 def _merge_dicts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
@@ -75,11 +78,7 @@ class Only(Quirk):
         self._names = frozenset(names)
 
     def request(self, call: Call) -> None:
-        call.body = {
-            key: value
-            for key, value in call.body.items()
-            if key in self._names
-        }
+        call.body = {key: value for key, value in call.body.items() if key in self._names}
 
 
 class Rename(Quirk):
@@ -202,21 +201,58 @@ class RejectResponseFormat(Quirk):
         if self._types and response_format.type not in self._types:
             return
         if not self._types:
-            raise ChatCompletionUnsupportedRequestError(
-                f"response_format is not supported for model {call.request.model!r}"
-            )
+            raise ChatCompletionUnsupportedRequestError(f"response_format is not supported for model {call.request.model!r}")
         raise ChatCompletionUnsupportedRequestError(
             f"response_format is not supported for model {call.request.model!r} when type is {response_format.type.value!r}"
         )
 
 
+class RateLimit(Quirk):
+    def __init__(self, limit: int, window_seconds: float) -> None:
+        if limit <= 0:
+            raise ValueError("rate limit must be positive")
+        if window_seconds <= 0:
+            raise ValueError("rate limit window must be positive")
+        self._limit = limit
+        self._window_seconds = float(window_seconds)
+        self._timestamps: deque[float] = deque()
+        self._lock = Lock()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> RateLimit:
+        copied = type(self)(self._limit, self._window_seconds)
+        memo[id(self)] = copied
+        return copied
+
+    def _admit(self, *, model: str) -> None:
+        now = time.monotonic()
+        cutoff = now - self._window_seconds
+        with self._lock:
+            while self._timestamps and self._timestamps[0] <= cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._limit:
+                raise ChatCompletionRateLimitError(
+                    f"local rate limit exceeded for model {model!r}: {self._limit} requests per {self._window_seconds:g} seconds"
+                )
+            self._timestamps.append(now)
+
+    async def complete(self, call: Call, next_complete) -> dict[str, Any]:
+        self._admit(model=call.request.model)
+        return await next_complete(None)
+
+    async def stream(self, call: Call, next_complete, next_stream):
+        self._admit(model=call.request.model)
+        async for raw in next_stream(None):
+            yield raw
+
+
 __all__ = [
-    "DropMessageName",
     "DropIf",
+    "DropMessageName",
     "EnsureAssistantReasoningContent",
     "ExtraBody",
     "ForceRequiredTool",
     "Only",
+    "RateLimit",
     "RejectResponseFormat",
     "Rename",
     "RenameMessageField",

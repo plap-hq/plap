@@ -29,12 +29,13 @@ from plap.llms.completions.errors import (
     is_context_length_exceeded_error,
 )
 from plap.llms.completions.quirks import (
-    DropMessageName,
     DropIf,
+    DropMessageName,
     EnsureAssistantReasoningContent,
     ExtraBody,
     ForceRequiredTool,
     Only,
+    RateLimit,
     RejectResponseFormat,
     Rename,
     RenameMessageField,
@@ -107,7 +108,7 @@ def _timeout_value(value: object) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -231,6 +232,7 @@ class OpenAIProvider(Provider):
                     await close_stream_object(stream)
 
         return run()
+
 
 LIGHTNING_OPENAI_BASE_URL = "https://lightning.ai/api/v1"
 GROQ_OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
@@ -370,26 +372,35 @@ CROF_FIELDS = (
     "reasoning_effort",
 )
 
+
+def _request_limits(*windows: tuple[int, float]) -> tuple[Quirk, ...]:
+    return tuple(RateLimit(limit=limit, window_seconds=window_seconds) for limit, window_seconds in windows)
+
+
+GROQ_NO_PARALLEL_TOOL_CALLS: tuple[Quirk, ...] = (Set("parallel_tool_calls", False),)
+GROQ_INCLUDE_REASONING: tuple[Quirk, ...] = (ExtraBody({"include_reasoning": True}),)
 LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "lightning-ai/gpt-oss-20b": (),
-    "lightning-ai/gpt-oss-120b": (RejectResponseFormat(),),
+    "lightning-ai/gpt-oss-20b": _request_limits((15, 60)),
+    "lightning-ai/gpt-oss-120b": (RejectResponseFormat(), *_request_limits((15, 60))),
     "lightning-ai/nvidia-nemotron-3-super-120b-a12b": (),
     "lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b": (),
 }
-GROQ_NO_PARALLEL_TOOL_CALLS: tuple[Quirk, ...] = (Set("parallel_tool_calls", False),)
-GROQ_INCLUDE_REASONING: tuple[Quirk, ...] = (ExtraBody({"include_reasoning": True}),)
 GROQ_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "openai/gpt-oss-20b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
-    "openai/gpt-oss-safeguard-20b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
-    "openai/gpt-oss-120b": GROQ_NO_PARALLEL_TOOL_CALLS + GROQ_INCLUDE_REASONING,
-    "meta-llama/llama-4-scout-17b-16e-instruct": (),
-    "qwen/qwen3-32b": (RejectResponseFormat("json_schema"), *GROQ_INCLUDE_REASONING),
-    "llama-3.3-70b-versatile": (RejectResponseFormat("json_schema"),),
-    "llama-3.1-8b-instant": (RejectResponseFormat("json_schema"),),
+    "openai/gpt-oss-20b": (*GROQ_NO_PARALLEL_TOOL_CALLS, *GROQ_INCLUDE_REASONING, *_request_limits((30, 60), (1000, 86400))),
+    "openai/gpt-oss-safeguard-20b": (
+        *GROQ_NO_PARALLEL_TOOL_CALLS,
+        *GROQ_INCLUDE_REASONING,
+        *_request_limits((30, 60), (1000, 86400)),
+    ),
+    "openai/gpt-oss-120b": (*GROQ_NO_PARALLEL_TOOL_CALLS, *GROQ_INCLUDE_REASONING, *_request_limits((30, 60), (1000, 86400))),
+    "meta-llama/llama-4-scout-17b-16e-instruct": _request_limits((30, 60), (1000, 86400)),
+    "qwen/qwen3-32b": (RejectResponseFormat("json_schema"), *GROQ_INCLUDE_REASONING, *_request_limits((60, 60), (1000, 86400))),
+    "llama-3.3-70b-versatile": (RejectResponseFormat("json_schema"), *_request_limits((30, 60), (1000, 86400))),
+    "llama-3.1-8b-instant": (RejectResponseFormat("json_schema"), *_request_limits((30, 60), (14400, 86400))),
 }
 CEREBRAS_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "gpt-oss-120b": (),
-    "zai-glm-4.7": (ExtraBody({"clear_thinking": False}),),
+    "gpt-oss-120b": _request_limits((5, 60)),
+    "zai-glm-4.7": (ExtraBody({"clear_thinking": False}), *_request_limits((5, 60))),
 }
 NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (ForceRequiredTool(),),
@@ -447,7 +458,7 @@ def build_gmicloud_provider(*, api_key: str) -> Provider:
             Only(*GMICLOUD_FIELDS),
             EnsureAssistantReasoningContent(),
             Rename("max_completion_tokens", "max_tokens"),
-            DropIf("reasoning_effort", "none"), #gmi does not have a real thinking disable switch
+            DropIf("reasoning_effort", "none"),  # gmi does not have a real thinking disable switch
             ExtraBody({"context_length_exceeded_behavior": "error"}),
         ),
         models=GMICLOUD_MODELS,

@@ -77,7 +77,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash",
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"),
+            reasoning_summarizer=RuntimeActorConfig(
+                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"
+            ),
             reviewer_max_transcript_tokens=256_000,
             arbitrator_max_transcript_tokens=256_000,
             compact_threshold=256_000,
@@ -178,7 +180,9 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_hf_repo="XiaomiMiMo/MiMo-V2.5-Pro",
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
-            reasoning_summarizer=RuntimeActorConfig(model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"),
+            reasoning_summarizer=RuntimeActorConfig(
+                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"
+            ),
             reviewer_max_transcript_tokens=256_000,
             arbitrator_max_transcript_tokens=256_000,
             compact_threshold=256_000,
@@ -219,6 +223,8 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
             },
         ),
     }
+
+
 _MCP_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
@@ -272,11 +278,7 @@ def _interpolate_mcp_value(value: Any, *, variables: dict[str, str], server_name
 def _merged_mcp_stdio_env(config: dict[str, Any], *, env: dict[str, str], server_name: str) -> dict[str, Any]:
     if not env:
         return config
-    if (
-        "command" not in config
-        and config.get("transport") != "stdio"
-        and config.get("type") != "stdio"
-    ):
+    if "command" not in config and config.get("transport") != "stdio" and config.get("type") != "stdio":
         return config
     existing_env = config.get("env")
     if existing_env is None:
@@ -1021,8 +1023,12 @@ class Settings(BaseSettings):
     log_json: bool = False
     log_file: str | None = None
     llm_api_keys: dict[str, str] = Field(default_factory=_default_llm_api_keys)
-    tool_effect_classifier_model: str = "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
-    tool_call_effect_classifier_model: str = "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
+    tool_effect_classifier_model: str = (
+        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
+    )
+    tool_call_effect_classifier_model: str = (
+        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:novita"
+    )
     tool_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_call_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_classifier_max_concurrency: int = 16

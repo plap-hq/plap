@@ -229,10 +229,12 @@ async def test_with_summary_skips_empty_summary_output() -> None:
 
 
 async def test_with_summary_closes_partial_summary_after_error_and_carries_it_forward() -> None:
-    summarizer = _SequenceSummarizer([
-        ("part", RuntimeError("boom")),
-        ("next",),
-    ])
+    summarizer = _SequenceSummarizer(
+        [
+            ("part", RuntimeError("boom")),
+            ("next",),
+        ]
+    )
 
     items = [
         item

@@ -601,9 +601,7 @@ def _mutation_tool_definition() -> dict[str, object]:
     return {
         "type": "function",
         "name": "update_record",
-        "description": (
-            "Update a record value in application state. This tool mutates stored data and changes state."
-        ),
+        "description": ("Update a record value in application state. This tool mutates stored data and changes state."),
         "parameters": {
             "type": "object",
             "properties": {

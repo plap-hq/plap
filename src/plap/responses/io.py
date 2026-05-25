@@ -119,12 +119,7 @@ class _ReasoningDraftComplete:
 
 
 type _CommitValue = (
-    ResponseObject
-    | ResponseOutputItem
-    | _ReasoningDraftBegin
-    | _ReasoningDraftReplace
-    | _ReasoningDraftSummary
-    | _ReasoningDraftComplete
+    ResponseObject | ResponseOutputItem | _ReasoningDraftBegin | _ReasoningDraftReplace | _ReasoningDraftSummary | _ReasoningDraftComplete
 )
 
 

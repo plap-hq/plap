@@ -517,11 +517,7 @@ async def test_retrieve_response_redacts_reasoning_encrypted_content_but_item_re
     assert retrieved.status_code == 200
     assert next(item for item in retrieved.json()["output"] if item["type"] == "reasoning").get("encrypted_content") is None
     assert retrieved_with_include.status_code == 200
-    sealed_reasoning = next(
-        item["encrypted_content"]
-        for item in retrieved_with_include.json()["output"]
-        if item["type"] == "reasoning"
-    )
+    sealed_reasoning = next(item["encrypted_content"] for item in retrieved_with_include.json()["output"] if item["type"] == "reasoning")
 
     prepared = await response_store.prepare_request(
         auth_context,

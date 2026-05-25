@@ -48,9 +48,7 @@ def truncate_transcript(
     if measure(transcript) <= max_tokens:
         return transcript
 
-    variable_indexes = [
-        index for index, message in enumerate(transcript) if message.role not in {"developer", "system"}
-    ]
+    variable_indexes = [index for index, message in enumerate(transcript) if message.role not in {"developer", "system"}]
     if not variable_indexes:
         return transcript
 

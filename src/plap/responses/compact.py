@@ -101,6 +101,7 @@ def _resolve_visible_segment(
         raise _compaction_unavailable_error(reason=reason, private_message=private_message)
     return segment
 
+
 COMPACT_TOOL_NAME = "compact"
 DUPLICATE_TOOL_OUTPUT_TOMBSTONE = "This tool output was omitted; a later identical call retains the full result."
 COMPACT_VALIDATION_MAX_ATTEMPTS = 3

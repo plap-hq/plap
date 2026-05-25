@@ -76,14 +76,8 @@ def _provider_env_alias(slug: str) -> str:
     return f"{_provider_env_suffix(slug)}_API_KEY"
 
 
-ROUTE_ENV_VARS = {
-    f"{slug}/": _provider_env_var(slug)
-    for slug in PROVIDER_BUILDERS
-}
-PROVIDER_ENV_ALIASES = {
-    _provider_env_var(slug): _provider_env_alias(slug)
-    for slug in PROVIDER_BUILDERS
-}
+ROUTE_ENV_VARS = {f"{slug}/": _provider_env_var(slug) for slug in PROVIDER_BUILDERS}
+PROVIDER_ENV_ALIASES = {_provider_env_var(slug): _provider_env_alias(slug) for slug in PROVIDER_BUILDERS}
 
 
 @dataclass(slots=True)
@@ -208,7 +202,7 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 
 
 def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
         return value[1:-1]
     return value
 
@@ -228,9 +222,7 @@ def _normalize_sealing_keys_env() -> None:
     if isinstance(parsed, str):
         parsed = [parsed]
     if not isinstance(parsed, list) or not all(isinstance(part, str) and part for part in parsed):
-        raise SystemExit(
-            "PLAP_SEALING_KEYS must be a JSON array of non-empty strings or a comma-separated string."
-        )
+        raise SystemExit("PLAP_SEALING_KEYS must be a JSON array of non-empty strings or a comma-separated string.")
     os.environ["PLAP_SEALING_KEYS"] = json.dumps(parsed)
 
 
@@ -241,11 +233,7 @@ def _populate_provider_aliases() -> None:
 
 
 def _require_provider_keys() -> None:
-    missing = [
-        name
-        for name in _required_provider_env_vars()
-        if not os.environ.get(name)
-    ]
+    missing = [name for name in _required_provider_env_vars() if not os.environ.get(name)]
     if missing:
         missing_list = ", ".join(missing)
         raise SystemExit(
@@ -323,9 +311,7 @@ def _ensure_managed_postgres(args: argparse.Namespace, managed_state: dict[str, 
     if host_port is None:
         raise SystemExit(f"managed postgres container {container_name!r} is missing a published 5432 port")
 
-    database_url = (
-        f"postgresql+asyncpg://{DEFAULT_POSTGRES_USER}:{DEFAULT_POSTGRES_PASSWORD}@127.0.0.1:{host_port}/{DEFAULT_POSTGRES_DB}"
-    )
+    database_url = f"postgresql+asyncpg://{DEFAULT_POSTGRES_USER}:{DEFAULT_POSTGRES_PASSWORD}@127.0.0.1:{host_port}/{DEFAULT_POSTGRES_DB}"
     os.environ["PLAP_DATABASE_URL"] = database_url
     managed_state["PLAP_DATABASE_URL"] = database_url
     managed_state["PLAP_DEV_POSTGRES_CONTAINER"] = container_name
@@ -543,9 +529,7 @@ def _print_summary(*, state_file: Path, log_file: Path, host: str, port: int, ap
     print(f"API key: {api_key}")
     print("Source this from another shell while the server is running: source .dev/dev.env")
     print(f"Explore logs: lnav {shlex.quote(str(log_file))}")
-    print(
-        f"Smoke test: curl http://{host}:{port}/v1/models -H 'Authorization: Bearer {api_key}'"
-    )
+    print(f"Smoke test: curl http://{host}:{port}/v1/models -H 'Authorization: Bearer {api_key}'")
 
 
 def _run_server(args: argparse.Namespace, resources: EphemeralResources) -> int:

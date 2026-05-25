@@ -113,9 +113,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
     assert profile.compact_max_rounds == 0
     assert profile.debate_max_rounds > 0
     assert profile.main.public_usage == PublicUsageConfig()
-    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
-        profile.model_info.supported_parameters
-    )
+    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(profile.model_info.supported_parameters)
 
 
 def test_app_runtime_includes_wisp_default_profile() -> None:
@@ -136,9 +134,7 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
     profile = settings.runtime_model_profiles["plap-ai/wisp"]
     assert profile.compact_max_rounds == 0
     assert profile.main.public_usage == PublicUsageConfig()
-    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(
-        profile.model_info.supported_parameters
-    )
+    assert {"tools", "response_format", "max_output_tokens", "service_tier", "stream"}.issubset(profile.model_info.supported_parameters)
 
 
 def test_app_runtime_validates_runtime_profile_tokenizers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,7 +226,7 @@ def test_app_runtime_rejects_unrouted_tool_classifier_route() -> None:
 
 def test_app_runtime_builds_tool_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_api_keys=_provider_keys("cerebras", "lightning", "openrouter"),
+        llm_api_keys=_provider_keys("cerebras", "groq", "lightning", "openrouter"),
         tool_classifier_max_concurrency=2,
     )
     client = _create_chat_completion_client(settings)
@@ -261,7 +257,7 @@ def test_app_runtime_builds_tool_classifier_for_configured_model() -> None:
 
 def test_app_runtime_builds_tool_call_classifier_for_routed_model() -> None:
     settings = _settings(
-        llm_api_keys=_provider_keys("cerebras", "lightning", "openrouter"),
+        llm_api_keys=_provider_keys("cerebras", "groq", "lightning", "openrouter"),
     )
     client = _create_chat_completion_client(settings)
 
@@ -462,10 +458,7 @@ def test_app_runtime_includes_builtin_jina_provider_when_api_key_present(monkeyp
     assert providers[0]._transport == {
         "mcpServers": {
             "jina": {
-                "url": (
-                    "https://mcp.jina.ai/v1?include_tools="
-                    "read_url,search_web,search_arxiv,search_ssrn,search_bibtex"
-                ),
+                "url": ("https://mcp.jina.ai/v1?include_tools=read_url,search_web,search_arxiv,search_ssrn,search_bibtex"),
                 "headers": {"Authorization": "Bearer builtin-jina-key"},
             }
         }

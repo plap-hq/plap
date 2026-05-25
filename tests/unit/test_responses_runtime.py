@@ -284,11 +284,13 @@ async def test_resolve_tool_calls_classifies_client_calls_as_ordered_batch() -> 
         "read_file",
     ]
     assert [policy.source for policy in resolved] == ["server", "client", "client"]
-    assert call_resolver.calls == [[
-        (MCP_SEARCH_TOOL_NAME, '{"query":"x"}'),
-        ("read_file", '{"path":"a"}'),
-        ("read_file", '{"path":"b"}'),
-    ]]
+    assert call_resolver.calls == [
+        [
+            (MCP_SEARCH_TOOL_NAME, '{"query":"x"}'),
+            ("read_file", '{"path":"a"}'),
+            ("read_file", '{"path":"b"}'),
+        ]
+    ]
 
 
 async def test_resolve_tool_calls_classifies_contextual_server_calls() -> None:
@@ -812,9 +814,7 @@ def test_parse_arbitrator_decision_accepts_matching_boundary_wrapper_lines() -> 
 
 
 def test_parse_accept_discards_extracted_note() -> None:
-    decision = parse_arbitrator_decision(
-        StateMessage(role="assistant", content="Looks good overall.\n\nDecision: ACCEPT")
-    )
+    decision = parse_arbitrator_decision(StateMessage(role="assistant", content="Looks good overall.\n\nDecision: ACCEPT"))
 
     assert decision.action == ArbitratorActionType.ACCEPT
     assert decision.note is None
@@ -1448,9 +1448,7 @@ async def test_stream_response_events_reviewer_request_includes_response_format_
                 model="plap/test",
                 input="return a structured result",
                 include=["reasoning.encrypted_content"],
-                text=ResponseTextConfig(
-                    format=TextFormatJSONObject(type="json_object")
-                ),
+                text=ResponseTextConfig(format=TextFormatJSONObject(type="json_object")),
             ),
             settings=_settings(profile=_profile_config(debate_max_rounds=2)),
             sealing_keyring=_keyring(),
@@ -1606,17 +1604,13 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert decoded_reviewer_call.side == "reviewer"
     assert decoded_reviewer_call.temp is True
     _assert_in_progress_review_context(first_client.requests[1].messages[3].content or "")
-    first_transcript = json.loads(
-        (first_client.requests[1].messages[1].content or "").removeprefix("Conversation transcript:\n")
-    )
+    first_transcript = json.loads((first_client.requests[1].messages[1].content or "").removeprefix("Conversation transcript:\n"))
     assert first_transcript[0]["role"] == "developer"
     assert "Instruction A." in first_transcript[0]["content"]
     first_request_contents = "\n".join(message.content or "" for message in first_client.requests[1].messages)
     assert '"description":"initial mutation tool"' in first_request_contents
 
-    second_client = _StaticChatClient(
-        _assistant_text("ACCEPT")
-    )
+    second_client = _StaticChatClient(_assistant_text("ACCEPT"))
     second_events = [
         event
         async for event in stream_response_events(
@@ -1651,9 +1645,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_pauses_and_resum
     assert second_client.requests[0].messages[-1].role == "tool"
     assert second_client.requests[0].messages[-1].content == "README tool output"
     _assert_in_progress_review_context(second_client.requests[0].messages[3].content or "")
-    second_transcript = json.loads(
-        (second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n")
-    )
+    second_transcript = json.loads((second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n"))
     assert second_transcript[0]["role"] == "developer"
     assert "Instruction B." in second_transcript[0]["content"]
     assert "Instruction A." not in second_transcript[0]["content"]
@@ -1728,9 +1720,7 @@ async def test_stream_response_events_reviewer_safe_client_tool_resume_hoists_in
     second_completed = _completed_response(second_events)
     assert [item.type for item in second_completed.output] == ["reasoning", "message", "function_call"]
     assert second_completed.output[-1].name == "mutate_record"
-    transcript = json.loads(
-        (second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n")
-    )
+    transcript = json.loads((second_client.requests[0].messages[1].content or "").removeprefix("Conversation transcript:\n"))
     assert any(message["role"] == "assistant" and message["content"] == "plugin reminder" for message in transcript)
     assert second_client.requests[0].messages[-1].role == "tool"
     assert second_client.requests[0].messages[-1].content == "README tool output"
@@ -1788,10 +1778,9 @@ async def test_stream_response_events_defender_uses_effective_main_context() -> 
     ]
     assert debate_request.messages[1].content == "original question"
     assert debate_request.messages[2].content == "draft answer"
-    assert [
-        {"name": call.name, "arguments": json.loads(call.arguments)}
-        for call in (debate_request.messages[2].tool_calls or [])
-    ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
+    assert [{"name": call.name, "arguments": json.loads(call.arguments)} for call in (debate_request.messages[2].tool_calls or [])] == [
+        {"name": "mutate_record", "arguments": {"id": "1"}}
+    ]
     assert debate_request.messages[3].content == DEBATE_HELD_TOOL_PLACEHOLDER
     _assert_in_progress_review_context(debate_request.messages[5].content or "")
     tool_definitions = _parse_prefixed_json(
@@ -1939,10 +1928,9 @@ async def test_stream_response_events_arbitrator_revise_reruns_main() -> None:
     ]
     assert final_main_request.messages[1].content == "original question"
     assert final_main_request.messages[2].content == "draft answer"
-    assert [
-        {"name": call.name, "arguments": json.loads(call.arguments)}
-        for call in (final_main_request.messages[2].tool_calls or [])
-    ] == [{"name": "mutate_record", "arguments": {"id": "1"}}]
+    assert [{"name": call.name, "arguments": json.loads(call.arguments)} for call in (final_main_request.messages[2].tool_calls or [])] == [
+        {"name": "mutate_record", "arguments": {"id": "1"}}
+    ]
     assert final_main_request.messages[3].content == DEBATE_HELD_TOOL_PLACEHOLDER
     assert final_main_request.messages[4].content == (
         "Internal retry guidance for the next fresh answer only.\n"
@@ -2013,8 +2001,7 @@ async def test_stream_response_events_arbitrator_accept_executes_intercepted_con
         for message in client.requests[4].messages
     )
     assert any(
-        item.type == "function_call_output" and getattr(item, "output", None) == "search result for cats"
-        for item in completed.output
+        item.type == "function_call_output" and getattr(item, "output", None) == "search result for cats" for item in completed.output
     )
     assert any(item.type == "message" and item.content[0].text == "final answer" for item in completed.output)
 
@@ -2327,10 +2314,12 @@ async def test_stream_response_events_mixed_server_client_tools_do_not_loop() ->
     assert completed.output[2].name == "read_file"
     assert completed.output[3].call_id == completed.output[1].call_id
     assert provider.calls == [(MCP_SEARCH_TOOL_NAME, {"query": "cats"})]
-    assert call_resolver.calls == [[
-        (MCP_SEARCH_TOOL_NAME, '{"query":"cats"}'),
-        ("read_file", '{"path":"README.md"}'),
-    ]]
+    assert call_resolver.calls == [
+        [
+            (MCP_SEARCH_TOOL_NAME, '{"query":"cats"}'),
+            ("read_file", '{"path":"README.md"}'),
+        ]
+    ]
     assert len(client.requests) == 1
 
 
@@ -2517,16 +2506,19 @@ async def test_stream_response_events_executes_batched_compaction() -> None:
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"duplicate_tool_calls": "[~3]"},
+                            {
+                                "prune_before": {"duplicate_tool_calls": "[~3]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~1]",
-                                        "summary": "alpha beta summary",                                    },
+                                        "summary": "alpha beta summary",
+                                    },
                                     {
                                         "start": "[~2]",
                                         "end": "[~3]",
-                                        "summary": "gamma delta summary",                                    },
+                                        "summary": "gamma delta summary",
+                                    },
                                 ],
                             }
                         ),
@@ -2627,12 +2619,14 @@ async def test_stream_response_events_accepts_stringified_compaction_ranges() ->
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": json.dumps(
+                            {
+                                "ranges": json.dumps(
                                     [
                                         {
                                             "start": "[~0]",
                                             "end": "[~1]",
-                                            "summary": "alpha beta summary",                                        }
+                                            "summary": "alpha beta summary",
+                                        }
                                     ]
                                 ),
                             }
@@ -2674,11 +2668,13 @@ async def test_stream_response_events_accepts_bare_numeric_compaction_citations(
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "0",
                                         "end": "1",
-                                        "summary": "alpha beta summary",                                    }
+                                        "summary": "alpha beta summary",
+                                    }
                                 ],
                             }
                         ),
@@ -2716,11 +2712,13 @@ def test_apply_compaction_accepts_boundary_citations_for_visible_summary_span(mo
         message=StateMessage(role="assistant", content="Longer summary that still preserves marker RETAIN-MONEY-314."),
     )
     arguments = json.dumps(
-        {            "ranges": [
+        {
+            "ranges": [
                 {
                     "start": "[~0]",
                     "end": "[~2]",
-                    "summary": "RETAIN-MONEY-314 summary.",                }
+                    "summary": "RETAIN-MONEY-314 summary.",
+                }
             ],
         }
     )
@@ -2755,11 +2753,13 @@ async def test_stream_response_events_compaction_recount_uses_main_request_measu
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~1]",
-                                        "summary": "alpha beta summary",                                    }
+                                        "summary": "alpha beta summary",
+                                    }
                                 ],
                             }
                         ),
@@ -2816,11 +2816,13 @@ async def test_stream_response_events_accepts_bracketless_compact_citations() ->
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "~0",
                                         "end": "~1",
-                                        "summary": "alpha beta summary",                                    }
+                                        "summary": "alpha beta summary",
+                                    }
                                 ],
                             }
                         ),
@@ -2863,12 +2865,14 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"duplicate_tool_calls": "[~2]"},
+                            {
+                                "prune_before": {"duplicate_tool_calls": "[~2]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~1]",
-                                        "summary": "earlier duplicate search attempt",                                    }
+                                        "summary": "earlier duplicate search attempt",
+                                    }
                                 ],
                             }
                         ),
@@ -2924,12 +2928,14 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_w
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"duplicate_tool_calls": "[~1]"},
+                            {
+                                "prune_before": {"duplicate_tool_calls": "[~1]"},
                                 "ranges": [
                                     {
                                         "start": "[~1]",
                                         "end": "[~2]",
-                                        "summary": "later duplicate search attempt",                                    }
+                                        "summary": "later duplicate search attempt",
+                                    }
                                 ],
                             }
                         ),
@@ -2984,12 +2990,14 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_i
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"duplicate_tool_calls": "[~2]"},
+                            {
+                                "prune_before": {"duplicate_tool_calls": "[~2]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~2]",
-                                        "summary": "search history summary",                                    }
+                                        "summary": "search history summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3042,11 +3050,13 @@ async def test_stream_response_events_compaction_can_preserve_duplicate_tool_out
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~1]",
-                                        "summary": "earlier duplicate search attempt",                                    }
+                                        "summary": "earlier duplicate search attempt",
+                                    }
                                 ],
                             }
                         ),
@@ -3099,12 +3109,14 @@ async def test_stream_response_events_compaction_prunes_duplicate_tool_outputs_o
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"duplicate_tool_calls": "[~1]"},
+                            {
+                                "prune_before": {"duplicate_tool_calls": "[~1]"},
                                 "ranges": [
                                     {
                                         "start": "[~3]",
                                         "end": "[~5]",
-                                        "summary": "notes",                                    }
+                                        "summary": "notes",
+                                    }
                                 ],
                             }
                         ),
@@ -3178,11 +3190,13 @@ async def test_stream_response_events_leaves_duplicate_tool_outputs_when_duplica
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~3]",
                                         "end": "[~5]",
-                                        "summary": "notes",                                    }
+                                        "summary": "notes",
+                                    }
                                 ],
                             }
                         ),
@@ -3257,11 +3271,13 @@ async def test_stream_response_events_compaction_summarizes_tool_call_and_output
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "search exchange summary",                                    }
+                                        "summary": "search exchange summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3337,7 +3353,8 @@ async def test_stream_response_events_prunes_reasoning_before_cutoff_recursively
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"reasoning": "[~3]"},
+                            {
+                                "prune_before": {"reasoning": "[~3]"},
                                 "ranges": [],
                             }
                         ),
@@ -3401,12 +3418,14 @@ async def test_stream_response_events_prunes_reasoning_inside_summary_by_ordinal
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"reasoning": "[~2]"},
+                            {
+                                "prune_before": {"reasoning": "[~2]"},
                                 "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~3]",
-                                        "summary": "conversation summary",                                    }
+                                        "summary": "conversation summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3451,7 +3470,8 @@ async def test_stream_response_events_bails_out_on_missing_compaction_fidelity()
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~1]",
@@ -3498,15 +3518,18 @@ async def test_stream_response_events_compaction_keeps_reductive_subset_of_range
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "same size",                                    },
+                                        "summary": "same size",
+                                    },
                                     {
                                         "start": "[~1]",
                                         "end": "[~1]",
-                                        "summary": "beta",                                    },
+                                        "summary": "beta",
+                                    },
                                 ],
                             }
                         ),
@@ -3561,12 +3584,14 @@ async def test_stream_response_events_compaction_can_succeed_from_pruning_when_s
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "prune_before": {"reasoning": "[~1]"},
+                            {
+                                "prune_before": {"reasoning": "[~1]"},
                                 "ranges": [
                                     {
                                         "start": "[~1]",
                                         "end": "[~1]",
-                                        "summary": "beta",                                    }
+                                        "summary": "beta",
+                                    }
                                 ],
                             }
                         ),
@@ -3618,7 +3643,8 @@ async def test_stream_response_events_rejects_missing_compaction_fidelity_at_har
                     id="compact_call_1",
                     name="compact",
                     arguments=json.dumps(
-                        {                            "ranges": [
+                        {
+                            "ranges": [
                                 {
                                     "start": "[~0]",
                                     "end": "[~1]",
@@ -3714,11 +3740,13 @@ async def test_stream_response_events_starts_soft_compaction_run(monkeypatch: py
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "short summary",                                    }
+                                        "summary": "short summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3846,11 +3874,13 @@ async def test_stream_response_events_hard_budget_continues_after_compaction_rou
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "short summary",                                    }
+                                        "summary": "short summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3901,11 +3931,13 @@ async def test_stream_response_events_upstream_oversize_triggers_hard_compaction
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "alpha summary",                                    }
+                                        "summary": "alpha summary",
+                                    }
                                 ],
                             }
                         ),
@@ -3920,11 +3952,13 @@ async def test_stream_response_events_upstream_oversize_triggers_hard_compaction
                         id="compact_call_2",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~1]",
                                         "end": "[~1]",
-                                        "summary": "beta summary",                                    }
+                                        "summary": "beta summary",
+                                    }
                                 ],
                             }
                         ),
@@ -4006,11 +4040,13 @@ async def test_stream_response_events_rejects_upstream_oversize_after_compaction
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "alpha summary",                                    }
+                                        "summary": "alpha summary",
+                                    }
                                 ],
                             }
                         ),
@@ -4063,11 +4099,13 @@ async def test_stream_response_events_forces_compact_at_hard_budget(monkeypatch:
                         id="compact_call_1",
                         name="compact",
                         arguments=json.dumps(
-                            {                                "ranges": [
+                            {
+                                "ranges": [
                                     {
                                         "start": "[~0]",
                                         "end": "[~0]",
-                                        "summary": "short summary",                                    }
+                                        "summary": "short summary",
+                                    }
                                 ],
                             }
                         ),
@@ -4423,11 +4461,13 @@ async def test_run_explicit_compaction_validates_with_main_tokenizer_config(
                     id="compact_call_1",
                     name="compact",
                     arguments=json.dumps(
-                        {                            "ranges": [
+                        {
+                            "ranges": [
                                 {
                                     "start": "[~0]",
                                     "end": "[~1]",
-                                    "summary": "alpha beta summary",                                }
+                                    "summary": "alpha beta summary",
+                                }
                             ],
                         }
                     ),
@@ -4834,11 +4874,7 @@ async def test_stream_response_events_stream_draft_stubs_tool_outputs_until_fina
         )
     ]
 
-    added_reasoning = next(
-        event.item
-        for event in events
-        if event.type == "response.output_item.added" and event.item.type == "reasoning"
-    )
+    added_reasoning = next(event.item for event in events if event.type == "response.output_item.added" and event.item.type == "reasoning")
     added_payload = open_reasoning_payload(added_reasoning.encrypted_content, keyring=_keyring())
     assert added_payload.temp is False
     assert added_payload.messages[0].tool_calls[0].name == "read_file"

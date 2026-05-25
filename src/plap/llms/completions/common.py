@@ -394,9 +394,7 @@ class StreamState:
 
 
 def raise_incomplete_stream_error() -> None:
-    raise ChatCompletionProviderError(
-        "stream ended without finish_reason and without inferable content or tool calls"
-    )
+    raise ChatCompletionProviderError("stream ended without finish_reason and without inferable content or tool calls")
 
 
 async def close_stream_object(stream: Any) -> None:

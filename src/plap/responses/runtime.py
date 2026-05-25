@@ -276,6 +276,7 @@ def _runtime_internal_error(*, reason: str, private_message: str, cause: BaseExc
         ),
     )
 
+
 def _runtime_invalid_tool_definition_error(*, message: str, reason: str, private_message: str) -> PlapError:
     return _runtime_invalid_request_error(
         code="invalid_tool_definition",
@@ -492,10 +493,7 @@ def _state_message_from_chat_message(message: ChatMessage) -> StateMessage:
 
 
 def _stream_stub_tool_output_rows(candidate: StateMessage) -> tuple[StateMessage, ...]:
-    return tuple(
-        StateMessage(role="tool", tool_call_id=call.id, content=STREAM_ABORTED_TOOL_PLACEHOLDER)
-        for call in candidate.tool_calls
-    )
+    return tuple(StateMessage(role="tool", tool_call_id=call.id, content=STREAM_ABORTED_TOOL_PLACEHOLDER) for call in candidate.tool_calls)
 
 
 def _stream_draft_payload(candidate: StateMessage) -> ReasoningPayload:
@@ -745,12 +743,12 @@ async def _run_main_completion(
         accumulator.apply(delta)
         candidate = accumulator.candidate()
 
-        if draft is None and enable_summary and (
-            candidate.tool_calls or candidate.reasoning_content is not None or candidate.reasoning_details
+        if (
+            draft is None
+            and enable_summary
+            and (candidate.tool_calls or candidate.reasoning_content is not None or candidate.reasoning_details)
         ):
-            draft = await out.begin_reasoning_draft(
-                _stream_draft_item(payload=_stream_draft_payload(candidate), keyring=sealing_keyring)
-            )
+            draft = await out.begin_reasoning_draft(_stream_draft_item(payload=_stream_draft_payload(candidate), keyring=sealing_keyring))
         elif draft is not None and (delta.tool_call_delta is not None or delta.reasoning_details_delta):
             await out.replace_reasoning_draft(
                 draft,

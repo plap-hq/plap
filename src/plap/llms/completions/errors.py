@@ -24,9 +24,7 @@ _CONTEXT_LENGTH_EXCEEDED_CODES = frozenset(
 )
 
 _CONTEXT_LENGTH_EXCEEDED_CODE_FIELDS = frozenset({"code", "error_code", "type", "error_type"})
-_CONTEXT_LENGTH_EXCEEDED_MESSAGE_FIELDS = frozenset(
-    {"message", "detail", "details", "description", "error", "reason", "body", "response"}
-)
+_CONTEXT_LENGTH_EXCEEDED_MESSAGE_FIELDS = frozenset({"message", "detail", "details", "description", "error", "reason", "body", "response"})
 _CONTEXT_LENGTH_EXCEEDED_ATTRIBUTES = (
     "code",
     "error_code",

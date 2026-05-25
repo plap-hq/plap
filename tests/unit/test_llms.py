@@ -9,13 +9,14 @@ import pytest
 from fireworks.client.error import InvalidRequestError
 from openai import APITimeoutError, BadRequestError
 
-import plap.llms.completions.router as router_module
 import plap.llms.completions.providers.openai as openai_provider_module
+import plap.llms.completions.quirks as quirks_module
+import plap.llms.completions.router as router_module
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
-    ChatCompletionResult,
     ChatCompletionRequest,
+    ChatCompletionResult,
     ChatFunctionTool,
     ChatMessage,
     ChatPrediction,
@@ -27,7 +28,7 @@ from plap.llms.completions.chat import (
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
-from plap.llms.completions.client import Call, ChatCompletionClient
+from plap.llms.completions.client import Call, ChatCompletionClient, Provider
 from plap.llms.completions.common import build_chat_body
 from plap.llms.completions.errors import (
     ChatCompletionContextLengthExceededError,
@@ -41,7 +42,6 @@ from plap.llms.completions.errors import (
 from plap.llms.completions.providers import (
     CEREBRAS_OPENAI_BASE_URL,
     CROF_OPENAI_BASE_URL,
-    GMICLOUD_OPENAI_BASE_URL,
     GROQ_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
     NOVITA_OPENAI_BASE_URL,
@@ -59,7 +59,9 @@ from plap.llms.completions.providers import (
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
-from plap.llms.retry import RETRY_TOOL_PLACEHOLDER, complete as retry_complete, stream as retry_stream
+from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
+from plap.llms.retry import complete as retry_complete
+from plap.llms.retry import stream as retry_stream
 from plap.settings import Settings
 
 
@@ -283,9 +285,11 @@ class _FakeFireworksCompletions:
         self.calls.append(kwargs)
         if kwargs.get("stream"):
             if isinstance(self._stream_result, Exception):
+
                 async def raise_stream() -> Any:
                     raise self._stream_result
                     yield
+
                 return raise_stream()
             return _AsyncListStream(list(self._stream_result))
 
@@ -299,7 +303,9 @@ class _FakeFireworksCompletions:
 
 class _FakeFireworksClient:
     def __init__(self, *, complete_result: Any, stream_result: Any, base_url: str = "https://example.com/v1") -> None:
-        self.chat = type("Chat", (), {"completions": _FakeFireworksCompletions(complete_result=complete_result, stream_result=stream_result)})()
+        self.chat = type(
+            "Chat", (), {"completions": _FakeFireworksCompletions(complete_result=complete_result, stream_result=stream_result)}
+        )()
         self.base_url = base_url
 
 
@@ -323,6 +329,41 @@ class _StubChatClient(IChatCompletionClient):
             for item in self._stream_result:
                 if isinstance(item, Exception):
                     raise item
+                yield item
+
+        return run()
+
+
+class _StaticProvider(Provider):
+    def __init__(
+        self,
+        *,
+        quirks: tuple[Any, ...] = (),
+        models: dict[str, tuple[Any, ...]] | None = None,
+        complete_raw: dict[str, Any] | None = None,
+        stream_raw: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(name="static", quirks=quirks, models=models)
+        self.complete_calls: list[Call] = []
+        self.stream_calls: list[Call] = []
+        self._complete_raw = complete_raw or _completion_response(model="model-a", content="ok")
+        self._stream_raw = list(
+            stream_raw
+            or [
+                _chunk(model="model-a", content="ok"),
+                _chunk(model="model-a", finish_reason="stop"),
+            ]
+        )
+
+    async def complete(self, call: Call) -> dict[str, Any]:
+        self.complete_calls.append(call)
+        return self._complete_raw
+
+    def stream(self, call: Call):
+        self.stream_calls.append(call)
+
+        async def run():
+            for item in self._stream_raw:
                 yield item
 
         return run()
@@ -360,6 +401,10 @@ def _delta(model: str, *, content_delta: str | None = None, finish_reason: str |
         content_delta=content_delta,
         finish_reason=finish_reason,
     )
+
+
+def _simple_request(model: str = "model-a") -> ChatCompletionRequest:
+    return ChatCompletionRequest(model=model, messages=[ChatMessage(role="user", content="hello")])
 
 
 def test_chat_tool_call_keeps_raw_arguments() -> None:
@@ -857,7 +902,7 @@ def test_cerebras_request_quirks_preserve_supported_fields_and_glm_thinking() ->
 def test_cerebras_provider_accepts_supported_models() -> None:
     provider = _cerebras_provider()
 
-    assert provider.lookup("gpt-oss-120b") == ()
+    assert provider.lookup("gpt-oss-120b")
     assert provider.lookup("zai-glm-4.7")
 
 
@@ -921,10 +966,81 @@ def test_groq_provider_accepts_supported_models() -> None:
     assert provider.lookup("openai/gpt-oss-20b")
     assert provider.lookup("openai/gpt-oss-safeguard-20b")
     assert provider.lookup("openai/gpt-oss-120b")
-    assert provider.lookup("meta-llama/llama-4-scout-17b-16e-instruct") == ()
+    assert provider.lookup("meta-llama/llama-4-scout-17b-16e-instruct")
     assert provider.lookup("qwen/qwen3-32b")
     assert provider.lookup("llama-3.3-70b-versatile")
     assert provider.lookup("llama-3.1-8b-instant")
+
+
+async def test_rate_limit_quirk_blocks_n_plus_1_complete_within_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = 100.0
+    monkeypatch.setattr(quirks_module.time, "monotonic", lambda: current)
+    provider = _StaticProvider(models={"model-a": (quirks_module.RateLimit(2, 60),)})
+    client = ChatCompletionClient(provider)
+
+    await client.complete(_simple_request())
+    await client.complete(_simple_request())
+
+    with pytest.raises(ChatCompletionRateLimitError, match="local rate limit exceeded"):
+        await client.complete(_simple_request())
+
+    assert len(provider.complete_calls) == 2
+
+
+async def test_rate_limit_quirk_provider_scope_is_shared_across_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = 200.0
+    monkeypatch.setattr(quirks_module.time, "monotonic", lambda: current)
+    provider = _StaticProvider(
+        quirks=(quirks_module.RateLimit(1, 60),),
+        models={"model-a": (), "model-b": ()},
+    )
+    client = ChatCompletionClient(provider)
+
+    await client.complete(_simple_request("model-a"))
+
+    with pytest.raises(ChatCompletionRateLimitError, match="local rate limit exceeded"):
+        await client.complete(_simple_request("model-b"))
+
+    assert len(provider.complete_calls) == 1
+
+
+async def test_provider_deepcopies_stateful_quirks_per_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = 250.0
+    monkeypatch.setattr(quirks_module.time, "monotonic", lambda: current)
+    shared_models = {"model-a": (quirks_module.RateLimit(1, 60),)}
+    first = ChatCompletionClient(_StaticProvider(models=shared_models))
+    second = ChatCompletionClient(_StaticProvider(models=shared_models))
+
+    await first.complete(_simple_request())
+    await second.complete(_simple_request())
+
+
+async def test_rate_limit_quirk_window_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = 300.0
+    monkeypatch.setattr(quirks_module.time, "monotonic", lambda: current)
+    provider = _StaticProvider(models={"model-a": (quirks_module.RateLimit(1, 60),)})
+    client = ChatCompletionClient(provider)
+
+    await client.complete(_simple_request())
+    current = 361.0
+    await client.complete(_simple_request())
+
+    assert len(provider.complete_calls) == 2
+
+
+async def test_rate_limit_quirk_blocks_n_plus_1_stream_within_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = 400.0
+    monkeypatch.setattr(quirks_module.time, "monotonic", lambda: current)
+    provider = _StaticProvider(models={"model-a": (quirks_module.RateLimit(1, 60),)})
+    client = ChatCompletionClient(provider)
+
+    deltas = [delta async for delta in client.stream(_simple_request())]
+
+    with pytest.raises(ChatCompletionRateLimitError, match="local rate limit exceeded"):
+        [delta async for delta in client.stream(_simple_request())]
+
+    assert deltas[-1].finish_reason == "stop"
+    assert len(provider.stream_calls) == 1
 
 
 def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
@@ -1186,9 +1302,7 @@ async def test_openai_provider_defaults_sdk_retries_to_zero() -> None:
 
 def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
     assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
-    assert is_context_length_exceeded_error(
-        {"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."}
-    )
+    assert is_context_length_exceeded_error({"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."})
     assert is_context_length_exceeded_error(
         {"response": {"body": {"message": "Input token count exceeds the maximum allowed token limit."}}}
     )
@@ -1281,9 +1395,7 @@ async def test_router_complete_retries_transient_errors_before_fallback(monkeypa
     events = _capture_router_logs(monkeypatch)
     delays = _capture_router_retry_sleeps(monkeypatch)
     primary = _StubChatClient(complete_result=ChatCompletionProviderError("boom"))
-    fallback = _StubChatClient(
-        complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
-    )
+    fallback = _StubChatClient(complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok"))
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=primary),
@@ -1315,9 +1427,7 @@ async def test_router_complete_retries_transient_errors_before_fallback(monkeypa
 async def test_router_complete_does_not_retry_current_attempt_for_invalid_request(monkeypatch: pytest.MonkeyPatch) -> None:
     events = _capture_router_logs(monkeypatch)
     primary = _StubChatClient(complete_result=ChatCompletionInvalidRequestError("bad request"))
-    fallback = _StubChatClient(
-        complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
-    )
+    fallback = _StubChatClient(complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok"))
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=primary),
@@ -1344,9 +1454,7 @@ async def test_router_complete_falls_back_immediately_for_rate_limit(monkeypatch
     events = _capture_router_logs(monkeypatch)
     delays = _capture_router_retry_sleeps(monkeypatch)
     primary = _StubChatClient(complete_result=ChatCompletionRateLimitError("rate limited"))
-    fallback = _StubChatClient(
-        complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok")
-    )
+    fallback = _StubChatClient(complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok"))
     router = RoutingChatCompletionClient(
         [
             ModelRoute(prefix="crof/", client=primary),
@@ -1515,6 +1623,7 @@ async def test_router_stream_falls_back_after_first_delta_timeout(monkeypatch: p
             async def run():
                 await anyio.sleep(0.05)
                 yield _delta(request.model, content_delta="late")
+
             return run()
 
     primary = SlowClient()

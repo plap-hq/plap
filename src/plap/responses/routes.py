@@ -96,8 +96,10 @@ async def _sse_payload(
                 status_code=public.status_code,
                 transport="sse",
             )
-            yield build_error_event(public=public).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(
-                exclude_none=True
+            yield (
+                build_error_event(public=public)
+                .model_copy(update={"sequence_number": last_sequence_number + 1})
+                .model_dump_json(exclude_none=True)
             )
         except Exception:
             logger.exception(
@@ -109,14 +111,18 @@ async def _sse_payload(
                 status_code=500,
                 transport="sse",
             )
-            yield build_error_event(
-                public=PublicError(
-                    status_code=500,
-                    type="server_error",
-                    code="server_error",
-                    message="Response generation failed.",
+            yield (
+                build_error_event(
+                    public=PublicError(
+                        status_code=500,
+                        type="server_error",
+                        code="server_error",
+                        message="Response generation failed.",
+                    )
                 )
-            ).model_copy(update={"sequence_number": last_sequence_number + 1}).model_dump_json(exclude_none=True)
+                .model_copy(update={"sequence_number": last_sequence_number + 1})
+                .model_dump_json(exclude_none=True)
+            )
         yield "[DONE]"
     finally:
         await _close_stream_events(events)

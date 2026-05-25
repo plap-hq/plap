@@ -804,9 +804,7 @@ def _defender_turn(*, reviewer_decision: ReviewerDecision) -> StateMessage:
     return StateMessage(
         role="user",
         content=(
-            "Latest review note:\n"
-            f"{reviewer_decision.note or ''}\n\n"
-            "Write one short response note about the current proposed next step."
+            f"Latest review note:\n{reviewer_decision.note or ''}\n\nWrite one short response note about the current proposed next step."
         ),
     )
 
@@ -1401,7 +1399,7 @@ def _held_candidate_messages(
                 tool_call_id=call.id,
                 content=server_outputs.get(index, DEBATE_HELD_TOOL_PLACEHOLDER),
             )
-    )
+        )
     return messages
 
 
@@ -1877,6 +1875,8 @@ async def _persist_temp_turn(
     for message in messages:
         state.append_side(side, message)
     state.set_continuation(continuation_side)
+
+
 async def _emit_debate_function_calls(
     *,
     side: Side,

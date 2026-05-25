@@ -8,8 +8,7 @@ from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResu
 from plap.llms.completions.errors import ChatCompletionProviderError
 
 RETRY_TOOL_PLACEHOLDER = (
-    "This tool call was not executed because the assistant attempt was rejected "
-    "and retried. If you still need this tool, call it again."
+    "This tool call was not executed because the assistant attempt was rejected and retried. If you still need this tool, call it again."
 )
 
 Validate: TypeAlias = Callable[[ChatCompletionResult], str | None]
@@ -75,7 +74,7 @@ async def stream(
         history = Snapshot(
             messages=(
                 *history.messages,
-                *last.messages[len(history.messages):],
+                *last.messages[len(history.messages) :],
                 *_tool_stubs(result.message),
                 ChatMessage(role="user", content=fix),
             ),

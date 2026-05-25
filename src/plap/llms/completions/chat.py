@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
+
 class ChatRole(StrEnum):
     SYSTEM = "system"
     DEVELOPER = "developer"

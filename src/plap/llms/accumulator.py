@@ -48,6 +48,8 @@ class _ToolCall:
             name=self.name,
             arguments="".join(self.argument_parts),
         )
+
+
 def _repair_tool_call(
     call: ChatToolCall,
     *,
@@ -84,10 +86,7 @@ def _repair_message(
     tool_calls = message.tool_calls or []
     if not tool_calls:
         return message
-    repaired = [
-        _repair_tool_call(call, tools_by_name=tools_by_name, partial=partial)
-        for call in tool_calls
-    ]
+    repaired = [_repair_tool_call(call, tools_by_name=tools_by_name, partial=partial) for call in tool_calls]
     return replace(message, tool_calls=repaired)
 
 

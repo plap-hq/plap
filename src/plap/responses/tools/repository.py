@@ -225,7 +225,6 @@ class ToolClassificationRepository:
             raise RuntimeError("tool classification insert did not produce a row")
         return stored
 
-
     async def get_tool_call_classification(
         self,
         *,

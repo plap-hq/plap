@@ -113,9 +113,7 @@ class ResponseProjection:
                     status_code=400,
                     type="invalid_request_error",
                     code="missing_reasoning_encrypted_content_include",
-                    message=(
-                        f"Requests with 'store' disabled must include '{REASONING_ENCRYPTED_CONTENT_INCLUDE}' in 'include'."
-                    ),
+                    message=(f"Requests with 'store' disabled must include '{REASONING_ENCRYPTED_CONTENT_INCLUDE}' in 'include'."),
                     param="include",
                 ),
                 private=PrivateError(

@@ -59,17 +59,13 @@ def _openrouter_model_parts(name: str) -> tuple[str, str, list[str]]:
     segments = name.split(":")
     base = segments[0]
     if not base:
-        raise ChatCompletionUnsupportedRequestError(
-            f"OpenRouter model {name!r} is missing a base model slug"
-        )
+        raise ChatCompletionUnsupportedRequestError(f"OpenRouter model {name!r} is missing a base model slug")
 
     provider_order: list[str] = []
     model_segments = [base]
     for segment in segments[1:]:
         if not segment:
-            raise ChatCompletionUnsupportedRequestError(
-                f"OpenRouter model {name!r} contains an empty suffix segment"
-            )
+            raise ChatCompletionUnsupportedRequestError(f"OpenRouter model {name!r} contains an empty suffix segment")
         if segment in OPENROUTER_SPECIAL_MODEL_SUFFIXES:
             model_segments.append(segment)
             continue

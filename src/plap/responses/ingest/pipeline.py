@@ -199,9 +199,7 @@ class _QueueBase:
         self._ensure_reasoning_can_start()
         patch_seen = False
         first_message_is_assistant = (
-            bool(payload.messages)
-            and isinstance(payload.messages[0], StateMessage)
-            and payload.messages[0].is_assistant()
+            bool(payload.messages) and isinstance(payload.messages[0], StateMessage) and payload.messages[0].is_assistant()
         )
         for index, item in enumerate(payload.messages):
             if isinstance(item, ReasoningMessagePatch):

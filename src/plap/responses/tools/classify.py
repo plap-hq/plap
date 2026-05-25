@@ -35,6 +35,7 @@ logger = structlog.get_logger(__name__)
 class _ClassifierShapeError(ValueError):
     pass
 
+
 TOOL_EFFECT_CLASSIFIER_PROMPT = """Classify client-provided tools by side effects.
 
 Call the `classify_tool_effect` tool exactly once.
