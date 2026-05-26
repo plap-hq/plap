@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 import blake3
@@ -28,7 +28,7 @@ class RetryToolSchemaError(RetryError):
     pass
 
 
-type RetryValidator = Callable[[ChatCompletionResult, ChatCompletionRequest], str | None]
+type RetryValidator = Callable[[ChatCompletionResult, ChatCompletionRequest], Awaitable[str | None]]
 type NextRequest = Callable[[Snapshot], ChatCompletionRequest | None]
 
 type _SchemaValidator = Callable[[Any], Any]
@@ -126,7 +126,7 @@ def _decoded_json_object(arguments: str) -> dict[str, Any] | None:
     return value
 
 
-def retry_on_unusable_tool_calls(
+async def retry_on_unusable_tool_calls(
     result: ChatCompletionResult,
     request: ChatCompletionRequest,
 ) -> str | None:
@@ -152,13 +152,13 @@ def retry_on_unusable_tool_calls(
     return None
 
 
-def _first_retry_message(
+async def _first_retry_message(
     result: ChatCompletionResult,
     request: ChatCompletionRequest,
     validators: Sequence[RetryValidator],
 ) -> str | None:
     for validator in validators:
-        retry_message = validator(result, request)
+        retry_message = await validator(result, request)
         if retry_message is not None:
             return retry_message
     return None
@@ -205,7 +205,7 @@ async def stream(
             raise RuntimeError("stream ended without final result")
 
         result = last.results[-1]
-        fix = _first_retry_message(result, request, validators)
+        fix = await _first_retry_message(result, request, validators)
         if fix is None:
             return
 

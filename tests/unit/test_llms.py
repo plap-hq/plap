@@ -7,7 +7,8 @@ import aiohttp
 import anyio
 import httpx
 import pytest
-from fireworks.client.error import APITimeoutError as FireworksAPITimeoutError, InvalidRequestError
+from fireworks.client.error import APITimeoutError as FireworksAPITimeoutError
+from fireworks.client.error import InvalidRequestError
 from openai import APITimeoutError, BadRequestError
 
 import plap.llms.completions.providers.fireworks as fireworks_provider_module
@@ -602,7 +603,7 @@ async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
     ]
     client = _RetryStreamClient(attempts)
 
-    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
         if result.finish_reason == "tool_calls":
             return "Your previous answer could not be used. Reply again without tool calls."
@@ -643,7 +644,7 @@ async def test_retry_complete_returns_final_snapshot() -> None:
         [[ChatCompletionDelta(id="chatcmpl_1", model="model-a", created_at=10, choice_index=0, finish_reason="stop")]]
     )
 
-    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
         _ = result
         return None
@@ -661,6 +662,48 @@ async def test_retry_complete_returns_final_snapshot() -> None:
     )
 
     assert final.results and final.results[0].finish_reason == "stop"
+
+
+async def test_retry_stream_cancellation_propagates_while_validator_is_pending() -> None:
+    client = _RetryStreamClient(
+        [[ChatCompletionDelta(id="chatcmpl_1", model="model-a", created_at=10, choice_index=0, finish_reason="stop")]]
+    )
+    validator_started = anyio.Event()
+    validator_cancelled = anyio.Event()
+
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = result
+        _ = request
+        validator_started.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            validator_cancelled.set()
+        return None
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        if snapshot.results:
+            return None
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise")],
+        )
+
+    async def consume() -> None:
+        async for _ in retry_stream(
+            client,
+            next_request=next_request,
+            validators=(validate,),
+        ):
+            pass
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(consume)
+        with anyio.fail_after(1):
+            await validator_started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert validator_cancelled.is_set() is True
 
 
 async def test_retry_stream_retries_after_partial_stream_timeout_without_persisting_partial_message() -> None:
@@ -695,7 +738,7 @@ async def test_retry_stream_retries_after_partial_stream_timeout_without_persist
         ]
     )
 
-    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
         _ = result
         return None
@@ -746,7 +789,7 @@ async def test_retry_complete_accepts_final_result_when_stream_times_out_after_f
         ]
     )
 
-    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
         _ = result
         return None
@@ -931,7 +974,7 @@ async def test_retry_stream_raises_retry_limit_exceeded_when_attempts_are_exhaus
         ]
     )
 
-    def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
         if result.finish_reason == "tool_calls":
             return "Reply again without tool calls."
@@ -960,7 +1003,7 @@ async def test_retry_stream_raises_retry_limit_exceeded_when_attempts_are_exhaus
     assert items[1].messages[-1].role == "user"
 
 
-def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_tool_name() -> None:
+async def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_tool_name() -> None:
     request = ChatCompletionRequest(
         model="model-a",
         messages=[ChatMessage(role="developer", content="be precise")],
@@ -977,14 +1020,14 @@ def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_tool_nam
         finish_reason="tool_calls",
     )
 
-    retry_message = retry_on_unusable_tool_calls(result, request)
+    retry_message = await retry_on_unusable_tool_calls(result, request)
 
     assert retry_message is not None
     assert "`read_file`" in retry_message
     assert "`lookup`" in retry_message
 
 
-def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_object_arguments() -> None:
+async def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_object_arguments() -> None:
     request = ChatCompletionRequest(
         model="model-a",
         messages=[ChatMessage(role="developer", content="be precise")],
@@ -1001,14 +1044,14 @@ def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_object_argum
         finish_reason="tool_calls",
     )
 
-    retry_message = retry_on_unusable_tool_calls(result, request)
+    retry_message = await retry_on_unusable_tool_calls(result, request)
 
     assert retry_message is not None
     assert "`read_file`" in retry_message
     assert "JSON object" in retry_message
 
 
-def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_schema_mismatch() -> None:
+async def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_schema_mismatch() -> None:
     request = ChatCompletionRequest(
         model="model-a",
         messages=[ChatMessage(role="developer", content="be precise")],
@@ -1038,14 +1081,14 @@ def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_schema_mi
         finish_reason="tool_calls",
     )
 
-    retry_message = retry_on_unusable_tool_calls(result, request)
+    retry_message = await retry_on_unusable_tool_calls(result, request)
 
     assert retry_message is not None
     assert "`lookup`" in retry_message
     assert "data.n must be integer" in retry_message
 
 
-def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schema() -> None:
+async def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schema() -> None:
     request = ChatCompletionRequest(
         model="model-a",
         messages=[ChatMessage(role="developer", content="be precise")],
@@ -1063,7 +1106,7 @@ def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schema() ->
     )
 
     with pytest.raises(RetryToolSchemaError, match="strict tool schema"):
-        retry_on_unusable_tool_calls(result, request)
+        await retry_on_unusable_tool_calls(result, request)
 
 
 async def test_completions_client_fills_missing_result_and_delta_models() -> None:
