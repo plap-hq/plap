@@ -59,7 +59,9 @@ def _terminal_finish_reason(
 ) -> ChatFinishReason | None:
     if saw_tool_calls:
         return ChatFinishReason.TOOL_CALLS
-    if saw_content and finish_reason in {None, ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}:
+    if finish_reason in {ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}:
+        return ChatFinishReason.STOP
+    if saw_content and finish_reason is None:
         return ChatFinishReason.STOP
     return finish_reason
 

@@ -1188,6 +1188,27 @@ async def test_completions_client_coerces_complete_finish_reason_to_stop_when_no
     assert result.message.tool_calls is None
 
 
+async def test_completions_client_coerces_empty_complete_tool_handoff_to_stop_when_no_tool_calls_exist() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(
+                model="ignored-model",
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=None,
+            )
+        ],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+
+    assert result.finish_reason == "stop"
+    assert result.message.content is None
+    assert result.message.tool_calls is None
+
+
 async def test_completions_client_coerces_stream_finish_reason_to_tool_handoff_when_tool_calls_present() -> None:
     fake_client = _FakeOpenAIClient(
         [
@@ -1257,6 +1278,54 @@ async def test_completions_client_coerces_stream_finish_reason_to_stop_when_no_t
                                 "finish_reason": None,
                                 "delta": {
                                     "content": "hello back",
+                                    "refusal": None,
+                                    "reasoning_content": None,
+                                    "tool_calls": None,
+                                },
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {
+                        "id": "chatcmpl_1",
+                        "model": "ignored-model",
+                        "created": 10,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "finish_reason": "tool_calls",
+                                "delta": {},
+                            }
+                        ],
+                        "usage": None,
+                    },
+                ]
+            )
+        ],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert deltas[-1].finish_reason == "stop"
+
+
+async def test_completions_client_coerces_empty_stream_tool_handoff_to_stop_when_no_tool_calls_exist() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _AsyncListStream(
+                [
+                    {
+                        "id": "chatcmpl_1",
+                        "model": "ignored-model",
+                        "created": 10,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "finish_reason": None,
+                                "delta": {
+                                    "content": None,
                                     "refusal": None,
                                     "reasoning_content": None,
                                     "tool_calls": None,
