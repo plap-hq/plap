@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.llms.summary import SummaryDelta
 from plap.responses.contracts import (
     ConversationReference,
     OutputTextContent,
@@ -21,7 +22,6 @@ from plap.responses.ingest import content_hash, seal_reasoning_payload
 from plap.responses.io import ResponseEventIO
 from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, StateMessage
 from plap.responses.projection import ResponseProjection
-from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.routes import _sse_payload
 from plap.responses.store import ResponseStore
 from plap.responses.tools import (
@@ -551,7 +551,6 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
     prepared = await response_store.prepare_request(auth_context, request)
     projection = ResponseProjection.from_create_request(request, transport="stream")
     send, receive = anyio.create_memory_object_stream(16)
-    summarizer = _BlockingReasoningSummarizer()
     assistant_message = StateMessage(role="assistant", content="reply")
     reasoning_patch = ReasoningMessagePatch(
         content_hash=content_hash(assistant_message),
@@ -573,12 +572,6 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
         prepared=prepared,
         response_store=response_store,
         send=send,
-        reasoning_summarizer=summarizer,
-        reasoning_summarizer_model="plap/test-summarizer",
-        reasoning_summarizer_prompt_cache_key_base=None,
-        reasoning_summarizer_reasoning_effort=None,
-        reasoning_summarizer_service_tier=None,
-        reasoning_summary_mode="auto",
     )
 
     async with send, receive, anyio.create_task_group() as task_group:
@@ -586,18 +579,7 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
         await out.created()
         await out.in_progress()
         draft = await out.begin_reasoning_draft(reasoning_item)
-
-        async def run_summary() -> None:
-            await out.append_reasoning_draft_summary(
-                draft,
-                ReasoningSummaryPartSource(
-                    prior_summary=None,
-                    reasoning_text="private thinking",
-                ),
-            )
-
-        task_group.start_soon(run_summary)
-        await summarizer.entered.wait()
+        await out.apply_reasoning_summary_delta(draft, SummaryDelta(index=0, text="partial summary"))
 
         replay = await response_store.prepare_request(
             auth_context,
@@ -610,8 +592,6 @@ async def test_reasoning_item_reference_resolves_before_summary_finishes(
         assert replay.execution_request.input is not None
         assert replay.execution_request.input[0].type == "reasoning"
         assert replay.execution_request.input[0].id == reasoning_item.id
-
-        summarizer.release.set()
         await out.aclose()
 
 
@@ -1014,28 +994,6 @@ async def test_websocket_create_uses_runtime_validation(
     assert event["code"] == "model_not_found"
     assert event["message"] == "Model 'unknown/model' not found."
     assert event["param"] == "model"
-
-
-class _BlockingReasoningSummarizer(IReasoningSummarizer):
-    def __init__(self) -> None:
-        self.entered = anyio.Event()
-        self.release = anyio.Event()
-
-    async def stream_part(
-        self,
-        *,
-        model: str,
-        prompt_cache_key: str | None,
-        reasoning_effort: object,
-        service_tier: object,
-        mode: str,
-        source,
-    ) -> AsyncIterator[str]:
-        _ = model, prompt_cache_key, reasoning_effort, service_tier, mode, source
-        self.entered.set()
-        await self.release.wait()
-        if False:
-            yield ""
 
 
 class _RecordingToolClassifier(IToolClassifier):

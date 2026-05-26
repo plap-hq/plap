@@ -17,7 +17,6 @@ from plap.llms.completions.dependencies import (
     provide_request_chat_completion_client,
     provide_socket_chat_completion_client,
 )
-from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.store import ResponseStore
 from plap.responses.tools import (
     CachedToolCallPolicyResolver,
@@ -60,18 +59,6 @@ def provide_socket_mcp_tool_providers(
     socket: WebSocket,
 ) -> tuple[IMCPToolProvider, ...]:
     return socket.app.state.mcp_tool_providers
-
-
-def provide_reasoning_summarizer(
-    request: Request[Any, Any, Any],
-) -> IReasoningSummarizer:
-    return request.app.state.reasoning_summarizer
-
-
-def provide_socket_reasoning_summarizer(
-    socket: WebSocket,
-) -> IReasoningSummarizer:
-    return socket.app.state.reasoning_summarizer
 
 
 def provide_response_store(request: Request[Any, Any, Any]) -> ResponseStore:
@@ -153,11 +140,6 @@ HTTP_ROUTE_DEPENDENCIES = {
         use_cache=True,
         sync_to_thread=False,
     ),
-    "reasoning_summarizer": Provide(
-        provide_reasoning_summarizer,
-        use_cache=True,
-        sync_to_thread=False,
-    ),
     "response_store": Provide(
         provide_response_store,
         use_cache=True,
@@ -194,11 +176,6 @@ WEBSOCKET_ROUTE_DEPENDENCIES = {
     ),
     "mcp_tool_providers": Provide(
         provide_socket_mcp_tool_providers,
-        use_cache=True,
-        sync_to_thread=False,
-    ),
-    "reasoning_summarizer": Provide(
-        provide_socket_reasoning_summarizer,
         use_cache=True,
         sync_to_thread=False,
     ),

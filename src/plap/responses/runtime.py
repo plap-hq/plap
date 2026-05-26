@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from typing import NoReturn
 
 import anyio
@@ -12,8 +12,9 @@ import structlog
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.accumulator import Snapshot
 from plap.llms.completions.chat import (
-    ChatCompletionDelta,
+    ChatCompletionRequest,
     ChatCompletionResult,
     ChatFinishReason,
     ChatMessage,
@@ -21,11 +22,13 @@ from plap.llms.completions.chat import (
     ChatStreamOptions,
     ChatToolCall,
     ChatToolChoiceFunction,
-    ChatUsage,
     IChatCompletionClient,
 )
 from plap.llms.completions.errors import ChatCompletionContextLengthExceededError
 from plap.llms.completions.tokens import measure_request_tokens
+from plap.llms.retry import retry_on_unusable_tool_calls
+from plap.llms.retry import stream as retry_stream
+from plap.llms.summary import ChatReasoningSummarizer, IReasoningSummarizer, SummaryDelta, SummaryDone, with_summary
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.compact import (
     CompactionOutcome,
@@ -62,7 +65,6 @@ from plap.responses.models import (
     UsageLedger,
 )
 from plap.responses.projection import ResponseProjection, ResponseTransport
-from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.tools import (
     IToolCallPolicyResolver,
@@ -492,17 +494,48 @@ def _state_message_from_chat_message(message: ChatMessage) -> StateMessage:
     )
 
 
+def _state_messages_from_chat_messages(messages: Sequence[ChatMessage]) -> tuple[StateMessage, ...]:
+    return tuple(_state_message_from_chat_message(message) for message in messages)
+
+
+def _latest_assistant_message(messages: Sequence[StateMessage]) -> StateMessage | None:
+    for message in reversed(messages):
+        if message.is_assistant():
+            return message
+    return None
+
+
 def _stream_stub_tool_output_rows(candidate: StateMessage) -> tuple[StateMessage, ...]:
     return tuple(StateMessage(role="tool", tool_call_id=call.id, content=STREAM_ABORTED_TOOL_PLACEHOLDER) for call in candidate.tool_calls)
 
 
-def _stream_draft_payload(candidate: StateMessage) -> ReasoningPayload:
+def _stream_draft_payload(messages: tuple[StateMessage, ...]) -> ReasoningPayload:
+    payload_messages = messages
+    if payload_messages and payload_messages[-1].is_assistant() and payload_messages[-1].tool_calls:
+        payload_messages = (*payload_messages, *_stream_stub_tool_output_rows(payload_messages[-1]))
     return ReasoningPayload(
         side="main",
         temp=False,
         continuation_side=Side.MAIN,
-        messages=(candidate, *_stream_stub_tool_output_rows(candidate)),
+        messages=payload_messages,
     )
+
+
+def _main_private_reasoning_payload(messages: tuple[StateMessage, ...]) -> ReasoningPayload:
+    return ReasoningPayload(
+        side="main",
+        temp=False,
+        continuation_side=Side.MAIN,
+        messages=messages,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _MainCompletionOutcome:
+    result: ChatCompletionResult | None
+    draft: ReasoningDraft | None
+    committed_private_messages: tuple[StateMessage, ...]
+    active_attempt_messages: tuple[StateMessage, ...]
 
 
 def _stream_draft_item(*, payload: ReasoningPayload, keyring: SealingKeyring, item_id: str | None = None) -> ResponseReasoningItem:
@@ -515,148 +548,26 @@ def _stream_draft_item(*, payload: ReasoningPayload, keyring: SealingKeyring, it
     )
 
 
-SUMMARY_MIN_FLUSH_CHARS = 400
-SUMMARY_MIN_BOUNDARY_CHARS = 240
-SUMMARY_HARD_FLUSH_CHARS = 800
-
-
-def _summary_boundary_index(buffer: str) -> int | None:
-    boundary_markers = ("\n\n", ". ", "? ", "! ")
-    boundary = max(
-        (buffer.rfind(marker) + len(marker) for marker in boundary_markers if buffer.rfind(marker) >= 0),
-        default=0,
+async def _complete_committed_main_history(
+    *,
+    out: ResponseEventIO,
+    keyring: SealingKeyring,
+    committed_private_messages: tuple[StateMessage, ...],
+    draft: ReasoningDraft | None,
+) -> None:
+    if not committed_private_messages:
+        return
+    item = ResponseReasoningItem(
+        encrypted_content=seal_reasoning_payload(_main_private_reasoning_payload(committed_private_messages), keyring=keyring),
+        id=draft.item_id if draft is not None else f"rs_{secrets.token_urlsafe(18)}",
+        status="completed",
+        summary=[],
+        type="reasoning",
     )
-    return boundary or None
-
-
-def _summary_flush_index(buffer: str, *, force: bool, tool_boundary: bool = False) -> int | None:
-    if not buffer.strip():
-        return None
-    if force or tool_boundary:
-        return len(buffer)
-    if len(buffer) < SUMMARY_MIN_FLUSH_CHARS:
-        return None
-    boundary = _summary_boundary_index(buffer)
-    if boundary is not None and boundary >= SUMMARY_MIN_BOUNDARY_CHARS:
-        return boundary
-    if len(buffer) >= SUMMARY_HARD_FLUSH_CHARS:
-        return len(buffer)
-    return None
-
-
-def _take_summary_fragment(buffer: str, *, force: bool, tool_boundary: bool = False) -> tuple[str | None, str]:
-    flush_index = _summary_flush_index(buffer, force=force, tool_boundary=tool_boundary)
-    if flush_index is None:
-        return None, buffer
-    fragment = buffer[:flush_index].strip()
-    remainder = buffer[flush_index:]
-    if not fragment:
-        return None, remainder
-    return fragment, remainder
-
-
-@dataclass(slots=True)
-class _StreamingToolCallAccumulator:
-    tool_call_id: str | None = None
-    name: str | None = None
-    argument_parts: list[str] = field(default_factory=list)
-
-    def apply(self, delta) -> None:
-        if delta.id is not None:
-            self.tool_call_id = delta.id
-        if delta.name is not None:
-            self.name = delta.name
-        if delta.arguments_delta is not None:
-            self.argument_parts.append(delta.arguments_delta)
-
-    def to_tool_call(self) -> ChatToolCall:
-        if self.tool_call_id is None:
-            raise _runtime_internal_error(
-                reason="streamed_tool_call_id_missing",
-                private_message="streamed tool call is missing id",
-            )
-        if self.name is None:
-            raise _runtime_internal_error(
-                reason="streamed_tool_call_name_missing",
-                private_message="streamed tool call is missing name",
-            )
-        return ChatToolCall(id=self.tool_call_id, name=self.name, arguments="".join(self.argument_parts))
-
-
-@dataclass(slots=True)
-class _MainStreamAccumulator:
-    request_model: str
-    completion_id: str | None = None
-    completion_model: str | None = None
-    created_at: float | None = None
-    content_parts: list[str] = field(default_factory=list)
-    saw_content: bool = False
-    reasoning_parts: list[str] = field(default_factory=list)
-    reasoning_details: list[object] = field(default_factory=list)
-    tool_calls: dict[int, _StreamingToolCallAccumulator] = field(default_factory=dict)
-    finish_reason: ChatFinishReason | None = None
-    usage: ChatUsage | None = None
-    system_fingerprint: str | None = None
-    service_tier: str | None = None
-
-    def apply(self, delta: ChatCompletionDelta) -> None:
-        if delta.id is not None:
-            self.completion_id = delta.id
-        if delta.model is not None:
-            self.completion_model = delta.model
-        if delta.created_at is not None:
-            self.created_at = delta.created_at
-        if delta.content_delta is not None:
-            self.saw_content = True
-            self.content_parts.append(delta.content_delta)
-        if delta.reasoning_delta is not None:
-            self.reasoning_parts.append(delta.reasoning_delta)
-        if delta.reasoning_details_delta:
-            self.reasoning_details.extend(delta.reasoning_details_delta)
-        if delta.tool_call_delta is not None:
-            call = self.tool_calls.setdefault(delta.tool_call_delta.index, _StreamingToolCallAccumulator())
-            call.apply(delta.tool_call_delta)
-        if delta.finish_reason is not None:
-            self.finish_reason = delta.finish_reason
-        if delta.usage is not None:
-            self.usage = delta.usage
-        if delta.system_fingerprint is not None:
-            self.system_fingerprint = delta.system_fingerprint
-        if delta.service_tier is not None:
-            self.service_tier = delta.service_tier
-
-    def assistant_message(self) -> ChatMessage:
-        content = "".join(self.content_parts) if self.saw_content else None
-        reasoning_content = "".join(self.reasoning_parts) or None
-        tool_calls = [self.tool_calls[index].to_tool_call() for index in sorted(self.tool_calls)] or None
-        return ChatMessage(
-            role="assistant",
-            content=content,
-            tool_calls=tool_calls,
-            reasoning_content=reasoning_content,
-            reasoning_details=list(self.reasoning_details) or None,
-        )
-
-    def candidate(self) -> StateMessage:
-        return _state_message_from_chat_message(self.assistant_message())
-
-    def result(self) -> ChatCompletionResult:
-        if self.finish_reason is None:
-            raise _runtime_internal_error(
-                reason="streamed_completion_finish_reason_missing",
-                private_message="streamed completion finish_reason is missing",
-            )
-        message = self.assistant_message()
-        return ChatCompletionResult(
-            id=self.completion_id,
-            model=self.completion_model or self.request_model,
-            created_at=self.created_at,
-            message=message,
-            finish_reason=self.finish_reason,
-            usage=self.usage,
-            system_fingerprint=self.system_fingerprint,
-            service_tier=self.service_tier,
-        )
+    if draft is not None:
+        await out.complete_reasoning_draft(draft, item)
+        return
+    await out.output(item)
 
 
 @dataclass(slots=True)
@@ -730,89 +641,171 @@ async def _run_main_completion(
     request: ResponseCreateRequest,
     model_request,
     chat_completion_client: IChatCompletionClient,
+    reasoning_summarizer: IReasoningSummarizer | None,
     sealing_keyring: SealingKeyring,
-) -> tuple[ChatCompletionResult, ReasoningDraft | None]:
+    usage_ledger: UsageLedger,
+    public_usage,
+) -> _MainCompletionOutcome:
     stream_request = replace(model_request, stream_options=ChatStreamOptions(include_usage=True))
-    accumulator = _MainStreamAccumulator(request_model=stream_request.model)
+    summary_mode = _reasoning_summary_mode(request)
     draft: ReasoningDraft | None = None
-    pending_summary = ""
-    summary_parts: list[str] = []
-    enable_summary = _reasoning_summary_mode(request) is not None
+    latest_snapshot = Snapshot(messages=(), results=(), delta=None)
+    committed_private_messages: tuple[StateMessage, ...] = ()
+    active_attempt_messages: tuple[StateMessage, ...] = ()
+    latest_candidate: StateMessage | None = None
+    recorded_hidden_results = 0
+    budget_exhausted = False
+    last_persisted_payload_messages: tuple[StateMessage, ...] | None = None
 
-    async for delta in chat_completion_client.stream(stream_request):
-        accumulator.apply(delta)
-        candidate = accumulator.candidate()
+    def build_payload_messages() -> tuple[StateMessage, ...]:
+        messages = (*committed_private_messages, *active_attempt_messages)
+        if messages and messages[-1].is_assistant() and messages[-1].tool_calls:
+            return (*messages, *_stream_stub_tool_output_rows(messages[-1]))
+        return messages
 
-        if (
-            draft is None
-            and enable_summary
-            and (candidate.tool_calls or candidate.reasoning_content is not None or candidate.reasoning_details)
-        ):
-            draft = await out.begin_reasoning_draft(_stream_draft_item(payload=_stream_draft_payload(candidate), keyring=sealing_keyring))
-        elif draft is not None and (delta.tool_call_delta is not None or delta.reasoning_details_delta):
-            await out.replace_reasoning_draft(
-                draft,
-                _stream_draft_item(
-                    payload=_stream_draft_payload(candidate),
-                    keyring=sealing_keyring,
-                    item_id=draft.item_id,
-                ),
-            )
-
-        if delta.reasoning_delta is not None:
-            pending_summary += delta.reasoning_delta
-
+    async def persist_draft_if_needed() -> None:
+        nonlocal draft, last_persisted_payload_messages
         if draft is None:
-            continue
-
-        fragment, pending_summary = _take_summary_fragment(
-            pending_summary,
-            force=False,
-            tool_boundary=delta.tool_call_delta is not None,
-        )
-        if fragment is None:
-            continue
+            return
+        payload_messages = build_payload_messages()
+        if payload_messages == last_persisted_payload_messages:
+            return
         await out.replace_reasoning_draft(
             draft,
             _stream_draft_item(
-                payload=_stream_draft_payload(candidate),
+                payload=_stream_draft_payload(payload_messages),
                 keyring=sealing_keyring,
                 item_id=draft.item_id,
             ),
         )
-        summary_parts.append(
-            await out.append_reasoning_draft_summary(
-                draft,
-                ReasoningSummaryPartSource(
-                    prior_summary="\n\n".join(summary_parts) or None,
-                    reasoning_text=fragment,
-                ),
+        last_persisted_payload_messages = payload_messages
+
+    def next_request(history: Snapshot) -> ChatCompletionRequest | None:
+        nonlocal budget_exhausted
+        capped_max_completion_tokens = usage_ledger.cap_for(public_usage)
+        if capped_max_completion_tokens == 0:
+            budget_exhausted = True
+            return None
+        if stream_request.max_completion_tokens is None:
+            max_completion_tokens = capped_max_completion_tokens
+        elif capped_max_completion_tokens is None:
+            max_completion_tokens = stream_request.max_completion_tokens
+        else:
+            max_completion_tokens = min(stream_request.max_completion_tokens, capped_max_completion_tokens)
+        request_body = (
+            stream_request
+            if not history.messages
+            else replace(stream_request, messages=[*stream_request.messages, *history.messages])
+        )
+        return replace(request_body, max_completion_tokens=max_completion_tokens)
+
+    def apply_snapshot(snapshot: Snapshot) -> None:
+        nonlocal latest_snapshot, committed_private_messages, active_attempt_messages, latest_candidate, recorded_hidden_results
+        latest_snapshot = snapshot
+        messages = _state_messages_from_chat_messages(snapshot.messages)
+        if snapshot.delta is None:
+            if len(snapshot.results) > recorded_hidden_results:
+                usage_ledger.record_hidden(public_usage, snapshot.results[-1].usage)
+                recorded_hidden_results = len(snapshot.results)
+            committed_private_messages = messages
+            active_attempt_messages = ()
+            latest_candidate = None
+            return
+        active_attempt_messages = messages[len(committed_private_messages) :]
+        latest_candidate = _latest_assistant_message(active_attempt_messages)
+
+    source = retry_stream(
+        chat_completion_client,
+        next_request=next_request,
+        validators=(retry_on_unusable_tool_calls,),
+    )
+
+    if summary_mode is None:
+        async for snapshot in source:
+            apply_snapshot(snapshot)
+            if snapshot.delta is None:
+                await persist_draft_if_needed()
+                continue
+        if budget_exhausted:
+            return _MainCompletionOutcome(
+                result=None,
+                draft=draft,
+                committed_private_messages=committed_private_messages,
+                active_attempt_messages=active_attempt_messages,
             )
+        if not latest_snapshot.results:
+            raise RuntimeError("main completion stream ended without final result")
+        return _MainCompletionOutcome(
+            result=latest_snapshot.results[-1],
+            draft=draft,
+            committed_private_messages=committed_private_messages,
+            active_attempt_messages=active_attempt_messages,
         )
 
-    result = accumulator.result()
-    if draft is not None:
-        candidate = accumulator.candidate()
-        fragment, pending_summary = _take_summary_fragment(pending_summary, force=True)
-        if fragment is not None:
-            await out.replace_reasoning_draft(
-                draft,
-                _stream_draft_item(
-                    payload=_stream_draft_payload(candidate),
-                    keyring=sealing_keyring,
-                    item_id=draft.item_id,
-                ),
-            )
-            summary_parts.append(
-                await out.append_reasoning_draft_summary(
-                    draft,
-                    ReasoningSummaryPartSource(
-                        prior_summary="\n\n".join(summary_parts) or None,
-                        reasoning_text=fragment,
-                    ),
+    if reasoning_summarizer is None:
+        raise _runtime_internal_error(
+            reason="reasoning_summarizer_missing",
+            private_message="reasoning summary mode requires a reasoning summarizer",
+        )
+
+    async with with_summary(source, mode=summary_mode, summarizer=reasoning_summarizer) as stream:
+        async for item in stream:
+            if isinstance(item, SummaryDelta):
+                if draft is None:
+                    raise _runtime_internal_error(
+                        reason="reasoning_summary_delta_without_draft",
+                        private_message="reasoning summary delta arrived before reasoning draft started",
+                    )
+                await out.apply_reasoning_summary_delta(draft, item)
+                continue
+            if isinstance(item, SummaryDone):
+                await persist_draft_if_needed()
+                if draft is None:
+                    raise _runtime_internal_error(
+                        reason="reasoning_summary_done_without_draft",
+                        private_message="reasoning summary completion arrived before reasoning draft started",
+                    )
+                await out.apply_reasoning_summary_done(draft, item)
+                continue
+
+            snapshot = item
+            apply_snapshot(snapshot)
+            if snapshot.delta is None:
+                await persist_draft_if_needed()
+                continue
+
+            if draft is None:
+                if latest_candidate is None or (
+                    not latest_candidate.tool_calls
+                    and latest_candidate.reasoning_content is None
+                    and not latest_candidate.reasoning_details
+                ):
+                    continue
+                payload_messages = build_payload_messages()
+                draft = await out.begin_reasoning_draft(
+                    _stream_draft_item(payload=_stream_draft_payload(payload_messages), keyring=sealing_keyring)
                 )
-            )
-    return result, draft
+                last_persisted_payload_messages = payload_messages
+                continue
+            delta = snapshot.delta
+            if delta is not None and (delta.tool_call_delta is not None or delta.reasoning_details_delta):
+                await persist_draft_if_needed()
+
+    if budget_exhausted:
+        return _MainCompletionOutcome(
+            result=None,
+            draft=draft,
+            committed_private_messages=committed_private_messages,
+            active_attempt_messages=active_attempt_messages,
+        )
+    if not latest_snapshot.results:
+        raise RuntimeError("main completion stream ended without final result")
+    return _MainCompletionOutcome(
+        result=latest_snapshot.results[-1],
+        draft=draft,
+        committed_private_messages=committed_private_messages,
+        active_attempt_messages=active_attempt_messages,
+    )
 
 
 async def run_response(
@@ -825,6 +818,7 @@ async def run_response(
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
+    reasoning_summarizer: IReasoningSummarizer | None,
     mcp_tool_providers: Sequence[IMCPToolProvider],
     prompt_cache_key_base: str | None,
 ) -> None:
@@ -972,12 +966,15 @@ async def run_response(
 
         streamed_draft: ReasoningDraft | None = None
         try:
-            result, streamed_draft = await _run_main_completion(
+            outcome = await _run_main_completion(
                 out=out,
                 request=request,
                 model_request=model_request,
                 chat_completion_client=chat_completion_client,
+                reasoning_summarizer=reasoning_summarizer,
                 sealing_keyring=sealing_keyring,
+                usage_ledger=usage_ledger,
+                public_usage=profile.main.public_usage,
             )
         except ChatCompletionContextLengthExceededError as exc:
             log_debug(
@@ -987,6 +984,12 @@ async def run_response(
             )
             authoritative_context_length_error = exc
             continue
+        if outcome.result is None:
+            await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+            return
+        result = outcome.result
+        streamed_draft = outcome.draft
+        reasoning_history = (*outcome.committed_private_messages, *outcome.active_attempt_messages)
         if result.finish_reason is None:
             raise _runtime_internal_error(reason="completion_finish_reason_missing", private_message="completion finish_reason is missing")
 
@@ -1019,6 +1022,14 @@ async def run_response(
 
         if user_return and profile.debate_max_rounds > 0:
             held_anchor_index = usage_ledger.record_hidden(profile.main.public_usage, result.usage)
+            if outcome.committed_private_messages:
+                await _complete_committed_main_history(
+                    out=out,
+                    keyring=sealing_keyring,
+                    committed_private_messages=outcome.committed_private_messages,
+                    draft=streamed_draft,
+                )
+                streamed_draft = None
             await start_debate_from_candidate(
                 state=state,
                 out=out,
@@ -1114,6 +1125,7 @@ async def run_response(
         published = await out.publish_main_candidate(
             candidate=candidate,
             keyring=sealing_keyring,
+            reasoning_history=reasoning_history,
             server_outputs={tool_calls[index].id: output for index, output in server_outputs.items()},
             reasoning_draft=streamed_draft,
         )
@@ -1155,7 +1167,7 @@ async def stream_response_events(
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
     chat_completion_client: IChatCompletionClient,
-    reasoning_summarizer: IReasoningSummarizer,
+    reasoning_summarizer: IReasoningSummarizer | None = None,
     response_store: ResponseStore,
     mcp_tool_providers: Sequence[IMCPToolProvider] = (),
 ) -> AsyncIterator[ResponseStreamEvent]:
@@ -1202,17 +1214,23 @@ async def stream_response_events(
                     prompt_cache_key=prepared.response_request.prompt_cache_key,
                     user=prepared.response_request.user,
                 )
+                reasoning_summary_mode = _reasoning_summary_mode(prepared.response_request)
+                resolved_reasoning_summarizer = reasoning_summarizer
+                if reasoning_summary_mode is not None and resolved_reasoning_summarizer is None:
+                    resolved_reasoning_summarizer = ChatReasoningSummarizer(
+                        client=chat_completion_client,
+                        model=profile.reasoning_summarizer.model,
+                        prompt_cache_key=(
+                            None if prompt_cache_key_base is None else f"{prompt_cache_key_base}|reasoning_summarizer"
+                        ),
+                        reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
+                        service_tier=profile.reasoning_summarizer.service_tier,
+                    )
                 out = ResponseEventIO(
                     request=prepared.response_request,
                     projection=projection,
                     prepared=prepared,
                     response_store=response_store,
-                    reasoning_summarizer=reasoning_summarizer,
-                    reasoning_summarizer_model=profile.reasoning_summarizer.model,
-                    reasoning_summarizer_prompt_cache_key_base=prompt_cache_key_base,
-                    reasoning_summarizer_reasoning_effort=profile.reasoning_summarizer.reasoning_effort,
-                    reasoning_summarizer_service_tier=profile.reasoning_summarizer.service_tier,
-                    reasoning_summary_mode=_reasoning_summary_mode(prepared.response_request),
                     send=send,
                 )
                 lifecycle.out = out
@@ -1246,6 +1264,7 @@ async def stream_response_events(
                                                 tool_policy_resolver=tool_policy_resolver,
                                                 tool_call_policy_resolver=tool_call_policy_resolver,
                                                 chat_completion_client=chat_completion_client,
+                                                reasoning_summarizer=resolved_reasoning_summarizer,
                                                 mcp_tool_providers=mcp_tool_providers,
                                                 prompt_cache_key_base=prompt_cache_key_base,
                                             )

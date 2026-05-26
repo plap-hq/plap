@@ -26,7 +26,6 @@ from plap.llms.completions.router import (
 from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
-from plap.responses.reasoning import LLMReasoningSummarizer
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.tools import (
     IToolCallClassifier,
@@ -462,7 +461,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
             resolved_settings,
             providers=providers,
         )
-        reasoning_summarizer = LLMReasoningSummarizer(chat_completion_client)
         tool_classifier = _create_tool_classifier(
             resolved_settings,
             chat_completion_client,
@@ -503,7 +501,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "chat_completion_client": chat_completion_client,
             "database": Database(resolved_settings.database_url),
             "runtime_model_profiles": resolved_settings.runtime_model_profiles,
-            "reasoning_summarizer": reasoning_summarizer,
             "sealing_keyring": SealingKeyring.from_encoded(resolved_settings.sealing_keys),
             "settings": resolved_settings,
             "tool_call_classifier": tool_call_classifier,

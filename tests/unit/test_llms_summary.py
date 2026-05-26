@@ -17,6 +17,7 @@ from plap.llms.summary import (
     SummaryDelta,
     SummaryDone,
     SummaryResult,
+    _SummaryChunker,
     collect_summary,
     with_summary,
 )
@@ -134,6 +135,49 @@ class _StreamingChatClient(IChatCompletionClient):
                 choice_index=0,
                 content_delta=delta,
             )
+
+
+def test_summary_chunker_waits_on_rule_lists_without_paragraph_breaks() -> None:
+    buffer = "\n".join(
+        (
+            "Key points from the rules:",
+            "- Output ONLY a thread title. Nothing else.",
+            "- Single line, 50 characters or fewer.",
+            "- No explanations.",
+            "- Use the same language as the user message.",
+            "- Never include tool names in the title.",
+            "- Focus on the main topic or question the user needs to retrieve.",
+            "- Keep exact technical terms, numbers, filenames, and HTTP codes.",
+            "- Never use tools.",
+            "- Always output something meaningful.",
+        )
+    )
+
+    chunker = _SummaryChunker()
+
+    assert chunker.push(buffer) == ()
+    assert chunker.buffer == buffer
+
+
+def test_summary_chunker_prefers_paragraph_boundary_near_end() -> None:
+    paragraph_1 = "I am checking the request constraints and comparing them with the current plan. " * 4
+    paragraph_2 = "I am reviewing the main failure modes and narrowing the likely cause before changing code. " * 4
+    paragraph_3 = "z" * 320
+    buffer = f"{paragraph_1}\n\n{paragraph_2}\n\n{paragraph_3}"
+
+    chunker = _SummaryChunker()
+
+    assert chunker.push(buffer) == (f"{paragraph_1}\n\n{paragraph_2}".strip(),)
+    assert chunker.buffer == paragraph_3
+
+
+def test_summary_chunker_hard_flushes_large_boundary_free_text() -> None:
+    buffer = "x" * 900
+
+    chunker = _SummaryChunker()
+
+    assert chunker.push(buffer) == (buffer,)
+    assert chunker.buffer == ""
 
 
 async def test_with_summary_forwards_snapshot_before_summary_finishes() -> None:

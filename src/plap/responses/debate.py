@@ -987,7 +987,7 @@ async def _execute_actor_turn(
             parsed_arguments: dict[str, dict[str, object]] = {}
             supported_calls: list[ChatToolCall] = []
             tools_by_name = {tool.name: tool for tool in tools}
-            for call in tool_calls:
+            for call_index, call in enumerate(tool_calls):
                 policy = tool_policies.get(call.name)
                 if policy is None:
                     log_debug(logger, "debate.actor.tool_stubbed", actor=actor_name, reason="tool_unavailable", tool_name=call.name)
@@ -1019,7 +1019,17 @@ async def _execute_actor_turn(
                     )
                     inline_output_seen = True
                     continue
-                supported_calls.append(call)
+                repaired_call = ChatToolCall(
+                    id=call.id,
+                    name=call.name,
+                    arguments=_json_text(parsed_arguments[call.id]),
+                )
+                assistant.tool_calls[call_index] = StateToolCall(
+                    id=repaired_call.id,
+                    name=repaired_call.name,
+                    arguments=repaired_call.arguments,
+                )
+                supported_calls.append(repaired_call)
 
             if supported_calls:
                 resolved_policies = await resolve_tool_call_policies(

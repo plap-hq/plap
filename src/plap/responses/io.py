@@ -13,12 +13,11 @@ from anyio.abc import ObjectSendStream, TaskGroup
 
 from plap.errors import ErrorLevel, PlapError, PrivateError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ReasoningEffort, ServiceTier
+from plap.llms.summary import SummaryDelta, SummaryDone
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     ConversationReference,
     OutputTextContent,
-    ReasoningSummary,
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
@@ -53,7 +52,6 @@ from plap.responses.contracts import (
 from plap.responses.ingest.sealing import content_hash_prefix, seal_call_id, seal_reasoning_payload
 from plap.responses.models import ReasoningMessagePatch, ReasoningPayload, SealedCallID, Side, StateMessage
 from plap.responses.projection import ResponseProjection
-from plap.responses.reasoning import IReasoningSummarizer, ReasoningSummaryPartSource
 from plap.responses.store import PreparedRequest, ResponseStore
 
 logger = structlog.get_logger(__name__)
@@ -65,7 +63,8 @@ class _CommitKind(StrEnum):
     OUTPUT = "output"
     REASONING_DRAFT_BEGIN = "reasoning_draft_begin"
     REASONING_DRAFT_REPLACE = "reasoning_draft_replace"
-    REASONING_DRAFT_SUMMARY = "reasoning_draft_summary"
+    REASONING_DRAFT_SUMMARY_DELTA = "reasoning_draft_summary_delta"
+    REASONING_DRAFT_SUMMARY_DONE = "reasoning_draft_summary_done"
     REASONING_DRAFT_COMPLETE = "reasoning_draft_complete"
     COMPLETED = "completed"
 
@@ -106,10 +105,18 @@ class _ReasoningDraftReplace:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReasoningDraftSummary:
+class _ReasoningDraftSummaryDelta:
     item_id: str
     output_index: int
-    source: ReasoningSummaryPartSource
+    summary_index: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ReasoningDraftSummaryDone:
+    item_id: str
+    output_index: int
+    summary_index: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +126,13 @@ class _ReasoningDraftComplete:
 
 
 type _CommitValue = (
-    ResponseObject | ResponseOutputItem | _ReasoningDraftBegin | _ReasoningDraftReplace | _ReasoningDraftSummary | _ReasoningDraftComplete
+    ResponseObject
+    | ResponseOutputItem
+    | _ReasoningDraftBegin
+    | _ReasoningDraftReplace
+    | _ReasoningDraftSummaryDelta
+    | _ReasoningDraftSummaryDone
+    | _ReasoningDraftComplete
 )
 
 
@@ -137,16 +150,19 @@ def _assistant_anchor_hash(candidate: StateMessage, public_assistant: StateMessa
 
 def _stable_reasoning_payload(
     *,
+    reasoning_history: tuple[StateMessage, ...],
     candidate: StateMessage,
     anchor_hash: str,
     public_assistant: StateMessage | None,
 ) -> ReasoningPayload:
     if public_assistant is not None:
+        prefix_messages = reasoning_history[:-1] if reasoning_history and reasoning_history[-1].is_assistant() else reasoning_history
         return ReasoningPayload(
             side="main",
             temp=False,
             continuation_side=Side.MAIN,
             messages=(
+                *prefix_messages,
                 ReasoningMessagePatch(
                     content_hash=anchor_hash,
                     tool_calls=tuple(candidate.tool_calls) or None,
@@ -155,7 +171,12 @@ def _stable_reasoning_payload(
                 ),
             ),
         )
-    return ReasoningPayload(side="main", temp=False, continuation_side=Side.MAIN, messages=(candidate,))
+    return ReasoningPayload(
+        side="main",
+        temp=False,
+        continuation_side=Side.MAIN,
+        messages=reasoning_history or (candidate,),
+    )
 
 
 @dataclass(slots=True)
@@ -177,27 +198,16 @@ class ResponseEventIO:
         prepared: PreparedRequest,
         response_store: ResponseStore,
         send: ObjectSendStream[ResponseStreamEvent],
-        reasoning_summarizer: IReasoningSummarizer,
-        reasoning_summarizer_model: str,
-        reasoning_summarizer_prompt_cache_key_base: str | None,
-        reasoning_summarizer_reasoning_effort: ReasoningEffort | None,
-        reasoning_summarizer_service_tier: ServiceTier | None,
-        reasoning_summary_mode: ReasoningSummary | None,
     ) -> None:
         self._response = _response_object(request, status="in_progress")
         self._prepared = prepared
         self._response_store = response_store
         self._send = send
         self._client_attached = True
-        self._reasoning_summarizer = reasoning_summarizer
-        self._reasoning_summarizer_model = reasoning_summarizer_model
-        self._reasoning_summarizer_prompt_cache_key_base = reasoning_summarizer_prompt_cache_key_base
-        self._reasoning_summarizer_reasoning_effort = reasoning_summarizer_reasoning_effort
-        self._reasoning_summarizer_service_tier = reasoning_summarizer_service_tier
-        self._reasoning_summary_mode = reasoning_summary_mode
         self._projection = projection
         self._commit_send, self._commit_receive = anyio.create_memory_object_stream[_Commit](16)
         self._output_items: list[ResponseOutputItem] = []
+        self._pending_reasoning_summary_text: dict[tuple[str, int], str] = {}
         self._sequence_number = 0
 
     def start(self, task_group: TaskGroup) -> None:
@@ -249,31 +259,36 @@ class ResponseEventIO:
             wait=True,
         )
 
-    async def append_reasoning_draft_summary(
+    async def apply_reasoning_summary_delta(
         self,
         draft: ReasoningDraft,
-        source: ReasoningSummaryPartSource,
-    ) -> str:
-        if self._reasoning_summary_mode is None:
-            raise _io_internal_error(
-                reason="reasoning_draft_summary_mode_missing",
-                private_message="reasoning summary mode is required for draft summary parts",
-            )
-        result = await self._enqueue_commit(
-            _CommitKind.REASONING_DRAFT_SUMMARY,
-            _ReasoningDraftSummary(
+        update: SummaryDelta,
+    ) -> None:
+        await self._enqueue_commit(
+            _CommitKind.REASONING_DRAFT_SUMMARY_DELTA,
+            _ReasoningDraftSummaryDelta(
                 item_id=draft.item_id,
                 output_index=draft.output_index,
-                source=source,
+                summary_index=update.index,
+                text=update.text,
+            ),
+        )
+
+
+    async def apply_reasoning_summary_done(
+        self,
+        draft: ReasoningDraft,
+        update: SummaryDone,
+    ) -> None:
+        await self._enqueue_commit(
+            _CommitKind.REASONING_DRAFT_SUMMARY_DONE,
+            _ReasoningDraftSummaryDone(
+                item_id=draft.item_id,
+                output_index=draft.output_index,
+                summary_index=update.index,
             ),
             wait=True,
         )
-        if not isinstance(result, str):
-            raise _io_internal_error(
-                reason="reasoning_draft_summary_result_invalid",
-                private_message="reasoning draft summary did not return text",
-            )
-        return result
 
     async def complete_reasoning_draft(self, draft: ReasoningDraft, item: ResponseReasoningItem) -> None:
         if item.status != "completed":
@@ -292,6 +307,7 @@ class ResponseEventIO:
         *,
         candidate: StateMessage,
         keyring: SealingKeyring,
+        reasoning_history: tuple[StateMessage, ...] = (),
         server_outputs: Mapping[str, str],
         reasoning_summary: Sequence[SummaryTextContent] = (),
         reasoning_draft: ReasoningDraft | None = None,
@@ -302,6 +318,7 @@ class ResponseEventIO:
 
         if reasoning_draft is not None:
             reasoning_payload = _stable_reasoning_payload(
+                reasoning_history=reasoning_history,
                 candidate=candidate,
                 anchor_hash=assistant_hash,
                 public_assistant=public_assistant,
@@ -318,6 +335,7 @@ class ResponseEventIO:
             )
         elif needs_reasoning_anchor:
             reasoning_payload = _stable_reasoning_payload(
+                reasoning_history=reasoning_history,
                 candidate=candidate,
                 anchor_hash=assistant_hash,
                 public_assistant=public_assistant,
@@ -494,8 +512,10 @@ class ResponseEventIO:
                         await self._emit_reasoning_draft_begin(commit)
                     elif commit.kind == _CommitKind.REASONING_DRAFT_REPLACE:
                         await self._emit_reasoning_draft_replace(commit)
-                    elif commit.kind == _CommitKind.REASONING_DRAFT_SUMMARY:
-                        await self._emit_reasoning_draft_summary(commit)
+                    elif commit.kind == _CommitKind.REASONING_DRAFT_SUMMARY_DELTA:
+                        await self._emit_reasoning_draft_summary_delta(commit)
+                    elif commit.kind == _CommitKind.REASONING_DRAFT_SUMMARY_DONE:
+                        await self._emit_reasoning_draft_summary_done(commit)
                     elif commit.kind == _CommitKind.REASONING_DRAFT_COMPLETE:
                         await self._emit_reasoning_draft_complete(commit)
                     else:
@@ -574,16 +594,45 @@ class ResponseEventIO:
         self._output_items[draft.output_index] = item
         self._ack_commit(commit)
 
-    async def _emit_reasoning_draft_summary(self, commit: _Commit) -> None:
-        summary = cast(_ReasoningDraftSummary, commit.value)
-        item = self._reasoning_draft_item(summary.output_index)
-        summary_index = len(item.summary)
-        summary_part = await self._emit_reasoning_summary_part_from_source(
-            item_id=summary.item_id,
-            output_index=summary.output_index,
-            summary_index=summary_index,
-            source=summary.source,
+    async def _emit_reasoning_draft_summary_delta(self, commit: _Commit) -> None:
+        summary = cast(_ReasoningDraftSummaryDelta, commit.value)
+        summary_key = (summary.item_id, summary.summary_index)
+        if summary_key not in self._pending_reasoning_summary_text:
+            self._pending_reasoning_summary_text[summary_key] = ""
+            await self._send_event(
+                ResponseReasoningSummaryPartAddedEvent(
+                    item_id=summary.item_id,
+                    output_index=summary.output_index,
+                    part=SummaryTextContent(text="", type="summary_text"),
+                    sequence_number=0,
+                    summary_index=summary.summary_index,
+                    type="response.reasoning_summary_part.added",
+                )
+            )
+        self._pending_reasoning_summary_text[summary_key] += summary.text
+        await self._send_event(
+            ResponseReasoningSummaryTextDeltaEvent(
+                delta=summary.text,
+                item_id=summary.item_id,
+                output_index=summary.output_index,
+                sequence_number=0,
+                summary_index=summary.summary_index,
+                type="response.reasoning_summary_text.delta",
+            )
         )
+        self._ack_commit(commit)
+
+    async def _emit_reasoning_draft_summary_done(self, commit: _Commit) -> None:
+        summary = cast(_ReasoningDraftSummaryDone, commit.value)
+        summary_key = (summary.item_id, summary.summary_index)
+        summary_text = self._pending_reasoning_summary_text.pop(summary_key, None)
+        if summary_text is None:
+            raise _io_internal_error(
+                reason="reasoning_draft_summary_done_missing_delta",
+                private_message="reasoning draft summary completion has no active summary text",
+            )
+        item = self._reasoning_draft_item(summary.output_index)
+        summary_part = SummaryTextContent(text=summary_text, type="summary_text")
         updated_item = item.model_copy(update={"summary": [*item.summary, summary_part]})
         await self._response_store.replace_output_item(
             self._prepared,
@@ -592,7 +641,27 @@ class ResponseEventIO:
             updated_item.model_dump(mode="json", exclude_none=True),
         )
         self._output_items[summary.output_index] = updated_item
-        self._ack_commit(commit, result=summary_part.text)
+        await self._send_event(
+            ResponseReasoningSummaryTextDoneEvent(
+                item_id=summary.item_id,
+                output_index=summary.output_index,
+                sequence_number=0,
+                summary_index=summary.summary_index,
+                text=summary_text,
+                type="response.reasoning_summary_text.done",
+            )
+        )
+        await self._send_event(
+            ResponseReasoningSummaryPartDoneEvent(
+                item_id=summary.item_id,
+                output_index=summary.output_index,
+                part=summary_part,
+                sequence_number=0,
+                summary_index=summary.summary_index,
+                type="response.reasoning_summary_part.done",
+            )
+        )
+        self._ack_commit(commit)
 
     async def _emit_reasoning_draft_complete(self, commit: _Commit) -> None:
         draft = cast(_ReasoningDraftComplete, commit.value)
@@ -661,88 +730,6 @@ class ResponseEventIO:
             )
         )
 
-    async def _emit_reasoning_summary_part_from_source(
-        self,
-        *,
-        item_id: str,
-        output_index: int,
-        summary_index: int,
-        source: ReasoningSummaryPartSource,
-    ) -> SummaryTextContent:
-        summary_text = ""
-        log_debug(
-            logger,
-            "response.io.reasoning_summary.start",
-            item_id=item_id,
-            mode=self._reasoning_summary_mode,
-            output_index=output_index,
-            summary_index=summary_index,
-        )
-        await self._send_event(
-            ResponseReasoningSummaryPartAddedEvent(
-                item_id=item_id,
-                output_index=output_index,
-                part=SummaryTextContent(text="", type="summary_text"),
-                sequence_number=0,
-                summary_index=summary_index,
-                type="response.reasoning_summary_part.added",
-            )
-        )
-        try:
-            async for delta in self._reasoning_summarizer.stream_part(
-                model=self._reasoning_summarizer_model,
-                prompt_cache_key=self._reasoning_summarizer_prompt_cache_key(),
-                reasoning_effort=self._reasoning_summarizer_reasoning_effort,
-                service_tier=self._reasoning_summarizer_service_tier,
-                mode=cast(ReasoningSummary, self._reasoning_summary_mode),
-                source=source,
-            ):
-                summary_text += delta
-                await self._send_event(
-                    ResponseReasoningSummaryTextDeltaEvent(
-                        delta=delta,
-                        item_id=item_id,
-                        output_index=output_index,
-                        sequence_number=0,
-                        summary_index=summary_index,
-                        type="response.reasoning_summary_text.delta",
-                    )
-                )
-        except Exception:
-            log_debug(logger, "response.io.reasoning_summary.failed", item_id=item_id, output_index=output_index)
-            summary_text = ""
-
-        summary_part = SummaryTextContent(text=summary_text, type="summary_text")
-        await self._send_event(
-            ResponseReasoningSummaryTextDoneEvent(
-                item_id=item_id,
-                output_index=output_index,
-                sequence_number=0,
-                summary_index=summary_index,
-                text=summary_text,
-                type="response.reasoning_summary_text.done",
-            )
-        )
-        await self._send_event(
-            ResponseReasoningSummaryPartDoneEvent(
-                item_id=item_id,
-                output_index=output_index,
-                part=summary_part,
-                sequence_number=0,
-                summary_index=summary_index,
-                type="response.reasoning_summary_part.done",
-            )
-        )
-        log_debug(
-            logger,
-            "response.io.reasoning_summary.done",
-            item_id=item_id,
-            output_index=output_index,
-            summary_index=summary_index,
-            summary_length=len(summary_text),
-        )
-        return summary_part
-
     def _reasoning_draft_item(self, output_index: int) -> ResponseReasoningItem:
         try:
             item = self._output_items[output_index]
@@ -769,11 +756,6 @@ class ResponseEventIO:
         if item.summary or not current.summary:
             return item
         return item.model_copy(update={"summary": list(current.summary)})
-
-    def _reasoning_summarizer_prompt_cache_key(self) -> str | None:
-        if self._reasoning_summarizer_prompt_cache_key_base is None:
-            return None
-        return f"{self._reasoning_summarizer_prompt_cache_key_base}|reasoning_summarizer"
 
     async def _emit_reasoning_events(
         self,

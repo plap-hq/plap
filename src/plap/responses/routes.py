@@ -36,7 +36,6 @@ from plap.responses.dependencies import (
     WEBSOCKET_ROUTE_DEPENDENCIES,
 )
 from plap.responses.projection import ResponseProjection
-from plap.responses.reasoning import IReasoningSummarizer
 from plap.responses.runtime import _base_prompt_cache_key, _requested_parameters, _runtime_selector, stream_response_events
 from plap.responses.store import ResponseStore
 from plap.responses.tools import IToolCallPolicyResolver, IToolPolicyResolver
@@ -144,7 +143,6 @@ async def create_response(
     settings: Settings,
     sealing_keyring: SealingKeyring,
     chat_completion_client: IChatCompletionClient,
-    reasoning_summarizer: IReasoningSummarizer,
     response_store: ResponseStore,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
@@ -169,7 +167,6 @@ async def create_response(
         settings=settings,
         sealing_keyring=sealing_keyring,
         chat_completion_client=chat_completion_client,
-        reasoning_summarizer=reasoning_summarizer,
         response_store=response_store,
         tool_policy_resolver=tool_policy_resolver,
         tool_call_policy_resolver=tool_call_policy_resolver,
@@ -327,7 +324,6 @@ async def responses_socket(
     settings: Settings,
     sealing_keyring: SealingKeyring,
     chat_completion_client: IChatCompletionClient,
-    reasoning_summarizer: IReasoningSummarizer,
     response_store: ResponseStore,
     tool_policy_resolver: IToolPolicyResolver,
     tool_call_policy_resolver: IToolCallPolicyResolver,
@@ -373,7 +369,6 @@ async def responses_socket(
                 settings=settings,
                 sealing_keyring=sealing_keyring,
                 chat_completion_client=chat_completion_client,
-                reasoning_summarizer=reasoning_summarizer,
                 response_store=response_store,
                 tool_policy_resolver=tool_policy_resolver,
                 tool_call_policy_resolver=tool_call_policy_resolver,
