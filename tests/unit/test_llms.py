@@ -993,7 +993,7 @@ async def test_retry_stream_raises_retry_limit_exceeded_when_attempts_are_exhaus
         max_attempts=1,
     )
     items: list[Snapshot] = []
-    with pytest.raises(RetryLimitExceededError, match="retry limit reached"):
+    with pytest.raises(RetryLimitExceededError, match="retry limit reached") as exc_info:
         items.append(await anext(stream))
         items.append(await anext(stream))
         await anext(stream)
@@ -1001,6 +1001,7 @@ async def test_retry_stream_raises_retry_limit_exceeded_when_attempts_are_exhaus
     assert len(items) == 2
     assert items[0].results and items[0].results[0].finish_reason == "tool_calls"
     assert items[1].messages[-1].role == "user"
+    assert exc_info.value.last_retry_message == "Reply again without tool calls."
 
 
 async def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_tool_name() -> None:

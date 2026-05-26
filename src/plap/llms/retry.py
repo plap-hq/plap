@@ -21,7 +21,9 @@ class RetryError(Exception):
 
 
 class RetryLimitExceededError(RetryError):
-    pass
+    def __init__(self, message: str = "retry limit reached", *, last_retry_message: str | None = None) -> None:
+        super().__init__(message)
+        self.last_retry_message = last_retry_message
 
 
 class RetryToolSchemaError(RetryError):
@@ -172,6 +174,7 @@ async def stream(
     max_attempts: int = 3,
 ) -> AsyncIterator[Snapshot]:
     history = Snapshot(messages=(), results=(), delta=None)
+    last_retry_message: str | None = None
 
     for _ in range(max_attempts):
         request = next_request(history)
@@ -208,6 +211,7 @@ async def stream(
         fix = await _first_retry_message(result, request, validators)
         if fix is None:
             return
+        last_retry_message = fix
 
         history = Snapshot(
             messages=(
@@ -221,7 +225,7 @@ async def stream(
         )
         yield history
 
-    raise RetryLimitExceededError("retry limit reached")
+    raise RetryLimitExceededError(last_retry_message=last_retry_message)
 
 
 async def complete(
