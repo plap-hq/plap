@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import aiohttp
 import anyio
 import httpx
 import pytest
-from fireworks.client.error import InvalidRequestError
+from fireworks.client.error import APITimeoutError as FireworksAPITimeoutError, InvalidRequestError
 from openai import APITimeoutError, BadRequestError
 
+import plap.llms.completions.providers.fireworks as fireworks_provider_module
 import plap.llms.completions.providers.openai as openai_provider_module
 import plap.llms.completions.quirks as quirks_module
 import plap.llms.completions.router as router_module
@@ -94,6 +96,16 @@ def _capture_openai_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[
         events.append({"event": event, **context})
 
     monkeypatch.setattr(openai_provider_module, "log_debug", record)
+    return events
+
+
+def _capture_fireworks_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+
+    def record(_logger: object, event: str, /, **context: object) -> None:
+        events.append({"event": event, **context})
+
+    monkeypatch.setattr(fireworks_provider_module, "log_debug", record)
     return events
 
 
@@ -282,6 +294,7 @@ class _FakeFireworksCompletions:
         self.calls: list[dict[str, Any]] = []
         self._complete_result = complete_result
         self._stream_result = stream_result
+        self.last_stream: Any | None = None
 
     def acreate(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
@@ -293,7 +306,11 @@ class _FakeFireworksCompletions:
                     yield
 
                 return raise_stream()
-            return _AsyncListStream(list(self._stream_result))
+            if hasattr(self._stream_result, "__aiter__"):
+                self.last_stream = self._stream_result
+                return self.last_stream
+            self.last_stream = _AsyncListStream(list(self._stream_result))
+            return self.last_stream
 
         async def complete() -> Any:
             if isinstance(self._complete_result, Exception):
@@ -304,11 +321,19 @@ class _FakeFireworksCompletions:
 
 
 class _FakeFireworksClient:
-    def __init__(self, *, complete_result: Any, stream_result: Any, base_url: str = "https://example.com/v1") -> None:
+    def __init__(
+        self,
+        *,
+        complete_result: Any,
+        stream_result: Any,
+        base_url: str = "https://example.com/v1",
+        timeout: int = 600,
+    ) -> None:
         self.chat = type(
             "Chat", (), {"completions": _FakeFireworksCompletions(complete_result=complete_result, stream_result=stream_result)}
         )()
         self.base_url = base_url
+        self._client_v1 = type("FireworksClientV1", (), {"request_timeout": timeout, "base_url": base_url})()
 
 
 class _StubChatClient(IChatCompletionClient):
@@ -1871,6 +1896,8 @@ async def test_fireworks_provider_uses_its_own_sdk_and_shared_parser() -> None:
     assert deltas[1].finish_reason == "stop"
     assert fake_client.chat.completions.calls[0]["stream"] is False
     assert fake_client.chat.completions.calls[1]["stream"] is True
+    assert fake_client.chat.completions.calls[0]["context_length_exceeded_behavior"] == "error"
+    assert fake_client.chat.completions.calls[1]["context_length_exceeded_behavior"] == "error"
 
 
 async def test_fireworks_provider_normalizes_context_length_errors() -> None:
@@ -1882,6 +1909,80 @@ async def test_fireworks_provider_normalizes_context_length_errors() -> None:
 
     with pytest.raises(ChatCompletionContextLengthExceededError, match="context window"):
         await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
+
+
+async def test_fireworks_provider_normalizes_sdk_timeout_errors_and_logs_transport_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _capture_fireworks_provider_logs(monkeypatch)
+    error = FireworksAPITimeoutError("Request timed out.")
+    fake_client = _FakeFireworksClient(
+        complete_result=error,
+        stream_result=[],
+        base_url="https://api.fireworks.ai/inference/v1",
+        timeout=321,
+    )
+    client = ChatCompletionClient(_fireworks_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionTimeoutError, match=r"Request timed out\."):
+        await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event"] == "llm.provider.request_error"
+    assert event["provider"] == "fireworks"
+    assert event["base_url"] == "https://api.fireworks.ai/inference/v1"
+    assert event["stream"] is False
+    assert event["request_model"] == "accounts/fireworks/models/gpt-oss-20b"
+    assert event["wire_model"] == "accounts/fireworks/models/gpt-oss-20b"
+    assert event["sdk_error_type"] == "APITimeoutError"
+    assert event["sdk_error_message"] == "Request timed out."
+    assert event["timeout_phase"] is None
+    assert event["cause_chain_types"] == ["APITimeoutError"]
+    assert event["root_cause_type"] is None
+    assert event["request_method"] is None
+    assert event["request_url"] is None
+    assert event["client_max_retries"] is None
+    assert event["client_timeout_seconds"] == 321.0
+    assert event["message_count"] == 2
+    assert event["tool_count"] == 1
+    assert isinstance(event["request_body_bytes"], int)
+    assert event["request_body_bytes"] > 0
+
+
+async def test_fireworks_provider_normalizes_aiohttp_transport_errors() -> None:
+    fake_client = _FakeFireworksClient(
+        complete_result=aiohttp.ClientError("connection lost"),
+        stream_result=[],
+    )
+    client = ChatCompletionClient(_fireworks_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionProviderError, match="connection lost"):
+        await client.complete(_request_for_model("accounts/fireworks/models/gpt-oss-20b"))
+
+
+async def test_fireworks_provider_closes_stream_on_error() -> None:
+    request = httpx.Request("POST", "https://api.fireworks.ai/inference/v1/chat/completions")
+    fake_client = _FakeFireworksClient(
+        complete_result=_completion_response(model="accounts/fireworks/models/gpt-oss-20b", content="ok"),
+        stream_result=[
+            _chunk(model="accounts/fireworks/models/gpt-oss-20b", content="ok"),
+            httpx.ReadTimeout("read timed out", request=request),
+        ],
+    )
+    client = ChatCompletionClient(_fireworks_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionTimeoutError, match=r"read timed out \(phase: read\)"):
+        [
+            delta
+            async for delta in client.stream(
+                replace(_request_for_model("accounts/fireworks/models/gpt-oss-20b"), stream_options=ChatStreamOptions(include_usage=True))
+            )
+        ]
+
+    stream = fake_client.chat.completions.last_stream
+    assert stream is not None
+    assert stream.closed is True
 
 
 async def test_router_complete_retries_transient_errors_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
