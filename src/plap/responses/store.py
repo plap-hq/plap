@@ -229,8 +229,13 @@ class ResponseStore:
 
                 if parent_response_id is not None:
                     replay_items = await self._replay_items(connection, scope_id, parent_response_id)
-                execution_replay_items = await self._resolve_execution_items(connection, scope_id, replay_items)
-                execution_current_input_items = await self._resolve_execution_items(connection, scope_id, current_input_items)
+                payloads_by_id = await self._stored_item_payloads_by_id(
+                    connection,
+                    scope_id,
+                    self._execution_resolution_ids(replay_items, current_input_items),
+                )
+                execution_replay_items = self._resolve_execution_items(replay_items, payloads_by_id)
+                execution_current_input_items = self._resolve_execution_items(current_input_items, payloads_by_id)
         else:
             execution_replay_items = replay_items
 
@@ -684,6 +689,23 @@ class ResponseStore:
             stored.append(item)
         return stored
 
+    @classmethod
+    def _execution_resolution_ids(cls, *item_groups: list[RequestInputItem]) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for items in item_groups:
+            for item in items:
+                item_id: str | None = None
+                if isinstance(item, RequestItemReference):
+                    item_id = item.id
+                elif cls._is_implicit_reasoning_replay(item):
+                    item_id = item.id
+                if item_id is None or item_id in seen:
+                    continue
+                seen.add(item_id)
+                ids.append(item_id)
+        return ids
+
     async def _require_replayable_response(
         self,
         connection: AsyncConnection,
@@ -729,19 +751,18 @@ class ResponseStore:
             result.close()
         return [self._request_input_from_payload(payload) for payload in rows]
 
-    async def _resolve_execution_items(
+    def _resolve_execution_items(
         self,
-        connection: AsyncConnection,
-        scope_id: UUID,
         items: list[RequestInputItem],
+        payloads_by_id: dict[str, list[PayloadObject]],
     ) -> list[RequestInputItem]:
         resolved: list[RequestInputItem] = []
         for item in items:
             if isinstance(item, RequestItemReference):
-                resolved.append(await self._resolve_item_reference(connection, scope_id, item.id))
+                resolved.append(self._resolve_item_reference(item.id, payloads_by_id))
                 continue
             if self._is_implicit_reasoning_replay(item):
-                resolved_item = await self._resolve_implicit_reasoning_replay(connection, scope_id, item.id)
+                resolved_item = self._resolve_implicit_reasoning_replay(item.id, payloads_by_id)
                 if resolved_item is not None:
                     resolved.append(resolved_item)
                     continue
@@ -750,15 +771,14 @@ class ResponseStore:
             resolved.append(item)
         return resolved
 
-    async def _resolve_implicit_reasoning_replay(
+    def _resolve_implicit_reasoning_replay(
         self,
-        connection: AsyncConnection,
-        scope_id: UUID,
         item_id: str | None,
+        payloads_by_id: dict[str, list[PayloadObject]],
     ) -> RequestInputItem | None:
         if item_id is None:
             return None
-        payloads = await self._stored_item_payloads(connection, scope_id, item_id)
+        payloads = payloads_by_id.get(item_id, [])
         if not payloads:
             return None
         if len(payloads) > 1:
@@ -768,51 +788,59 @@ class ResponseStore:
             return None
         return resolved
 
-    async def _resolve_item_reference(
+    def _resolve_item_reference(
         self,
-        connection: AsyncConnection,
-        scope_id: UUID,
         item_id: str,
+        payloads_by_id: dict[str, list[PayloadObject]],
     ) -> RequestInputItem:
-        payloads = await self._stored_item_payloads(connection, scope_id, item_id)
+        payloads = payloads_by_id.get(item_id, [])
         if not payloads:
             raise _item_reference_not_found_error(item_id)
         if len(payloads) > 1:
             raise _item_reference_ambiguous_error(item_id)
         return self._request_input_from_payload(payloads[0])
 
-    async def _stored_item_payloads(
+    async def _stored_item_payloads_by_id(
         self,
         connection: AsyncConnection,
         scope_id: UUID,
-        item_id: str,
-    ) -> list[PayloadObject]:
+        item_ids: list[str],
+    ) -> dict[str, list[PayloadObject]]:
+        if not item_ids:
+            return {}
         result = await connection.execute(
             text(
                 """
-                select payload.payload_json
-                  from responses.response_input_items item
+                with requested as (
+                  select distinct value as item_id
+                    from jsonb_array_elements_text(cast(:item_ids as jsonb))
+                )
+                select requested.item_id, payload.payload_json
+                  from requested
                   join responses.payloads payload
-                    on payload.scope_id = item.scope_id
-                   and payload.payload_id = item.payload_id
-                 where item.scope_id = :scope_id
-                   and payload.payload_json ->> 'id' = :item_id
-                   and coalesce(payload.payload_json ->> 'type', '') <> 'item_reference'
-                   and not exists (
+                    on payload.scope_id = :scope_id
+                   and payload.item_id = requested.item_id
+                   and payload.item_type <> 'item_reference'
+                  join responses.response_input_items item
+                    on item.scope_id = payload.scope_id
+                   and item.payload_id = payload.payload_id
+                 where not exists (
                      select 1
                        from responses.response_tombstones tombstone
                       where tombstone.scope_id = item.scope_id
                         and tombstone.response_id = item.response_id
                    )
                 union all
-                select payload.payload_json
-                  from responses.response_output_items item
+                select requested.item_id, payload.payload_json
+                  from requested
                   join responses.payloads payload
-                    on payload.scope_id = item.scope_id
-                   and payload.payload_id = item.payload_id
-                 where item.scope_id = :scope_id
-                   and payload.payload_json ->> 'id' = :item_id
-                   and not exists (
+                    on payload.scope_id = :scope_id
+                   and payload.item_id = requested.item_id
+                   and payload.item_type <> 'item_reference'
+                  join responses.response_output_items item
+                    on item.scope_id = payload.scope_id
+                   and item.payload_id = payload.payload_id
+                 where not exists (
                      select 1
                        from responses.response_tombstones tombstone
                       where tombstone.scope_id = item.scope_id
@@ -820,12 +848,18 @@ class ResponseStore:
                    )
                 """
             ),
-            {"scope_id": scope_id, "item_id": item_id},
+            {"scope_id": scope_id, "item_ids": self._json_text(item_ids)},
         )
         try:
-            return [dict(cast(Mapping[str, object], payload)) for payload in result.scalars().all()]
+            rows = result.mappings().all()
         finally:
             result.close()
+        payloads_by_id: dict[str, list[PayloadObject]] = {}
+        for row in rows:
+            item_id = cast(str, row["item_id"])
+            payload = dict(cast(Mapping[str, object], row["payload_json"]))
+            payloads_by_id.setdefault(item_id, []).append(payload)
+        return payloads_by_id
 
     @staticmethod
     def _request_input_from_payload(payload: Mapping[str, object]) -> RequestInputItem:
