@@ -25,6 +25,7 @@ from plap.responses.contracts import (
     RequestInputItem,
     RequestItemReference,
     RequestMessageItem,
+    RequestReasoningItem,
     ResponseCreateRequest,
     ResponseObject,
 )
@@ -190,6 +191,7 @@ class PreparedRequest:
     response_request: ResponseCreateRequest
     execution_request: ResponseCreateRequest
     current_input_items: list[RequestInputItem]
+    stored_input_items: list[RequestInputItem]
     parent_response_id: str | None
     conversation_id: str | None
     persist_response: bool
@@ -208,11 +210,12 @@ class ResponseStore:
             raise _conversation_requires_store_error()
 
         current_input_items = self._current_input_items(request)
+        stored_input_items = self._stored_current_input_items(current_input_items)
         parent_response_id = request.previous_response_id
         replay_items: list[RequestInputItem] = []
         execution_replay_items: list[RequestInputItem] = []
         execution_current_input_items: list[RequestInputItem] = list(current_input_items)
-        if parent_response_id is not None or conversation_id is not None or self._has_item_references(current_input_items):
+        if parent_response_id is not None or conversation_id is not None or self._needs_execution_resolution(current_input_items):
             async with self._database.connection() as connection:
                 if parent_response_id is not None:
                     await self._require_replayable_response(
@@ -226,8 +229,8 @@ class ResponseStore:
 
                 if parent_response_id is not None:
                     replay_items = await self._replay_items(connection, scope_id, parent_response_id)
-                execution_replay_items = await self._resolve_item_references(connection, scope_id, replay_items)
-                execution_current_input_items = await self._resolve_item_references(connection, scope_id, current_input_items)
+                execution_replay_items = await self._resolve_execution_items(connection, scope_id, replay_items)
+                execution_current_input_items = await self._resolve_execution_items(connection, scope_id, current_input_items)
         else:
             execution_replay_items = replay_items
 
@@ -254,6 +257,7 @@ class ResponseStore:
             response_request=response_request,
             execution_request=execution_request,
             current_input_items=current_input_items,
+            stored_input_items=stored_input_items,
             parent_response_id=parent_response_id,
             conversation_id=conversation_id,
             persist_response=request.store is not False,
@@ -262,7 +266,7 @@ class ResponseStore:
     async def begin_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
         if not prepared.persist_response:
             return
-        input_items = self._stored_input_payloads(response.id, prepared.current_input_items)
+        input_items = self._stored_input_payloads(response.id, prepared.stored_input_items)
         log_debug(
             logger,
             "response.store.begin",
@@ -663,8 +667,22 @@ class ResponseStore:
         return list(request.input)
 
     @staticmethod
-    def _has_item_references(items: list[RequestInputItem]) -> bool:
-        return any(isinstance(item, RequestItemReference) for item in items)
+    def _is_implicit_reasoning_replay(item: RequestInputItem) -> bool:
+        return isinstance(item, RequestReasoningItem) and item.id is not None and item.encrypted_content is None
+
+    @classmethod
+    def _needs_execution_resolution(cls, items: list[RequestInputItem]) -> bool:
+        return any(isinstance(item, RequestItemReference) or cls._is_implicit_reasoning_replay(item) for item in items)
+
+    @classmethod
+    def _stored_current_input_items(cls, items: list[RequestInputItem]) -> list[RequestInputItem]:
+        stored: list[RequestInputItem] = []
+        for item in items:
+            if cls._is_implicit_reasoning_replay(item):
+                stored.append(RequestItemReference(id=item.id, type="item_reference"))
+                continue
+            stored.append(item)
+        return stored
 
     async def _require_replayable_response(
         self,
@@ -711,7 +729,7 @@ class ResponseStore:
             result.close()
         return [self._request_input_from_payload(payload) for payload in rows]
 
-    async def _resolve_item_references(
+    async def _resolve_execution_items(
         self,
         connection: AsyncConnection,
         scope_id: UUID,
@@ -719,10 +737,35 @@ class ResponseStore:
     ) -> list[RequestInputItem]:
         resolved: list[RequestInputItem] = []
         for item in items:
-            if not isinstance(item, RequestItemReference):
+            if isinstance(item, RequestItemReference):
+                resolved.append(await self._resolve_item_reference(connection, scope_id, item.id))
+                continue
+            if self._is_implicit_reasoning_replay(item):
+                resolved_item = await self._resolve_implicit_reasoning_replay(connection, scope_id, item.id)
+                if resolved_item is not None:
+                    resolved.append(resolved_item)
+                    continue
                 resolved.append(item)
                 continue
-            resolved.append(await self._resolve_item_reference(connection, scope_id, item.id))
+            resolved.append(item)
+        return resolved
+
+    async def _resolve_implicit_reasoning_replay(
+        self,
+        connection: AsyncConnection,
+        scope_id: UUID,
+        item_id: str | None,
+    ) -> RequestInputItem | None:
+        if item_id is None:
+            return None
+        payloads = await self._stored_item_payloads(connection, scope_id, item_id)
+        if not payloads:
+            return None
+        if len(payloads) > 1:
+            raise _item_reference_ambiguous_error(item_id)
+        resolved = self._request_input_from_payload(payloads[0])
+        if not isinstance(resolved, RequestReasoningItem):
+            return None
         return resolved
 
     async def _resolve_item_reference(
@@ -731,6 +774,19 @@ class ResponseStore:
         scope_id: UUID,
         item_id: str,
     ) -> RequestInputItem:
+        payloads = await self._stored_item_payloads(connection, scope_id, item_id)
+        if not payloads:
+            raise _item_reference_not_found_error(item_id)
+        if len(payloads) > 1:
+            raise _item_reference_ambiguous_error(item_id)
+        return self._request_input_from_payload(payloads[0])
+
+    async def _stored_item_payloads(
+        self,
+        connection: AsyncConnection,
+        scope_id: UUID,
+        item_id: str,
+    ) -> list[PayloadObject]:
         result = await connection.execute(
             text(
                 """
@@ -767,14 +823,9 @@ class ResponseStore:
             {"scope_id": scope_id, "item_id": item_id},
         )
         try:
-            payloads = [dict(cast(Mapping[str, object], payload)) for payload in result.scalars().all()]
+            return [dict(cast(Mapping[str, object], payload)) for payload in result.scalars().all()]
         finally:
             result.close()
-        if not payloads:
-            raise _item_reference_not_found_error(item_id)
-        if len(payloads) > 1:
-            raise _item_reference_ambiguous_error(item_id)
-        return self._request_input_from_payload(payloads[0])
 
     @staticmethod
     def _request_input_from_payload(payload: Mapping[str, object]) -> RequestInputItem:

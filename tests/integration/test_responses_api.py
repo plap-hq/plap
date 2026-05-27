@@ -33,7 +33,6 @@ from plap.responses.tools import (
 
 def _request_payload(stream: bool = False) -> dict[str, object]:
     return {
-        "context_management": [{"compact_threshold": 128, "type": "compaction"}],
         "input": [
             {
                 "content": "hello from the client",
@@ -530,6 +529,177 @@ async def test_retrieve_response_redacts_reasoning_encrypted_content_but_item_re
     assert prepared.execution_request.input is not None
     assert prepared.execution_request.input[0].type == "reasoning"
     assert prepared.execution_request.input[0].encrypted_content == sealed_reasoning
+
+
+async def test_redacted_reasoning_output_replay_resolves_from_stored_state(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    response_store = ResponseStore(test_app.state.database)
+    auth_context = AuthContext(
+        api_key_id=seeded_auth_data.api_key_id,
+        organization_id=seeded_auth_data.organization_id,
+        user_id=seeded_auth_data.user_id,
+    )
+    prepared = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="hello"),
+    )
+    first_message = StateMessage(role="assistant", content="first reply")
+    sealed_reasoning = seal_reasoning_payload(
+        ReasoningPayload(
+            side="main",
+            temp=False,
+            continuation_side="main",
+            messages=(
+                ReasoningMessagePatch(
+                    content_hash=content_hash(first_message),
+                    reasoning_content="first thinking",
+                ),
+            ),
+        ),
+        keyring=test_app.state.sealing_keyring,
+    )
+    response = ResponseObject(
+        created_at=0,
+        id="resp_replay_reasoning_shell",
+        model="plap/test",
+        output=[],
+        status="in_progress",
+    )
+    reasoning_item = ResponseReasoningItem(
+        encrypted_content=sealed_reasoning,
+        id="rs_replay_reasoning_shell",
+        status="completed",
+        summary=[],
+        type="reasoning",
+    )
+    message_item = ResponseMessageItem(
+        content=[OutputTextContent(text="first reply", type="output_text")],
+        id="msg_replay_reasoning_shell",
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    await response_store.begin_response(prepared, response)
+    await response_store.append_output_item(
+        prepared,
+        response.id,
+        0,
+        reasoning_item.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.append_output_item(
+        prepared,
+        response.id,
+        1,
+        message_item.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.finish_response(
+        prepared,
+        response.model_copy(
+            update={
+                "completed_at": 1,
+                "output": [reasoning_item, message_item],
+                "status": "completed",
+            }
+        ),
+    )
+
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+    async with AsyncTestClient(app=test_app) as client:
+        retrieved = await client.get(f"/v1/responses/{response.id}", headers=headers)
+
+    assert retrieved.status_code == 200
+    replay_output = retrieved.json()["output"]
+    assert replay_output[0]["type"] == "reasoning"
+    assert replay_output[0].get("encrypted_content") is None
+
+    prepared_replay = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input=replay_output),
+    )
+
+    assert prepared_replay.execution_request.input is not None
+    assert [item.type for item in prepared_replay.execution_request.input] == ["reasoning", "message"]
+    assert prepared_replay.execution_request.input[0].id == "rs_replay_reasoning_shell"
+    assert prepared_replay.execution_request.input[0].encrypted_content == sealed_reasoning
+    assert [item.type for item in prepared_replay.stored_input_items] == ["item_reference", "message"]
+    assert prepared_replay.stored_input_items[0].id == "rs_replay_reasoning_shell"
+
+    replay_response = ResponseObject(
+        created_at=0,
+        id="resp_replay_reasoning_shell_followup",
+        model="plap/test",
+        output=[],
+        previous_response_id=prepared_replay.parent_response_id,
+        status="in_progress",
+    )
+    replay_message = ResponseMessageItem(
+        content=[OutputTextContent(text="followup reply", type="output_text")],
+        id="msg_replay_reasoning_shell_followup",
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    await response_store.begin_response(prepared_replay, replay_response)
+    await response_store.append_output_item(
+        prepared_replay,
+        replay_response.id,
+        0,
+        replay_message.model_dump(mode="json", exclude_none=True),
+    )
+    await response_store.finish_response(
+        prepared_replay,
+        replay_response.model_copy(
+            update={
+                "completed_at": 1,
+                "output": [replay_message],
+                "status": "completed",
+            }
+        ),
+    )
+
+    prepared_third = await response_store.prepare_request(
+        auth_context,
+        ResponseCreateRequest(model="plap/test", input="third turn", previous_response_id=replay_response.id),
+    )
+
+    assert prepared_third.execution_request.input is not None
+    assert [item.type for item in prepared_third.execution_request.input] == ["reasoning", "message", "message", "message"]
+    assert prepared_third.execution_request.input[0].id == "rs_replay_reasoning_shell"
+    assert prepared_third.execution_request.input[1].content[0].text == "first reply"
+    assert prepared_third.execution_request.input[2].content[0].text == "followup reply"
+    assert prepared_third.execution_request.input[3].content == "third turn"
+
+
+async def test_missing_redacted_reasoning_shell_stays_untrusted(
+    test_app,
+    seeded_auth_data,
+) -> None:
+    headers = {"Authorization": f"Bearer {seeded_auth_data.api_key}"}
+
+    async with AsyncTestClient(app=test_app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "plap/test",
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_missing_reasoning_shell",
+                        "status": "completed",
+                        "summary": [],
+                    }
+                ],
+            },
+            headers=headers,
+        )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_reasoning_replay"
+    assert body["error"]["param"] == "input"
 
 
 async def test_reasoning_item_reference_resolves_before_summary_finishes(

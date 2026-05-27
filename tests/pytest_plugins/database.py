@@ -87,7 +87,9 @@ def test_settings(postgres_container: PostgresContainer) -> Settings:
         api_key_pepper="test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
         llm_api_keys={
+            "cerebras": "test-cerebras-key",
             "crof": "test-crof-key",
+            "groq": "test-groq-key",
             "lightning": "test-lightning-key",
             "openrouter": "test-openrouter-key",
         },
