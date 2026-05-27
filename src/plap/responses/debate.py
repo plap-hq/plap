@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 
 import msgspec
@@ -10,8 +10,11 @@ import structlog
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.accumulator import Snapshot
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
+    ChatCompletionResult,
+    ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
     ChatResponseFormat,
@@ -22,6 +25,8 @@ from plap.llms.completions.chat import (
     IChatCompletionClient,
 )
 from plap.llms.completions.tokens import measure_prompt_tokens
+from plap.llms.retry import RetryLimitExceededError, RetryValidator, retry_on_unusable_tool_calls
+from plap.llms.retry import stream as retry_stream
 from plap.logging import bound_context, log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
@@ -69,10 +74,6 @@ DEBATE_UNSAFE_TOOL_PLACEHOLDER = (
     "This tool call is unsafe to run in this environment. "
     "Do not retry the same call. Instead, continue from that result by reasoning about the task, "
     "using other safe tools, or changing approach."
-)
-DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER = (
-    "This tool call could not be used because its arguments were not a valid JSON object. "
-    "If you still need this tool, call it again with corrected JSON object arguments."
 )
 DEBATE_STEP_MAX_ATTEMPTS = 3
 CALLED_TOOL_DEFINITIONS_HEADER = "Tool definitions for tools used by the proposed next step:"
@@ -369,6 +370,19 @@ class ActorAwaitingClientTool:
     tool_calls: list[ChatToolCall]
     usage: ChatUsage | None
     service_tier: str | None
+
+
+@dataclass(slots=True)
+class ActorRetryExhausted:
+    messages: list[StateMessage]
+    hidden_usage_index: int | None
+    last_retry_message: str | None
+
+
+@dataclass(slots=True)
+class ActorBudgetExhausted:
+    messages: list[StateMessage]
+    hidden_usage_index: int | None
 
 
 class DebateResult(StrEnum):
@@ -912,6 +926,10 @@ def _state_message_from_result(message: ChatMessage) -> StateMessage:
     )
 
 
+def _state_messages_from_results(messages: Sequence[ChatMessage]) -> list[StateMessage]:
+    return [_state_message_from_result(message) for message in messages]
+
+
 def _arguments_object(arguments: str, *, label: str) -> dict[str, object]:
     try:
         return parse_json_object_with_repair(arguments)
@@ -931,6 +949,52 @@ def _json_text(value: object) -> str:
     return msgspec.json.encode(value).decode()
 
 
+def _retry_message_text(message: StateMessage) -> str:
+    content = message.content_text()
+    if content is None:
+        raise _debate_internal_error(
+            reason="debate_retry_message_missing_content",
+            private_message="debate retry message is missing content",
+        )
+    return content
+
+
+def _is_tool_handoff_result(result: ChatCompletionResult) -> bool:
+    return result.finish_reason in {ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}
+
+
+async def _retry_invalid_reviewer_decision(
+    result: ChatCompletionResult,
+    request: ChatCompletionRequest,
+) -> str | None:
+    _ = request
+    if _is_tool_handoff_result(result):
+        return None
+    try:
+        parse_reviewer_decision(_state_message_from_result(result.message))
+    except PlapError as exc:
+        if not _is_retryable_decision_error(exc):
+            raise
+        return _retry_message_text(_reviewer_retry_message(exc))
+    return None
+
+
+async def _retry_invalid_arbitrator_decision(
+    result: ChatCompletionResult,
+    request: ChatCompletionRequest,
+) -> str | None:
+    _ = request
+    if _is_tool_handoff_result(result):
+        return None
+    try:
+        parse_arbitrator_decision(_state_message_from_result(result.message))
+    except PlapError as exc:
+        if not _is_retryable_decision_error(exc):
+            raise
+        return _retry_message_text(_arbitrator_retry_message(exc))
+    return None
+
+
 async def _execute_actor_turn(
     *,
     actor_name: str,
@@ -946,7 +1010,8 @@ async def _execute_actor_turn(
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
     response_format: ChatResponseFormat | None,
-) -> ActorFinished | ActorAwaitingClientTool | None:
+    validators: Sequence[RetryValidator],
+) -> ActorFinished | ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted | None:
     with bound_context(actor=actor_name):
         while True:
             cap = usage_ledger.cap_for(actor_config.public_usage)
@@ -966,9 +1031,70 @@ async def _execute_actor_turn(
             )
             log_debug(logger, "debate.actor.request", actor=actor_name, max_completion_tokens=cap, tool_count=len(tools))
             log_payload(logger, "debate.actor.request.payload", actor=actor_name, request=asdict(actor_request))
-            result = await chat_completion_client.complete(actor_request)
-            assistant = _state_message_from_result(result.message)
-            turn_messages.append(assistant)
+            budget_exhausted = False
+            latest_hidden_usage_index: int | None = None
+            latest_snapshot = Snapshot(messages=(), results=(), delta=None)
+            recorded_hidden_results = 0
+
+            def next_request(history: Snapshot, base_request: ChatCompletionRequest = actor_request) -> ChatCompletionRequest | None:
+                nonlocal budget_exhausted
+                current_cap = usage_ledger.cap_for(actor_config.public_usage)
+                if current_cap == 0:
+                    budget_exhausted = True
+                    return None
+                request_body: ChatCompletionRequest = base_request
+                if history.messages:
+                    request_body = replace(
+                        base_request,
+                        messages=[*base_request.messages, *history.messages],
+                    )
+                return replace(request_body, max_completion_tokens=current_cap)
+
+            try:
+                async for snapshot in retry_stream(
+                    chat_completion_client,
+                    next_request=next_request,
+                    validators=validators,
+                    max_attempts=DEBATE_STEP_MAX_ATTEMPTS,
+                ):
+                    latest_snapshot = snapshot
+                    if snapshot.delta is None and len(snapshot.results) > recorded_hidden_results:
+                        latest_hidden_usage_index = usage_ledger.record_hidden(actor_config.public_usage, snapshot.results[-1].usage)
+                        recorded_hidden_results = len(snapshot.results)
+            except RetryLimitExceededError as exc:
+                log_debug(
+                    logger,
+                    "debate.actor.retry_exhausted",
+                    actor=actor_name,
+                    last_retry_message=exc.last_retry_message,
+                )
+                return ActorRetryExhausted(
+                    messages=[*turn_messages, *_state_messages_from_results(latest_snapshot.messages)],
+                    hidden_usage_index=latest_hidden_usage_index,
+                    last_retry_message=exc.last_retry_message,
+                )
+
+            if budget_exhausted:
+                if latest_snapshot.messages:
+                    return ActorBudgetExhausted(
+                        messages=[*turn_messages, *_state_messages_from_results(latest_snapshot.messages)],
+                        hidden_usage_index=latest_hidden_usage_index,
+                    )
+                return None
+            if not latest_snapshot.results:
+                raise _debate_internal_error(
+                    reason="debate_actor_result_missing",
+                    private_message="debate actor retry stream ended without final result",
+                )
+
+            turn_messages.extend(_state_messages_from_results(latest_snapshot.messages))
+            result = latest_snapshot.results[-1]
+            assistant = _latest_assistant(turn_messages)
+            if assistant is None:
+                raise _debate_internal_error(
+                    reason="debate_actor_assistant_missing",
+                    private_message="debate actor retry stream did not produce an assistant message",
+                )
             tool_calls = result.message.tool_calls or []
             log_debug(
                 logger,
@@ -1000,25 +1126,7 @@ async def _execute_actor_turn(
                     )
                     inline_output_seen = True
                     continue
-                try:
-                    parsed_arguments[call.id] = _arguments_object(call.arguments, label="debate tool arguments")
-                except PlapError as exc:
-                    log_debug(
-                        logger,
-                        "debate.actor.tool_stubbed",
-                        actor=actor_name,
-                        reason=exc.private.reason,
-                        tool_name=call.name,
-                    )
-                    turn_messages.append(
-                        StateMessage(
-                            role="tool",
-                            tool_call_id=call.id,
-                            content=DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER,
-                        )
-                    )
-                    inline_output_seen = True
-                    continue
+                parsed_arguments[call.id] = _arguments_object(call.arguments, label="debate tool arguments")
                 repaired_call = ChatToolCall(
                     id=call.id,
                     name=call.name,
@@ -1157,64 +1265,6 @@ def _arbitrator_retry_message(exc: PlapError) -> StateMessage:
     )
 
 
-async def _run_decision_actor_turn(
-    *,
-    actor_name: str,
-    actor_config: RuntimeActorConfig,
-    request,
-    header_messages: Sequence[ChatMessage],
-    turn_messages: list[StateMessage],
-    tools: Sequence[FunctionTool],
-    tool_policies: Mapping[str, ToolPolicy],
-    server_executors: Mapping[str, IServerToolExecutor],
-    tool_call_policy_resolver: IToolCallPolicyResolver,
-    chat_completion_client: IChatCompletionClient,
-    prompt_cache_key_base: str | None,
-    usage_ledger: UsageLedger,
-    parse_decision: Callable[[StateMessage], object],
-    build_retry_message: Callable[[PlapError], StateMessage],
-) -> tuple[ActorFinished | ActorAwaitingClientTool | None, object | None]:
-    attempts = 0
-    while True:
-        outcome = await _execute_actor_turn(
-            actor_name=actor_name,
-            actor_config=actor_config,
-            request=request,
-            header_messages=header_messages,
-            turn_messages=turn_messages,
-            tools=tools,
-            tool_policies=tool_policies,
-            server_executors=server_executors,
-            tool_call_policy_resolver=tool_call_policy_resolver,
-            chat_completion_client=chat_completion_client,
-            prompt_cache_key_base=prompt_cache_key_base,
-            usage_ledger=usage_ledger,
-            response_format=None,
-        )
-        if outcome is None or isinstance(outcome, ActorAwaitingClientTool):
-            return outcome, None
-        try:
-            decision = parse_decision(outcome.assistant)
-        except PlapError as exc:
-            if not _is_retryable_decision_error(exc):
-                raise
-            usage_ledger.record_hidden(actor_config.public_usage, outcome.usage)
-            attempts += 1
-            log_debug(
-                logger,
-                "debate.step.retry",
-                actor=actor_name,
-                attempt=attempts,
-                max_attempts=DEBATE_STEP_MAX_ATTEMPTS,
-                reason=exc.private.reason,
-            )
-            if attempts >= DEBATE_STEP_MAX_ATTEMPTS:
-                raise
-            turn_messages.append(build_retry_message(exc))
-            continue
-        return outcome, decision
-
-
 async def run_reviewer_turn(
     *,
     state: MutableQueues,
@@ -1230,7 +1280,7 @@ async def run_reviewer_turn(
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
-) -> tuple[ActorFinished | ActorAwaitingClientTool | None, ReviewerDecision | None]:
+) -> tuple[ActorFinished | ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted | None, ReviewerDecision | None]:
     thread = _thread_messages(state.reviewer)
     header_messages = _reviewer_header_messages(
         state=state,
@@ -1259,7 +1309,7 @@ async def run_reviewer_turn(
         ]
     else:
         turn_messages = [_reviewer_initial_turn(parts)]
-    return await _run_decision_actor_turn(
+    outcome = await _execute_actor_turn(
         actor_name=Side.REVIEWER.value,
         actor_config=profile.reviewer,
         request=request,
@@ -1272,9 +1322,12 @@ async def run_reviewer_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        parse_decision=parse_reviewer_decision,
-        build_retry_message=_reviewer_retry_message,
+        response_format=None,
+        validators=(retry_on_unusable_tool_calls, _retry_invalid_reviewer_decision),
     )
+    if outcome is None or isinstance(outcome, ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted):
+        return outcome, None
+    return outcome, parse_reviewer_decision(outcome.assistant)
 
 
 async def run_defender_turn(
@@ -1291,7 +1344,7 @@ async def run_defender_turn(
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
-) -> ActorFinished | ActorAwaitingClientTool | None:
+) -> ActorFinished | ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted | None:
     thread = [row.message for row in parts.remaining_temp_rows]
     header_messages = _defender_header_messages(
         state=state,
@@ -1323,6 +1376,7 @@ async def run_defender_turn(
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
         response_format=None,
+        validators=(retry_on_unusable_tool_calls,),
     )
 
 
@@ -1341,7 +1395,7 @@ async def run_arbitrator_turn(
     chat_completion_client: IChatCompletionClient,
     prompt_cache_key_base: str | None,
     usage_ledger: UsageLedger,
-) -> tuple[ActorFinished | ActorAwaitingClientTool | None, ArbitratorDecision | None]:
+) -> tuple[ActorFinished | ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted | None, ArbitratorDecision | None]:
     reviewer_decision = _latest_reviewer_decision(_thread_messages(state.reviewer))
     latest_response_note = _latest_assistant([row.message for row in parts.remaining_temp_rows])
     if reviewer_decision is None or latest_response_note is None:
@@ -1377,7 +1431,7 @@ async def run_arbitrator_turn(
                 latest_response_note=latest_response_note,
             )
         ]
-    return await _run_decision_actor_turn(
+    outcome = await _execute_actor_turn(
         actor_name=Side.ARBITRATOR.value,
         actor_config=profile.arbitrator,
         request=request,
@@ -1390,9 +1444,12 @@ async def run_arbitrator_turn(
         chat_completion_client=chat_completion_client,
         prompt_cache_key_base=prompt_cache_key_base,
         usage_ledger=usage_ledger,
-        parse_decision=parse_arbitrator_decision,
-        build_retry_message=_arbitrator_retry_message,
+        response_format=None,
+        validators=(retry_on_unusable_tool_calls, _retry_invalid_arbitrator_decision),
     )
+    if outcome is None or isinstance(outcome, ActorAwaitingClientTool | ActorRetryExhausted | ActorBudgetExhausted):
+        return outcome, None
+    return outcome, parse_arbitrator_decision(outcome.assistant)
 
 
 def _held_candidate_messages(
@@ -1578,6 +1635,83 @@ async def resume_main_with_revise_bundle(
     state.clear_debate()
 
 
+async def _auto_accept_retry_exhausted_turn(
+    *,
+    side: Side,
+    exhausted: ActorRetryExhausted,
+    state: MutableQueues,
+    out: ResponseEventIO,
+    request,
+    debug_debate_summaries: bool,
+    keyring: SealingKeyring,
+    tool_policies: Mapping[str, ToolPolicy],
+    server_executors: Mapping[str, IServerToolExecutor],
+    usage_ledger: UsageLedger,
+    held_anchor_index: int | None,
+) -> DebateResult:
+    await _persist_temp_turn(
+        state=state,
+        side=side,
+        messages=exhausted.messages,
+        continuation_side=side,
+        out=out,
+        debug_debate_summaries=debug_debate_summaries,
+        keyring=keyring,
+    )
+    log_debug(
+        logger,
+        "debate.retry_exhausted.auto_accept",
+        side=side,
+        last_retry_message=exhausted.last_retry_message,
+    )
+    debate_result = await publish_accepted_candidate(
+        state=state,
+        out=out,
+        debug_debate_summaries=debug_debate_summaries,
+        keyring=keyring,
+        tool_policies=tool_policies,
+        server_executors=server_executors,
+    )
+    if debate_result == DebateResult.CONTINUE_MAIN:
+        return DebateResult.CONTINUE_MAIN
+    if held_anchor_index is not None:
+        usage_ledger.use_hidden_as_anchor(held_anchor_index)
+    elif exhausted.hidden_usage_index is not None:
+        usage_ledger.use_hidden_as_anchor(exhausted.hidden_usage_index)
+    await out.completed(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+    return DebateResult.COMPLETED
+
+
+async def _persist_budget_exhausted_turn_and_incomplete(
+    *,
+    side: Side,
+    exhausted: ActorBudgetExhausted,
+    state: MutableQueues,
+    out: ResponseEventIO,
+    request,
+    debug_debate_summaries: bool,
+    keyring: SealingKeyring,
+    usage_ledger: UsageLedger,
+    held_anchor_index: int | None,
+) -> DebateResult:
+    await _persist_temp_turn(
+        state=state,
+        side=side,
+        messages=exhausted.messages,
+        continuation_side=side,
+        out=out,
+        debug_debate_summaries=debug_debate_summaries,
+        keyring=keyring,
+    )
+    if usage_ledger.anchor is None:
+        if held_anchor_index is not None:
+            usage_ledger.use_hidden_as_anchor(held_anchor_index)
+        elif exhausted.hidden_usage_index is not None:
+            usage_ledger.use_hidden_as_anchor(exhausted.hidden_usage_index)
+    await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
+    return DebateResult.COMPLETED
+
+
 async def continue_debate(
     *,
     state: MutableQueues,
@@ -1646,6 +1780,32 @@ async def continue_debate(
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
+            if isinstance(outcome, ActorBudgetExhausted):
+                return await _persist_budget_exhausted_turn_and_incomplete(
+                    side=Side.REVIEWER,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
+            if isinstance(outcome, ActorRetryExhausted):
+                return await _auto_accept_retry_exhausted_turn(
+                    side=Side.REVIEWER,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    tool_policies=tool_policies,
+                    server_executors=server_executors,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
             if isinstance(outcome, ActorAwaitingClientTool):
                 usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
@@ -1722,6 +1882,32 @@ async def continue_debate(
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
+            if isinstance(outcome, ActorBudgetExhausted):
+                return await _persist_budget_exhausted_turn_and_incomplete(
+                    side=Side.DEFENDER,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
+            if isinstance(outcome, ActorRetryExhausted):
+                return await _auto_accept_retry_exhausted_turn(
+                    side=Side.DEFENDER,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    tool_policies=tool_policies,
+                    server_executors=server_executors,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
             if isinstance(outcome, ActorAwaitingClientTool):
                 usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(
@@ -1777,6 +1963,32 @@ async def continue_debate(
                     usage_ledger.use_hidden_as_anchor(held_anchor_index)
                 await out.incomplete(service_tier=request.service_tier, usage=usage_ledger.to_response_usage())
                 return DebateResult.COMPLETED
+            if isinstance(outcome, ActorBudgetExhausted):
+                return await _persist_budget_exhausted_turn_and_incomplete(
+                    side=Side.ARBITRATOR,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
+            if isinstance(outcome, ActorRetryExhausted):
+                return await _auto_accept_retry_exhausted_turn(
+                    side=Side.ARBITRATOR,
+                    exhausted=outcome,
+                    state=state,
+                    out=out,
+                    request=request,
+                    debug_debate_summaries=debug_debate_summaries,
+                    keyring=keyring,
+                    tool_policies=tool_policies,
+                    server_executors=server_executors,
+                    usage_ledger=usage_ledger,
+                    held_anchor_index=held_anchor_index,
+                )
             if isinstance(outcome, ActorAwaitingClientTool):
                 usage_ledger.set_anchor(outcome.usage)
                 await _persist_temp_turn(

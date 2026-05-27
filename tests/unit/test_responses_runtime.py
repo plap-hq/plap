@@ -50,7 +50,6 @@ from plap.responses.contracts import (
 )
 from plap.responses.debate import (
     DEBATE_HELD_TOOL_PLACEHOLDER,
-    DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER,
     DEBATE_UNSAFE_TOOL_PLACEHOLDER,
     ArbitratorActionType,
     ReviewerActionType,
@@ -896,6 +895,100 @@ async def test_stream_response_events_reviewer_retry_persists_failed_answer_and_
     assert len(client.requests) == 3
 
 
+async def test_stream_response_events_reviewer_retry_exhaustion_persists_turn_and_auto_accepts() -> None:
+    invalid_reviewer_answer = "This looks acceptable, but I forgot the final decision line."
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            ChatMessage(role="assistant", content=invalid_reviewer_answer),
+            ChatMessage(role="assistant", content=invalid_reviewer_answer),
+            ChatMessage(role="assistant", content=invalid_reviewer_answer),
+        ]
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(model="plap/test", input="hello", include=["reasoning.encrypted_content"]),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert [message.role for message in reviewer_payload.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert reviewer_payload.messages[1].content == invalid_reviewer_answer
+    assert reviewer_payload.messages[3].content == invalid_reviewer_answer
+    assert reviewer_payload.messages[5].content == invalid_reviewer_answer
+    assert (reviewer_payload.messages[2].content or "").strip()
+    assert (reviewer_payload.messages[4].content or "").strip()
+    assert (reviewer_payload.messages[6].content or "").strip()
+    assert completed.output[-1].content[0].text == "draft answer"
+    assert len(client.requests) == 4
+
+
+async def test_stream_response_events_reviewer_retry_budget_exhaustion_persists_turn_before_incomplete() -> None:
+    invalid_reviewer_answer = "This looks acceptable, but I forgot the final decision line."
+    client = _StaticChatClient(
+        [
+            ChatMessage(role="assistant", content="draft answer"),
+            ChatMessage(role="assistant", content=invalid_reviewer_answer),
+        ],
+        usages=(
+            ChatUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            ChatUsage(input_tokens=0, output_tokens=1, total_tokens=1),
+        ),
+    )
+
+    completed = _completed_response(
+        [
+            event
+            async for event in stream_response_events(
+                ResponseCreateRequest(
+                    model="plap/test",
+                    input="hello",
+                    include=["reasoning.encrypted_content"],
+                    max_output_tokens=1,
+                ),
+                settings=_settings(profile=_profile_config(debate_max_rounds=2)),
+                sealing_keyring=_keyring(),
+                tool_policy_resolver=_RecordingResolver(),
+                tool_call_policy_resolver=_RecordingCallResolver(),
+                chat_completion_client=client,
+                reasoning_summarizer=_FakeReasoningSummarizer(),
+            )
+        ]
+    )
+
+    assert completed.status == "incomplete"
+    assert completed.incomplete_details is not None
+    assert completed.incomplete_details.reason == "max_output_tokens"
+    assert [item.type for item in completed.output] == ["reasoning", "reasoning"]
+    reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
+    assert reviewer_payload.continuation_side == "reviewer"
+    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant", "user"]
+    assert reviewer_payload.messages[1].content == invalid_reviewer_answer
+    assert (reviewer_payload.messages[2].content or "").strip()
+    assert completed.usage is not None
+    assert completed.usage.total_tokens == 1
+    assert len(client.requests) == 2
+
+
 async def test_stream_response_events_arbitrator_retry_persists_failed_answer_and_feedback() -> None:
     invalid_arbitrator_answer = "The review note is correct. Use the safer path."
     client = _StaticChatClient(
@@ -941,7 +1034,7 @@ async def test_stream_response_events_arbitrator_retry_persists_failed_answer_an
     assert len(client.requests) == 7
 
 
-async def test_stream_response_events_reviewer_stubs_invalid_safe_tool_arguments() -> None:
+async def test_stream_response_events_reviewer_retries_invalid_safe_tool_arguments() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(role="assistant", content="draft answer"),
@@ -975,19 +1068,20 @@ async def test_stream_response_events_reviewer_stubs_invalid_safe_tool_arguments
 
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "message"]
     reviewer_payload = open_reasoning_payload(completed.output[1].encrypted_content, keyring=_keyring())
-    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert [message.role for message in reviewer_payload.messages] == ["user", "assistant", "tool", "user", "assistant"]
     assert reviewer_payload.messages[1].tool_calls[0].name == "read_file"
     assert reviewer_payload.messages[2].tool_call_id == "bad_read_1"
-    assert reviewer_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert reviewer_payload.messages[2].content == RETRY_TOOL_PLACEHOLDER
     retry_request_tail = client.requests[2].messages[-3:]
-    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
-    assert retry_request_tail[1].tool_calls[0].name == "read_file"
-    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert [message.role for message in retry_request_tail] == ["assistant", "tool", "user"]
+    assert retry_request_tail[0].tool_calls[0].name == "read_file"
+    assert retry_request_tail[1].content == RETRY_TOOL_PLACEHOLDER
+    assert (retry_request_tail[2].content or "").strip()
     assert not any(item.type == "function_call" for item in completed.output)
     assert completed.output[-1].content[0].text == "draft answer"
 
 
-async def test_stream_response_events_defender_stubs_invalid_contextual_tool_arguments() -> None:
+async def test_stream_response_events_defender_retries_invalid_contextual_tool_arguments() -> None:
     client = _StaticChatClient(
         [
             ChatMessage(role="assistant", content="draft answer"),
@@ -1023,19 +1117,20 @@ async def test_stream_response_events_defender_stubs_invalid_contextual_tool_arg
 
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message"]
     defender_payload = open_reasoning_payload(completed.output[2].encrypted_content, keyring=_keyring())
-    assert [message.role for message in defender_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert [message.role for message in defender_payload.messages] == ["user", "assistant", "tool", "user", "assistant"]
     assert defender_payload.messages[1].tool_calls[0].name == "bash"
     assert defender_payload.messages[2].tool_call_id == "bad_bash_1"
-    assert defender_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert defender_payload.messages[2].content == RETRY_TOOL_PLACEHOLDER
     retry_request_tail = client.requests[3].messages[-3:]
-    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
-    assert retry_request_tail[1].tool_calls[0].name == "bash"
-    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert [message.role for message in retry_request_tail] == ["assistant", "tool", "user"]
+    assert retry_request_tail[0].tool_calls[0].name == "bash"
+    assert retry_request_tail[1].content == RETRY_TOOL_PLACEHOLDER
+    assert (retry_request_tail[2].content or "").strip()
     assert not any(item.type == "function_call" for item in completed.output)
     assert completed.output[-1].content[0].text == "draft answer"
 
 
-async def test_stream_response_events_arbitrator_stubs_invalid_server_tool_arguments() -> None:
+async def test_stream_response_events_arbitrator_retries_invalid_server_tool_arguments() -> None:
     provider = _FakeMCPToolProvider(output="search result")
     client = _StaticChatClient(
         [
@@ -1073,14 +1168,15 @@ async def test_stream_response_events_arbitrator_stubs_invalid_server_tool_argum
 
     assert [item.type for item in completed.output] == ["reasoning", "reasoning", "reasoning", "reasoning", "message"]
     arbitrator_payload = open_reasoning_payload(completed.output[3].encrypted_content, keyring=_keyring())
-    assert [message.role for message in arbitrator_payload.messages] == ["user", "assistant", "tool", "assistant"]
+    assert [message.role for message in arbitrator_payload.messages] == ["user", "assistant", "tool", "user", "assistant"]
     assert arbitrator_payload.messages[1].tool_calls[0].name == MCP_SEARCH_TOOL_NAME
     assert arbitrator_payload.messages[2].tool_call_id == "bad_search_1"
-    assert arbitrator_payload.messages[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert arbitrator_payload.messages[2].content == RETRY_TOOL_PLACEHOLDER
     retry_request_tail = client.requests[4].messages[-3:]
-    assert [message.role for message in retry_request_tail] == ["user", "assistant", "tool"]
-    assert retry_request_tail[1].tool_calls[0].name == MCP_SEARCH_TOOL_NAME
-    assert retry_request_tail[2].content == DEBATE_INVALID_TOOL_ARGUMENTS_PLACEHOLDER
+    assert [message.role for message in retry_request_tail] == ["assistant", "tool", "user"]
+    assert retry_request_tail[0].tool_calls[0].name == MCP_SEARCH_TOOL_NAME
+    assert retry_request_tail[1].content == RETRY_TOOL_PLACEHOLDER
+    assert (retry_request_tail[2].content or "").strip()
     assert provider.calls == []
     assert not any(item.type == "function_call" for item in completed.output)
     assert completed.output[-1].content[0].text == "draft answer"
@@ -5825,10 +5921,25 @@ class _StreamingStaticChatClient(IChatCompletionClient):
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionDelta]:
         self.requests.append(request)
-        if self._stream_calls:
-            raise AssertionError("unexpected second stream() call")
         self._stream_calls += 1
-        for delta in self.deltas:
+        if self._stream_calls == 1:
+            for delta in self.deltas:
+                yield delta
+            return
+        if not self.messages:
+            raise AssertionError("unexpected second stream() call")
+        index = min(self._stream_calls - 2, len(self.messages) - 1)
+        message = self.messages[index]
+        usage = self.usages[min(index, len(self.usages) - 1)] if self.usages else None
+        finish_reason = self.finish_reasons[min(index, len(self.finish_reasons) - 1)]
+        if isinstance(message, Exception):
+            raise message
+        for delta in _stream_deltas_from_message(
+            request=request,
+            message=message,
+            finish_reason=finish_reason,
+            usage=usage,
+        ):
             yield delta
 
 
