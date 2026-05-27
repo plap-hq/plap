@@ -52,6 +52,7 @@ OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
     "stepfun/step-3.5-flash": (),
+    "xiaomi/mimo-v2.5-pro": (),
 }
 
 
