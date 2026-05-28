@@ -240,6 +240,48 @@ def test_decode_queue_classifies_unopenable_function_call_output_as_fabricated()
     assert decoded == [_DecodedFabricatedFunctionCallOutput(item=item)]
 
 
+def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(role="assistant", content="prefix"),
+            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")] ),
+            Message(role="tool", tool_call_id="call_1", content="hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 3
+
+
+def test_sides_update_main_rejects_second_patch() -> None:
+    with pytest.raises(ValueError, match="at most one message patch"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", reasoning_content="first"),
+                MessagePatch(content_hash="efgh", reasoning_content="second"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
+    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after a message patch"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                Message(role="assistant", content="later assistant"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch() -> None:
+    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after a message patch"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")] ),
+                Message(role="tool", content="missing id"),
+            ]
+        )
+
+
 def test_decode_queue_preserves_item_order() -> None:
     compaction = _sealed_compaction(CompactionPayload(machine={"active": []}, sides=Sides()))
     message = _message("hello")

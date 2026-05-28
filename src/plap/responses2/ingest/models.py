@@ -217,6 +217,22 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
     return updates
 
 
+def _validate_main_updates(main: list[MainUpdate]) -> None:
+    patch_seen = False
+    for index, update in enumerate(main):
+        if isinstance(update, MessagePatch):
+            if patch_seen:
+                raise ValueError("sides update main may contain at most one message patch")
+            patch_seen = True
+            continue
+        if not patch_seen:
+            continue
+        if not update.is_tool() or update.tool_call_id is None:
+            raise ValueError(
+                f"sides update main[{index}] must be a tool message with tool_call_id after a message patch"
+            )
+
+
 @dataclass(slots=True)
 class Sides:
     main: list[Message] = field(default_factory=list)
@@ -265,6 +281,7 @@ class SidesUpdate:
     others: dict[Side, JSONPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        _validate_main_updates(self.main)
         normalized: dict[Side, JSONPatch] = {}
         for raw_side, patch in self.others.items():
             side = Side(raw_side)
