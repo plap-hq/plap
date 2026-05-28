@@ -61,7 +61,7 @@ Sealed call ids
     header[1]
     || side_header[1]
     || content_hash_prefix[8]
-    || tool_call_index[uvarint]
+    || tool_call_index[u16be]
     || upstream_tool_call_id[utf8 bytes]
 
 - `header` bit layout:
@@ -73,21 +73,17 @@ Sealed call ids
   - bits 4..0: side code
 
 - Side codes:
-  - `main = 1`
-  - `defender = 2`
-  - `reviewer = 3`
-  - `arbitrator = 4`
+  - `main = 0`
+  - `defender = 1`
+  - `reviewer = 2`
+  - `arbitrator = 3`
 
 - `content_hash_prefix` is the first 8 raw bytes of the BLAKE3 digest of
   the deterministic JSON encoding of `Message.to_primitive()`. If you
   start from the hex digest returned by `content_hash(...)`, this is the
   first 16 hex characters decoded back into 8 bytes.
 
-- `tool_call_index` is an unsigned base-128 varint:
-  - each byte stores 7 payload bits
-  - high bit 1 means another byte follows
-  - high bit 0 terminates the varint
-  - lower 7-bit groups are emitted least-significant first
+- `tool_call_index` is a fixed-width unsigned 16-bit big-endian integer.
 
 - `upstream_tool_call_id` is required, non-empty, and UTF-8.
 
@@ -132,13 +128,14 @@ REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
 CALL_ID_HEADER_BYTES = 2
 CALL_ID_CONTENT_HASH_PREFIX_BYTES = 8
+CALL_ID_TOOL_CALL_INDEX_BYTES = 2
 TAG_BYTES = 16
 _CALL_ID_VERSION_SHIFT = 4
 _CALL_ID_VERSION_MASK = 0xF0
 _CALL_ID_FLAGS_MASK = 0x0F
 _CALL_ID_SIDE_MASK = 0x1F
 _CALL_ID_SIDE_RESERVED_MASK = 0xE0
-_SIDE_CODES: dict[Side, int] = {Side.MAIN: 1, Side.DEFENDER: 2, Side.REVIEWER: 3, Side.ARBITRATOR: 4}
+_SIDE_CODES: dict[Side, int] = {Side.MAIN: 0, Side.DEFENDER: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
 if set(_SIDE_CODES) != set(Side):
     raise RuntimeError("_SIDE_CODES must include every Side")
@@ -266,33 +263,20 @@ def _decode_upstream_id(value: bytes) -> str:
         ) from exc
 
 
-def _pack_uvarint(value: int) -> bytes:
+def _pack_tool_call_index(value: int) -> bytes:
     if value < 0:
         raise _tool_replay_error(reason="tool_call_index_negative", private_message="tool_call_index must be non-negative")
-    chunks: list[int] = []
-    remaining = value
-    while True:
-        byte = remaining & 0x7F
-        remaining >>= 7
-        if remaining:
-            chunks.append(byte | 0x80)
-        else:
-            chunks.append(byte)
-            return bytes(chunks)
+    if value > 0xFFFF:
+        raise _tool_replay_error(reason="tool_call_index_too_large", private_message="tool_call_index must be at most 65535")
+    return value.to_bytes(CALL_ID_TOOL_CALL_INDEX_BYTES, byteorder="big")
 
 
-def _unpack_uvarint(value: bytes, offset: int) -> tuple[int, int]:
-    result = 0
-    shift = 0
-    for index in range(offset, len(value)):
-        byte = value[index]
-        result |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return result, index + 1
-        shift += 7
-        if shift > 63:
-            raise _tool_replay_error(reason="function_call_id_index_too_large", private_message="function call id index is too large")
-    raise _tool_replay_error(reason="function_call_id_index_truncated", private_message="function call id index is truncated")
+def _unpack_tool_call_index(value: bytes, offset: int) -> tuple[int, int]:
+    end = offset + CALL_ID_TOOL_CALL_INDEX_BYTES
+    chunk = value[offset:end]
+    if len(chunk) != CALL_ID_TOOL_CALL_INDEX_BYTES:
+        raise _tool_replay_error(reason="function_call_id_index_truncated", private_message="function call id index is truncated")
+    return int.from_bytes(chunk, byteorder="big"), end
 
 
 def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
@@ -350,8 +334,6 @@ def _pack_call_id(value: CallID) -> bytes:
         raise _tool_replay_error(
             reason="function_call_content_hash_prefix_invalid", private_message="function call content_hash prefix is invalid"
         )
-    if value.tool_call_index < 0:
-        raise _tool_replay_error(reason="tool_call_index_negative", private_message="tool_call_index must be non-negative")
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
     side_code = _SIDE_CODES[value.side]
@@ -363,14 +345,14 @@ def _pack_call_id(value: CallID) -> bytes:
             bytes([header]),
             bytes([side_code]),
             value.content_hash_prefix,
-            _pack_uvarint(value.tool_call_index),
+            _pack_tool_call_index(value.tool_call_index),
             value.upstream_tool_call_id.encode(),
         )
     )
 
 
 def _unpack_call_id(value: bytes) -> CallID:
-    min_length = CALL_ID_HEADER_BYTES + CALL_ID_CONTENT_HASH_PREFIX_BYTES + 1 + 1
+    min_length = CALL_ID_HEADER_BYTES + CALL_ID_CONTENT_HASH_PREFIX_BYTES + CALL_ID_TOOL_CALL_INDEX_BYTES + 1
     if len(value) < min_length:
         raise _tool_replay_error(reason="function_call_id_plaintext_too_short", private_message="function call id plaintext is too short")
     header = value[0]
@@ -396,7 +378,7 @@ def _unpack_call_id(value: bytes) -> CallID:
         ) from exc
     offset = CALL_ID_HEADER_BYTES
     content_hash_prefix_value = value[offset : offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES]
-    tool_call_index, offset = _unpack_uvarint(value, offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
+    tool_call_index, offset = _unpack_tool_call_index(value, offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
     return CallID(
         side=side,
         content_hash_prefix=content_hash_prefix_value,

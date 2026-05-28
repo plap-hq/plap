@@ -39,7 +39,14 @@ from plap.responses2.ingest.models import (
     SidesUpdate,
     ToolCall,
 )
-from plap.responses2.ingest.sealing import content_hash, content_hash_prefix, seal_call_id, seal_compaction_payload, seal_reasoning_payload
+from plap.responses2.ingest.sealing import (
+    content_hash,
+    content_hash_prefix,
+    open_call_id,
+    seal_call_id,
+    seal_compaction_payload,
+    seal_reasoning_payload,
+)
 
 
 def _compaction(label: str) -> RequestCompactionItem:
@@ -238,6 +245,34 @@ def test_decode_queue_classifies_unopenable_function_call_output_as_fabricated()
     decoded = _decode_queue([item], keyring=_keyring())
 
     assert decoded == [_DecodedFabricatedFunctionCallOutput(item=item)]
+
+
+def test_call_id_roundtrips_zero_based_main_side_with_fixed_width_index() -> None:
+    value = CallID(
+        side="main",
+        content_hash_prefix=bytes.fromhex("0102030405060708"),
+        tool_call_index=65535,
+        upstream_tool_call_id="up_main_65535",
+    )
+
+    token = seal_call_id(value, keyring=_keyring())
+
+    assert open_call_id(token, keyring=_keyring()) == value
+
+
+def test_seal_call_id_rejects_tool_call_index_above_u16() -> None:
+    with pytest.raises(PlapError) as excinfo:
+        seal_call_id(
+            CallID(
+                side="main",
+                content_hash_prefix=bytes.fromhex("0102030405060708"),
+                tool_call_index=65536,
+                upstream_tool_call_id="up_main_65536",
+            ),
+            keyring=_keyring(),
+        )
+
+    assert excinfo.value.private.reason == "tool_call_index_too_large"
 
 
 def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
