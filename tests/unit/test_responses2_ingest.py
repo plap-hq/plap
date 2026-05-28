@@ -263,7 +263,7 @@ def test_sides_update_main_rejects_second_patch() -> None:
 
 
 def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
-    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
+    with pytest.raises(ValueError, match="message patch must be the last non-tool main update"):
         SidesUpdate(
             main=[
                 MessagePatch(content_hash="abcd", reasoning_content="hidden"),
@@ -578,7 +578,7 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
     assert result.last_side is None
 
 
-async def test_ingest_response_request_rejects_main_hidden_call_with_public_pair_until_step_5() -> None:
+async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair() -> None:
     assistant = Message(
         role="assistant",
         content="main hidden",
@@ -590,23 +590,28 @@ async def test_ingest_response_request_rejects_main_hidden_call_with_public_pair
     )
     call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
 
-    with pytest.raises(NotImplementedError, match="standalone main function_call replay not implemented yet"):
-        await ingest_response_request(
-            ResponseCreateRequest(
-                model="plap/test",
-                input=[
-                    _sealed_reasoning(payload),
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=call_id,
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(call_id=call_id, output="main result", type="function_call_output"),
-                ],
-            ),
-            keyring=_keyring(),
-        )
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id=call_id,
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.main == [
+        assistant,
+        Message(role="tool", tool_call_id="up_main_0", content="main result"),
+    ]
+    assert result.last_side == Side.MAIN
 
 
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
@@ -852,19 +857,24 @@ async def test_ingest_response_request_rejects_main_message_patch_until_supporte
         ),
     )
 
-    with pytest.raises(NotImplementedError, match="main message patch replay not implemented yet"):
+    with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
             ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
             keyring=_keyring(),
         )
 
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "main_message_patch_target_missing"
 
-async def test_ingest_response_request_rejects_standalone_message_until_supported() -> None:
-    with pytest.raises(NotImplementedError, match="standalone main message replay not implemented yet"):
-        await ingest_response_request(
-            ResponseCreateRequest(model="plap/test", input=[_message("hello")]),
-            keyring=_keyring(),
-        )
+
+async def test_ingest_response_request_accepts_standalone_main_message() -> None:
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_message("hello")]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.main == [Message(role="user", content="hello")]
+    assert result.last_side == Side.MAIN
 
 
 async def test_ingest_response_request_rejects_sealed_function_call_without_matching_hidden_call() -> None:

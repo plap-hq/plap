@@ -5,6 +5,8 @@ Legend
 - `R(h)`: reasoning item with a hidden assistant anchor
 - `R(h-empty-main)`: main-side reasoning item whose hidden anchor exists but
   has empty public content
+- `R(c)`: reasoning item whose main side is fully closed and contributes only
+  carrier state before later standalone main replay
 - `R(p->M)`: reasoning patch targeting explicit assistant `M`
 - `M`: explicit assistant anchor message
 - `FMa`: fabricated assistant message
@@ -232,12 +234,12 @@ Phase 1: Anchored cases
   Outcome: Accept
   Notes: Same generalized bundle.
 
-- Raw: `R M FF FFO F FO`
+- Raw: `R(c) M FF FFO F FO`
   Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[]`
   Outcome: Accept
   Notes: `FF/FFO` fallback to explicit `M`.
 
-- Raw: `R M FF FFO F FO FF2 FFO2 F2 FO2`
+- Raw: `R(c) M FF FFO F FO FF2 FFO2 F2 FO2`
   Normalized:
   `pre=[] anchor=M slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[]`
   Outcome: Accept
@@ -245,74 +247,93 @@ Phase 1: Anchored cases
 
 7. Post-anchor plain messages
 
-- Raw: `R M FMu F FO`
+Patch-target analogues:
+
+- Every `R(c) M ...` accept row in sections 7-10 below also has an executable
+  `R(p->M) M ...` analogue once `M` resolves the patch target.
+- The executable cases include all of these analogues even when the prose
+  block does not spell out every repeated row explicitly.
+
+- Raw: `R(c) M FMu F FO`
   Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu)]`
   Outcome: Accept
   Notes: Append after sealed bundle.
 
-- Raw: `R M FMu FMu2 F FO`
+- Raw: `R(c) M FMu FMu2 F FO`
   Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu),P(FMu2)]`
   Outcome: Accept
   Notes: Preserve order.
 
-- Raw: `R M FMa F FO`
+- Raw: `R(c) M FMa F FO`
   Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(FMa)]`
   Outcome: Accept
   Notes: Assistant plain message after bundle.
 
 8. Post-anchor assistant mini-bundles
 
-- Raw: `R M FMa FF FFO F FO`
+- Raw: `R(c) M FMa FF FFO F FO`
   Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(FMa;FF,FFO)]`
   Outcome: Accept
   Notes: Per chosen post-anchor policy.
 
-- Raw: `R M FMa FF FFO F1 F2 FO2 FO1`
+- Raw: `R(c) M FMa FF FFO F1 F2 FO2 FO1`
   Normalized:
   `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[A(FMa;FF,FFO)]`
   Outcome: Accept
   Notes: Post-anchor assistant mini-bundle with parallel sealed calls.
 
+- Raw: `R(c) M FMa1 FF1 FFO1 FMa2 FF2 FFO2 F FO`
+  Normalized:
+  `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(FMa1;FF1,FFO1),A(FMa2;FF2,FFO2)]`
+  Outcome: Accept
+  Notes: Multiple post-anchor assistant mini-bundles remain separate.
+
 9. Post-anchor mixed `FMa` / `FMu`
 
-- Raw: `R M FMu FMa FF FFO F FO`
+- Raw: `R(c) M FMu FMa FF FFO F FO`
   Normalized:
   `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu),A(FMa;FF,FFO)]`
   Outcome: Accept
   Notes: Preserve cluster-start order.
 
-- Raw: `R M FMa FMu FF FFO F FO`
+- Raw: `R(c) M FMa FMu FF FFO F FO`
   Normalized:
   `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(FMa;FF,FFO),P(FMu)]`
   Outcome: Accept
   Notes: `FMu` cannot split `FMa` from `FF/FFO`.
 
-- Raw: `R M FMa FMu FF FFO F1 F2 FO2 FO1`
+- Raw: `R(c) M FMa FMu FF FFO F1 F2 FO2 FO1`
   Normalized:
   `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[A(FMa;FF,FFO),P(FMu)]`
   Outcome: Accept
   Notes: Same with parallel sealed calls.
 
+- Raw: `R(c) M FMa1 FMu1 FF1 FFO1 FMa2 FMu2 FF2 FFO2 F FO`
+  Normalized:
+  `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(FMa1;FF1,FFO1),P(FMu1),A(FMa2;FF2,FFO2),P(FMu2)]`
+  Outcome: Accept
+  Notes: Each interleaved plain message is pushed outside its attached assistant cluster.
+
 10. Post-anchor non-assistant plus fabricated calls that fall back to anchor
 
-- Raw: `R M FMu FF FFO F FO`
+- Raw: `R(c) M FMu FF FFO F FO`
   Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu)]`
   Outcome: Accept
   Notes: `FF/FFO` bind to `M`, not `FMu`.
 
-- Raw: `R M FMu FMu2 FF FFO F FO`
+- Raw: `R(c) M FMu FMu2 FF FFO F FO`
   Normalized:
   `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu),P(FMu2)]`
   Outcome: Accept
   Notes: Same.
 
-- Raw: `R M FMu FF FFO F1 F2 FO2 FO1`
+- Raw: `R(c) M FMu FF FFO F1 F2 FO2 FO1`
   Normalized:
   `pre=[] anchor=M slots=[F1,F2,FF] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
   Outcome: Accept
   Notes: Sealed outputs preserve chronology.
 
-- Raw: `R M FMu FF FFO F FO FF2 FFO2 F2 FO2`
+- Raw: `R(c) M FMu FF FFO F FO FF2 FFO2 F2 FO2`
   Normalized:
   `pre=[] anchor=M slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[P(FMu)]`
   Outcome: Accept
@@ -397,7 +418,7 @@ Phase 2: Synthetic-only cases
   Outcome: Accept
   Notes: Stripped-anchor recovery.
 
-- Raw: `R M R(h-empty-main) F FO stripped into M F FO`
+- Raw: `R(c) M R(h-empty-main) F FO stripped into M F FO`
   Normalized:
   `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
   `slots=[F] outputs=[FO]`
@@ -507,7 +528,7 @@ def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     )
 
 
-def _carrier(label: str) -> RequestReasoningItem:
+def _reasoning_closed_main(label: str) -> RequestReasoningItem:
     return _sealed_reasoning(
         ReasoningPayload(
             machine=[{"op": "add", "path": f"/{label}", "value": True}],
@@ -600,6 +621,29 @@ def _fabricated_output(call_id: str, output: str) -> RequestFunctionCallOutputIt
 
 def _main_primitives(result) -> list[dict[str, object]]:
     return [message.to_primitive() for message in result.sides.main]
+
+
+def _append_patch_analogue_case(
+    *,
+    case_id: str,
+    tool_call_ids: tuple[str, ...],
+    tail_items: list[RequestInputItem],
+    expected_main: list[dict[str, object]],
+) -> None:
+    m = _assistant_value("m")
+    ACCEPT_CASES.append(
+        pytest.param(
+            _AcceptCase(
+                items=[
+                    _reasoning_patch_main(m, tool_call_ids=tool_call_ids),
+                    _assistant_item("m"),
+                    *tail_items,
+                ],
+                expected_main=expected_main,
+            ),
+            id=case_id,
+        )
+    )
 
 
 ACCEPT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
@@ -1131,7 +1175,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("rm_single"),
+                _reasoning_closed_main("rm_single"),
                 _assistant_item("m"),
                 _fabricated_call("fab_0"),
                 _fabricated_output("fab_0", "ffo_0"),
@@ -1153,7 +1197,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("rm_multi"),
+                _reasoning_closed_main("rm_multi"),
                 _assistant_item("m"),
                 _fabricated_call("fab_0"),
                 _fabricated_output("fab_0", "ffo_0"),
@@ -1181,7 +1225,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_plain_single"),
+                _reasoning_closed_main("post_plain_single"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _sealed_main_call(m, "up_0"),
@@ -1198,7 +1242,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_plain_multi"),
+                _reasoning_closed_main("post_plain_multi"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _plain_item("user", "u2"),
@@ -1221,7 +1265,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_plain_assistant"),
+                _reasoning_closed_main("post_plain_assistant"),
                 _assistant_item("m"),
                 _assistant_item("post"),
                 _sealed_main_call(m, "up_0"),
@@ -1238,7 +1282,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_mini_single"),
+                _reasoning_closed_main("post_mini_single"),
                 _assistant_item("m"),
                 _assistant_item("post"),
                 _fabricated_call("fab_0"),
@@ -1262,7 +1306,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_mini_multi"),
+                _reasoning_closed_main("post_mini_multi"),
                 _assistant_item("m"),
                 _assistant_item("post"),
                 _fabricated_call("fab_0"),
@@ -1289,7 +1333,36 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_mixed_1"),
+                _reasoning_closed_main("post_multi_cluster_single"),
+                _assistant_item("m"),
+                _assistant_item("post1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _assistant_item("post2"),
+                _fabricated_call("fab_1"),
+                _fabricated_output("fab_1", "ffo_1"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m", "up_0"),
+                _tool_value("up_0", "fo_0"),
+                _assistant_value("post1", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _assistant_value("post2", "fab_1"),
+                _tool_value("fab_1", "ffo_1"),
+            ],
+        ),
+        id="post_anchor_assistant_minibundle_multiple_clusters",
+    )
+)
+
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _reasoning_closed_main("post_mixed_1"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _assistant_item("post"),
@@ -1315,7 +1388,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_mixed_2"),
+                _reasoning_closed_main("post_mixed_2"),
                 _assistant_item("m"),
                 _assistant_item("post"),
                 _plain_item("user", "u1"),
@@ -1341,7 +1414,33 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_mixed_3"),
+                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
+                _assistant_item("m"),
+                _assistant_item("post"),
+                _plain_item("user", "u1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m", "up_0"),
+                _tool_value("up_0", "fo_0"),
+                _assistant_value("post", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _plain_value("user", "u1"),
+            ],
+        ),
+        id="post_anchor_mixed_patch_anchor_assistant_cluster_then_user",
+    )
+)
+
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _reasoning_closed_main("post_mixed_3"),
                 _assistant_item("m"),
                 _assistant_item("post"),
                 _plain_item("user", "u1"),
@@ -1370,7 +1469,40 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_fallback_1"),
+                _reasoning_closed_main("post_multi_cluster_interleaved"),
+                _assistant_item("m"),
+                _assistant_item("post1"),
+                _plain_item("user", "u1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _assistant_item("post2"),
+                _plain_item("user", "u2"),
+                _fabricated_call("fab_1"),
+                _fabricated_output("fab_1", "ffo_1"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m", "up_0"),
+                _tool_value("up_0", "fo_0"),
+                _assistant_value("post1", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _plain_value("user", "u1"),
+                _assistant_value("post2", "fab_1"),
+                _tool_value("fab_1", "ffo_1"),
+                _plain_value("user", "u2"),
+            ],
+        ),
+        id="post_anchor_mixed_multiple_assistant_clusters_with_interleaved_plain",
+    )
+)
+
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _reasoning_closed_main("post_fallback_1"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _fabricated_call("fab_0"),
@@ -1394,7 +1526,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_fallback_2"),
+                _reasoning_closed_main("post_fallback_2"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _plain_item("user", "u2"),
@@ -1420,7 +1552,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_fallback_3"),
+                _reasoning_closed_main("post_fallback_3"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _fabricated_call("fab_0"),
@@ -1447,7 +1579,7 @@ ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
             items=[
-                _carrier("post_fallback_4"),
+                _reasoning_closed_main("post_fallback_4"),
                 _assistant_item("m"),
                 _plain_item("user", "u1"),
                 _fabricated_call("fab_0"),
@@ -1470,6 +1602,306 @@ ACCEPT_CASES.append(
         ),
         id="post_anchor_non_assistant_fallback_mixed_multiple",
     )
+)
+
+_append_patch_analogue_case(
+    case_id="mixed_same_patch_anchor_single",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_0", "fo_0"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="mixed_same_patch_anchor_multiple",
+    tool_call_ids=("up_0", "up_1"),
+    tail_items=[
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0", tool_call_index=0),
+        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+        _fabricated_call("fab_1"),
+        _fabricated_output("fab_1", "ffo_1"),
+        _sealed_main_call(m, "up_1", tool_call_index=1),
+        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_0", "fo_0"),
+        _tool_value("fab_1", "ffo_1"),
+        _tool_value("up_1", "fo_1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_plain_patch_single",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_plain_patch_multiple",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _plain_item("user", "u2"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+        _plain_value("user", "u2"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_plain_patch_assistant",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _assistant_item("post"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_assistant_minibundle_patch_single",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _assistant_item("post"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_assistant_minibundle_patch_multiple_sealed",
+    tool_call_ids=("up_0", "up_1"),
+    tail_items=[
+        _assistant_item("post"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0", tool_call_index=0),
+        _sealed_main_call(m, "up_1", tool_call_index=1),
+        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "up_1"),
+        _tool_value("up_1", "fo_1"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_assistant_minibundle_patch_multiple_clusters",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _assistant_item("post1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _assistant_item("post2"),
+        _fabricated_call("fab_1"),
+        _fabricated_output("fab_1", "ffo_1"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post1", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _assistant_value("post2", "fab_1"),
+        _tool_value("fab_1", "ffo_1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_mixed_patch_anchor_user_then_assistant_cluster",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _assistant_item("post"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+        _assistant_value("post", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_mixed_patch_anchor_assistant_cluster_then_user_parallel_sealed",
+    tool_call_ids=("up_0", "up_1"),
+    tail_items=[
+        _assistant_item("post"),
+        _plain_item("user", "u1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0", tool_call_index=0),
+        _sealed_main_call(m, "up_1", tool_call_index=1),
+        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "up_1"),
+        _tool_value("up_1", "fo_1"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _plain_value("user", "u1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_mixed_patch_multiple_assistant_clusters_with_interleaved_plain",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _assistant_item("post1"),
+        _plain_item("user", "u1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _assistant_item("post2"),
+        _plain_item("user", "u2"),
+        _fabricated_call("fab_1"),
+        _fabricated_output("fab_1", "ffo_1"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0"),
+        _tool_value("up_0", "fo_0"),
+        _assistant_value("post1", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _plain_value("user", "u1"),
+        _assistant_value("post2", "fab_1"),
+        _tool_value("fab_1", "ffo_1"),
+        _plain_value("user", "u2"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_non_assistant_patch_fallback_single",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_non_assistant_patch_fallback_multiple",
+    tool_call_ids=("up_0",),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _plain_item("user", "u2"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0"),
+        _sealed_main_output(m, "up_0", "fo_0"),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+        _plain_value("user", "u2"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_non_assistant_patch_fallback_parallel_sealed",
+    tool_call_ids=("up_0", "up_1"),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0", tool_call_index=0),
+        _sealed_main_call(m, "up_1", tool_call_index=1),
+        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "up_1", "fab_0"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_1", "fo_1"),
+        _tool_value("up_0", "fo_0"),
+        _plain_value("user", "u1"),
+    ],
+)
+
+_append_patch_analogue_case(
+    case_id="post_anchor_non_assistant_patch_fallback_mixed_multiple",
+    tool_call_ids=("up_0", "up_1"),
+    tail_items=[
+        _plain_item("user", "u1"),
+        _fabricated_call("fab_0"),
+        _fabricated_output("fab_0", "ffo_0"),
+        _sealed_main_call(m, "up_0", tool_call_index=0),
+        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+        _fabricated_call("fab_1"),
+        _fabricated_output("fab_1", "ffo_1"),
+        _sealed_main_call(m, "up_1", tool_call_index=1),
+        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+    ],
+    expected_main=[
+        _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
+        _tool_value("fab_0", "ffo_0"),
+        _tool_value("up_0", "fo_0"),
+        _tool_value("fab_1", "ffo_1"),
+        _tool_value("up_1", "fo_1"),
+        _plain_value("user", "u1"),
+    ],
 )
 
 m = _assistant_value("m")
@@ -1509,6 +1941,7 @@ ACCEPT_CASES.append(
 )
 
 h = _assistant_value("hidden")
+hidden_with_call = _assistant_value("hidden", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1524,13 +1957,13 @@ ACCEPT_CASES.append(
                                     tool_calls=[_tool_call_model("pref_0")],
                                 ),
                                 Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                Message.from_primitive(_assistant_value("hidden", "up_0")),
+                                Message.from_primitive(hidden_with_call),
                             ]
                         ),
                     )
                 ),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
+                _sealed_main_call(hidden_with_call, "up_0"),
+                _sealed_main_output(hidden_with_call, "up_0", "fo_0"),
             ],
             expected_main=[
                 _assistant_value("prefix turn", "pref_0"),
@@ -1664,11 +2097,11 @@ REJECT_CASES.append(
     pytest.param(
         _RejectCase(
             items=[
-                _carrier("retro_1"),
+                _reasoning_closed_main("retro_1"),
                 _assistant_item("m1"),
                 _sealed_main_call(m1, "up_0"),
                 _sealed_main_output(m1, "up_0", "fo_0"),
-                _carrier("retro_2"),
+                _reasoning_closed_main("retro_2"),
                 _assistant_item("m2"),
                 _sealed_main_call(m2, "up_1"),
                 _sealed_main_output(m2, "up_1", "fo_1"),

@@ -249,16 +249,25 @@ def _anchor_open_call_ids(anchor: MainUpdate) -> set[str]:
     return set(_tool_call_ids(anchor.tool_calls, label="anchor tool_calls"))
 
 
+def _main_anchor_index(main: list[MainUpdate]) -> int | None:
+    anchor_index = len(main) - 1
+    while anchor_index >= 0:
+        candidate = main[anchor_index]
+        if isinstance(candidate, Message) and candidate.is_tool():
+            anchor_index -= 1
+            continue
+        return anchor_index
+    return None
+
+
 def _validate_main_updates(main: list[MainUpdate]) -> None:
     if not main:
         return
     patch_indices = [index for index, update in enumerate(main) if isinstance(update, MessagePatch)]
     if len(patch_indices) > 1:
         raise ValueError("sides update main may contain at most one message patch")
-    anchor_index = len(main) - 1
-    while anchor_index >= 0 and isinstance(main[anchor_index], Message) and main[anchor_index].is_tool():
-        anchor_index -= 1
-    if anchor_index < 0:
+    anchor_index = _main_anchor_index(main)
+    if anchor_index is None:
         raise ValueError("sides update main must contain an assistant anchor or message patch")
     anchor = main[anchor_index]
     if isinstance(anchor, MessagePatch):
@@ -340,6 +349,15 @@ class SidesUpdate:
 
     def is_empty(self) -> bool:
         return not self.main and not any(self.others[side] for side in NON_MAIN_SIDES)
+
+    def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message]]:
+        anchor_index = _main_anchor_index(self.main)
+        if anchor_index is None:
+            return [], None, []
+        anchor = self.main[anchor_index]
+        prefix = [update for update in self.main[:anchor_index] if isinstance(update, Message)]
+        suffix = [update for update in self.main[anchor_index + 1 :] if isinstance(update, Message)]
+        return prefix, anchor, suffix
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
