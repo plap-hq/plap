@@ -244,7 +244,7 @@ def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messag
     update = SidesUpdate(
         main=[
             Message(role="assistant", content="prefix"),
-            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")] ),
+            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
             Message(role="tool", tool_call_id="call_1", content="hidden output"),
         ]
     )
@@ -263,7 +263,7 @@ def test_sides_update_main_rejects_second_patch() -> None:
 
 
 def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
-    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after a message patch"):
+    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
         SidesUpdate(
             main=[
                 MessagePatch(content_hash="abcd", reasoning_content="hidden"),
@@ -273,11 +273,103 @@ def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
 
 
 def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch() -> None:
-    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after a message patch"):
+    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
         SidesUpdate(
             main=[
-                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")] ),
+                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
                 Message(role="tool", content="missing id"),
+            ]
+        )
+
+
+def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(
+                role="assistant",
+                content="prefix tool turn",
+                tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            Message(role="tool", tool_call_id="call_1", content="anchor hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 4
+
+
+def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(
+                role="assistant",
+                content="prefix tool turn",
+                tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+            Message(
+                role="assistant",
+                content="anchor",
+                tool_calls=[ToolCall(id="anchor_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="anchor_0", content="anchor hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 4
+
+
+def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
+    with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> None:
+    with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                Message(role="assistant", content="anchor"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
+    with pytest.raises(ValueError, match="cannot appear before earlier tool calls are satisfied"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                Message(role="user", content="interrupting prefix"),
+                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
+    with pytest.raises(ValueError, match="does not match an unresolved anchor tool call"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                Message(role="tool", tool_call_id="wrong", content="hidden output"),
             ]
         )
 

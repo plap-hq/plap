@@ -217,20 +217,66 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
     return updates
 
 
+def _tool_call_ids(tool_calls: list[ToolCall], *, label: str) -> list[str]:
+    call_ids = [tool_call.id for tool_call in tool_calls]
+    if len(call_ids) != len(set(call_ids)):
+        raise ValueError(f"{label} must not contain duplicate tool call ids")
+    return call_ids
+
+
+def _validate_closed_prefix_messages(messages: list[Message], *, label: str) -> None:
+    pending_call_ids: set[str] = set()
+    for index, message in enumerate(messages):
+        if message.is_tool():
+            if message.tool_call_id is None or message.tool_call_id not in pending_call_ids:
+                raise ValueError(f"{label}[{index}] has no pending tool call to satisfy")
+            pending_call_ids.remove(message.tool_call_id)
+            continue
+        if pending_call_ids:
+            raise ValueError(f"{label}[{index}] cannot appear before earlier tool calls are satisfied")
+        if not message.is_assistant() or not message.tool_calls:
+            continue
+        pending_call_ids.update(_tool_call_ids(message.tool_calls, label=f"{label}[{index}] tool_calls"))
+    if pending_call_ids:
+        raise ValueError(f"{label} must satisfy all prefix tool calls before the anchor")
+
+
+def _anchor_open_call_ids(anchor: MainUpdate) -> set[str]:
+    if isinstance(anchor, MessagePatch):
+        if anchor.tool_calls is None:
+            return set()
+        return set(_tool_call_ids(anchor.tool_calls, label="message patch tool_calls"))
+    return set(_tool_call_ids(anchor.tool_calls, label="anchor tool_calls"))
+
+
 def _validate_main_updates(main: list[MainUpdate]) -> None:
-    patch_seen = False
-    for index, update in enumerate(main):
-        if isinstance(update, MessagePatch):
-            if patch_seen:
-                raise ValueError("sides update main may contain at most one message patch")
-            patch_seen = True
-            continue
-        if not patch_seen:
-            continue
-        if not update.is_tool() or update.tool_call_id is None:
-            raise ValueError(
-                f"sides update main[{index}] must be a tool message with tool_call_id after a message patch"
-            )
+    if not main:
+        return
+    patch_indices = [index for index, update in enumerate(main) if isinstance(update, MessagePatch)]
+    if len(patch_indices) > 1:
+        raise ValueError("sides update main may contain at most one message patch")
+    anchor_index = len(main) - 1
+    while anchor_index >= 0 and isinstance(main[anchor_index], Message) and main[anchor_index].is_tool():
+        anchor_index -= 1
+    if anchor_index < 0:
+        raise ValueError("sides update main must contain an assistant anchor or message patch")
+    anchor = main[anchor_index]
+    if isinstance(anchor, MessagePatch):
+        if patch_indices != [anchor_index]:
+            raise ValueError("message patch must be the last non-tool main update")
+    elif not anchor.is_assistant():
+        raise ValueError("sides update main anchor must be an assistant message or message patch")
+    prefix = main[:anchor_index]
+    if any(isinstance(update, MessagePatch) for update in prefix):
+        raise ValueError("message patch must be the last non-tool main update")
+    _validate_closed_prefix_messages([update for update in prefix if isinstance(update, Message)], label="sides update main prefix")
+    pending_anchor_call_ids = _anchor_open_call_ids(anchor)
+    for index, update in enumerate(main[anchor_index + 1 :], start=anchor_index + 1):
+        if not isinstance(update, Message) or not update.is_tool() or update.tool_call_id is None:
+            raise ValueError(f"sides update main[{index}] must be a tool message with tool_call_id after the anchor")
+        if update.tool_call_id not in pending_anchor_call_ids:
+            raise ValueError(f"sides update main[{index}] does not match an unresolved anchor tool call")
+        pending_anchor_call_ids.remove(update.tool_call_id)
 
 
 @dataclass(slots=True)

@@ -1472,6 +1472,118 @@ ACCEPT_CASES.append(
     )
 )
 
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_reasoning(
+                    ReasoningPayload(
+                        machine=[],
+                        sides=SidesUpdate(
+                            main=[
+                                Message(
+                                    role="assistant",
+                                    content="prefix turn",
+                                    tool_calls=[_tool_call_model("pref_0")],
+                                ),
+                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+                                MessagePatch(content_hash=_message_hash(m), tool_calls=[_tool_call_model("up_0")]),
+                            ]
+                        ),
+                    )
+                ),
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("prefix turn", "pref_0"),
+                _tool_value("pref_0", "prefix output"),
+                _assistant_value("m", "up_0"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="extended_prefix_closed_tool_turn_before_patch_anchor",
+    )
+)
+
+h = _assistant_value("hidden")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_reasoning(
+                    ReasoningPayload(
+                        machine=[],
+                        sides=SidesUpdate(
+                            main=[
+                                Message(
+                                    role="assistant",
+                                    content="prefix turn",
+                                    tool_calls=[_tool_call_model("pref_0")],
+                                ),
+                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+                                Message.from_primitive(_assistant_value("hidden", "up_0")),
+                            ]
+                        ),
+                    )
+                ),
+                _sealed_main_call(h, "up_0"),
+                _sealed_main_output(h, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("prefix turn", "pref_0"),
+                _tool_value("pref_0", "prefix output"),
+                _assistant_value("hidden", "up_0"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="extended_prefix_closed_tool_turn_before_hidden_anchor",
+    )
+)
+
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_reasoning(
+                    ReasoningPayload(
+                        machine=[],
+                        sides=SidesUpdate(
+                            main=[
+                                Message(
+                                    role="assistant",
+                                    content="prefix turn",
+                                    tool_calls=[_tool_call_model("pref_0")],
+                                ),
+                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+                                MessagePatch(
+                                    content_hash=_message_hash(m),
+                                    tool_calls=[_tool_call_model("up_0"), _tool_call_model("up_hidden_1")],
+                                ),
+                                Message(role="tool", tool_call_id="up_hidden_1", content="hidden output"),
+                            ]
+                        ),
+                    )
+                ),
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("prefix turn", "pref_0"),
+                _tool_value("pref_0", "prefix output"),
+                _assistant_value("m", "up_0", "up_hidden_1"),
+                _tool_value("up_hidden_1", "hidden output"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="extended_patch_anchor_with_suffix_hidden_output_after_closed_prefix",
+    )
+)
+
 
 REJECT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
 
