@@ -2107,7 +2107,7 @@ REJECT_CASES.append(
                 _sealed_main_output(m2, "up_1", "fo_1"),
                 _sealed_main_call(m1, "up_old"),
             ],
-            expected_reason="main_retroactive_reopen_unsupported",
+            expected_reason="sealed_function_call_content_hash_target_missing",
         ),
         id="reject_retroactive_reopen_older_explicit_anchor",
     )

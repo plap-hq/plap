@@ -450,11 +450,6 @@ def _anchor_has_matching_hash(anchor: _MainAnchor | None, call_id: CallID) -> bo
     return anchor is not None and anchor.stable_hash is not None and anchor.stable_hash.startswith(call_id.content_hash_prefix.hex())
 
 
-def _committed_has_matching_hash(committed_anchor_hashes: set[str], call_id: CallID) -> bool:
-    prefix = call_id.content_hash_prefix.hex()
-    return any(anchor_hash.startswith(prefix) for anchor_hash in committed_anchor_hashes)
-
-
 def _anchor_all_calls(anchor: _MainAnchor) -> list[_MainCall]:
     return [*anchor.sealed_calls, *anchor.fabricated_calls]
 
@@ -619,7 +614,6 @@ class _ParsedMain:
     messages: list[Message]
     calls: _SideCalls
     has_pending_patch: bool
-    anchor_hashes_to_commit: set[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,7 +666,7 @@ type _MainEvent = (
 )
 
 
-def _parse_main_events(events: list[_MainEvent], committed_anchor_hashes: set[str]) -> _ParsedMain:
+def _parse_main_events(events: list[_MainEvent]) -> _ParsedMain:
     pre: list[_MainCluster] = []
     post: list[_MainCluster] = []
     anchor: _MainAnchor | None = None
@@ -683,21 +677,11 @@ def _parse_main_events(events: list[_MainEvent], committed_anchor_hashes: set[st
 
     def ensure_anchor_for_main_call(call_id: CallID) -> _MainAnchor:
         if anchor is None or anchor.assistant is None or anchor.patch is not None:
-            if _committed_has_matching_hash(committed_anchor_hashes, call_id):
-                raise _tool_replay_error(
-                    reason="main_retroactive_reopen_unsupported",
-                    private_message="sealed main function call targets a previously committed anchor",
-                )
             raise _tool_replay_error(
                 reason="sealed_function_call_content_hash_target_missing",
                 private_message="sealed function call content_hash target is missing",
             )
         if not _anchor_has_matching_hash(anchor, call_id):
-            if _committed_has_matching_hash(committed_anchor_hashes, call_id):
-                raise _tool_replay_error(
-                    reason="main_retroactive_reopen_unsupported",
-                    private_message="sealed main function call targets a previously committed anchor",
-                )
             raise _tool_replay_error(
                 reason="sealed_function_call_content_hash_target_missing",
                 private_message="sealed function call content_hash target is missing",
@@ -896,14 +880,10 @@ def _parse_main_events(events: list[_MainEvent], committed_anchor_hashes: set[st
             ),
         ),
     )
-    anchor_hashes_to_commit: set[str] = set()
-    if anchor is not None and anchor.stable_hash is not None and anchor.assistant is not None:
-        anchor_hashes_to_commit.add(anchor.stable_hash)
     return _ParsedMain(
         messages=messages,
         calls=calls,
         has_pending_patch=_pending_patch(anchor),
-        anchor_hashes_to_commit=anchor_hashes_to_commit,
     )
 
 
@@ -919,15 +899,13 @@ def _build_calls_from_clusters(clusters: list[_MainCluster]) -> _SideCalls:
 @dataclass(slots=True)
 class _MainReplay:
     committed: list[Message] = field(default_factory=list)
-    committed_anchor_hashes: set[str] = field(default_factory=set)
     events: list[_MainEvent] = field(default_factory=list)
 
     def _parse(self) -> _ParsedMain:
-        return _parse_main_events(self.events, self.committed_anchor_hashes)
+        return _parse_main_events(self.events)
 
     def load_snapshot(self, messages: list[Message]) -> None:
         self.committed = list(messages)
-        self.committed_anchor_hashes = {content_hash(message) for message in messages if message.is_assistant()}
         self.events = []
 
     def commit_before_reasoning(self) -> None:
@@ -940,13 +918,11 @@ class _MainReplay:
                 private_message="main message patch target is missing",
             )
         self.committed.extend(parsed.messages)
-        self.committed_anchor_hashes.update(parsed.anchor_hashes_to_commit)
         self.events = []
 
     def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
         prefix, anchor, suffix = sides.split_main()
         self.committed.extend(prefix)
-        self.committed_anchor_hashes.update(content_hash(message) for message in prefix if message.is_assistant())
         if anchor is None:
             return
         if isinstance(anchor, MessagePatch):
