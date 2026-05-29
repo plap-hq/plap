@@ -4,6 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+import blake3
+import msgspec
+
 from plap.llms.completions.chat import ChatRole
 
 type JSONValue = object
@@ -156,6 +159,9 @@ class Message:
 
     def tool_call_at(self, index: int) -> ToolCall:
         return self.tool_calls[index]
+
+    def content_hash(self) -> str:
+        return blake3.blake3(msgspec.json.encode(self.to_primitive(), order="deterministic")).hexdigest()
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {"role": self.role}

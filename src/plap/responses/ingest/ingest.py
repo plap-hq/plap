@@ -29,7 +29,7 @@ from plap.responses.ingest.models import (
     SidesUpdate,
     ToolCall,
 )
-from plap.responses.ingest.sealing import content_hash, open_call_id, open_compaction_payload, open_reasoning_payload
+from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
 
 ENABLE_PHASE2 = True
 
@@ -305,7 +305,7 @@ def _call_matches_call_id(call: _TrackedCall, call_id: CallID) -> bool:
 
 
 def _register_assistant_calls(side_calls: _SideCalls, message: Message) -> None:
-    anchor_content_hash = content_hash(message)
+    anchor_content_hash = message.content_hash()
     for index, tool_call in enumerate(message.tool_calls):
         if tool_call.id in side_calls.calls_by_id:
             raise _tool_replay_error(
@@ -454,7 +454,7 @@ def _pending_patch(anchor: _MainAnchor | None) -> bool:
 def _build_hidden_anchor(message: Message, suffix_outputs: list[Message]) -> _MainAnchor:
     anchor = _MainAnchor(
         assistant=message,
-        stable_hash=content_hash(message),
+        stable_hash=message.content_hash(),
         patch=None,
         hidden_suffix_outputs=[],
         sealed_calls=[_main_call_from_tool_call(tool_call, sealed_index=index) for index, tool_call in enumerate(message.tool_calls)],
@@ -557,7 +557,7 @@ def _resolve_patch_anchor(anchor: _MainAnchor, message: Message) -> None:
             reason="main_message_patch_target_missing",
             private_message="main message patch target must resolve to an assistant message",
         )
-    stable_hash = content_hash(message)
+    stable_hash = message.content_hash()
     tool_calls = [] if anchor.patch.tool_calls is None else list(anchor.patch.tool_calls)
     resolved = _copy_message(
         message,
@@ -640,7 +640,7 @@ def _render_clusters(clusters: list[_MainCluster]) -> list[Message]:
 
 def _build_calls_from_cluster(cluster: _AssistantCluster) -> _SideCalls:
     side_calls = _SideCalls()
-    anchor_hash = content_hash(cluster.assistant)
+    anchor_hash = cluster.assistant.content_hash()
     base_index = len(cluster.assistant.tool_calls)
     for offset, call in enumerate(cluster.calls):
         side_calls.calls_by_id[call.id] = _tracked_call_from_main_call(
@@ -815,7 +815,7 @@ def _parse_main_events(events: list[_MainEvent]) -> _ParsedMain:
 
         if isinstance(event, _PublicMainMessage):
             if _pending_patch(anchor):
-                if event.message.is_assistant() and content_hash(event.message) == anchor.patch.content_hash:
+                if event.message.is_assistant() and event.message.content_hash() == anchor.patch.content_hash:
                     _resolve_patch_anchor(anchor, event.message)
                     bundle_started = True
                     continue

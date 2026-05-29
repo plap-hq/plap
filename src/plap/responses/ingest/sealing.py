@@ -84,7 +84,7 @@ Sealed call ids
 
 - `content_hash_prefix` is the first 8 raw bytes of the BLAKE3 digest of
   the deterministic JSON encoding of `Message.to_primitive()`. If you
-  start from the hex digest returned by `content_hash(...)`, this is the
+  start from the hex digest returned by `Message.content_hash()`, this is the
   first 16 hex characters decoded back into 8 bytes.
 
 - `tool_call_index` is a fixed-width unsigned 16-bit big-endian integer.
@@ -110,7 +110,6 @@ from __future__ import annotations
 import base64
 from typing import Any
 
-import blake3
 import msgspec
 import zstandard as zstd
 from cryptography.exceptions import InvalidTag
@@ -120,7 +119,7 @@ from nacl.secret import Aead
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring, associated_data, purpose_label
-from plap.responses.ingest.models import CallID, CompactionPayload, Message, ReasoningPayload, Side
+from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload, Side
 
 COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
@@ -423,10 +422,6 @@ def _xchacha_open(value: str, *, purpose: str, keyring: SealingKeyring) -> bytes
     raise _tool_replay_error(
         reason="sealed_tool_payload_open_failed", private_message=f"sealed {purpose} payload could not be opened", cause=last_error
     ) from last_error
-
-
-def content_hash(message: Message) -> str:
-    return blake3.blake3(msgspec.json.encode(message.to_primitive(), order="deterministic")).hexdigest()
 
 
 def content_hash_prefix(value: str) -> bytes:

@@ -43,7 +43,6 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import (
-    content_hash,
     content_hash_prefix,
     open_call_id,
     seal_call_id,
@@ -135,7 +134,7 @@ def _sealed_call_id_for_message(side: str, upstream_tool_call_id: str, message: 
     return seal_call_id(
         CallID(
             side=side,
-            content_hash_prefix=content_hash_prefix(content_hash(message)),
+            content_hash_prefix=content_hash_prefix(message.content_hash()),
             tool_call_index=tool_call_index,
             upstream_tool_call_id=upstream_tool_call_id,
         ),

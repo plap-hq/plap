@@ -587,7 +587,6 @@ from plap.responses.contracts import (
 from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, SidesUpdate, ToolCall
 from plap.responses.ingest.sealing import (
-    content_hash,
     content_hash_prefix,
     open_reasoning_payload,
     seal_call_id,
@@ -712,7 +711,7 @@ def _plain_item(role: str, content: str) -> RequestMessageItem:
 
 
 def _message_hash(value: dict[str, object]) -> str:
-    return content_hash(Message.from_primitive(value))
+    return Message.from_primitive(value).content_hash()
 
 
 def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
