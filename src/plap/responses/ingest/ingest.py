@@ -1218,7 +1218,13 @@ class _Replay:
 
     def finish(self) -> Ingested:
         self._validate_all_calls_closed()
-        return Ingested(machine=self.machine, sides=self.sides, last_side=self.last_side)
+        return Ingested(
+            machine=self.machine,
+            sides=self.sides,
+            last_side=self.last_side,
+            last_reasoning_id=self.last_reasoning_id,
+            current_compaction_id=self.current_compaction_id,
+        )
 
     def step(self, item: _DecodedInput) -> None:
         if isinstance(item, _DecodedCompaction):

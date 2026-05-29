@@ -534,6 +534,8 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
     assert result.machine == payload.machine
     assert result.sides == payload.sides
     assert result.last_side is None
+    assert result.last_reasoning_id is None
+    assert result.current_compaction_id == payload.id
 
 
 async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compaction() -> None:
@@ -571,6 +573,8 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         Message(role="assistant", content="second"),
     ]
     assert result.last_side is None
+    assert result.last_reasoning_id == second.id
+    assert result.current_compaction_id == compaction.id
 
 
 async def test_ingest_response_request_applies_reasoning_machine_patch() -> None:
@@ -587,6 +591,8 @@ async def test_ingest_response_request_applies_reasoning_machine_patch() -> None
     assert result.machine == {"active": ["reviewer"]}
     assert result.sides == Sides()
     assert result.last_side is None
+    assert result.last_reasoning_id == payload.id
+    assert result.current_compaction_id is None
 
 
 async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:

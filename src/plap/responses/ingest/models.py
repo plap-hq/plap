@@ -10,7 +10,8 @@ import msgspec
 from plap.llms.completions.chat import ChatRole
 
 type JSONValue = object
-type JSONPatch = list[dict[str, JSONValue]]
+type JSONPatchOperation = dict[str, JSONValue]
+type JSONPatch = list[JSONPatchOperation]
 
 
 def _required_mapping(value: object, *, label: str) -> Mapping[str, object]:
@@ -477,3 +478,5 @@ class Ingested:
     machine: dict[str, JSONValue]
     sides: Sides
     last_side: Side | None
+    last_reasoning_id: str | None
+    current_compaction_id: str | None
