@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import plap.responses2.ingest.ingest as ingest_module
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.responses2.contracts import (
@@ -912,7 +913,84 @@ async def test_ingest_response_request_accepts_standalone_main_message() -> None
     assert result.last_side == Side.MAIN
 
 
-async def test_ingest_response_request_rejects_sealed_function_call_without_matching_hidden_call() -> None:
+async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
+    item = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
+        name="read_file",
+        type="function_call",
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[item]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.others[Side.REVIEWER] == []
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_strict_phase1_rejects_naked_main_synthetic_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+    synthetic = Message(role="assistant", content="")
+    call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+
+
+async def test_ingest_response_request_strict_phase1_rejects_closed_anchor_then_synthetic_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+    synthetic = Message(role="assistant", content="")
+    call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    RequestMessageItem(content="m", role="assistant", type="message"),
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+
+
+async def test_ingest_response_request_strict_phase1_rejects_naked_non_main_sealed_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
     item = RequestFunctionCallItem(
         arguments='{"path":"README.md"}',
         call_id=_sealed_call_id("reviewer", "up_reviewer_0"),

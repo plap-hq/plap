@@ -31,6 +31,8 @@ from plap.responses2.ingest.models import (
 )
 from plap.responses2.ingest.sealing import content_hash, open_call_id, open_compaction_payload, open_reasoning_payload
 
+ENABLE_PHASE2 = True
+
 
 def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
     return PlapError(
@@ -327,6 +329,10 @@ def _merge_side_calls(base: _SideCalls, extra: _SideCalls) -> _SideCalls:
     return merged
 
 
+def _side_calls_empty(side_calls: _SideCalls) -> bool:
+    return not side_calls.calls_by_id
+
+
 def _get_call(side_calls: _SideCalls, call_id: CallID) -> _TrackedCall:
     call = side_calls.calls_by_id.get(call_id.upstream_tool_call_id)
     if call is None or not _call_matches_call_id(call, call_id):
@@ -435,6 +441,32 @@ def _build_patch_anchor(patch: MessagePatch, suffix_outputs: list[Message]) -> _
         patch=patch,
         hidden_suffix_outputs=list(suffix_outputs),
         sealed_calls=[],
+        fabricated_calls=[],
+        outputs=[],
+    )
+
+
+def _build_synthetic_anchor(event: _SealedMainFunctionCall) -> _MainAnchor:
+    if event.call_id.tool_call_index != 0:
+        raise _tool_replay_error(
+            reason="sealed_function_call_index_not_contiguous",
+            private_message="sealed function_call index is not contiguous",
+        )
+    return _MainAnchor(
+        assistant=Message(role="assistant", content=""),
+        stable_hash=event.call_id.content_hash_prefix.hex(),
+        patch=None,
+        hidden_suffix_outputs=[],
+        sealed_calls=[
+            _MainCall(
+                id=event.call_id.upstream_tool_call_id,
+                name=event.item.name,
+                arguments=event.item.arguments,
+                sealed_index=0,
+                has_function_call_item=True,
+                has_output_message=False,
+            )
+        ],
         fabricated_calls=[],
         outputs=[],
     )
@@ -771,6 +803,15 @@ def _parse_main_events(events: list[_MainEvent]) -> _ParsedMain:
             continue
 
         if isinstance(event, _SealedMainFunctionCall):
+            if anchor is None:
+                if not ENABLE_PHASE2:
+                    raise _tool_replay_error(
+                        reason="sealed_function_call_content_hash_target_missing",
+                        private_message="sealed function call content_hash target is missing",
+                    )
+                anchor = _build_synthetic_anchor(event)
+                bundle_started = True
+                continue
             current_anchor = ensure_anchor_for_main_call(event.call_id)
             sealed_call = _anchor_sealed_call(current_anchor, event.call_id.tool_call_index)
             if sealed_call is not None:
@@ -811,6 +852,11 @@ def _parse_main_events(events: list[_MainEvent]) -> _ParsedMain:
             continue
 
         if isinstance(event, _SealedMainFunctionCallOutput):
+            if anchor is None or anchor.assistant is None or anchor.patch is not None:
+                raise _tool_replay_error(
+                    reason="function_call_output_without_pending_function_call",
+                    private_message="function_call_output has no pending function_call",
+                )
             current_anchor = ensure_anchor_for_main_call(event.call_id)
             sealed_call = _anchor_sealed_call(current_anchor, event.call_id.tool_call_index)
             if sealed_call is None:
@@ -896,29 +942,39 @@ def _build_calls_from_clusters(clusters: list[_MainCluster]) -> _SideCalls:
     return side_calls
 
 
+def _region_closed(parsed: _ParsedMain) -> bool:
+    if parsed.has_pending_patch:
+        return False
+    return all(call.has_output_message for call in parsed.calls.calls_by_id.values())
+
+
 @dataclass(slots=True)
 class _MainReplay:
     committed: list[Message] = field(default_factory=list)
-    events: list[_MainEvent] = field(default_factory=list)
+    regions: list[list[_MainEvent]] = field(default_factory=list)
 
-    def _parse(self) -> _ParsedMain:
-        return _parse_main_events(self.events)
+    def _parse_region(self, region: list[_MainEvent]) -> _ParsedMain:
+        return _parse_main_events(region)
+
+    def _parse_regions(self) -> list[_ParsedMain]:
+        return [self._parse_region(region) for region in self.regions]
 
     def load_snapshot(self, messages: list[Message]) -> None:
         self.committed = list(messages)
-        self.events = []
+        self.regions = []
 
     def commit_before_reasoning(self) -> None:
-        if not self.events:
+        if not self.regions:
             return
-        parsed = self._parse()
-        if parsed.has_pending_patch:
-            raise _reasoning_replay_error(
-                reason="main_message_patch_target_missing",
-                private_message="main message patch target is missing",
-            )
-        self.committed.extend(parsed.messages)
-        self.events = []
+        parsed_regions = self._parse_regions()
+        for parsed in parsed_regions:
+            if parsed.has_pending_patch:
+                raise _reasoning_replay_error(
+                    reason="main_message_patch_target_missing",
+                    private_message="main message patch target is missing",
+                )
+            self.committed.extend(parsed.messages)
+        self.regions = []
 
     def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
         prefix, anchor, suffix = sides.split_main()
@@ -926,46 +982,81 @@ class _MainReplay:
         if anchor is None:
             return
         if isinstance(anchor, MessagePatch):
-            self.events.append(_HiddenMainPatch(patch=anchor, suffix_outputs=suffix))
+            self.regions.append([_HiddenMainPatch(patch=anchor, suffix_outputs=suffix)])
             return
-        self.events.append(_HiddenMainMessage(message=anchor, suffix_outputs=suffix))
+        self.regions.append([_HiddenMainMessage(message=anchor, suffix_outputs=suffix)])
+
+    def _append_to_current_region(self, event: _MainEvent) -> None:
+        if not self.regions:
+            self.regions.append([])
+        candidate = [*self.regions[-1], event]
+        self._parse_region(candidate)
+        self.regions[-1] = candidate
+
+    def _append_sealed_call_with_region_split(self, event: _SealedMainFunctionCall) -> None:
+        if not self.regions:
+            self.regions.append([event])
+            self._parse_region(self.regions[-1])
+            return
+        candidate = [*self.regions[-1], event]
+        try:
+            self._parse_region(candidate)
+            self.regions[-1] = candidate
+        except PlapError as exc:
+            if exc.private is None or exc.private.reason != "sealed_function_call_content_hash_target_missing":
+                raise
+            if not ENABLE_PHASE2:
+                raise
+            parsed = self._parse_region(self.regions[-1])
+            if not _region_closed(parsed):
+                raise _tool_replay_error(
+                    reason="sealed_function_call_content_hash_target_missing",
+                    private_message="sealed function call content_hash target is missing",
+                ) from exc
+            self.regions.append([event])
+            self._parse_region(self.regions[-1])
 
     def add_standalone_main_item(self, item: _DecodedInput) -> None:
         if isinstance(item, _DecodedMessage):
-            self.events.append(_PublicMainMessage(message=item.message))
+            self._append_to_current_region(_PublicMainMessage(message=item.message))
             return
         if isinstance(item, _DecodedSealedFunctionCall):
-            self.events.append(_SealedMainFunctionCall(item=item.item, call_id=item.call_id))
+            self._append_sealed_call_with_region_split(_SealedMainFunctionCall(item=item.item, call_id=item.call_id))
             return
         if isinstance(item, _DecodedSealedFunctionCallOutput):
-            self.events.append(_SealedMainFunctionCallOutput(item=item.item, call_id=item.call_id))
+            self._append_to_current_region(_SealedMainFunctionCallOutput(item=item.item, call_id=item.call_id))
             return
         if isinstance(item, _DecodedFabricatedFunctionCall):
-            self.events.append(_FabricatedMainFunctionCall(item=item.item))
+            self._append_to_current_region(_FabricatedMainFunctionCall(item=item.item))
             return
         if isinstance(item, _DecodedFabricatedFunctionCallOutput):
-            self.events.append(_FabricatedMainFunctionCallOutput(item=item.item))
+            self._append_to_current_region(_FabricatedMainFunctionCallOutput(item=item.item))
             return
         raise TypeError(f"unsupported standalone main item: {type(item).__name__}")
 
     def current_messages(self) -> list[Message]:
-        parsed = self._parse()
-        return [*self.committed, *parsed.messages]
+        parsed_regions = self._parse_regions()
+        rendered: list[Message] = [*self.committed]
+        for parsed in parsed_regions:
+            rendered.extend(parsed.messages)
+        return rendered
 
     def current_calls(self) -> _SideCalls:
-        parsed = self._parse()
-        return _merge_side_calls(_rebuild_calls(self.committed), parsed.calls)
+        merged = _rebuild_calls(self.committed)
+        for parsed in self._parse_regions():
+            merged = _merge_side_calls(merged, parsed.calls)
+        return merged
 
     def history_changed_by_last_event(self, item: _DecodedInput) -> bool:
         return not isinstance(item, _DecodedSealedFunctionCall)
 
     def assert_finished(self) -> None:
-        parsed = self._parse()
-        if parsed.has_pending_patch:
-            raise _reasoning_replay_error(
-                reason="main_message_patch_target_missing",
-                private_message="main message patch target is missing",
-            )
+        for parsed in self._parse_regions():
+            if parsed.has_pending_patch:
+                raise _reasoning_replay_error(
+                    reason="main_message_patch_target_missing",
+                    private_message="main message patch target is missing",
+                )
 
 
 @dataclass(slots=True)
@@ -1019,6 +1110,8 @@ class _Replay:
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:
         side_calls = self.calls_by_side[call_id.side]
+        if _side_calls_empty(side_calls) and ENABLE_PHASE2:
+            return
         call = _get_call(side_calls, call_id)
         if call.has_output_message:
             raise _tool_replay_error(
@@ -1034,6 +1127,8 @@ class _Replay:
 
     def _step_non_main_function_call_output(self, item: RequestFunctionCallOutputItem, call_id: CallID) -> None:
         side_calls = self.calls_by_side[call_id.side]
+        if _side_calls_empty(side_calls) and ENABLE_PHASE2:
+            return
         call = _get_call(side_calls, call_id)
         if not call.has_function_call_item or call.has_output_message:
             raise _tool_replay_error(

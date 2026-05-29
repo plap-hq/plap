@@ -394,6 +394,13 @@ Phase 1: Rejections that stay rejected
 
 Phase 2: Synthetic-only cases
 
+Phase 2 shorthand:
+
+- `F[M]` / `FO[M]`: sealed call/output whose `content_hash_prefix` targets the
+  visible explicit anchor `M`
+- `F[S0]` / `FO[S0]`: sealed call/output whose `content_hash_prefix` does not
+  target `M` and therefore starts or continues a synthetic anchor `S0`
+
 - Raw: `F FO on main`
   Normalized:
   `pre=[] anchor=synthetic-empty-main slots=[F] outputs=[FO] post=[]`
@@ -418,12 +425,129 @@ Phase 2: Synthetic-only cases
   Outcome: Accept
   Notes: Stripped-anchor recovery.
 
+- Raw: `Stripped R(h-empty-main) F1 FO1 F2 FO2 -> F1 FO1 F2 FO2`
+  Normalized:
+  `pre=[] anchor=synthetic-empty-main slots=[F1,F2] outputs=[FO1,FO2] post=[]`
+  Outcome: Accept
+  Notes: Stripped-anchor recovery with multiple sealed calls.
+
+- Raw: `Stripped R(h-empty-main) F1 F2 FO2 FO1 -> F1 F2 FO2 FO1`
+  Normalized:
+  `pre=[] anchor=synthetic-empty-main slots=[F1,F2] outputs=[FO2,FO1] post=[]`
+  Outcome: Accept
+  Notes: Stripped-anchor recovery preserving output chronology.
+
 - Raw: `R(c) M R(h-empty-main) F FO stripped into M F FO`
   Normalized:
   `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
   `slots=[F] outputs=[FO]`
   Outcome: Accept
   Notes: Must not bind naked `F/FO` to `M`.
+
+- Raw: `R(c) M R(h-empty-main) F1 FO1 F2 FO2 stripped into M F1 FO1 F2 FO2`
+  Normalized:
+  `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
+  `slots=[F1,F2] outputs=[FO1,FO2]`
+  Outcome: Accept
+  Notes: Multiple stripped sealed calls remain on the synthetic anchor.
+
+- Raw: `R(c) M R(h-empty-main) F1 F2 FO2 FO1 stripped into M F1 F2 FO2 FO1`
+  Normalized:
+  `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
+  `slots=[F1,F2] outputs=[FO2,FO1]`
+  Outcome: Accept
+  Notes: Multiple stripped sealed calls preserve chronology on the synthetic anchor.
+
+- Raw: `R(p->M) M R(h-empty-main) F FO stripped into M F FO`
+  Normalized:
+  `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
+  `slots=[F] outputs=[FO]`
+  Outcome: Accept
+  Notes: Stripping hides the patch provenance, so this collapses to the same visible queue.
+
+- Raw: `R(p->M) M R(h-empty-main) F1 FO1 F2 FO2 stripped into M F1 FO1 F2 FO2`
+  Normalized:
+  `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
+  `slots=[F1,F2] outputs=[FO1,FO2]`
+  Outcome: Accept
+  Notes: Patch-target provenance is irrelevant after stripping.
+
+- Raw: `R(p->M) M R(h-empty-main) F1 F2 FO2 FO1 stripped into M F1 F2 FO2 FO1`
+  Normalized:
+  `anchor=M slots=[] outputs=[] and separate anchor=synthetic-empty-main`
+  `slots=[F1,F2] outputs=[FO2,FO1]`
+  Outcome: Accept
+  Notes: Patch-target provenance is irrelevant after stripping and chronology stays preserved.
+
+- Raw: `R(p->M) M F1 FO1 F2 FO2 -> M F1 FO1 F2 FO2`
+  Normalized:
+  `pre=[] anchor=M slots=[F1,F2] outputs=[FO1,FO2] post=[]`
+  Outcome: Accept
+  Notes: Visible queue is identical to the explicit-anchor case once the patch resolves.
+
+- Raw: `R(p->M) M F1 F2 FO2 FO1 -> M F1 F2 FO2 FO1`
+  Normalized:
+  `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[]`
+  Outcome: Accept
+  Notes: Visible queue is identical to the explicit-anchor case once the patch resolves.
+
+- Raw: `M FMa1 FF1 FFO1 F[S0] FO[S0]`
+  Normalized:
+  `anchor=M slots=[] outputs=[] post=[A(FMa1;FF1,FFO1)] and separate anchor=synthetic-empty-main`
+  `slots=[F[S0]] outputs=[FO[S0]]`
+  Outcome: Accept
+  Notes: Closed post-anchor assistant cluster allows a later synthetic split.
+
+- Raw: `M FMa1 FF1 FFO1 FMa2 FF2 FFO2 F[S0] FO[S0]`
+  Normalized:
+  `anchor=M slots=[] outputs=[] post=[A(FMa1;FF1,FFO1),A(FMa2;FF2,FFO2)] and separate`
+  `anchor=synthetic-empty-main slots=[F[S0]] outputs=[FO[S0]]`
+  Outcome: Accept
+  Notes: Multiple closed post-anchor assistant clusters allow a later synthetic split.
+
+- Raw: `M FMa1 FMu1 FF1 FFO1 FMa2 FMu2 FF2 FFO2 F[S0] FO[S0]`
+  Normalized:
+  `anchor=M slots=[] outputs=[] post=[A(FMa1;FF1,FFO1),P(FMu1),A(FMa2;FF2,FFO2),P(FMu2)]`
+  `and separate anchor=synthetic-empty-main slots=[F[S0]] outputs=[FO[S0]]`
+  Outcome: Accept
+  Notes: Closed interleaved clusters allow a later synthetic split.
+
+- Raw: `M FMu1 FF1 FFO1 F[S0] FO[S0]`
+  Normalized:
+  `anchor=M slots=[FF1] outputs=[FFO1] post=[P(FMu1)] and separate anchor=synthetic-empty-main`
+  `slots=[F[S0]] outputs=[FO[S0]]`
+  Outcome: Accept
+  Notes: Closed anchor-bound fabricated fallback allows a later synthetic split.
+
+- Raw: `M F[M] F[S0]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Open anchor call prevents a synthetic split.
+
+- Raw: `M FMa1 FF1 F[S0] FO[S0]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Open post-anchor assistant cluster call prevents a synthetic split.
+
+- Raw: `M FMu1 FF1 F[S0] FO[S0]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Open anchor-bound fabricated fallback prevents a synthetic split.
+
+- Raw: `FO[S0]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Synthetic output without a pending synthetic call is invalid.
+
+- Raw: `F[S0]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Synthetic pending call still requires a later output.
+
+- Raw: `FMu1 FF1 FFO1 M F[M] FO[M]`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: Stripped patch-target-style replay with no assistant anchor before `M` still rejects.
 
 - Raw: `Naked reviewer F FO`
   Normalized: N/A
@@ -460,7 +584,7 @@ from plap.responses2.contracts import (
     SummaryTextContent,
 )
 from plap.responses2.ingest.ingest import ingest_response_request
-from plap.responses2.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, SidesUpdate, ToolCall
+from plap.responses2.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, SidesUpdate, ToolCall
 from plap.responses2.ingest.sealing import content_hash, content_hash_prefix, seal_call_id, seal_reasoning_payload
 
 
@@ -472,6 +596,18 @@ class _AcceptCase:
 
 @dataclass(frozen=True, slots=True)
 class _RejectCase:
+    items: list[RequestInputItem]
+    expected_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscardCase:
+    items: list[RequestInputItem]
+    side: Side
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase2RejectCase:
     items: list[RequestInputItem]
     expected_reason: str
 
@@ -587,6 +723,18 @@ def _sealed_main_call(anchor: dict[str, object], upstream_id: str, *, tool_call_
     )
 
 
+def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
+    return seal_call_id(
+        CallID(
+            side=side,
+            content_hash_prefix=bytes.fromhex("0102030405060708"),
+            tool_call_index=0,
+            upstream_tool_call_id=upstream_tool_call_id,
+        ),
+        keyring=_keyring(),
+    )
+
+
 def _sealed_main_output(
     anchor: dict[str, object], upstream_id: str, output: str, *, tool_call_index: int = 0
 ) -> RequestFunctionCallOutputItem:
@@ -647,6 +795,9 @@ def _append_patch_analogue_case(
 
 
 ACCEPT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
+PHASE2_ACCEPT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
+DISCARD_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
+PHASE2_REJECT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
 
 m = _assistant_value("m")
 ACCEPT_CASES.append(
@@ -1904,6 +2055,505 @@ _append_patch_analogue_case(
     ],
 )
 
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[_sealed_main_call(synthetic, "syn_0"), _sealed_main_output(synthetic, "syn_0", "fo_0")],
+            expected_main=[_assistant_value("", "syn_0"), _tool_value("syn_0", "fo_0")],
+        ),
+        id="phase2_naked_main_single",
+    )
+)
+
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+            ],
+            expected_main=[
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_0", "fo_0"),
+                _tool_value("syn_1", "fo_1"),
+            ],
+        ),
+        id="phase2_naked_main_multiple_in_order",
+    )
+)
+
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+            ],
+            expected_main=[
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_1", "fo_1"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_naked_main_multiple_chronology",
+    )
+)
+
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[_sealed_main_call(synthetic, "syn_0"), _sealed_main_output(synthetic, "syn_0", "fo_0")],
+            expected_main=[_assistant_value("", "syn_0"), _tool_value("syn_0", "fo_0")],
+        ),
+        id="phase2_stripped_hidden_empty_single",
+    )
+)
+
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+            ],
+            expected_main=[
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_0", "fo_0"),
+                _tool_value("syn_1", "fo_1"),
+            ],
+        ),
+        id="phase2_stripped_hidden_empty_multiple_in_order",
+    )
+)
+
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+            ],
+            expected_main=[
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_1", "fo_1"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_stripped_hidden_empty_multiple_chronology",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[_assistant_item("m"), _sealed_main_call(synthetic, "syn_0"), _sealed_main_output(synthetic, "syn_0", "fo_0")],
+            expected_main=[_assistant_value("m"), _assistant_value("", "syn_0"), _tool_value("syn_0", "fo_0")],
+        ),
+        id="phase2_closed_anchor_then_synthetic_single",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_0", "fo_0"),
+                _tool_value("syn_1", "fo_1"),
+            ],
+        ),
+        id="phase2_closed_anchor_then_synthetic_multiple_in_order",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_1", "fo_1"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_closed_anchor_then_synthetic_multiple_chronology",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _assistant_item("post1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _sealed_main_call(synthetic, "syn_0"),
+                _sealed_main_output(synthetic, "syn_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("post1", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _assistant_value("", "syn_0"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_closed_cluster_then_synthetic_single",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _assistant_item("post1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _assistant_item("post2"),
+                _fabricated_call("fab_1"),
+                _fabricated_output("fab_1", "ffo_1"),
+                _sealed_main_call(synthetic, "syn_0"),
+                _sealed_main_output(synthetic, "syn_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("post1", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _assistant_value("post2", "fab_1"),
+                _tool_value("fab_1", "ffo_1"),
+                _assistant_value("", "syn_0"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_closed_multiple_clusters_then_synthetic_single",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _assistant_item("post1"),
+                _plain_item("user", "u1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _assistant_item("post2"),
+                _plain_item("user", "u2"),
+                _fabricated_call("fab_1"),
+                _fabricated_output("fab_1", "ffo_1"),
+                _sealed_main_call(synthetic, "syn_0"),
+                _sealed_main_output(synthetic, "syn_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("post1", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _plain_value("user", "u1"),
+                _assistant_value("post2", "fab_1"),
+                _tool_value("fab_1", "ffo_1"),
+                _plain_value("user", "u2"),
+                _assistant_value("", "syn_0"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_closed_interleaved_clusters_then_synthetic_single",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _plain_item("user", "u1"),
+                _fabricated_call("fab_0"),
+                _fabricated_output("fab_0", "ffo_0"),
+                _sealed_main_call(synthetic, "syn_0"),
+                _sealed_main_output(synthetic, "syn_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("m", "fab_0"),
+                _tool_value("fab_0", "ffo_0"),
+                _plain_value("user", "u1"),
+                _assistant_value("", "syn_0"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_closed_anchor_bound_fabricated_then_synthetic_single",
+    )
+)
+
+m = _assistant_value("m")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[_assistant_item("m"), _sealed_main_call(m, "up_0"), _sealed_main_output(m, "up_0", "fo_0")],
+            expected_main=[_assistant_value("m", "up_0"), _tool_value("up_0", "fo_0")],
+        ),
+        id="phase2_patch_anchor_collapse_single",
+    )
+)
+
+m = _assistant_value("m")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0", tool_call_index=0),
+                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+                _sealed_main_call(m, "up_1", tool_call_index=1),
+                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+            ],
+            expected_main=[
+                _assistant_value("m", "up_0", "up_1"),
+                _tool_value("up_0", "fo_0"),
+                _tool_value("up_1", "fo_1"),
+            ],
+        ),
+        id="phase2_patch_anchor_collapse_multiple_in_order",
+    )
+)
+
+m = _assistant_value("m")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0", tool_call_index=0),
+                _sealed_main_call(m, "up_1", tool_call_index=1),
+                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
+                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
+            ],
+            expected_main=[
+                _assistant_value("m", "up_0", "up_1"),
+                _tool_value("up_1", "fo_1"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="phase2_patch_anchor_collapse_multiple_chronology",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[_assistant_item("m"), _sealed_main_call(synthetic, "syn_0"), _sealed_main_output(synthetic, "syn_0", "fo_0")],
+            expected_main=[_assistant_value("m"), _assistant_value("", "syn_0"), _tool_value("syn_0", "fo_0")],
+        ),
+        id="phase2_patch_anchor_then_stripped_hidden_empty_single",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_0", "fo_0"),
+                _tool_value("syn_1", "fo_1"),
+            ],
+        ),
+        id="phase2_patch_anchor_then_stripped_hidden_empty_multiple_in_order",
+    )
+)
+
+m = _assistant_value("m")
+synthetic = _assistant_value("")
+PHASE2_ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _assistant_item("m"),
+                _sealed_main_call(synthetic, "syn_0", tool_call_index=0),
+                _sealed_main_call(synthetic, "syn_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_1", "fo_1", tool_call_index=1),
+                _sealed_main_output(synthetic, "syn_0", "fo_0", tool_call_index=0),
+            ],
+            expected_main=[
+                _assistant_value("m"),
+                _assistant_value("", "syn_0", "syn_1"),
+                _tool_value("syn_1", "fo_1"),
+                _tool_value("syn_0", "fo_0"),
+            ],
+        ),
+        id="phase2_patch_anchor_then_stripped_hidden_empty_multiple_chronology",
+    )
+)
+
+DISCARD_CASES.extend(
+    [
+        pytest.param(
+            _DiscardCase(
+                items=[
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=_sealed_call_id("reviewer", "up_0"),
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(
+                        call_id=_sealed_call_id("reviewer", "up_0"),
+                        output="fo_0",
+                        type="function_call_output",
+                    ),
+                ],
+                side=Side.REVIEWER,
+            ),
+            id="phase2_naked_reviewer_pair_discarded",
+        ),
+        pytest.param(
+            _DiscardCase(
+                items=[
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=_sealed_call_id("arbitrator", "up_0"),
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(
+                        call_id=_sealed_call_id("arbitrator", "up_0"),
+                        output="fo_0",
+                        type="function_call_output",
+                    ),
+                ],
+                side=Side.ARBITRATOR,
+            ),
+            id="phase2_naked_arbitrator_pair_discarded",
+        ),
+    ]
+)
+
+synthetic = _assistant_value("")
+PHASE2_REJECT_CASES.extend(
+    [
+        pytest.param(
+            _Phase2RejectCase(
+                items=[
+                    _assistant_item("m"),
+                    _sealed_main_call(_assistant_value("m"), "up_0"),
+                    _sealed_main_call(synthetic, "syn_0"),
+                ],
+                expected_reason="sealed_function_call_content_hash_target_missing",
+            ),
+            id="phase2_reject_open_explicit_anchor_before_synthetic_split",
+        ),
+        pytest.param(
+            _Phase2RejectCase(
+                items=[
+                    _assistant_item("m"),
+                    _assistant_item("post1"),
+                    _fabricated_call("fab_0"),
+                    _sealed_main_call(synthetic, "syn_0"),
+                    _sealed_main_output(synthetic, "syn_0", "fo_0"),
+                ],
+                expected_reason="sealed_function_call_content_hash_target_missing",
+            ),
+            id="phase2_reject_open_cluster_before_synthetic_split",
+        ),
+        pytest.param(
+            _Phase2RejectCase(
+                items=[
+                    _assistant_item("m"),
+                    _plain_item("user", "u1"),
+                    _fabricated_call("fab_0"),
+                    _sealed_main_call(synthetic, "syn_0"),
+                    _sealed_main_output(synthetic, "syn_0", "fo_0"),
+                ],
+                expected_reason="sealed_function_call_content_hash_target_missing",
+            ),
+            id="phase2_reject_open_anchor_bound_fabricated_before_synthetic_split",
+        ),
+        pytest.param(
+            _Phase2RejectCase(
+                items=[_sealed_main_output(synthetic, "syn_0", "fo_0")],
+                expected_reason="function_call_output_without_pending_function_call",
+            ),
+            id="phase2_reject_naked_synthetic_output_without_call",
+        ),
+        pytest.param(
+            _Phase2RejectCase(
+                items=[_sealed_main_call(synthetic, "syn_0")],
+                expected_reason="function_call_missing_function_call_output",
+            ),
+            id="phase2_reject_naked_synthetic_missing_output",
+        ),
+        pytest.param(
+            _Phase2RejectCase(
+                items=[
+                    _plain_item("user", "u1"),
+                    _fabricated_call("fab_0"),
+                    _fabricated_output("fab_0", "ffo_0"),
+                    _assistant_item("m"),
+                    _sealed_main_call(_assistant_value("m"), "up_0"),
+                    _sealed_main_output(_assistant_value("m"), "up_0", "fo_0"),
+                ],
+                expected_reason="fabricated_function_call_without_previous_assistant",
+            ),
+            id="phase2_reject_stripped_patch_target_style_queue",
+        ),
+    ]
+)
+
 m = _assistant_value("m")
 ACCEPT_CASES.append(
     pytest.param(
@@ -2107,7 +2757,7 @@ REJECT_CASES.append(
                 _sealed_main_output(m2, "up_1", "fo_1"),
                 _sealed_main_call(m1, "up_old"),
             ],
-            expected_reason="sealed_function_call_content_hash_target_missing",
+            expected_reason="function_call_missing_function_call_output",
         ),
         id="reject_retroactive_reopen_older_explicit_anchor",
     )
@@ -2129,7 +2779,7 @@ REJECT_CASES.append(
     pytest.param(
         _RejectCase(
             items=[_assistant_item("m"), _sealed_main_call(wrong_anchor, "up_0")],
-            expected_reason="sealed_function_call_content_hash_target_missing",
+            expected_reason="function_call_missing_function_call_output",
         ),
         id="reject_sealed_hash_mismatch",
     )
@@ -2200,6 +2850,29 @@ async def test_phase1_truth_table_accepts(case: _AcceptCase) -> None:
 
 @pytest.mark.parametrize("case", REJECT_CASES)
 async def test_phase1_truth_table_rejects(case: _RejectCase) -> None:
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(_request(case.items), keyring=_keyring())
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == case.expected_reason
+
+
+@pytest.mark.parametrize("case", PHASE2_ACCEPT_CASES)
+async def test_phase2_truth_table_accepts(case: _AcceptCase) -> None:
+    result = await ingest_response_request(_request(case.items), keyring=_keyring())
+
+    assert _main_primitives(result) == case.expected_main
+
+
+@pytest.mark.parametrize("case", DISCARD_CASES)
+async def test_phase2_truth_table_discards_non_main_naked_pairs(case: _DiscardCase) -> None:
+    result = await ingest_response_request(_request(case.items), keyring=_keyring())
+
+    assert result.sides.messages(case.side) == []
+
+
+@pytest.mark.parametrize("case", PHASE2_REJECT_CASES)
+async def test_phase2_truth_table_rejects(case: _Phase2RejectCase) -> None:
     with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(_request(case.items), keyring=_keyring())
 
