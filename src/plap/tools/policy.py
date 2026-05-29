@@ -14,7 +14,6 @@ from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.completions.chat import ChatToolCall
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
-from plap.tools.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 
 logger = structlog.get_logger(__name__)
 
@@ -256,21 +255,25 @@ def signature_hash_hex(signature_hash: bytes) -> str:
     return signature_hash.hex()
 
 
-def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
+def _strict_json_object(arguments: str) -> dict[str, Any]:
     try:
-        return parse_json_object_with_repair(arguments)
-    except JSONInvalidError as exc:
+        decoded = msgspec.json.decode(arguments.encode())
+    except msgspec.DecodeError as exc:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_invalid_json",
             private_message="function call arguments must be valid JSON",
             cause=exc,
         ) from exc
-    except JSONNotObjectError as exc:
+    if not isinstance(decoded, dict):
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_not_object",
             private_message="function call arguments must be a JSON object",
-            cause=exc,
-        ) from exc
+        )
+    return decoded
+
+
+def canonical_tool_arguments(arguments: str) -> dict[str, Any]:
+    return _strict_json_object(arguments)
 
 
 def function_tool_call_signature(

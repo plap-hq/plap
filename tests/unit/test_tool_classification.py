@@ -12,6 +12,7 @@ from plap.llms.completions.chat import (
     ChatCompletionResult,
     ChatMessage,
     ChatToolCall,
+    ChatToolCallDelta,
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool
@@ -175,6 +176,37 @@ async def test_llm_tool_classifier_reprompts_once_after_shape_failure() -> None:
     assert (retry_request.messages[-1].content or "").strip()
 
 
+async def test_llm_tool_classifier_retries_empty_rationale_once() -> None:
+    signature = function_tool_signature(_read_file_tool())
+    classifier = LLMToolClassifier(
+        client=_SequenceChatClient(
+            [
+                _classifier_tool_call_message(
+                    "classify_tool_effect",
+                    '{"effect_class":"safe","confidence":0.9,"rationale":""}',
+                ),
+                _classifier_tool_call_message(
+                    "classify_tool_effect",
+                    '{"effect_class":"safe","confidence":0.9,"rationale":"Read-only."}',
+                ),
+            ]
+        ),
+        classifier="fake",
+        classifier_model="fake/model",
+        classifier_cache_model="fake/cache",
+    )
+
+    result = await classifier.classify(signature)
+
+    assert result.effect_class == "safe"
+    assert len(classifier._client.requests) == 2
+    retry_request = classifier._client.requests[1]
+    assert retry_request.messages[-3].tool_calls is not None
+    assert retry_request.messages[-2].role == "tool"
+    assert retry_request.messages[-1].role == "user"
+    assert "empty rationale" in (retry_request.messages[-1].content or "")
+
+
 async def test_llm_tool_classifier_fans_out_batch_as_isolated_requests() -> None:
     read_signature = function_tool_signature(_read_file_tool())
     list_signature = function_tool_signature(_list_files_tool())
@@ -281,6 +313,15 @@ def test_tool_arguments_reject_non_object_json() -> None:
 def test_tool_arguments_reject_malformed_json() -> None:
     with pytest.raises(PlapError) as exc_info:
         canonical_tool_arguments("not json")
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "invalid_tool_arguments"
+    assert exc_info.value.public.param == "input"
+
+
+def test_tool_arguments_reject_repairable_but_invalid_json() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        canonical_tool_arguments('{"path":"README.md",}')
 
     assert exc_info.value.public is not None
     assert exc_info.value.public.code == "invalid_tool_arguments"
@@ -780,6 +821,45 @@ def _classifier_tool_call_message(name: str, arguments: str) -> ChatMessage:
     )
 
 
+def _stream_classifier_message(
+    message: ChatMessage,
+    *,
+    request: ChatCompletionRequest,
+    result_id: str,
+) -> AsyncIterator[ChatCompletionDelta]:
+    async def run() -> AsyncIterator[ChatCompletionDelta]:
+        if message.content is not None:
+            yield ChatCompletionDelta(
+                id=result_id,
+                model=request.model,
+                created_at=1.0,
+                choice_index=0,
+                content_delta=message.content,
+            )
+        for index, tool_call in enumerate(message.tool_calls or ()):
+            yield ChatCompletionDelta(
+                id=result_id,
+                model=request.model,
+                created_at=1.0,
+                choice_index=0,
+                tool_call_delta=ChatToolCallDelta(
+                    index=index,
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    arguments_delta=tool_call.arguments,
+                ),
+            )
+        yield ChatCompletionDelta(
+            id=result_id,
+            model=request.model,
+            created_at=1.0,
+            choice_index=0,
+            finish_reason="tool_calls" if message.tool_calls else "stop",
+        )
+
+    return run()
+
+
 class _FakeChatClient(IChatCompletionClient):
     def __init__(self, message: ChatMessage | str) -> None:
         self.message = _assistant_message(message)
@@ -795,8 +875,9 @@ class _FakeChatClient(IChatCompletionClient):
             finish_reason="stop",
         )
 
-    def stream(self, _request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
-        raise NotImplementedError
+    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
+        self.requests.append(request)
+        return _stream_classifier_message(self.message, request=request, result_id=f"chat_{len(self.requests)}")
 
 
 class _SequenceChatClient(IChatCompletionClient):
@@ -814,8 +895,13 @@ class _SequenceChatClient(IChatCompletionClient):
             finish_reason="stop",
         )
 
-    def stream(self, _request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
-        raise NotImplementedError
+    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
+        self.requests.append(request)
+        return _stream_classifier_message(
+            self.messages[len(self.requests) - 1],
+            request=request,
+            result_id=f"chat_{len(self.requests)}",
+        )
 
 
 @dataclass(slots=True)

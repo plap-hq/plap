@@ -16,8 +16,9 @@ from plap.llms.completions.chat import (
     ChatTool,
     IChatCompletionClient,
 )
+from plap.llms.retry import RetryValidator, retry_message, retry_on_unusable_tool_calls
+from plap.llms.retry import complete as retry_complete
 from plap.logging import log_debug, log_payload
-from plap.tools.json_utils import parse_json_object_with_repair
 from plap.tools.policy import (
     EffectClass,
     IToolCallClassifier,
@@ -82,6 +83,8 @@ TOOL_EFFECT_CLASSIFIER_TOOL = ChatTool(
     )
 )
 TOOL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
+TOOL_EFFECT_CLASSIFIER_SINGLE_TOOL_RETRY_EVENT = "tool.classifier.single_tool_retry"
+TOOL_EFFECT_CLASSIFIER_EMPTY_RATIONALE_RETRY_EVENT = "tool.classifier.empty_rationale_retry"
 
 TOOL_CALL_EFFECT_CLASSIFIER_PROMPT = """Classify a concrete client tool call.
 
@@ -128,6 +131,8 @@ TOOL_CALL_EFFECT_CLASSIFIER_TOOL = ChatTool(
     )
 )
 TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS = 512
+TOOL_CALL_EFFECT_CLASSIFIER_SINGLE_TOOL_RETRY_EVENT = "tool.call_classifier.single_tool_retry"
+TOOL_CALL_EFFECT_CLASSIFIER_EMPTY_RATIONALE_RETRY_EVENT = "tool.call_classifier.empty_rationale_retry"
 
 
 def _classifier_result_context(result: ChatCompletionResult) -> dict[str, object]:
@@ -140,56 +145,123 @@ def _classifier_result_context(result: ChatCompletionResult) -> dict[str, object
     }
 
 
-def _shape_retry_request(
-    request: ChatCompletionRequest,
-    *,
-    assistant: ChatMessage,
-    expected_tool_name: str,
-    error_message: str,
-) -> ChatCompletionRequest:
-    correction = ChatMessage(
-        role="user",
-        content=(
-            "Your previous answer was unusable. "
-            f"Problem: {error_message}. "
-            f"Reply again with exactly one real `{expected_tool_name}` tool call and no plain-text answer. "
-            "Put your explanation only in the `rationale` field. "
-            "Do not return multiple tool calls. Do not return prose in `content`."
-        ),
-    )
-    return replace(request, messages=[*request.messages, assistant, correction])
-
-
-async def _complete_with_shape_retry(
-    *,
-    client: IChatCompletionClient,
-    request: ChatCompletionRequest,
-    retry_event: str,
-    expected_tool_name: str,
-) -> ChatCompletionResult:
-    result = await client.complete(request)
-    try:
-        _parse_raw_output(result.message, expected_tool_name=expected_tool_name)
-    except _ClassifierShapeError as exc:
-        retry_request = _shape_retry_request(
-            request,
-            assistant=result.message,
-            expected_tool_name=expected_tool_name,
-            error_message=str(exc),
+def _classifier_single_tool_validator(*, retry_event: str, expected_tool_name: str) -> RetryValidator:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        tool_calls = result.message.tool_calls or ()
+        if len(tool_calls) == 1:
+            return None
+        retry_message_text = retry_message(
+            problems=("the classifier did not return exactly one tool call",),
+            rules=(
+                f"Return exactly one real `{expected_tool_name}` tool call.",
+                "Do not return multiple tool calls.",
+                "Do not return plain-text content.",
+                "Put your explanation only in the `rationale` field.",
+            ),
         )
         log_debug(
             logger,
             retry_event,
-            error_message=str(exc),
             expected_tool_name=expected_tool_name,
+            retry_message=retry_message_text,
         )
         log_payload(
             logger,
             f"{retry_event}.payload",
-            request=asdict(retry_request),
+            request=asdict(request),
+            result=asdict(result),
         )
-        return await client.complete(retry_request)
-    return result
+        return retry_message_text
+
+    return validate
+
+
+def _classifier_rationale_validator(*, retry_event: str, expected_tool_name: str) -> RetryValidator:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        tool_calls = result.message.tool_calls or ()
+        if len(tool_calls) != 1:
+            return None
+        tool_call = tool_calls[0]
+        if tool_call.name != expected_tool_name:
+            return None
+        try:
+            raw = _parse_raw_output(result.message, expected_tool_name=expected_tool_name)
+        except _ClassifierShapeError:
+            return None
+        rationale = raw.get("rationale")
+        if isinstance(rationale, str) and rationale.strip():
+            return None
+        retry_message_text = retry_message(
+            problems=("the classifier returned an empty rationale",),
+            rules=(
+                f"Return exactly one real `{expected_tool_name}` tool call.",
+                "Put your explanation only in the `rationale` field.",
+                "The `rationale` field must be a non-empty string.",
+            ),
+        )
+        log_debug(
+            logger,
+            retry_event,
+            expected_tool_name=expected_tool_name,
+            retry_message=retry_message_text,
+        )
+        log_payload(
+            logger,
+            f"{retry_event}.payload",
+            request=asdict(request),
+            result=asdict(result),
+        )
+        return retry_message_text
+
+    return validate
+
+
+async def _complete_classifier_request(
+    *,
+    client: IChatCompletionClient,
+    request: ChatCompletionRequest,
+    validators: tuple[RetryValidator, ...],
+    expected_tool_name: str,
+) -> tuple[ChatCompletionResult, dict[str, Any]]:
+    snapshot = await retry_complete(
+        client,
+        next_request=lambda history: replace(request, messages=[*request.messages, *history.messages]),
+        validators=validators,
+        max_attempts=3,
+    )
+    if not snapshot.results:
+        raise RuntimeError("classifier retry completed without a final result")
+    result = snapshot.results[-1]
+    raw = _parse_raw_output(result.message, expected_tool_name=expected_tool_name)
+    return result, raw
+
+
+def _tool_classifier_validators() -> tuple[RetryValidator, ...]:
+    return (
+        retry_on_unusable_tool_calls,
+        _classifier_single_tool_validator(
+            retry_event=TOOL_EFFECT_CLASSIFIER_SINGLE_TOOL_RETRY_EVENT,
+            expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name,
+        ),
+        _classifier_rationale_validator(
+            retry_event=TOOL_EFFECT_CLASSIFIER_EMPTY_RATIONALE_RETRY_EVENT,
+            expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name,
+        ),
+    )
+
+
+def _tool_call_classifier_validators() -> tuple[RetryValidator, ...]:
+    return (
+        retry_on_unusable_tool_calls,
+        _classifier_single_tool_validator(
+            retry_event=TOOL_CALL_EFFECT_CLASSIFIER_SINGLE_TOOL_RETRY_EVENT,
+            expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name,
+        ),
+        _classifier_rationale_validator(
+            retry_event=TOOL_CALL_EFFECT_CLASSIFIER_EMPTY_RATIONALE_RETRY_EVENT,
+            expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name,
+        ),
+    )
 
 
 class LLMToolClassifier(IToolClassifier):
@@ -266,13 +338,12 @@ class LLMToolClassifier(IToolClassifier):
         )
         result: ChatCompletionResult | None = None
         try:
-            result = await _complete_with_shape_retry(
+            result, raw = await _complete_classifier_request(
                 client=self._client,
                 request=request,
-                retry_event="tool.classifier.shape_retry",
+                validators=_tool_classifier_validators(),
                 expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name,
             )
-            raw = _parse_raw_output(result.message, expected_tool_name=TOOL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _classification_from_raw(
                 signature_hash=signature.signature_hash,
                 classifier=self.classifier,
@@ -421,13 +492,12 @@ class LLMToolCallClassifier(IToolCallClassifier):
         )
         result: ChatCompletionResult | None = None
         try:
-            result = await _complete_with_shape_retry(
+            result, raw = await _complete_classifier_request(
                 client=self._client,
                 request=request,
-                retry_event="tool.call_classifier.shape_retry",
+                validators=_tool_call_classifier_validators(),
                 expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name,
             )
-            raw = _parse_raw_output(result.message, expected_tool_name=TOOL_CALL_EFFECT_CLASSIFIER_TOOL.function.name)
             classification = _tool_call_classification_from_raw(
                 signature_hash=call.signature_hash,
                 arguments_hash=call.arguments_hash,
@@ -504,7 +574,13 @@ def _parse_raw_output(message: ChatMessage, *, expected_tool_name: str) -> dict[
     tool_call = tool_calls[0]
     if tool_call.name != expected_tool_name:
         raise _ClassifierShapeError("classifier returned an unexpected tool call")
-    return parse_json_object_with_repair(tool_call.arguments)
+    try:
+        decoded = msgspec.json.decode(tool_call.arguments.encode())
+    except msgspec.DecodeError as exc:
+        raise _ClassifierShapeError("classifier tool arguments were not a valid JSON object") from exc
+    if not isinstance(decoded, dict):
+        raise _ClassifierShapeError("classifier tool arguments were not a valid JSON object")
+    return decoded
 
 
 def _prompt_hash(

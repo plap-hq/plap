@@ -48,7 +48,7 @@ def _tool_stubs(message: ChatMessage) -> tuple[ChatMessage, ...]:
     )
 
 
-def _retry_message(*, problems: Sequence[str], rules: Sequence[str]) -> str:
+def retry_message(*, problems: Sequence[str], rules: Sequence[str]) -> str:
     problem_block = "\n".join(f"- {problem}" for problem in problems)
     rule_block = "\n".join(f"- {rule}" for rule in rules)
     return (
@@ -72,21 +72,21 @@ def _unknown_tool_retry_message(call_name: str, *, tools: Sequence[ChatTool]) ->
         rule = "Use only tool names declared in the request." if tools else "Do not call tools in your next reply."
     else:
         rule = f"Use only the declared tool name: {declared_tool_name}."
-    return _retry_message(
+    return retry_message(
         problems=(f"You called an undeclared tool: `{call_name}`.",),
         rules=(rule,),
     )
 
 
 def _invalid_tool_arguments_retry_message(tool_name: str) -> str:
-    return _retry_message(
+    return retry_message(
         problems=(f"The arguments for tool `{tool_name}` were not a valid JSON object.",),
         rules=(f"If you call `{tool_name}`, its `arguments` must be a JSON object.",),
     )
 
 
 def _strict_schema_mismatch_retry_message(tool_name: str, *, error_message: str) -> str:
-    return _retry_message(
+    return retry_message(
         problems=(
             f"The arguments for strict tool `{tool_name}` did not match its declared schema.",
             f"Validation error: `{error_message}`.",
@@ -254,6 +254,7 @@ __all__ = [
     "RetryToolSchemaError",
     "RetryValidator",
     "complete",
+    "retry_message",
     "retry_on_unusable_tool_calls",
     "stream",
 ]
