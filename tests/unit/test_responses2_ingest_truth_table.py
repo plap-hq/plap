@@ -569,6 +569,7 @@ Three quick validation rules
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import count
 
 import pytest
 
@@ -585,7 +586,13 @@ from plap.responses2.contracts import (
 )
 from plap.responses2.ingest.ingest import ingest_response_request
 from plap.responses2.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, SidesUpdate, ToolCall
-from plap.responses2.ingest.sealing import content_hash, content_hash_prefix, seal_call_id, seal_reasoning_payload
+from plap.responses2.ingest.sealing import (
+    content_hash,
+    content_hash_prefix,
+    open_reasoning_payload,
+    seal_call_id,
+    seal_reasoning_payload,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,8 +623,61 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
+_REASONING_PAYLOAD_COUNTER = count()
+
+
+def _next_reasoning_payload_id() -> str:
+    return f"rs_truth_{next(_REASONING_PAYLOAD_COUNTER)}"
+
+
+def _reasoning_payload(
+    *,
+    machine: list[dict[str, object]],
+    sides: SidesUpdate,
+    payload_id: str | None = None,
+    previous_reasoning_id: str | None = None,
+    previous_compaction_id: str | None = None,
+) -> ReasoningPayload:
+    return ReasoningPayload(
+        id=payload_id or _next_reasoning_payload_id(),
+        previous_reasoning_id=previous_reasoning_id,
+        previous_compaction_id=previous_compaction_id,
+        machine=machine,
+        sides=sides,
+    )
+
+
+def _chain_reasoning_items(items: list[RequestInputItem]) -> list[RequestInputItem]:
+    chained: list[RequestInputItem] = []
+    last_reasoning_id: str | None = None
+    for item in items:
+        if not isinstance(item, RequestReasoningItem) or item.encrypted_content is None:
+            chained.append(item)
+            continue
+        payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
+        chained_payload = _reasoning_payload(
+            payload_id=payload.id,
+            previous_reasoning_id=last_reasoning_id,
+            previous_compaction_id=None,
+            machine=payload.machine,
+            sides=payload.sides,
+        )
+        last_reasoning_id = chained_payload.id
+        chained.append(
+            RequestReasoningItem(
+                content=item.content,
+                encrypted_content=seal_reasoning_payload(chained_payload, keyring=_keyring()),
+                id=chained_payload.id,
+                status=item.status,
+                summary=item.summary,
+                type="reasoning",
+            )
+        )
+    return chained
+
+
 def _request(items: list[RequestInputItem]) -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap/test", input=items)
+    return ResponseCreateRequest(model="plap/test", input=_chain_reasoning_items(items))
 
 
 def _tool_call_model(call_id: str) -> ToolCall:
@@ -658,7 +718,7 @@ def _message_hash(value: dict[str, object]) -> str:
 def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
-        id=None,
+        id=payload.id,
         summary=[SummaryTextContent(text="sealed", type="summary_text")],
         type="reasoning",
     )
@@ -666,7 +726,7 @@ def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
 
 def _reasoning_closed_main(label: str) -> RequestReasoningItem:
     return _sealed_reasoning(
-        ReasoningPayload(
+        _reasoning_payload(
             machine=[{"op": "add", "path": f"/{label}", "value": True}],
             sides=SidesUpdate(),
         )
@@ -675,7 +735,7 @@ def _reasoning_closed_main(label: str) -> RequestReasoningItem:
 
 def _reasoning_hidden_main(*messages: dict[str, object]) -> RequestReasoningItem:
     return _sealed_reasoning(
-        ReasoningPayload(
+        _reasoning_payload(
             machine=[],
             sides=SidesUpdate(main=[Message.from_primitive(message) for message in messages]),
         )
@@ -693,7 +753,7 @@ def _reasoning_patch_main(
         tool_calls=[_tool_call_model(call_id) for call_id in tool_call_ids],
     )
     return _sealed_reasoning(
-        ReasoningPayload(
+        _reasoning_payload(
             machine=[],
             sides=SidesUpdate(
                 main=[
@@ -2560,7 +2620,7 @@ ACCEPT_CASES.append(
         _AcceptCase(
             items=[
                 _sealed_reasoning(
-                    ReasoningPayload(
+                    _reasoning_payload(
                         machine=[],
                         sides=SidesUpdate(
                             main=[
@@ -2597,7 +2657,7 @@ ACCEPT_CASES.append(
         _AcceptCase(
             items=[
                 _sealed_reasoning(
-                    ReasoningPayload(
+                    _reasoning_payload(
                         machine=[],
                         sides=SidesUpdate(
                             main=[
@@ -2632,7 +2692,7 @@ ACCEPT_CASES.append(
         _AcceptCase(
             items=[
                 _sealed_reasoning(
-                    ReasoningPayload(
+                    _reasoning_payload(
                         machine=[],
                         sides=SidesUpdate(
                             main=[

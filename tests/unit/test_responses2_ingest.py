@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from itertools import count
+
 import pytest
 
 import plap.responses2.ingest.ingest as ingest_module
@@ -62,14 +64,56 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
+_REASONING_PAYLOAD_COUNTER = count()
+_COMPACTION_PAYLOAD_COUNTER = count()
+
+
+def _next_reasoning_payload_id() -> str:
+    return f"rs_payload_{next(_REASONING_PAYLOAD_COUNTER)}"
+
+
+def _next_compaction_payload_id() -> str:
+    return f"cmp_payload_{next(_COMPACTION_PAYLOAD_COUNTER)}"
+
+
+def _compaction_payload(
+    *,
+    machine: dict[str, object],
+    sides: Sides,
+    payload_id: str | None = None,
+) -> CompactionPayload:
+    return CompactionPayload(id=payload_id or _next_compaction_payload_id(), machine=machine, sides=sides)
+
+
+def _reasoning_payload(
+    *,
+    machine: list[dict[str, object]],
+    sides: SidesUpdate,
+    payload_id: str | None = None,
+    previous_reasoning_id: str | None = None,
+    previous_compaction_id: str | None = None,
+) -> ReasoningPayload:
+    return ReasoningPayload(
+        id=payload_id or _next_reasoning_payload_id(),
+        previous_reasoning_id=previous_reasoning_id,
+        previous_compaction_id=previous_compaction_id,
+        machine=machine,
+        sides=sides,
+    )
+
+
 def _sealed_compaction(payload: CompactionPayload) -> RequestCompactionItem:
-    return RequestCompactionItem(encrypted_content=seal_compaction_payload(payload, keyring=_keyring()), type="compaction")
+    return RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
+        id=payload.id,
+        type="compaction",
+    )
 
 
 def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
-        id=None,
+        id=payload.id,
         summary=[SummaryTextContent(text="sealed", type="summary_text")],
         type="reasoning",
     )
@@ -142,7 +186,7 @@ def test_slice_to_last_compaction_preserves_compaction_only_queue() -> None:
 
 
 def test_decode_queue_opens_compaction_payload() -> None:
-    payload = CompactionPayload(machine={"active": []}, sides=Sides())
+    payload = _compaction_payload(machine={"active": []}, sides=Sides())
 
     decoded = _decode_queue([_sealed_compaction(payload)], keyring=_keyring())
 
@@ -150,7 +194,7 @@ def test_decode_queue_opens_compaction_payload() -> None:
 
 
 def test_decode_queue_opens_reasoning_payload() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
         sides=SidesUpdate(),
     )
@@ -158,6 +202,37 @@ def test_decode_queue_opens_reasoning_payload() -> None:
     decoded = _decode_queue([_sealed_reasoning(payload)], keyring=_keyring())
 
     assert decoded == [_DecodedReasoning(payload=payload)]
+
+
+def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:
+    payload = _reasoning_payload(machine=[{"op": "add", "path": "/active", "value": []}], sides=SidesUpdate())
+    item = RequestReasoningItem(
+        encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
+        id="rs_wrong",
+        summary=[SummaryTextContent(text="sealed", type="summary_text")],
+        type="reasoning",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        _decode_queue([item], keyring=_keyring())
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_item_id_mismatch"
+
+
+def test_decode_queue_rejects_compaction_item_id_mismatch() -> None:
+    payload = _compaction_payload(machine={"active": []}, sides=Sides())
+    item = RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
+        id="cmp_wrong",
+        type="compaction",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        _decode_queue([item], keyring=_keyring())
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "compaction_item_id_mismatch"
 
 
 def test_decode_queue_decodes_message_item_to_internal_message() -> None:
@@ -411,7 +486,7 @@ def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None
 
 
 def test_decode_queue_preserves_item_order() -> None:
-    compaction = _sealed_compaction(CompactionPayload(machine={"active": []}, sides=Sides()))
+    compaction = _sealed_compaction(_compaction_payload(machine={"active": []}, sides=Sides()))
     message = _message("hello")
     sealed_call = RequestFunctionCallItem(
         arguments='{"path":"README.md"}',
@@ -444,7 +519,7 @@ def test_decode_queue_rejects_unsealed_reasoning_input() -> None:
 
 
 async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_only_queue() -> None:
-    payload = CompactionPayload(
+    payload = _compaction_payload(
         machine={"active": ["reviewer"]},
         sides=Sides(
             main=[Message(role="assistant", content="main snapshot")],
@@ -462,8 +537,45 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
     assert result.last_side is None
 
 
+async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compaction() -> None:
+    compaction = _compaction_payload(
+        payload_id="cmp_root",
+        machine={"active": []},
+        sides=Sides(main=[Message(role="assistant", content="snapshot")]),
+    )
+    first = _reasoning_payload(
+        payload_id="rs_first",
+        previous_compaction_id=compaction.id,
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_second",
+        previous_reasoning_id=first.id,
+        previous_compaction_id=compaction.id,
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[_sealed_compaction(compaction), _sealed_reasoning(first), _sealed_reasoning(second)],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.sides.main == [
+        Message(role="assistant", content="snapshot"),
+        Message(role="assistant", content="first"),
+        Message(role="assistant", content="second"),
+    ]
+    assert result.last_side is None
+
+
 async def test_ingest_response_request_applies_reasoning_machine_patch() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(),
     )
@@ -479,7 +591,7 @@ async def test_ingest_response_request_applies_reasoning_machine_patch() -> None
 
 
 async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -500,7 +612,7 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
 
 
 async def test_ingest_response_request_appends_main_messages_from_reasoning() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
         sides=SidesUpdate(main=[Message(role="assistant", content="main hidden")]),
     )
@@ -515,18 +627,17 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
 
 
 async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
-    first = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-            sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
-        )
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
     )
-    second = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-            sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
-        )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+        previous_reasoning_id=first_payload.id,
     )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
 
     result = await ingest_response_request(
         ResponseCreateRequest(model="plap/test", input=[first, second]),
@@ -541,13 +652,111 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     assert result.last_side is None
 
 
+async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_reasoning_id() -> None:
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        previous_reasoning_id="rs_missing",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_compaction_id() -> None:
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        previous_compaction_id="cmp_missing",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_reasoning_with_none_previous_compaction_id_after_compaction() -> None:
+    compaction = _compaction_payload(payload_id="cmp_root", machine={"active": []}, sides=Sides())
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(compaction), _sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
+    first = _reasoning_payload(
+        payload_id="rs_first",
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_second",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(first), _sealed_reasoning(second)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
+
+
+async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_when_chain_matches() -> None:
+    first = _reasoning_payload(
+        payload_id="rs_duplicate",
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_duplicate",
+        previous_reasoning_id=first.id,
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(first), _sealed_reasoning(second)]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.last_side is None
+
+
 async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_pair() -> None:
     assistant = Message(
         role="assistant",
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -590,7 +799,7 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     hidden_output = {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "hidden result"}
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -620,7 +829,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         content="main hidden",
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["main"]}],
         sides=SidesUpdate(main=[assistant]),
     )
@@ -651,7 +860,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
 
 
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["main"]}],
         sides=SidesUpdate(
             main=[
@@ -664,9 +873,10 @@ async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_
         ),
     )
     later = _sealed_reasoning(
-        ReasoningPayload(
+        _reasoning_payload(
             machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
             sides=SidesUpdate(),
+            previous_reasoning_id=payload.id,
         )
     )
 
@@ -686,7 +896,7 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -713,7 +923,7 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -747,7 +957,7 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={
@@ -781,30 +991,29 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    first = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-            sides=SidesUpdate(
-                others={
-                    Side.REVIEWER: [
-                        {"op": "add", "path": "/0", "value": assistant.to_primitive()},
-                    ]
-                }
-            ),
-        )
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
     )
-    second = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-            sides=SidesUpdate(
-                others={
-                    Side.REVIEWER: [
-                        {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
-                    ]
-                }
-            ),
-        )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
+                ]
+            }
+        ),
+        previous_reasoning_id=first_payload.id,
     )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
     call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
 
     with pytest.raises(PlapError) as exc_info:
@@ -835,24 +1044,23 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    first = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-            sides=SidesUpdate(
-                others={
-                    Side.REVIEWER: [
-                        {"op": "add", "path": "/0", "value": assistant.to_primitive()},
-                    ]
-                }
-            ),
-        )
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
     )
-    second = _sealed_reasoning(
-        ReasoningPayload(
-            machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-            sides=SidesUpdate(),
-        )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(),
+        previous_reasoning_id=first_payload.id,
     )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
     call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
 
     with pytest.raises(PlapError) as exc_info:
@@ -881,7 +1089,7 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
 
 
 async def test_ingest_response_request_rejects_main_message_patch_until_supported() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
         sides=SidesUpdate(
             main=[
@@ -1009,7 +1217,7 @@ async def test_ingest_response_request_strict_phase1_rejects_naked_non_main_seal
 
 
 async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "replace", "path": "/missing", "value": 1}],
         sides=SidesUpdate(),
     )
@@ -1025,7 +1233,7 @@ async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -
 
 
 async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> None:
-    payload = ReasoningPayload(
+    payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=SidesUpdate(
             others={

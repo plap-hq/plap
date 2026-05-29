@@ -24,6 +24,9 @@ Reasoning and compaction payloads
     {
         "version": 2,
         "type": "reasoning",
+        "id": <string>,
+        "previous_reasoning_id": <string|null>,
+        "previous_compaction_id": <string|null>,
         "machine": <JSONPatch>,
         "sides": <SidesUpdate>,
     }
@@ -33,6 +36,7 @@ Reasoning and compaction payloads
     {
         "version": 2,
         "type": "compaction",
+        "id": <string>,
         "machine": <object>,
         "sides": <Sides>,
     }
@@ -295,6 +299,7 @@ def _compaction_from_json(value: object) -> CompactionPayload:
     try:
         return CompactionPayload.from_primitive(
             {
+                "id": value.get("id"),
                 "machine": value.get("machine"),
                 "sides": value.get("sides"),
             }
@@ -319,6 +324,9 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
     try:
         return ReasoningPayload.from_primitive(
             {
+                "id": value.get("id"),
+                "previous_reasoning_id": value.get("previous_reasoning_id"),
+                "previous_compaction_id": value.get("previous_compaction_id"),
                 "machine": value.get("machine"),
                 "sides": value.get("sides"),
             }

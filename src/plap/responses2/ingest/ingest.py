@@ -53,6 +53,25 @@ def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseExc
     )
 
 
+def _compaction_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="invalid_compaction_replay",
+            message="Compaction replay data is invalid.",
+            param="input",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason=reason,
+            message=private_message,
+            level=ErrorLevel.WARNING,
+            cause=cause,
+        ),
+    )
+
+
 def _tool_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
     return PlapError(
         public=PublicError(
@@ -112,7 +131,13 @@ def _decode_message_item(item: RequestMessageItem) -> Message:
 
 
 def _open_compaction_item(item: RequestCompactionItem, *, keyring: SealingKeyring) -> CompactionPayload:
-    return open_compaction_payload(item.encrypted_content, keyring=keyring)
+    payload = open_compaction_payload(item.encrypted_content, keyring=keyring)
+    if item.id is not None and item.id != payload.id:
+        raise _compaction_replay_error(
+            reason="compaction_item_id_mismatch",
+            private_message="compaction item id does not match sealed payload id",
+        )
+    return payload
 
 
 def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring) -> ReasoningPayload:
@@ -121,7 +146,13 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
             reason="unsealed_reasoning_input_untrusted",
             private_message="unsealed reasoning input is not trusted",
         )
-    return open_reasoning_payload(item.encrypted_content, keyring=keyring)
+    payload = open_reasoning_payload(item.encrypted_content, keyring=keyring)
+    if item.id is not None and item.id != payload.id:
+        raise _reasoning_replay_error(
+            reason="reasoning_item_id_mismatch",
+            private_message="reasoning item id does not match sealed payload id",
+        )
+    return payload
 
 
 def _open_call_id_or_none(value: str, *, keyring: SealingKeyring) -> CallID | None:
@@ -1066,6 +1097,8 @@ class _Replay:
     last_side: Side | None
     calls_by_side: dict[Side, _SideCalls] = field(default_factory=_empty_calls_by_side)
     main: _MainReplay = field(default_factory=_MainReplay)
+    current_compaction_id: str | None = None
+    last_reasoning_id: str | None = None
 
     def _sync_main(self) -> None:
         self.sides.main = self.main.current_messages()
@@ -1087,15 +1120,30 @@ class _Replay:
                 private_message="reasoning cannot appear before open function calls are closed",
             )
 
+    def _assert_reasoning_chain_matches_state(self, payload: ReasoningPayload) -> None:
+        if payload.previous_reasoning_id != self.last_reasoning_id:
+            raise _reasoning_replay_error(
+                reason="reasoning_previous_reasoning_id_mismatch",
+                private_message="reasoning payload previous_reasoning_id does not match replay history",
+            )
+        if payload.previous_compaction_id != self.current_compaction_id:
+            raise _reasoning_replay_error(
+                reason="reasoning_previous_compaction_id_mismatch",
+                private_message="reasoning payload previous_compaction_id does not match replay history",
+            )
+
     def _step_compaction(self, payload: CompactionPayload) -> None:
         self.machine = dict(payload.machine)
         self.sides = Sides.from_primitive(payload.sides.to_primitive())
         self.main.load_snapshot(self.sides.main)
         self._rebuild_all_calls()
+        self.current_compaction_id = payload.id
+        self.last_reasoning_id = None
         self.last_side = None
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
         self._assert_no_open_function_calls_before_reasoning()
+        self._assert_reasoning_chain_matches_state(payload)
         self.main.commit_before_reasoning()
         self.machine = _apply_machine_patch(self.machine, payload.machine)
         for side in NON_MAIN_SIDES:
@@ -1106,6 +1154,7 @@ class _Replay:
         if payload.sides.main:
             self.main.apply_hidden_main_updates(payload.sides)
             self._sync_main()
+        self.last_reasoning_id = payload.id
         self.last_side = None
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:

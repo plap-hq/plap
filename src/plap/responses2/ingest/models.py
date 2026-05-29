@@ -30,6 +30,12 @@ def _optional_string(value: object, *, label: str) -> str | None:
     return value
 
 
+def _optional_non_empty_string(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    return _required_string(value, label=label)
+
+
 def _required_patch(value: object, *, label: str) -> JSONPatch:
     if not isinstance(value, list):
         raise TypeError(f"{label} must be an array")
@@ -382,15 +388,24 @@ class SidesUpdate:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningPayload:
+    id: str
+    previous_reasoning_id: str | None
+    previous_compaction_id: str | None
     machine: JSONPatch
     sides: SidesUpdate
 
     def __post_init__(self) -> None:
+        _required_string(self.id, label="reasoning payload id")
+        _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
+        _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
         if not self.machine and self.sides.is_empty():
             raise ValueError("reasoning payload must change machine or sides")
 
     def to_primitive(self) -> dict[str, object]:
         return {
+            "id": self.id,
+            "previous_reasoning_id": self.previous_reasoning_id,
+            "previous_compaction_id": self.previous_compaction_id,
             "machine": list(self.machine),
             "sides": self.sides.to_primitive(),
         }
@@ -399,6 +414,13 @@ class ReasoningPayload:
     def from_primitive(cls, value: object) -> ReasoningPayload:
         item = _required_mapping(value, label="reasoning payload")
         return cls(
+            id=_required_string(item.get("id"), label="reasoning payload id"),
+            previous_reasoning_id=_optional_non_empty_string(
+                item.get("previous_reasoning_id"), label="reasoning payload previous_reasoning_id"
+            ),
+            previous_compaction_id=_optional_non_empty_string(
+                item.get("previous_compaction_id"), label="reasoning payload previous_compaction_id"
+            ),
             machine=_required_patch(item.get("machine"), label="reasoning payload machine"),
             sides=SidesUpdate.from_primitive(item.get("sides")),
         )
@@ -406,11 +428,16 @@ class ReasoningPayload:
 
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
+    id: str
     machine: dict[str, JSONValue]
     sides: Sides
 
+    def __post_init__(self) -> None:
+        _required_string(self.id, label="compaction payload id")
+
     def to_primitive(self) -> dict[str, object]:
         return {
+            "id": self.id,
             "machine": dict(self.machine),
             "sides": self.sides.to_primitive(),
         }
@@ -422,6 +449,7 @@ class CompactionPayload:
         if not isinstance(machine_value, Mapping):
             raise TypeError("compaction payload machine must be an object")
         return cls(
+            id=_required_string(item.get("id"), label="compaction payload id"),
             machine=dict(machine_value),
             sides=Sides.from_primitive(item.get("sides")),
         )
