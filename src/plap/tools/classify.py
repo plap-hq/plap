@@ -16,9 +16,9 @@ from plap.llms.completions.chat import (
     ChatTool,
     IChatCompletionClient,
 )
-from plap.responses.json_utils import parse_json_object_with_repair
 from plap.logging import log_debug, log_payload
-from plap.responses.tools.policy import (
+from plap.tools.json_utils import parse_json_object_with_repair
+from plap.tools.policy import (
     EffectClass,
     IToolCallClassifier,
     IToolClassifier,

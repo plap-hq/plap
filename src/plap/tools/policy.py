@@ -12,9 +12,9 @@ from cachetools import LRUCache
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.completions.chat import ChatToolCall
-from plap.responses.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
+from plap.tools.json_utils import JSONInvalidError, JSONNotObjectError, parse_json_object_with_repair
 
 logger = structlog.get_logger(__name__)
 

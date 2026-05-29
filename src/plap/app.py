@@ -27,17 +27,17 @@ from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import configure_logging, log_debug
 from plap.persistence import Database
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
-from plap.responses.tools import (
+from plap.settings import MCPServerConfig, Settings, get_settings
+from plap.tools import (
     IToolCallClassifier,
     IToolClassifier,
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.mcp import (
+from plap.tools.mcp import (
     IMCPToolProvider,
     MCPToolProvider,
 )
-from plap.settings import MCPServerConfig, Settings, get_settings
 
 logger = structlog.get_logger(__name__)
 

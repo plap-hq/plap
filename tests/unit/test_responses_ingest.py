@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import base64
-import importlib
+from itertools import count
 
-import msgspec
 import pytest
-import zstandard as zstd
-from nacl.secret import Aead
 
+import plap.responses.ingest.ingest as ingest_module
 from plap.errors import PlapError
-from plap.keyring import SealingKeyring, purpose_label
+from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
+    InputTextContent,
     RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
@@ -19,1783 +17,125 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
-from plap.responses.ingest import (
-    CALL_ID_CONTENT_HASH_PREFIX_BYTES,
-    ChatMessageSpan,
+from plap.responses.ingest.ingest import (
+    _decode_queue,
+    _DecodedCompaction,
+    _DecodedFabricatedFunctionCall,
+    _DecodedFabricatedFunctionCallOutput,
+    _DecodedMessage,
+    _DecodedReasoning,
+    _DecodedSealedFunctionCall,
+    _DecodedSealedFunctionCallOutput,
+    _last_compaction_index,
+    _normalize_input_items,
+    _slice_to_last_compaction,
+    ingest_response_request,
+)
+from plap.responses.ingest.models import (
+    CallID,
     CompactionPayload,
-    IngestedQueues,
-    MutableQueues,
+    Message,
+    MessagePatch,
     ReasoningPayload,
-    SealedCallID,
+    Side,
+    Sides,
+    SidesUpdate,
+    ToolCall,
+)
+from plap.responses.ingest.sealing import (
     content_hash,
     content_hash_prefix,
     open_call_id,
-    open_compaction_payload,
     seal_call_id,
     seal_compaction_payload,
     seal_reasoning_payload,
 )
-from plap.responses.ingest import (
-    ingest_response_request as _ingest_response_request,
-)
-from plap.responses.ingest.sealing import (
-    COMPACTION_PURPOSE,
-    PAYLOAD_FORMAT_VERSION,
-)
-from plap.responses.models import Actor, ReasoningMessagePatch, StateMessage
 
 
-async def ingest_response_request(
-    request: ResponseCreateRequest,
+def _compaction(label: str) -> RequestCompactionItem:
+    return RequestCompactionItem(encrypted_content=label, type="compaction")
+
+
+def _message(label: str) -> RequestMessageItem:
+    return RequestMessageItem(content=label, role="user", type="message")
+
+
+def _keyring() -> SealingKeyring:
+    return SealingKeyring(roots=(b"i" * 32,))
+
+
+_REASONING_PAYLOAD_COUNTER = count()
+_COMPACTION_PAYLOAD_COUNTER = count()
+
+
+def _next_reasoning_payload_id() -> str:
+    return f"rs_payload_{next(_REASONING_PAYLOAD_COUNTER)}"
+
+
+def _next_compaction_payload_id() -> str:
+    return f"cmp_payload_{next(_COMPACTION_PAYLOAD_COUNTER)}"
+
+
+def _compaction_payload(
     *,
-    keyring: SealingKeyring,
-) -> IngestedQueues:
-    return await _ingest_response_request(
-        request,
-        keyring=keyring,
-    )
+    machine: dict[str, object],
+    sides: Sides,
+    payload_id: str | None = None,
+) -> CompactionPayload:
+    return CompactionPayload(id=payload_id or _next_compaction_payload_id(), machine=machine, sides=sides)
 
 
-def _assert_plap_error(
-    exc: PlapError,
+def _reasoning_payload(
     *,
-    code: str | None = None,
-    param: str | None = None,
-    private_reason: str | None = None,
-) -> None:
-    if code is not None:
-        assert exc.public is not None
-        assert exc.public.code == code
-    if param is not None:
-        assert exc.public is not None
-        assert exc.public.param == param
-    if private_reason is not None:
-        assert exc.private.reason == private_reason
-
-
-def _main_transcript(
-    queues: IngestedQueues,
-) -> tuple[ChatMessageSpan, ...]:
-    return tuple(queues.main_context)
-
-
-async def test_ingestion_preserves_last_compaction_spans() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("user", "before"),
-                _compaction_item("discarded", 10),
-                _message("user", "between"),
-                _compaction_item("kept", 2),
-                _message("user", "after"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end, row.message.content) for row in result.main_context] == [
-        (0, 0, "kept source"),
-        (1, 1, "kept summarized source"),
-        (2, 2, "after"),
-    ]
-    assert [row.message.content for row in _main_transcript(result)] == [
-        "kept source",
-        "kept summarized source",
-        "after",
-    ]
-    assert result.cursors == {"m": 3}
-    assert result.continuation_side == "main"
-
-
-def test_mutable_queues_append_helpers() -> None:
-    queues = MutableQueues(
-        main_context=[],
-        defender=[],
-        reviewer=[],
-        arbitrator=[],
-        cursors={"m": 0},
-        continuation_side="main",
-    )
-
-    stable = queues.append_main(StateMessage(role="user", content="stable"), content_hash="stable-hash")
-    next_stable = queues.append_main(StateMessage(role="assistant", content="after temp"), content_hash="after-temp-hash")
-    temp = queues.append_side("defender", StateMessage(role="assistant", content="temp"))
-    hidden_tool = queues.append_side("defender", StateMessage(role="tool", tool_call_id="call_1", content="tool output"))
-    defender = queues.append_side("defender", StateMessage(role="assistant", content="defend"), content_hash="defend-hash")
-    reviewer = queues.append_side("reviewer", StateMessage(role="assistant", content="review"), content_hash="review-hash")
-    arbitrator = queues.append_side("arbitrator", StateMessage(role="assistant", content="decide"))
-
-    assert (stable.start, stable.end, stable.content_hash) == (0, 0, "stable-hash")
-    assert temp.message.content == "temp"
-    assert hidden_tool.message.tool_call_id == "call_1"
-    assert (next_stable.start, next_stable.end, next_stable.content_hash) == (1, 1, "after-temp-hash")
-    assert defender.content_hash == "defend-hash"
-    assert defender.message.content == "defend"
-    assert reviewer.content_hash == "review-hash"
-    assert reviewer.message.content == "review"
-    assert arbitrator.message.content == "decide"
-    assert [row.message.content for row in queues.defender] == ["temp", "tool output", "defend"]
-    assert queues.cursors == {"m": 2}
-    queues.set_continuation("defender")
-    assert queues.current_actor() == Actor.DEFENDER
-
-    with pytest.raises(ValueError, match="append_side does not accept main"):
-        queues.append_side("main", StateMessage(role="assistant", content="bad"))
-
-
-def test_request_accepts_verbatim_replayed_function_output_created_by() -> None:
-    request = ResponseCreateRequest(
-        model="test/model",
-        input=[
-            {
-                "type": "function_call_output",
-                "call_id": "call_123",
-                "output": "tool result",
-                "created_by": "server",
-            }
-        ],
-    )
-
-    item = request.input[0]
-    assert isinstance(item, RequestFunctionCallOutputItem)
-    assert item.created_by == "server"
-
-
-def test_request_accepts_verbatim_replayed_compaction_created_by() -> None:
-    value = _compaction_item("kept", 2).model_dump(mode="python")
-    value["created_by"] = "assistant"
-
-    request = ResponseCreateRequest(
-        model="test/model",
-        input=[value],
-    )
-
-    item = request.input[0]
-    assert isinstance(item, RequestCompactionItem)
-    assert item.created_by == "assistant"
-
-
-async def test_ingestion_compaction_only_continues_main() -> None:
-    result = await ingest_response_request(
-        _request(input=[_compaction_item("only", 2)]),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end) for row in result.main_context] == [
-        (0, 0),
-        (1, 1),
-    ]
-    assert [(row.start, row.end) for row in _main_transcript(result)] == [
-        (0, 0),
-        (1, 1),
-    ]
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_assigns_m_ordinals_without_compaction() -> None:
-    result = await ingest_response_request(
-        _request(input=[_message("user", "u0"), _message("assistant", "a0")]),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end, row.message.content) for row in result.main_context] == [
-        (0, 0, "u0"),
-        (1, 1, "a0"),
-    ]
-    assert result.cursors == {"m": 2}
-    assert result.main_context == _main_transcript(result)
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_routes_reasoning_by_sealed_side_with_hashes() -> None:
-    result = await ingest_response_request(
-        _request(input=[_reasoning_item("reviewer", False, [{"role": "assistant", "content": "review"}])]),
-        keyring=_keyring(),
-    )
-
-    assert result.main_context == ()
-    assert _main_transcript(result) == ()
-    assert [(row.message.content, row.content_hash) for row in result.reviewer] == [
-        ("review", _message_hash({"role": "assistant", "content": "review"}))
-    ]
-    assert result.arbitrator == ()
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_arbitrator_reasoning_sets_continuation_side() -> None:
-    result = await ingest_response_request(
-        _request(input=[_reasoning_item("arbitrator", False, [{"role": "assistant", "content": "decide"}])]),
-        keyring=_keyring(),
-    )
-
-    assert result.arbitrator[0].message.content == "decide"
-    assert result.continuation_side == "arbitrator"
-
-
-async def test_ingestion_reasoning_continuation_side_overrides_next_side_only_when_last() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "defender",
-                    True,
-                    [{"role": "assistant", "content": "candidate mutation"}],
-                    continuation_side="reviewer",
-                )
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.defender] == ["candidate mutation"]
-    assert result.reviewer == ()
-    assert result.continuation_side == "reviewer"
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "defender",
-                    True,
-                    [{"role": "assistant", "content": "candidate defense"}],
-                    continuation_side="defender",
-                )
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.defender] == ["candidate defense"]
-    assert result.reviewer == ()
-    assert result.arbitrator == ()
-    assert result.continuation_side == "defender"
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "main",
-                    False,
-                    [{"role": "assistant", "content": "main reasoning"}],
-                    continuation_side="reviewer",
-                ),
-                _message("user", "follow-up"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.main_context] == ["main reasoning", "follow-up"]
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_temp_false_prunes_entire_temp_debate() -> None:
-    temp_message = {"role": "assistant", "content": "temp reviewer"}
-    call_id = _call_id(
-        side="reviewer",
-        temp=True,
-        content_hash_value=_message_hash(temp_message),
-        upstream_tool_call_id="up_temp_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", True, [temp_message]),
-                _function_call(call_id),
-                _function_output(call_id, "temp output"),
-                _reasoning_item(
-                    "main",
-                    False,
-                    [{"role": "assistant", "content": "final debate result"}],
-                ),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.main_context] == ["final debate result"]
-    assert result.defender == ()
-    assert result.main_context == _main_transcript(result)
-    assert result.reviewer == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_message_after_temp_prunes_entire_temp_debate() -> None:
-    temp_message = {
-        "role": "assistant",
-        "content": "temp reviewer",
-        "tool_calls": [_tool_call("up_temp_0")],
-    }
-    call_id = _call_id(
-        side="reviewer",
-        temp=True,
-        content_hash_value=_message_hash(temp_message),
-        upstream_tool_call_id="up_temp_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", True, [temp_message]),
-                _function_call(call_id),
-                _function_output(call_id, "temp output"),
-                _message("user", "new mainline request"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.main_context] == ["new mainline request"]
-    assert result.defender == ()
-    assert result.main_context == _main_transcript(result)
-    assert result.reviewer == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_public_sealed_pair_after_temp_defender_reasoning_prunes_temp_debate() -> None:
-    temp_assistant = {
-        "role": "assistant",
-        "content": " ",
-        "tool_calls": [_tool_call("up_temp_0")],
-    }
-    public_assistant = {"role": "assistant", "content": " "}
-    call_id = _call_id(
-        side="main",
-        temp=False,
-        content_hash_value=_message_hash(public_assistant),
-        upstream_tool_call_id="up_temp_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "defender",
-                    True,
-                    [
-                        temp_assistant,
-                        {
-                            "role": "tool",
-                            "tool_call_id": "up_temp_0",
-                            "content": "This tool call was intercepted by a reviewer.",
-                        },
-                    ],
-                ),
-                _message("assistant", " "),
-                _function_call(call_id),
-                _function_output(call_id, "public output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [
-        {
-            "role": "assistant",
-            "content": " ",
-            "tool_calls": [_tool_call("up_temp_0")],
-        },
-        {"role": "tool", "tool_call_id": "up_temp_0", "content": "public output"},
-    ]
-    assert result.defender == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_message_after_temp_prunes_forward_reasoning_refs_too() -> None:
-    target = {"role": "assistant", "content": "stable public answer"}
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "reviewer",
-                    True,
-                    [
-                        {"role": "assistant", "content": "temp reviewer"},
-                        {
-                            "content_hash": _message_hash(target),
-                            "reasoning_content": "should not leak",
-                        },
-                    ],
-                ),
-                _message("assistant", "stable public answer"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [target]
-    assert result.defender == ()
-    assert result.reviewer == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_fabricated_call_after_temp_prunes_temp_debate() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "stable assistant"),
-                _reasoning_item(
-                    "reviewer",
-                    True,
-                    [{"role": "assistant", "content": "temp reviewer"}],
-                ),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="client_call_0",
-                    name="read_file",
-                    type="function_call",
-                ),
-                _function_output("client_call_0", "client output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [
-        {
-            "role": "assistant",
-            "content": "stable assistant",
-            "tool_calls": [
-                {
-                    "id": "client_call_0",
-                    "name": "read_file",
-                    "arguments": '{"path":"README.md"}',
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "client_call_0",
-            "content": "client output",
-        },
-    ]
-    assert result.defender == ()
-    assert result.main_context == _main_transcript(result)
-    assert result.reviewer == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_exposes_active_defender_state() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "defender",
-                    True,
-                    [{"role": "assistant", "content": "temp debate tail"}],
-                )
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.main_context == ()
-    assert [row.message.content for row in result.defender] == ["temp debate tail"]
-    assert _main_transcript(result) == ()
-    assert result.continuation_side == "defender"
-
-
-async def test_ingestion_routes_sealed_reviewer_call_and_output() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "need file",
-        "tool_calls": [_tool_call("up_reviewer_0")],
-    }
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reviewer_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", False, [assistant]),
-                _function_call(call_id),
-                _function_output(call_id, "review file"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.main_context == ()
-    assert _main_transcript(result) == ()
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        assistant,
-        {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "review file"},
-    ]
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_hoists_interleaved_assistant_message_before_temp_reviewer_continuation() -> None:
-    assistant = {"role": "assistant", "content": "need file"}
-    call_id = _call_id(
-        side="reviewer",
-        temp=True,
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_temp_reviewer_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", True, [assistant]),
-                _message("assistant", "fabricated reminder"),
-                _function_call(call_id),
-                _function_output(call_id, "review file"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.main_context] == ["fabricated reminder"]
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "need file",
-            "tool_calls": [
-                {
-                    "id": "up_temp_reviewer_0",
-                    "name": "read_file",
-                    "arguments": '{"path":"README.md"}',
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
-    ]
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_hoists_interleaved_user_message_before_temp_reviewer_continuation() -> None:
-    assistant = {"role": "assistant", "content": "need file"}
-    call_id = _call_id(
-        side="reviewer",
-        temp=True,
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_temp_reviewer_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", True, [assistant]),
-                _message("user", "steering request"),
-                _function_call(call_id),
-                _function_output(call_id, "review file"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.content for row in result.main_context] == ["steering request"]
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "need file",
-            "tool_calls": [
-                {
-                    "id": "up_temp_reviewer_0",
-                    "name": "read_file",
-                    "arguments": '{"path":"README.md"}',
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
-    ]
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_hoists_interleaved_fabricated_pair_before_temp_reviewer_continuation() -> None:
-    assistant = {"role": "assistant", "content": "need file"}
-    call_id = _call_id(
-        side="reviewer",
-        temp=True,
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_temp_reviewer_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "stable assistant"),
-                _reasoning_item("reviewer", True, [assistant]),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="client_call_0",
-                    name="read_file",
-                    type="function_call",
-                ),
-                _function_output("client_call_0", "client output"),
-                _function_call(call_id),
-                _function_output(call_id, "review file"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [
-        {
-            "role": "assistant",
-            "content": "stable assistant",
-            "tool_calls": [
-                {
-                    "id": "client_call_0",
-                    "name": "read_file",
-                    "arguments": '{"path":"README.md"}',
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "client_call_0",
-            "content": "client output",
-        },
-    ]
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "need file",
-            "tool_calls": [
-                {
-                    "id": "up_temp_reviewer_0",
-                    "name": "read_file",
-                    "arguments": '{"path":"README.md"}',
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "up_temp_reviewer_0", "content": "review file"},
-    ]
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_routes_sealed_main_call_and_tool_output_to_m_rows() -> None:
-    assistant = {"role": "assistant", "content": "public assistant"}
-    call_id = _call_id(
-        side="main",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_main_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "public assistant"),
-                _function_call(call_id),
-                _function_output(call_id, "main output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
-        (
-            0,
-            0,
-            {
-                "role": "assistant",
-                "content": "public assistant",
-                "tool_calls": [_tool_call("up_main_0")],
-            },
-        ),
-        (
-            0,
-            0,
-            {"role": "tool", "tool_call_id": "up_main_0", "content": "main output"},
-        ),
-    ]
-    assert result.cursors == {"m": 1}
-    assert result.main_context == _main_transcript(result)
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_fabricated_unsealed_pair_routes_to_main_only() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "client fabricated assistant"),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="client_call_0",
-                    name="read_file",
-                    type="function_call",
-                ),
-                _function_output("client_call_0", "client output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
-        (
-            0,
-            0,
-            {
-                "role": "assistant",
-                "content": "client fabricated assistant",
-                "tool_calls": [{"id": "client_call_0", "name": "read_file", "arguments": '{"path":"README.md"}'}],
-            },
-        ),
-        (
-            0,
-            0,
-            {
-                "role": "tool",
-                "tool_call_id": "client_call_0",
-                "content": "client output",
-            },
-        ),
-    ]
-    assert result.main_context == _main_transcript(result)
-    assert result.reviewer == ()
-    assert result.arbitrator == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_unopenable_call_prefix_falls_back_to_fabricated_pair() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _message("assistant", "client fabricated assistant"),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="call_not_openable",
-                    name="read_file",
-                    type="function_call",
-                ),
-                _function_output("call_not_openable", "client output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [(row.start, row.end, row.message.to_primitive()) for row in result.main_context] == [
-        (
-            0,
-            0,
-            {
-                "role": "assistant",
-                "content": "client fabricated assistant",
-                "tool_calls": [{"id": "call_not_openable", "name": "read_file", "arguments": '{"path":"README.md"}'}],
-            },
-        ),
-        (
-            0,
-            0,
-            {
-                "role": "tool",
-                "tool_call_id": "call_not_openable",
-                "content": "client output",
-            },
-        ),
-    ]
-    assert result.reviewer == ()
-    assert result.arbitrator == ()
-    assert result.continuation_side == "main"
-
-
-async def test_ingestion_rejects_unsealed_call_interleaving_before_output() -> None:
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _message("assistant", "first assistant"),
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id="client_call_0",
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    _message("assistant", "second assistant"),
-                    _function_output("client_call_0", "client output"),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="pending_tool_outputs_block_message")
-
-
-async def test_ingestion_rejects_duplicate_unsealed_pending_call_ids() -> None:
-    first_call = RequestFunctionCallItem(
-        arguments='{"path":"a"}',
-        call_id="client_call_0",
-        name="read_file",
-        type="function_call",
-    )
-    second_call = RequestFunctionCallItem(
-        arguments='{"path":"b"}',
-        call_id="client_call_0",
-        name="read_file",
-        type="function_call",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(input=[_message("assistant", "anchor"), first_call, second_call]),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="duplicate_pending_unsealed_function_call")
-
-
-async def test_ingestion_rejects_sealed_call_interleaving_before_output() -> None:
-    assistant = {"role": "assistant", "content": "need file"}
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reviewer_0",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item("reviewer", False, [assistant]),
-                    _function_call(call_id),
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [{"role": "assistant", "content": "interleaving"}],
-                    ),
-                    _function_output(call_id, "review file"),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_tool_replay", param="input", private_reason="pending_tool_outputs_block_message")
-
-
-async def test_ingestion_allows_stripped_tool_call_association() -> None:
-    stripped = {"role": "assistant", "content": "need file"}
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(stripped),
-        upstream_tool_call_id="up_stripped_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", False, [stripped]),
-                _function_call(call_id),
-                _function_output(call_id, "stripped output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "need file",
-            "tool_calls": [_tool_call("up_stripped_0")],
-        },
-        {"role": "tool", "tool_call_id": "up_stripped_0", "content": "stripped output"},
-    ]
-
-
-async def test_ingestion_requires_reasoning_tool_call_public_replay() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "need file",
-        "tool_calls": [_tool_call("up_reasoning_0")],
-    }
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(input=[_reasoning_item("reviewer", False, [assistant])]),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_tool_call_missing_function_call_item"
-    )
-
-
-async def test_ingestion_accepts_reasoning_tool_call_satisfied_by_hidden_output() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "need file",
-        "tool_calls": [_tool_call("up_reasoning_0")],
-    }
-    hidden_output = {
-        "role": "tool",
-        "tool_call_id": "up_reasoning_0",
-        "content": "intercepted by reviewer",
-    }
-
-    result = await ingest_response_request(
-        _request(input=[_reasoning_item("reviewer", False, [assistant, hidden_output])]),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.reviewer] == [assistant, hidden_output]
-    assert result.continuation_side == "reviewer"
-
-
-async def test_ingestion_accepts_reasoning_tool_call_with_public_pair() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "need file",
-        "tool_calls": [_tool_call("up_reasoning_0")],
-    }
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reasoning_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item("reviewer", False, [assistant]),
-                _function_call(call_id),
-                _function_output(call_id, "reasoning output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        assistant,
-        {
-            "role": "tool",
-            "tool_call_id": "up_reasoning_0",
-            "content": "reasoning output",
-        },
-    ]
-
-
-async def test_ingestion_accepts_reasoning_patch_tool_call_with_public_pair() -> None:
-    target = {"role": "assistant", "content": "patched target"}
-    call_id = _call_id(
-        side="main",
-        content_hash_value=_message_hash(target),
-        upstream_tool_call_id="up_visible_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "main",
-                    False,
-                    [
-                        {
-                            "content_hash": _message_hash(target),
-                            "tool_calls": [_tool_call("up_visible_0")],
-                        }
-                    ],
-                ),
-                _message("assistant", "patched target"),
-                _function_call(call_id),
-                _function_output(call_id, "visible output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [
-        {
-            "role": "assistant",
-            "content": "patched target",
-            "tool_calls": [_tool_call("up_visible_0")],
-        },
-        {"role": "tool", "tool_call_id": "up_visible_0", "content": "visible output"},
-    ]
-
-
-async def test_ingestion_reproduces_public_tool_only_anchor_message_interleaving_target_missing() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [_tool_call("up_public_0")],
-    }
-    call_id = _call_id(
-        side="main",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_public_0",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item("main", False, [assistant]),
-                    _message("assistant", "plugin reminder"),
-                    _function_call(call_id),
-                    _function_output(call_id, "public output"),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_tool_replay",
-        param="input",
-        private_reason="sealed_function_call_content_hash_target_missing",
-    )
-
-
-async def test_ingestion_accepts_reasoning_patch_with_hidden_tool_output_before_public_output() -> None:
-    target = {"role": "assistant", "content": "patched target"}
-    call_id = _call_id(
-        side="main",
-        content_hash_value=_message_hash(target),
-        upstream_tool_call_id="up_visible_0",
-    )
-
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "main",
-                    False,
-                    [
-                        {
-                            "content_hash": _message_hash(target),
-                            "tool_calls": [_tool_call("up_visible_0"), _tool_call("up_hidden_1")],
-                        },
-                        {
-                            "role": "tool",
-                            "tool_call_id": "up_hidden_1",
-                            "content": "hidden output",
-                        },
-                    ],
-                ),
-                _message("assistant", "patched target"),
-                _function_call(call_id),
-                _function_output(call_id, "visible output"),
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.main_context] == [
-        {
-            "role": "assistant",
-            "content": "patched target",
-            "tool_calls": [_tool_call("up_visible_0"), _tool_call("up_hidden_1")],
-        },
-        {"role": "tool", "tool_call_id": "up_hidden_1", "content": "hidden output"},
-        {"role": "tool", "tool_call_id": "up_visible_0", "content": "visible output"},
-    ]
-
-
-async def test_ingestion_allows_followup_message_after_attachable_hidden_tool_output() -> None:
-    result = await ingest_response_request(
-        _request(
-            input=[
-                _reasoning_item(
-                    "reviewer",
-                    False,
-                    [
-                        {
-                            "role": "assistant",
-                            "content": "candidate",
-                            "tool_calls": [_tool_call("up_reasoning_0")],
-                        },
-                        {
-                            "role": "tool",
-                            "tool_call_id": "up_reasoning_0",
-                            "content": "hidden output",
-                        },
-                        {
-                            "role": "assistant",
-                            "content": "after tool",
-                        },
-                    ],
-                )
-            ]
-        ),
-        keyring=_keyring(),
-    )
-
-    assert [row.message.to_primitive() for row in result.reviewer] == [
-        {
-            "role": "assistant",
-            "content": "candidate",
-            "tool_calls": [_tool_call("up_reasoning_0")],
-        },
-        {"role": "tool", "tool_call_id": "up_reasoning_0", "content": "hidden output"},
-        {"role": "assistant", "content": "after tool"},
-    ]
-
-
-async def test_ingestion_requires_output_for_replayed_reasoning_tool_call() -> None:
-    assistant = {
-        "role": "assistant",
-        "content": "need file",
-        "tool_calls": [_tool_call("up_reasoning_0")],
-    }
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reasoning_0",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item("reviewer", False, [assistant]),
-                    _function_call(call_id),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value, code="invalid_tool_replay", param="input", private_reason="function_call_missing_function_call_output"
-    )
-
-
-async def test_ingestion_rejects_reasoning_forward_refs() -> None:
-    target = {"role": "assistant", "content": "target"}
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [
-                            {
-                                "content_hash": _message_hash(target),
-                                "reasoning_content": "hidden",
-                            },
-                            target,
-                        ],
-                    )
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
-
-
-async def test_ingestion_missing_reasoning_forward_ref_fails_closed() -> None:
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [
-                            {
-                                "content_hash": _message_hash({"role": "assistant", "content": "missing"}),
-                                "reasoning_content": "hidden",
-                            }
-                        ],
-                    )
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_content_hash_target_missing"
-    )
-
-
-async def test_ingestion_rejects_reasoning_patch_followed_by_additional_messages() -> None:
-    anchor = {"role": "assistant", "content": "anchor"}
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _message("assistant", "anchor"),
-                    _reasoning_item(
-                        "main",
-                        False,
-                        [
-                            {
-                                "content_hash": _message_hash(anchor),
-                                "reasoning_content": "anchor reasoning",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": "new reasoning message",
-                                "reasoning_content": "new hidden",
-                            },
-                        ],
-                    ),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
-
-
-async def test_ingestion_rejects_followup_message_before_hidden_tool_outputs_can_attach() -> None:
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [
-                            {
-                                "role": "assistant",
-                                "content": "candidate",
-                                "tool_calls": [_tool_call("up_reasoning_0"), _tool_call("up_reasoning_1")],
-                            },
-                            {
-                                "role": "tool",
-                                "tool_call_id": "up_reasoning_0",
-                                "content": "hidden output",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": "after tool",
-                            },
-                        ],
-                    )
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_reasoning_replay", param="input", private_reason="reasoning_message_invalid")
-
-
-async def test_ingestion_missing_content_hash_target_fails_closed() -> None:
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_prefix_value=b"\xff" * CALL_ID_CONTENT_HASH_PREFIX_BYTES,
-        upstream_tool_call_id="up_missing_0",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(input=[_function_call(call_id)]),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_tool_replay",
-        param="input",
-        private_reason="sealed_function_call_content_hash_target_missing",
-    )
-
-
-async def test_ingestion_sealed_function_call_requires_current_assistant_bundle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_hash(message: StateMessage) -> str:
-        content = str(message.content or "")
-        if content.endswith("a"):
-            return "0102030405060708" + "a" * 48
-        return "1112131415161718" + "b" * 48
-
-    monkeypatch.setattr(StateMessage, "content_hash", fake_hash)
-    call_id = _call_id(
-        side="reviewer",
-        content_hash_prefix_value=bytes.fromhex("0102030405060708"),
-        upstream_tool_call_id="up_ambiguous_0",
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [
-                            {"role": "assistant", "content": "a"},
-                            {"role": "assistant", "content": "b"},
-                        ],
-                    ),
-                    _function_call(call_id),
-                    _function_output(call_id, "nearest output"),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_tool_replay",
-        param="input",
-        private_reason="sealed_function_call_content_hash_target_missing",
-    )
-
-
-async def test_ingestion_rejects_second_pending_reasoning_patch() -> None:
-    target = {"role": "assistant", "content": "target"}
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [{"content_hash": _message_hash(target), "reasoning_content": "hidden one"}],
-                    ),
-                    _reasoning_item(
-                        "reviewer",
-                        False,
-                        [{"content_hash": _message_hash(target), "reasoning_content": "hidden two"}],
-                    ),
-                    _message("assistant", "target"),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_reasoning_replay",
-        param="input",
-        private_reason="reasoning_content_hash_target_missing",
-    )
-
-
-async def test_ingestion_rejects_function_call_after_output_for_same_assistant_turn() -> None:
-    assistant = {"role": "assistant", "content": "need file"}
-    call_id_one = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reasoning_0",
-    )
-    call_id_two = _call_id(
-        side="reviewer",
-        content_hash_value=_message_hash(assistant),
-        upstream_tool_call_id="up_reasoning_1",
-        tool_call_index=1,
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    _reasoning_item("reviewer", False, [assistant]),
-                    _function_call(call_id_one),
-                    _function_output(call_id_one, "first output"),
-                    _function_call(call_id_two),
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_tool_replay",
-        param="input",
-        private_reason="sealed_function_call_after_function_call_output",
-    )
-
-
-async def test_ingestion_invalid_sealed_artifact_fails_closed() -> None:
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            _request(
-                input=[
-                    RequestReasoningItem(
-                        encrypted_content="not-valid",
-                        id="rs_bad",
-                        summary=[SummaryTextContent(text="bad", type="summary_text")],
-                        type="reasoning",
-                    )
-                ]
-            ),
-            keyring=_keyring(),
-        )
-
-    _assert_plap_error(exc_info.value, code="invalid_input_replay", param="input", private_reason="sealed_payload_not_base64url")
-
-
-def test_payload_domain_objects_do_not_expose_version_or_type_truths() -> None:
-    assert "version" not in CompactionPayload.__dataclass_fields__
-    assert "type" not in CompactionPayload.__dataclass_fields__
-    assert "version" not in ReasoningPayload.__dataclass_fields__
-    assert "type" not in ReasoningPayload.__dataclass_fields__
-
-
-def test_chat_message_span_citation_uses_model_facing_syntax() -> None:
-    leaf = ChatMessageSpan(
-        start=0,
-        end=0,
-        message=_state_message({"role": "user"}),
-    )
-    range_span = ChatMessageSpan(
-        start=0,
-        end=7,
-        message=_state_message({"role": "assistant"}),
-    )
-
-    assert leaf.citation == "[~0]"
-    assert range_span.citation == "[~0_7]"
-
-
-def test_sealed_compaction_rejects_wrong_payload_type() -> None:
-    token = _seal_raw_payload(
-        COMPACTION_PURPOSE,
-        {
-            "version": PAYLOAD_FORMAT_VERSION,
-            "type": "reasoning",
-            "active": [],
-            "source": [],
-            "cursors": {"m": 0},
-        },
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
-
-    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="unsupported_compaction_payload")
-
-
-def test_sealed_compaction_rejects_active_spans_outside_cursors() -> None:
-    token = seal_compaction_payload(
-        CompactionPayload(
-            active=(
-                ChatMessageSpan(
-                    start=5,
-                    end=5,
-                    message=_state_message({"role": "user", "content": "bad"}),
-                ),
-            ),
-            cursors={"m": 1},
-        ),
-        keyring=_keyring(),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
-
-    _assert_plap_error(
-        exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_active_span_outside_cursor"
-    )
-
-
-def test_sealed_compaction_accepts_summary_spans_with_children_only() -> None:
-    token = _seal_raw_payload(
-        COMPACTION_PURPOSE,
-        {
-            "version": PAYLOAD_FORMAT_VERSION,
-            "type": "compaction",
-            "active": [
-                {
-                    "start": 0,
-                    "end": 1,
-                    "message": {"role": "assistant", "content": "summary"},
-                    "children": [
-                        {
-                            "start": 0,
-                            "end": 0,
-                            "message": {"role": "user", "content": "a"},
-                        },
-                        {
-                            "start": 1,
-                            "end": 1,
-                            "message": {"role": "user", "content": "b"},
-                        },
-                    ],
-                }
-            ],
-            "cursors": {"m": 2},
-        },
-    )
-
-    payload = open_compaction_payload(token, keyring=_keyring())
-
-    assert [(row.start, row.end, row.message.content) for row in payload.active] == [(0, 1, "summary")]
-
-
-def test_sealed_compaction_rejects_overlapping_active_spans() -> None:
-    token = seal_compaction_payload(
-        CompactionPayload(
-            active=(
-                ChatMessageSpan(
-                    start=0,
-                    end=1,
-                    message=_state_message({"role": "user", "content": "first"}),
-                ),
-                ChatMessageSpan(
-                    start=1,
-                    end=1,
-                    message=_state_message({"role": "user", "content": "second"}),
-                ),
-            ),
-            cursors={"m": 2},
-        ),
-        keyring=_keyring(),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
-
-    _assert_plap_error(exc_info.value, code="invalid_compaction_replay", param="input", private_reason="compaction_active_spans_overlap")
-
-
-def test_sealed_compaction_rejects_tool_output_starting_new_segment() -> None:
-    token = seal_compaction_payload(
-        CompactionPayload(
-            active=(
-                ChatMessageSpan(
-                    start=0,
-                    end=0,
-                    message=_state_message(
-                        {
-                            "role": "assistant",
-                            "content": "first search",
-                            "tool_calls": [_tool_call("call_1")],
-                        }
-                    ),
-                ),
-                ChatMessageSpan(
-                    start=1,
-                    end=1,
-                    message=_state_message({"role": "tool", "tool_call_id": "call_1", "content": "old result"}),
-                ),
-            ),
-            cursors={"m": 2},
-        ),
-        keyring=_keyring(),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        open_compaction_payload(token, keyring=_keyring())
-
-    _assert_plap_error(
-        exc_info.value,
-        code="invalid_compaction_replay",
-        param="input",
-        private_reason="compaction_tool_output_starts_new_segment",
-    )
-
-
-async def test_ingestion_main_context_active_transcript_budgeted() -> None:
-    first_summary = ChatMessageSpan(
-        start=0,
-        end=1,
-        message=_state_message({"role": "assistant", "content": "summary 0-1"}),
-        children=(
-            ChatMessageSpan(
-                start=0,
-                end=0,
-                message=_state_message({"role": "user", "content": "m0"}),
-            ),
-            ChatMessageSpan(
-                start=1,
-                end=1,
-                message=_state_message({"role": "assistant", "content": "m1"}),
-            ),
-        ),
-    )
-    second_summary = ChatMessageSpan(
-        start=2,
-        end=3,
-        message=_state_message({"role": "assistant", "content": "summary 2-3"}),
-        children=(
-            ChatMessageSpan(
-                start=2,
-                end=2,
-                message=_state_message({"role": "user", "content": "m2"}),
-            ),
-            ChatMessageSpan(
-                start=3,
-                end=3,
-                message=_state_message({"role": "assistant", "content": "m3"}),
-            ),
-        ),
-    )
-    compaction = RequestCompactionItem(
-        encrypted_content=seal_compaction_payload(
-            CompactionPayload(
-                active=(first_summary, second_summary),
-                cursors={"m": 4},
-            ),
-            keyring=_keyring(),
-        ),
-        type="compaction",
-    )
-
-    result = await ingest_response_request(
-        _request(input=[compaction]),
-        keyring=_keyring(),
-    )
-
-    assert [row.citation for row in result.main_context] == ["[~0_1]", "[~2_3]"]
-    assert [row.citation for row in _main_transcript(result)] == ["[~0_1]", "[~2_3]"]
-
-
-async def test_ingestion_transcript_expansion_ties_prefer_newer_spans() -> None:
-    first_summary = ChatMessageSpan(
-        start=0,
-        end=1,
-        message=_state_message({"role": "assistant", "content": "summary 0-1"}),
-        children=(
-            ChatMessageSpan(
-                start=0,
-                end=0,
-                message=_state_message({"role": "user", "content": "m0"}),
-            ),
-            ChatMessageSpan(
-                start=1,
-                end=1,
-                message=_state_message({"role": "assistant", "content": "m1"}),
-            ),
-        ),
-    )
-    second_summary = ChatMessageSpan(
-        start=2,
-        end=3,
-        message=_state_message({"role": "assistant", "content": "summary 2-3"}),
-        children=(
-            ChatMessageSpan(
-                start=2,
-                end=2,
-                message=_state_message({"role": "user", "content": "m2"}),
-            ),
-            ChatMessageSpan(
-                start=3,
-                end=3,
-                message=_state_message({"role": "assistant", "content": "m3"}),
-            ),
-        ),
-    )
-    compaction = RequestCompactionItem(
-        encrypted_content=seal_compaction_payload(
-            CompactionPayload(active=(first_summary, second_summary), cursors={"m": 4}),
-            keyring=_keyring(),
-        ),
-        type="compaction",
-    )
-
-    result = await ingest_response_request(
-        _request(input=[compaction]),
-        keyring=_keyring(),
-    )
-
-    assert [row.citation for row in _main_transcript(result)] == ["[~0_1]", "[~2_3]"]
-
-
-def test_call_id_binary_encoding_is_compact_and_roundtrips() -> None:
-    value = SealedCallID(
-        side="arbitrator",
-        temp=True,
-        content_hash_prefix=bytes.fromhex("0102030405060708"),
-        tool_call_index=300,
-        upstream_tool_call_id="provider_123",
-    )
-
-    token = seal_call_id(value, keyring=_keyring())
-
-    assert token.startswith("call_")
-    assert len(token) < 60
-    assert open_call_id(token, keyring=_keyring()) == value
-
-
-def test_old_tools_call_ids_module_is_removed() -> None:
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("plap.responses.tools.call_ids")
-
-
-def _request(
-    *,
-    input: list[object] | None = None,
-    tools: list[object] | None = None,
-) -> ResponseCreateRequest:
-    return ResponseCreateRequest(input=input, model="test/model", tools=tools)
-
-
-def _message(role: str, content: str) -> RequestMessageItem:
-    return RequestMessageItem(content=content, role=role, type="message")
-
-
-def _compaction_item(label: str, cursor: int) -> RequestCompactionItem:
-    if cursor < 1:
-        raise ValueError("cursor must be positive")
-    source = tuple(
-        ChatMessageSpan(
-            start=ordinal,
-            end=ordinal,
-            message=_state_message(
-                {
-                    "role": "user",
-                    "content": (f"{label} source" if ordinal == 0 else f"{label} summarized source"),
-                }
-            ),
-        )
-        for ordinal in range(cursor)
-    )
-    active = [source[0]]
-    if cursor == 2:
-        active.append(source[1])
-    elif cursor > 2:
-        active.append(
-            ChatMessageSpan(
-                start=1,
-                end=cursor - 1,
-                message=_state_message({"role": "assistant", "content": f"{label} summary"}),
-                children=source[1:],
-            )
-        )
-    payload = CompactionPayload(
-        active=tuple(active),
-        cursors={"m": cursor},
-    )
+    machine: list[dict[str, object]],
+    sides: SidesUpdate,
+    payload_id: str | None = None,
+    previous_reasoning_id: str | None = None,
+    previous_compaction_id: str | None = None,
+) -> ReasoningPayload:
+    return ReasoningPayload(
+        id=payload_id or _next_reasoning_payload_id(),
+        previous_reasoning_id=previous_reasoning_id,
+        previous_compaction_id=previous_compaction_id,
+        machine=machine,
+        sides=sides,
+    )
+
+
+def _sealed_compaction(payload: CompactionPayload) -> RequestCompactionItem:
     return RequestCompactionItem(
         encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
+        id=payload.id,
         type="compaction",
     )
 
 
-def _reasoning_item(
-    side: str,
-    temp: bool,
-    messages: list[dict[str, object]],
-    *,
-    continuation_side: str | None = None,
-    item_id: str | None = None,
-) -> RequestReasoningItem:
-    payload = ReasoningPayload(
-        side=side,
-        temp=temp,
-        messages=tuple(_reasoning_message(message) for message in messages),
-        continuation_side=continuation_side or side,
-    )
+def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
-        id=item_id,
+        id=payload.id,
         summary=[SummaryTextContent(text="sealed", type="summary_text")],
         type="reasoning",
     )
 
 
-def _call_id(
-    *,
-    side: str,
-    temp: bool = False,
-    upstream_tool_call_id: str,
-    content_hash_value: str | None = None,
-    content_hash_prefix_value: bytes | None = None,
-    tool_call_index: int = 0,
-) -> str:
-    if content_hash_prefix_value is None:
-        if content_hash_value is None:
-            raise ValueError("content_hash_value or content_hash_prefix_value is required")
-        content_hash_prefix_value = content_hash_prefix(content_hash_value)
+def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
     return seal_call_id(
-        SealedCallID(
+        CallID(
             side=side,
-            temp=temp,
-            content_hash_prefix=content_hash_prefix_value,
+            content_hash_prefix=bytes.fromhex("0102030405060708"),
+            tool_call_index=0,
+            upstream_tool_call_id=upstream_tool_call_id,
+        ),
+        keyring=_keyring(),
+    )
+
+
+def _sealed_call_id_for_message(side: str, upstream_tool_call_id: str, message: Message, *, tool_call_index: int = 0) -> str:
+    return seal_call_id(
+        CallID(
+            side=side,
+            content_hash_prefix=content_hash_prefix(content_hash(message)),
             tool_call_index=tool_call_index,
             upstream_tool_call_id=upstream_tool_call_id,
         ),
@@ -1803,50 +143,1112 @@ def _call_id(
     )
 
 
-def _function_call(call_id: str) -> RequestFunctionCallItem:
-    return RequestFunctionCallItem(
+def test_normalize_input_items_wraps_string_as_user_message() -> None:
+    result = _normalize_input_items(ResponseCreateRequest(model="plap/test", input="hello"))
+
+    assert result == [RequestMessageItem(content="hello", role="user", type="message")]
+
+
+def test_last_compaction_index_returns_none_without_compaction() -> None:
+    items = [_message("a"), _message("b")]
+
+    assert _last_compaction_index(items) is None
+
+
+def test_slice_to_last_compaction_keeps_full_queue_without_compaction() -> None:
+    items = [_message("a"), _message("b")]
+
+    assert _slice_to_last_compaction(items) == items
+
+
+def test_slice_to_last_compaction_drops_items_before_single_compaction() -> None:
+    items = [_message("a"), _compaction("cmp1"), _message("b")]
+
+    assert _slice_to_last_compaction(items) == [_compaction("cmp1"), _message("b")]
+
+
+def test_slice_to_last_compaction_uses_last_compaction_when_multiple_exist() -> None:
+    items = [_message("a"), _compaction("cmp1"), _message("b"), _compaction("cmp2"), _message("c")]
+
+    assert _slice_to_last_compaction(items) == [_compaction("cmp2"), _message("c")]
+
+
+def test_slice_to_last_compaction_leaves_leading_compaction_in_place() -> None:
+    items = [_compaction("cmp1"), _message("a"), _message("b")]
+
+    assert _slice_to_last_compaction(items) == items
+
+
+def test_slice_to_last_compaction_preserves_compaction_only_queue() -> None:
+    items = [_compaction("cmp1")]
+
+    assert _slice_to_last_compaction(items) == items
+
+
+def test_decode_queue_opens_compaction_payload() -> None:
+    payload = _compaction_payload(machine={"active": []}, sides=Sides())
+
+    decoded = _decode_queue([_sealed_compaction(payload)], keyring=_keyring())
+
+    assert decoded == [_DecodedCompaction(payload=payload)]
+
+
+def test_decode_queue_opens_reasoning_payload() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": []}],
+        sides=SidesUpdate(),
+    )
+
+    decoded = _decode_queue([_sealed_reasoning(payload)], keyring=_keyring())
+
+    assert decoded == [_DecodedReasoning(payload=payload)]
+
+
+def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:
+    payload = _reasoning_payload(machine=[{"op": "add", "path": "/active", "value": []}], sides=SidesUpdate())
+    item = RequestReasoningItem(
+        encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
+        id="rs_wrong",
+        summary=[SummaryTextContent(text="sealed", type="summary_text")],
+        type="reasoning",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        _decode_queue([item], keyring=_keyring())
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_item_id_mismatch"
+
+
+def test_decode_queue_rejects_compaction_item_id_mismatch() -> None:
+    payload = _compaction_payload(machine={"active": []}, sides=Sides())
+    item = RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
+        id="cmp_wrong",
+        type="compaction",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        _decode_queue([item], keyring=_keyring())
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "compaction_item_id_mismatch"
+
+
+def test_decode_queue_decodes_message_item_to_internal_message() -> None:
+    decoded = _decode_queue(
+        [
+            RequestMessageItem(
+                content=[
+                    InputTextContent(text="hello", type="input_text"),
+                    InputTextContent(text="world", type="input_text"),
+                ],
+                role="assistant",
+                type="message",
+            )
+        ],
+        keyring=_keyring(),
+    )
+
+    assert decoded == [_DecodedMessage(message=Message(role="assistant", content="hello world"))]
+
+
+def test_decode_queue_classifies_sealed_function_call() -> None:
+    item = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
+        name="read_file",
+        type="function_call",
+    )
+
+    decoded = _decode_queue([item], keyring=_keyring())
+
+    assert decoded == [
+        _DecodedSealedFunctionCall(
+            item=item,
+            call_id=CallID(
+                side="reviewer",
+                content_hash_prefix=bytes.fromhex("0102030405060708"),
+                tool_call_index=0,
+                upstream_tool_call_id="up_reviewer_0",
+            ),
+        )
+    ]
+
+
+def test_decode_queue_classifies_unopenable_function_call_as_fabricated() -> None:
+    item = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id="not_openable",
+        name="read_file",
+        type="function_call",
+    )
+
+    decoded = _decode_queue([item], keyring=_keyring())
+
+    assert decoded == [_DecodedFabricatedFunctionCall(item=item)]
+
+
+def test_decode_queue_classifies_sealed_function_call_output() -> None:
+    item = RequestFunctionCallOutputItem(
+        call_id=_sealed_call_id("defender", "up_defender_0"),
+        output="done",
+        type="function_call_output",
+    )
+
+    decoded = _decode_queue([item], keyring=_keyring())
+
+    assert decoded == [
+        _DecodedSealedFunctionCallOutput(
+            item=item,
+            call_id=CallID(
+                side="defender",
+                content_hash_prefix=bytes.fromhex("0102030405060708"),
+                tool_call_index=0,
+                upstream_tool_call_id="up_defender_0",
+            ),
+        )
+    ]
+
+
+def test_decode_queue_classifies_unopenable_function_call_output_as_fabricated() -> None:
+    item = RequestFunctionCallOutputItem(
+        call_id="not_openable",
+        output="done",
+        type="function_call_output",
+    )
+
+    decoded = _decode_queue([item], keyring=_keyring())
+
+    assert decoded == [_DecodedFabricatedFunctionCallOutput(item=item)]
+
+
+def test_call_id_roundtrips_zero_based_main_side_with_fixed_width_index() -> None:
+    value = CallID(
+        side="main",
+        content_hash_prefix=bytes.fromhex("0102030405060708"),
+        tool_call_index=65535,
+        upstream_tool_call_id="up_main_65535",
+    )
+
+    token = seal_call_id(value, keyring=_keyring())
+
+    assert open_call_id(token, keyring=_keyring()) == value
+
+
+def test_seal_call_id_rejects_tool_call_index_above_u16() -> None:
+    with pytest.raises(PlapError) as excinfo:
+        seal_call_id(
+            CallID(
+                side="main",
+                content_hash_prefix=bytes.fromhex("0102030405060708"),
+                tool_call_index=65536,
+                upstream_tool_call_id="up_main_65536",
+            ),
+            keyring=_keyring(),
+        )
+
+    assert excinfo.value.private.reason == "tool_call_index_too_large"
+
+
+def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(role="assistant", content="prefix"),
+            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            Message(role="tool", tool_call_id="call_1", content="hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 3
+
+
+def test_sides_update_main_rejects_second_patch() -> None:
+    with pytest.raises(ValueError, match="at most one message patch"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", reasoning_content="first"),
+                MessagePatch(content_hash="efgh", reasoning_content="second"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
+    with pytest.raises(ValueError, match="message patch must be the last non-tool main update"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                Message(role="assistant", content="later assistant"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch() -> None:
+    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                Message(role="tool", content="missing id"),
+            ]
+        )
+
+
+def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(
+                role="assistant",
+                content="prefix tool turn",
+                tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            Message(role="tool", tool_call_id="call_1", content="anchor hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 4
+
+
+def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
+    update = SidesUpdate(
+        main=[
+            Message(
+                role="assistant",
+                content="prefix tool turn",
+                tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+            Message(
+                role="assistant",
+                content="anchor",
+                tool_calls=[ToolCall(id="anchor_0", name="read_file", arguments="{}")],
+            ),
+            Message(role="tool", tool_call_id="anchor_0", content="anchor hidden output"),
+        ]
+    )
+
+    assert len(update.main) == 4
+
+
+def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
+    with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> None:
+    with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                Message(role="assistant", content="anchor"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
+    with pytest.raises(ValueError, match="cannot appear before earlier tool calls are satisfied"):
+        SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="prefix tool turn",
+                    tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
+                ),
+                Message(role="user", content="interrupting prefix"),
+                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
+    with pytest.raises(ValueError, match="does not match an unresolved anchor tool call"):
+        SidesUpdate(
+            main=[
+                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                Message(role="tool", tool_call_id="wrong", content="hidden output"),
+            ]
+        )
+
+
+def test_decode_queue_preserves_item_order() -> None:
+    compaction = _sealed_compaction(_compaction_payload(machine={"active": []}, sides=Sides()))
+    message = _message("hello")
+    sealed_call = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
+        name="read_file",
+        type="function_call",
+    )
+    fabricated_output = RequestFunctionCallOutputItem(call_id="not_openable", output="done", type="function_call_output")
+
+    decoded = _decode_queue([compaction, message, sealed_call, fabricated_output], keyring=_keyring())
+
+    assert [type(item) for item in decoded] == [
+        _DecodedCompaction,
+        _DecodedMessage,
+        _DecodedSealedFunctionCall,
+        _DecodedFabricatedFunctionCallOutput,
+    ]
+
+
+def test_decode_queue_rejects_unsealed_reasoning_input() -> None:
+    item = RequestReasoningItem(
+        encrypted_content=None,
+        id=None,
+        summary=[SummaryTextContent(text="sealed", type="summary_text")],
+        type="reasoning",
+    )
+
+    with pytest.raises(PlapError):
+        _decode_queue([item], keyring=_keyring())
+
+
+async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_only_queue() -> None:
+    payload = _compaction_payload(
+        machine={"active": ["reviewer"]},
+        sides=Sides(
+            main=[Message(role="assistant", content="main snapshot")],
+            others={Side.REVIEWER: [Message(role="assistant", content="review snapshot")]},
+        ),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(payload)]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == payload.machine
+    assert result.sides == payload.sides
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compaction() -> None:
+    compaction = _compaction_payload(
+        payload_id="cmp_root",
+        machine={"active": []},
+        sides=Sides(main=[Message(role="assistant", content="snapshot")]),
+    )
+    first = _reasoning_payload(
+        payload_id="rs_first",
+        previous_compaction_id=compaction.id,
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_second",
+        previous_reasoning_id=first.id,
+        previous_compaction_id=compaction.id,
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[_sealed_compaction(compaction), _sealed_reasoning(first), _sealed_reasoning(second)],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.sides.main == [
+        Message(role="assistant", content="snapshot"),
+        Message(role="assistant", content="first"),
+        Message(role="assistant", content="second"),
+    ]
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_applies_reasoning_machine_patch() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"]}
+    assert result.sides == Sides()
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": {"role": "assistant", "content": "review hidden"}},
+                ]
+            }
+        ),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.others[Side.REVIEWER] == [Message(role="assistant", content="review hidden")]
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_appends_main_messages_from_reasoning() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": []}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="main hidden")]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.main == [Message(role="assistant", content="main hidden")]
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
+    )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+        previous_reasoning_id=first_payload.id,
+    )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[first, second]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"], "meta": {"step": 2}}
+    assert result.sides.main == [
+        Message(role="assistant", content="first"),
+        Message(role="assistant", content="second"),
+    ]
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_reasoning_id() -> None:
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        previous_reasoning_id="rs_missing",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_compaction_id() -> None:
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        previous_compaction_id="cmp_missing",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_reasoning_with_none_previous_compaction_id_after_compaction() -> None:
+    compaction = _compaction_payload(payload_id="cmp_root", machine={"active": []}, sides=Sides())
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(compaction), _sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
+
+
+async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
+    first = _reasoning_payload(
+        payload_id="rs_first",
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_second",
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(first), _sealed_reasoning(second)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
+
+
+async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_when_chain_matches() -> None:
+    first = _reasoning_payload(
+        payload_id="rs_duplicate",
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        sides=SidesUpdate(),
+    )
+    second = _reasoning_payload(
+        payload_id="rs_duplicate",
+        previous_reasoning_id=first.id,
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(first), _sealed_reasoning(second)]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_pair() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id=call_id,
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="review result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.others[Side.REVIEWER] == [
+        assistant,
+        Message(role="tool", tool_call_id="up_reviewer_0", content="review result"),
+    ]
+    assert result.last_side == Side.REVIEWER
+
+
+async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_output_only() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    hidden_output = {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "hidden result"}
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                    {"op": "add", "path": "/1", "value": hidden_output},
+                ]
+            }
+        ),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.others[Side.REVIEWER] == [
+        assistant,
+        Message(role="tool", tool_call_id="up_reviewer_0", content="hidden result"),
+    ]
+    assert result.last_side is None
+
+
+async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair() -> None:
+    assistant = Message(
+        role="assistant",
+        content="main hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=SidesUpdate(main=[assistant]),
+    )
+    call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id=call_id,
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.main == [
+        assistant,
+        Message(role="tool", tool_call_id="up_main_0", content="main result"),
+    ]
+    assert result.last_side == Side.MAIN
+
+
+async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=SidesUpdate(
+            main=[
+                Message(
+                    role="assistant",
+                    content="main hidden",
+                    tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+                )
+            ]
+        ),
+    )
+    later = _sealed_reasoning(
+        _reasoning_payload(
+            machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+            sides=SidesUpdate(),
+            previous_reasoning_id=payload.id,
+        )
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload), later]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
+
+
+async def test_ingest_response_request_rejects_hidden_call_missing_public_function_call_item() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_tool_call_missing_function_call_item"
+
+
+async def test_ingest_response_request_rejects_function_call_output_without_pending_function_call() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _sealed_reasoning(payload),
+                    RequestFunctionCallOutputItem(call_id=call_id, output="review result", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "function_call_output_without_pending_function_call"
+
+
+async def test_ingest_response_request_rejects_duplicate_public_function_call_item() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
+    function_call = RequestFunctionCallItem(
         arguments='{"path":"README.md"}',
         call_id=call_id,
         name="read_file",
         type="function_call",
     )
 
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload), function_call, function_call]),
+            keyring=_keyring(),
+        )
 
-def _function_output(call_id: str, output: str) -> RequestFunctionCallOutputItem:
-    return RequestFunctionCallOutputItem(
-        call_id=call_id,
-        output=output,
-        type="function_call_output",
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "duplicate_pending_function_call"
+
+
+async def test_ingest_response_request_rejects_same_side_reasoning_before_public_output() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
+                ]
+            }
+        ),
+        previous_reasoning_id=first_payload.id,
+    )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
+    call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    first,
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    second,
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
+
+
+async def test_ingest_response_request_rejects_machine_only_reasoning_while_waiting_for_output() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    first_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    second_payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=SidesUpdate(),
+        previous_reasoning_id=first_payload.id,
+    )
+    first = _sealed_reasoning(first_payload)
+    second = _sealed_reasoning(second_payload)
+    call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    first,
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    second,
+                    RequestFunctionCallOutputItem(call_id=call_id, output="review result", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
+
+
+
+
+async def test_ingest_response_request_rejects_main_message_patch_until_supported() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": []}],
+        sides=SidesUpdate(
+            main=[
+                MessagePatch(
+                    content_hash="abcd",
+                    reasoning_content="hidden assistant state",
+                )
+            ]
+        ),
     )
 
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
 
-def _tool_call(upstream_id: str) -> dict[str, object]:
-    return {
-        "id": upstream_id,
-        "name": "read_file",
-        "arguments": '{"path":"README.md"}',
-    }
-
-
-def _state_message(value: dict[str, object]) -> StateMessage:
-    return StateMessage.from_primitive(value)
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "main_message_patch_target_missing"
 
 
-def _reasoning_message(value: dict[str, object]) -> StateMessage | ReasoningMessagePatch:
-    if isinstance(value.get("content_hash"), str):
-        return ReasoningMessagePatch.from_primitive(value)
-    return StateMessage.from_primitive(value)
+async def test_ingest_response_request_accepts_standalone_main_message() -> None:
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_message("hello")]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.main == [Message(role="user", content="hello")]
+    assert result.last_side == Side.MAIN
 
 
-def _message_hash(value: dict[str, object]) -> str:
-    return content_hash(_state_message(value))
+async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
+    item = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
+        name="read_file",
+        type="function_call",
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[item]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.others[Side.REVIEWER] == []
+    assert result.last_side is None
 
 
-def _seal_raw_payload(purpose: str, value: object) -> str:
-    compressed = zstd.ZstdCompressor().compress(msgspec.json.encode(value, order="deterministic"))
-    encrypted = Aead(_keyring().active(purpose)).encrypt(compressed, purpose_label(purpose))
-    return base64.urlsafe_b64encode(bytes(encrypted)).rstrip(b"=").decode()
+async def test_ingest_response_request_strict_phase1_rejects_naked_main_synthetic_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+    synthetic = Message(role="assistant", content="")
+    call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
 
 
-def _keyring() -> SealingKeyring:
-    return SealingKeyring(roots=(b"i" * 32,))
+async def test_ingest_response_request_strict_phase1_rejects_closed_anchor_then_synthetic_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+    synthetic = Message(role="assistant", content="")
+    call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    RequestMessageItem(content="m", role="assistant", type="message"),
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+
+
+async def test_ingest_response_request_strict_phase1_rejects_naked_non_main_sealed_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+    item = RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
+        name="read_file",
+        type="function_call",
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[item]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+
+
+async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "replace", "path": "/missing", "value": 1}],
+        sides=SidesUpdate(),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_machine_patch_invalid"
+
+
+async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> None:
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=SidesUpdate(
+            others={
+                Side.REVIEWER: [
+                    {"op": "add", "path": "/0", "value": 1},
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_side_patch_invalid"

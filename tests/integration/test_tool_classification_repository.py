@@ -1,14 +1,14 @@
 import pytest
 
 from plap.responses.contracts import FunctionTool
-from plap.responses.tools import (
+from plap.tools import (
     CachedToolPolicyResolver,
     ToolCallClassification,
     ToolClassification,
     ToolSignature,
     function_tool_signature,
 )
-from plap.responses.tools.repository import ToolClassificationRepository
+from plap.tools.repository import ToolClassificationRepository
 
 
 async def test_tool_classification_repository_roundtrips_signature_and_classification(

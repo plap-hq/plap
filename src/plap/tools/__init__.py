@@ -1,4 +1,4 @@
-from plap.responses.tools.classify import (
+from plap.tools.classify import (
     TOOL_CALL_EFFECT_CLASSIFIER_NAME,
     TOOL_CALL_EFFECT_CLASSIFIER_PROMPT,
     TOOL_EFFECT_CLASSIFIER_NAME,
@@ -6,8 +6,8 @@ from plap.responses.tools.classify import (
     LLMToolCallClassifier,
     LLMToolClassifier,
 )
-from plap.responses.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPToolExecutor, MCPToolProvider
-from plap.responses.tools.policy import (
+from plap.tools.mcp import IMCPToolProvider, IServerToolExecutor, MCPToolExecutor, MCPToolProvider
+from plap.tools.policy import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
     ClassificationL1Cache,
@@ -35,7 +35,7 @@ from plap.responses.tools.policy import (
     signature_hash_hex,
     tool_arguments_hash,
 )
-from plap.responses.tools.repository import ToolClassificationRepository, ToolClassificationStore
+from plap.tools.repository import ToolClassificationRepository, ToolClassificationStore
 
 __all__ = [
     "TOOL_CALL_EFFECT_CLASSIFIER_NAME",

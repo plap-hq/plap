@@ -15,7 +15,7 @@ from plap.llms.completions.chat import (
     IChatCompletionClient,
 )
 from plap.responses.contracts import FunctionTool
-from plap.responses.tools import (
+from plap.tools import (
     CachedToolCallPolicyResolver,
     CachedToolPolicyResolver,
     IToolCallClassifier,
@@ -34,7 +34,7 @@ from plap.responses.tools import (
     function_tool_signature,
     tool_arguments_hash,
 )
-from plap.responses.tools.classify import (
+from plap.tools.classify import (
     TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
     TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
 )

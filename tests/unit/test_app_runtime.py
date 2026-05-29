@@ -15,13 +15,6 @@ from plap.llms.completions.router import (
     RoutingChatCompletionClient,
     UnavailableChatCompletionClient,
 )
-from plap.responses.tools import (
-    TOOL_CALL_EFFECT_CLASSIFIER_NAME,
-    TOOL_EFFECT_CLASSIFIER_NAME,
-    LLMToolCallClassifier,
-    LLMToolClassifier,
-)
-from plap.responses.tools.mcp import MCPToolProvider
 from plap.settings import (
     MCPServerConfig,
     MCPToolConfig,
@@ -37,6 +30,13 @@ from plap.settings import (
     RuntimeSelector,
     Settings,
 )
+from plap.tools import (
+    TOOL_CALL_EFFECT_CLASSIFIER_NAME,
+    TOOL_EFFECT_CLASSIFIER_NAME,
+    LLMToolCallClassifier,
+    LLMToolClassifier,
+)
+from plap.tools.mcp import MCPToolProvider
 
 
 def test_app_runtime_uses_unavailable_chat_client_without_provider_keys() -> None:
@@ -111,6 +111,7 @@ def test_app_runtime_includes_wisp_mini_default_profile() -> None:
             "gmicloud",
             "lightning",
             "novita",
+            "qubrid",
             "openrouter",
         ),
     )
@@ -133,6 +134,7 @@ def test_app_runtime_includes_wisp_default_profile() -> None:
             "gmicloud",
             "lightning",
             "novita",
+            "qubrid",
             "openrouter",
         ),
     )

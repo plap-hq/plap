@@ -7,7 +7,7 @@ import jsonpatch
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.responses2.contracts import (
+from plap.responses.contracts import (
     RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
@@ -16,7 +16,7 @@ from plap.responses2.contracts import (
     RequestReasoningItem,
     ResponseCreateRequest,
 )
-from plap.responses2.ingest.models import (
+from plap.responses.ingest.models import (
     NON_MAIN_SIDES,
     CallID,
     CompactionPayload,
@@ -29,7 +29,7 @@ from plap.responses2.ingest.models import (
     SidesUpdate,
     ToolCall,
 )
-from plap.responses2.ingest.sealing import content_hash, open_call_id, open_compaction_payload, open_reasoning_payload
+from plap.responses.ingest.sealing import content_hash, open_call_id, open_compaction_payload, open_reasoning_payload
 
 ENABLE_PHASE2 = True
 
