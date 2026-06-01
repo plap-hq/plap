@@ -462,8 +462,6 @@ class CompactionPayload:
 @dataclass(frozen=True, slots=True)
 class CallID:
     side: Side
-    content_hash_prefix: bytes
-    tool_call_index: int
     upstream_tool_call_id: str
 
     def __post_init__(self) -> None:

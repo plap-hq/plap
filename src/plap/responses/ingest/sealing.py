@@ -64,8 +64,6 @@ Sealed call ids
 
     header[1]
     || side_header[1]
-    || content_hash_prefix[8]
-    || tool_call_index[u16be]
     || upstream_tool_call_id[utf8 bytes]
 
 - `header` bit layout:
@@ -81,13 +79,6 @@ Sealed call ids
   - `defender = 1`
   - `reviewer = 2`
   - `arbitrator = 3`
-
-- `content_hash_prefix` is the first 8 raw bytes of the BLAKE3 digest of
-  the deterministic JSON encoding of `Message.to_primitive()`. If you
-  start from the hex digest returned by `Message.content_hash()`, this is the
-  first 16 hex characters decoded back into 8 bytes.
-
-- `tool_call_index` is a fixed-width unsigned 16-bit big-endian integer.
 
 - `upstream_tool_call_id` is required, non-empty, and UTF-8.
 
@@ -130,8 +121,6 @@ COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
 CALL_ID_HEADER_BYTES = 2
-CALL_ID_CONTENT_HASH_PREFIX_BYTES = 8
-CALL_ID_TOOL_CALL_INDEX_BYTES = 2
 TAG_BYTES = 16
 _CALL_ID_VERSION_SHIFT = 4
 _CALL_ID_VERSION_MASK = 0xF0
@@ -266,22 +255,6 @@ def _decode_upstream_id(value: bytes) -> str:
         ) from exc
 
 
-def _pack_tool_call_index(value: int) -> bytes:
-    if value < 0:
-        raise _tool_replay_error(reason="tool_call_index_negative", private_message="tool_call_index must be non-negative")
-    if value > 0xFFFF:
-        raise _tool_replay_error(reason="tool_call_index_too_large", private_message="tool_call_index must be at most 65535")
-    return value.to_bytes(CALL_ID_TOOL_CALL_INDEX_BYTES, byteorder="big")
-
-
-def _unpack_tool_call_index(value: bytes, offset: int) -> tuple[int, int]:
-    end = offset + CALL_ID_TOOL_CALL_INDEX_BYTES
-    chunk = value[offset:end]
-    if len(chunk) != CALL_ID_TOOL_CALL_INDEX_BYTES:
-        raise _tool_replay_error(reason="function_call_id_index_truncated", private_message="function call id index is truncated")
-    return int.from_bytes(chunk, byteorder="big"), end
-
-
 def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
     return {
         "version": PAYLOAD_FORMAT_VERSION,
@@ -337,10 +310,6 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
 def _pack_call_id(value: CallID) -> bytes:
     if value.side not in {Side.MAIN, Side.DEFENDER, Side.REVIEWER, Side.ARBITRATOR}:
         raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
-    if len(value.content_hash_prefix) != CALL_ID_CONTENT_HASH_PREFIX_BYTES:
-        raise _tool_replay_error(
-            reason="function_call_content_hash_prefix_invalid", private_message="function call content_hash prefix is invalid"
-        )
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
     side_code = _SIDE_CODES[value.side]
@@ -351,15 +320,13 @@ def _pack_call_id(value: CallID) -> bytes:
         (
             bytes([header]),
             bytes([side_code]),
-            value.content_hash_prefix,
-            _pack_tool_call_index(value.tool_call_index),
             value.upstream_tool_call_id.encode(),
         )
     )
 
 
 def _unpack_call_id(value: bytes) -> CallID:
-    min_length = CALL_ID_HEADER_BYTES + CALL_ID_CONTENT_HASH_PREFIX_BYTES + CALL_ID_TOOL_CALL_INDEX_BYTES + 1
+    min_length = CALL_ID_HEADER_BYTES + 1
     if len(value) < min_length:
         raise _tool_replay_error(reason="function_call_id_plaintext_too_short", private_message="function call id plaintext is too short")
     header = value[0]
@@ -383,14 +350,9 @@ def _unpack_call_id(value: bytes) -> CallID:
         raise _tool_replay_error(
             reason="invalid_function_call_id_side", private_message="invalid function call id side", cause=exc
         ) from exc
-    offset = CALL_ID_HEADER_BYTES
-    content_hash_prefix_value = value[offset : offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES]
-    tool_call_index, offset = _unpack_tool_call_index(value, offset + CALL_ID_CONTENT_HASH_PREFIX_BYTES)
     return CallID(
         side=side,
-        content_hash_prefix=content_hash_prefix_value,
-        tool_call_index=tool_call_index,
-        upstream_tool_call_id=_decode_upstream_id(value[offset:]),
+        upstream_tool_call_id=_decode_upstream_id(value[CALL_ID_HEADER_BYTES:]),
     )
 
 
@@ -422,18 +384,6 @@ def _xchacha_open(value: str, *, purpose: str, keyring: SealingKeyring) -> bytes
     raise _tool_replay_error(
         reason="sealed_tool_payload_open_failed", private_message=f"sealed {purpose} payload could not be opened", cause=last_error
     ) from last_error
-
-
-def content_hash_prefix(value: str) -> bytes:
-    try:
-        payload = bytes.fromhex(value)
-    except ValueError as exc:
-        raise _tool_replay_error(
-            reason="content_hash_not_lowercase_hex", private_message="content_hash must be lowercase hex", cause=exc
-        ) from exc
-    if len(payload) < CALL_ID_CONTENT_HASH_PREFIX_BYTES:
-        raise _tool_replay_error(reason="content_hash_too_short", private_message="content_hash is too short")
-    return payload[:CALL_ID_CONTENT_HASH_PREFIX_BYTES]
 
 
 def seal_compaction_payload(

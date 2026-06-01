@@ -4,7 +4,6 @@ from itertools import count
 
 import pytest
 
-import plap.responses.ingest.ingest as ingest_module
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
@@ -43,7 +42,6 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import (
-    content_hash_prefix,
     open_call_id,
     seal_call_id,
     seal_compaction_payload,
@@ -122,8 +120,6 @@ def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
     return seal_call_id(
         CallID(
             side=side,
-            content_hash_prefix=bytes.fromhex("0102030405060708"),
-            tool_call_index=0,
             upstream_tool_call_id=upstream_tool_call_id,
         ),
         keyring=_keyring(),
@@ -131,11 +127,11 @@ def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
 
 
 def _sealed_call_id_for_message(side: str, upstream_tool_call_id: str, message: Message, *, tool_call_index: int = 0) -> str:
+    _ = message
+    _ = tool_call_index
     return seal_call_id(
         CallID(
             side=side,
-            content_hash_prefix=content_hash_prefix(message.content_hash()),
-            tool_call_index=tool_call_index,
             upstream_tool_call_id=upstream_tool_call_id,
         ),
         keyring=_keyring(),
@@ -267,8 +263,6 @@ def test_decode_queue_classifies_sealed_function_call() -> None:
             item=item,
             call_id=CallID(
                 side="reviewer",
-                content_hash_prefix=bytes.fromhex("0102030405060708"),
-                tool_call_index=0,
                 upstream_tool_call_id="up_reviewer_0",
             ),
         )
@@ -302,8 +296,6 @@ def test_decode_queue_classifies_sealed_function_call_output() -> None:
             item=item,
             call_id=CallID(
                 side="defender",
-                content_hash_prefix=bytes.fromhex("0102030405060708"),
-                tool_call_index=0,
                 upstream_tool_call_id="up_defender_0",
             ),
         )
@@ -322,32 +314,15 @@ def test_decode_queue_classifies_unopenable_function_call_output_as_fabricated()
     assert decoded == [_DecodedFabricatedFunctionCallOutput(item=item)]
 
 
-def test_call_id_roundtrips_zero_based_main_side_with_fixed_width_index() -> None:
+def test_call_id_roundtrips_zero_based_main_side() -> None:
     value = CallID(
         side="main",
-        content_hash_prefix=bytes.fromhex("0102030405060708"),
-        tool_call_index=65535,
-        upstream_tool_call_id="up_main_65535",
+        upstream_tool_call_id="up_main_0",
     )
 
     token = seal_call_id(value, keyring=_keyring())
 
     assert open_call_id(token, keyring=_keyring()) == value
-
-
-def test_seal_call_id_rejects_tool_call_index_above_u16() -> None:
-    with pytest.raises(PlapError) as excinfo:
-        seal_call_id(
-            CallID(
-                side="main",
-                content_hash_prefix=bytes.fromhex("0102030405060708"),
-                tool_call_index=65536,
-                upstream_tool_call_id="up_main_65536",
-            ),
-            keyring=_keyring(),
-        )
-
-    assert excinfo.value.private.reason == "tool_call_index_too_large"
 
 
 def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
@@ -1143,10 +1118,7 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_function_c
     assert result.last_side is None
 
 
-async def test_ingest_response_request_strict_phase1_rejects_naked_main_synthetic_pair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+async def test_ingest_response_request_rejects_naked_main_sealed_pair_without_anchor() -> None:
     synthetic = Message(role="assistant", content="")
     call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
 
@@ -1168,42 +1140,37 @@ async def test_ingest_response_request_strict_phase1_rejects_naked_main_syntheti
         )
 
     assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+    assert exc_info.value.private.reason == "sealed_function_call_without_attachment_owner"
 
 
-async def test_ingest_response_request_strict_phase1_rejects_closed_anchor_then_synthetic_split(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+async def test_ingest_response_request_accepts_closed_anchor_then_stripped_hidden_empty_pair() -> None:
     synthetic = Message(role="assistant", content="")
     call_id = _sealed_call_id_for_message("main", "syn_0", synthetic)
 
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            ResponseCreateRequest(
-                model="plap/test",
-                input=[
-                    RequestMessageItem(content="m", role="assistant", type="message"),
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=call_id,
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
-                ],
-            ),
-            keyring=_keyring(),
-        )
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                RequestMessageItem(content="m", role="assistant", type="message"),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id=call_id,
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="fo_0", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
 
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+    assert result.sides.main == [
+        Message(role="assistant", content="m", tool_calls=[ToolCall(id="syn_0", name="read_file", arguments='{"path":"README.md"}')]),
+        Message(role="tool", tool_call_id="syn_0", content="fo_0"),
+    ]
 
 
-async def test_ingest_response_request_strict_phase1_rejects_naked_non_main_sealed_pair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(ingest_module, "ENABLE_PHASE2", False)
+async def test_ingest_response_request_discards_naked_non_main_sealed_pair_even_without_history_match() -> None:
     item = RequestFunctionCallItem(
         arguments='{"path":"README.md"}',
         call_id=_sealed_call_id("reviewer", "up_reviewer_0"),
@@ -1211,14 +1178,12 @@ async def test_ingest_response_request_strict_phase1_rejects_naked_non_main_seal
         type="function_call",
     )
 
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            ResponseCreateRequest(model="plap/test", input=[item]),
-            keyring=_keyring(),
-        )
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[item]),
+        keyring=_keyring(),
+    )
 
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "sealed_function_call_content_hash_target_missing"
+    assert result.sides.others[Side.REVIEWER] == []
 
 
 async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -> None:
