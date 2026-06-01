@@ -2,12 +2,20 @@
 
 Legend
 
-- `R(h)`: reasoning item with a hidden assistant anchor
-- `R(h-empty-main)`: main-side reasoning item whose hidden anchor exists but
+- `R(h)`: reasoning item whose hidden main anchor exists and declares no
+  main-side `tool_calls`
+- `R(h[up_0,...])`: reasoning item whose hidden main anchor declares those
+  main-side `tool_calls` in that order
+- `R(h-empty-main)`: same as `R(h)`, but the hidden anchor has empty public
+  content
+- `R(h-empty-main[up_0,...])`: same as `R(h[up_0,...])`, but the hidden anchor
   has empty public content
 - `R(c)`: reasoning item whose main side is fully closed and contributes only
   carrier state before later standalone main replay
-- `R(p->M)`: reasoning patch targeting explicit assistant `M`
+- `R(p->M)`: reasoning patch targeting explicit assistant `M` and declaring no
+  main-side `tool_calls`
+- `R(p->M[up_0,...])`: reasoning patch targeting explicit assistant `M` and
+  declaring those main-side `tool_calls` in that order
 - `M`: explicit assistant anchor message
 - `FMa`: fabricated assistant message
 - `FMu`: fabricated non-assistant message (`user` / `system` / `developer`)
@@ -17,27 +25,60 @@ Legend
 
 Bundle model
 
-Replay normalization should operate on replay bundles, not on one region-wide
-anchor that survives until the next reasoning item.
+Replay normalization operates on bundles, not on one region-wide anchor that
+survives until the next reasoning item.
 
-Bundle states
+The normalized shape of one bundle is:
 
-- `pending_patch`
-  - `R(p->M)` has appeared but `M` has not resolved yet.
-- `strict_anchor`
-  - the current anchor came from hidden reasoning state or a resolved patch and
-    declares main-side `tool_calls` that must be satisfied.
-- `free_anchor`
-  - the current anchor has no hidden declared main-side `tool_calls`.
+- `pre=[...]`: ordered clusters hoisted immediately before the anchor
+- `anchor=...`: the anchor assistant
+- `slots=[...]`: the anchor assistant's rendered `tool_calls`
+- `outputs=[...]`: the anchor-owned `role: tool` messages in real chronology
+- `post=[...]`: ordered clusters that remain in the same bundle after the
+  anchor
+
+`pre` exists only for pending-patch / hidden-prelude hoists.
+`post` exists only while a later assistant has clustered into the current
+bundle instead of superseding it.
+
+Anchor call model
+
+For any anchor `A`, define:
+
+- `declared(A)`:
+  - the ordered tool-call ids declared by the anchor itself
+  - hidden anchors take them from the hidden assistant message in the reasoning
+    payload
+  - patch anchors take them from `R(p->M[up_0,...])` once `M` resolves
+  - standalone public anchors start with `declared(A)=[]`
+- `added(A)`:
+  - the ordered direct calls later attached to `A` during standalone replay
+    that are not already in `declared(A)`
+  - includes sealed direct calls
+  - includes fabricated direct calls
+  - preserves first-arrival order across both kinds
+- `slots(A) = declared(A) + added(A)`
+
+A sealed direct call whose id is already in `declared(A)` replays that declared
+slot; it does not create a second slot and it does not move the declared
+segment.
+
+- `free_anchor`: `declared(A)=[]`, so `slots(A)=added(A)`
+- `strict_anchor`: `declared(A)!=[]`, so `slots(A)` begins with the declared
+  segment and only then appends later additions
 
 Release and settlement
 
+- `pending_patch`
+  - `R(p->M[...])` has appeared but `M` has not resolved yet.
 - `released`
-  - for a `strict_anchor`: all hidden declared main-side `tool_calls` have been
-    satisfied.
-  - for a `free_anchor`: true immediately.
+  - a pending patch is not released
+  - otherwise, every id in `declared(A)` has a matching output
+  - a free anchor is therefore released immediately once its anchor exists
 - `settled`
-  - there are no open calls left in the current bundle, sealed or fabricated.
+  - no open call remains anywhere in the current bundle
+  - this includes declared anchor calls, added anchor calls, and clustered
+    assistant mini-turn calls
 
 Turnover rules
 
@@ -53,39 +94,35 @@ Cluster kinds
 
 - Plain message cluster:
   - a `user` / `system` / `developer` message
-  - or an assistant message with no attached fabricated calls
+  - or an assistant message with no attached calls
 - Assistant mini-turn cluster:
   - an assistant message
-  - zero or more fabricated calls attached to that assistant
-  - zero or more fabricated tool outputs for those fabricated calls
+  - zero or more calls attached to that assistant
+  - all corresponding tool outputs
 - Anchor bundle:
   - the anchor assistant
-  - zero or more sealed calls attached directly to that anchor
-  - zero or more fabricated calls that still belong to that same anchor
+  - its `declared(A)` segment
+  - its `added(A)` segment
   - all corresponding tool outputs
   - hidden reasoning/tool rows if the anchor came from `R`
 
-Fabricated calls attach to the nearest preceding assistant within the local
-bundle parse. If there is no such assistant, they fall back to the current
-anchor assistant. Once a fabricated call or output attaches to an assistant,
-that assistant mini-turn is indivisible for chronology purposes.
+Call attachment
 
-The local normalized shape for one bundle is:
-
-- `pre=[...]`
-- `anchor=...`
-- `slots=[...]`
-- `outputs=[...]`
-- `post=[...]`
-
-`pre` exists only for pending-patch / hidden-prelude hoists.
-`post` exists only while a later assistant has clustered into the current
-bundle instead of superseding it.
+- A direct call first looks for the nearest preceding assistant within the local
+  bundle parse.
+- If such an assistant exists, the call belongs to that assistant mini-turn
+  cluster.
+- Otherwise the call belongs directly to the current anchor.
+- If a direct sealed call belongs to the anchor and its id is already in
+  `declared(A)`, it replays that declared slot.
+- Otherwise the direct call contributes the next entry in `added(A)`.
+- Once a call or output attaches to an assistant mini-turn, that mini-turn is
+  indivisible for chronology purposes.
 
 Normalized form
 
-- `A(FMa)`: assistant message cluster with no attached fabricated calls
-- `A(FMa; FF,FFO)`: assistant cluster with attached fabricated mini-turn
+- `A(FMa)`: assistant message cluster with no attached calls
+- `A(FMa; FF,FFO)`: assistant cluster with attached mini-turn
 - `P(FMu)`: plain non-assistant message cluster
 - `pre=[...]`: clusters hoisted immediately before the anchor assistant
 - `anchor=...`
@@ -99,16 +136,12 @@ Invariants
   contiguous.
 - `outputs` preserve real chronology. So `F1 F2 FO2 FO1` keeps
   `outputs=[FO2,FO1]` and is not reordered.
+- Direct anchor slot order never reorders later additions by call kind. Only
+  the declared segment may stay ahead of later additions.
 - `free_anchor` later assistants supersede immediately once the current bundle
   is settled.
 - `strict_anchor` later assistants cluster until the current bundle is both
   released and settled.
-
-Slot rule
-
-- Sealed calls occupy their declared indexed segment.
-- Fabricated calls attached directly to the anchor append after the
-  sealed-indexed segment, in first-appearance order.
 
 Replay cases
 
@@ -132,160 +165,185 @@ Replay cases
 - Raw: `R(h) F FO`
   Normalized: `pre=[] anchor=R.hidden slots=[F] outputs=[FO] post=[]`
   Outcome: Accept
-  Notes: Hidden anchor.
+  Notes: Hidden free anchor. `F` becomes the first added slot.
+
+- Raw: `R(h[up_0]) F(up_0) FO(up_0)`
+  Normalized: `pre=[] anchor=R.hidden slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
+  Outcome: Accept
+  Notes: Hidden strict anchor. The sealed call replays the declared slot.
 
 - Raw: `R(h-empty-main) F FO`
   Normalized: `pre=[] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
   Outcome: Accept
-  Notes: Anchored, not synthetic.
+  Notes: Hidden free anchor with empty public content. Anchored, not synthetic.
 
-- Raw: `R(p->M) M F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[]`
+- Raw: `R(h-empty-main[up_0]) F(up_0) FO(up_0)`
+  Normalized:
+  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
+  Outcome: Accept
+  Notes: Hidden strict anchor with empty public content. The sealed call replays the declared slot.
+
+- Raw: `R(p->M[up_0]) M F(up_0) FO(up_0)`
+  Normalized: `pre=[] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Patch resolves to `M`.
 
-- Raw: `M F FO` after stripping `R(p->M)`
+- Raw: `M F FO` after stripping `R(p->M[up_0])`
   Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[]`
   Outcome: Accept
   Notes: Sealed targeting is based on `M`, not `R+M`.
 
 2. Pre-anchor plain message hoists
 
-- Raw: `R(h-empty-main) FMu F FO`
+Hidden and patch-anchor rows in sections 2-5 use explicit declared ids when the
+row is testing hoist or attachment rather than free-anchor direct-call order.
+
+- Raw: `R(h-empty-main[up_0]) FMu F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Effective visible order `FMu F FO`.
 
-- Raw: `R(h-empty-main) FMu FMu2 F FO`
+- Raw: `R(h-empty-main[up_0]) FMu FMu2 F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Preserve order.
 
-- Raw: `R(h-empty-main) FMa F FO`
+- Raw: `R(h-empty-main[up_0]) FMa F(up_0) FO(up_0)`
   Normalized:
-  `pre=[A(FMa)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[A(FMa)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Assistant plain message before hidden anchor.
 
-- Raw: `R(p->M) FMu M F FO`
-  Normalized: `pre=[P(FMu)] anchor=M slots=[F] outputs=[FO] post=[]`
+- Raw: `R(p->M[up_0]) FMu M F(up_0) FO(up_0)`
+  Normalized: `pre=[P(FMu)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Hoist before `M`, not before whole `R`.
 
-- Raw: `R(p->M) FMu FMu2 M F FO`
-  Normalized: `pre=[P(FMu),P(FMu2)] anchor=M slots=[F] outputs=[FO] post=[]`
+- Raw: `R(p->M[up_0]) FMu FMu2 M F(up_0) FO(up_0)`
+  Normalized: `pre=[P(FMu),P(FMu2)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Preserve order.
 
-- Raw: `R(p->M) FMa M F FO`
-  Normalized: `pre=[A(FMa)] anchor=M slots=[F] outputs=[FO] post=[]`
+- Raw: `R(p->M[up_0]) FMa M F(up_0) FO(up_0)`
+  Normalized: `pre=[A(FMa)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Assistant plain message before `M`.
 
 3. Pre-anchor assistant mini-bundles
 
-- Raw: `R(h-empty-main) FMa FF FFO F FO`
+- Raw: `R(h-empty-main[up_0]) FMa FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: `FF/FFO` bind to `FMa`, sealed pair binds to hidden anchor.
 
-- Raw: `R(p->M) FMa FF FFO M F FO`
-  Normalized: `pre=[A(FMa;FF,FFO)] anchor=M slots=[F] outputs=[FO] post=[]`
+- Raw: `R(p->M[up_0]) FMa FF FFO M F(up_0) FO(up_0)`
+  Normalized: `pre=[A(FMa;FF,FFO)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Same, explicit anchor.
 
 4. Pre-anchor mixed `FMa` / `FMu`
 
-- Raw: `R(h-empty-main) FMu FMa FF FFO F FO`
+- Raw: `R(h-empty-main[up_0]) FMu FMa FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Plain message stays before assistant cluster.
 
-- Raw: `R(h-empty-main) FMa FMu FF FFO F FO`
+- Raw: `R(h-empty-main[up_0]) FMa FMu FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
+  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: `FMu` cannot split `FMa` from `FF/FFO`.
 
-- Raw: `R(p->M) FMu FMa FF FFO M F FO`
+- Raw: `R(p->M[up_0]) FMu FMa FF FFO M F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=M slots=[F] outputs=[FO] post=[]`
+  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Explicit anchor.
 
-- Raw: `R(p->M) FMa FMu FF FFO M F FO`
+- Raw: `R(p->M[up_0]) FMa FMu FF FFO M F(up_0) FO(up_0)`
   Normalized:
-  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=M slots=[F] outputs=[FO] post=[]`
+  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: `FMu` pushed outside attached assistant cluster.
 
-5. Pre-anchor non-assistant plus fabricated calls that fall back to anchor
+5. Pre-anchor non-assistant plus fabricated fallback to the hidden anchor
 
-- Raw: `R(h-empty-main) FMu FF FFO F FO`
+These are attachment rows. The hidden anchor is declared explicitly so the row
+tests which anchor owns `FF/FFO`, not free-anchor direct-call ordering.
+
+- Raw: `R(h-empty-main[up_0]) FMu FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F,FF] outputs=[FFO,FO] post=[]`
+  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
   Outcome: Accept
-  Notes: No assistant before `FF`, so `FF/FFO` bind to anchor.
+  Notes: No assistant before `FF`, so `FF/FFO` fall back to the hidden anchor.
 
-- Raw: `R(h-empty-main) FMu FMu2 FF FFO F FO`
+- Raw: `R(h-empty-main[up_0]) FMu FMu2 FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F,FF] outputs=[FFO,FO] post=[]`
+  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Same fallback.
 
-- Raw: `R(p->M) FMu FF FFO M F FO`
+- Raw: `R(p->M[up_0]) FMu FF FFO M F(up_0) FO(up_0)`
   Normalized: N/A
   Outcome: Reject
   Notes: No assistant exists before `M` for `FF` to bind to.
 
-- Raw: `R(p->M) FMu FMu2 FF FFO M F FO`
+- Raw: `R(p->M[up_0]) FMu FMu2 FF FFO M F(up_0) FO(up_0)`
   Normalized: N/A
   Outcome: Reject
   Notes: Same reason.
 
-6. Mixed fabricated + sealed calls on the same anchor
+6. Mixed direct calls on one anchor
 
-- Raw: `R(h) FF FFO F FO`
-  Normalized: `pre=[] anchor=R.hidden slots=[F,FF] outputs=[FFO,FO] post=[]`
+6A. Hidden strict-anchor attachment
+
+- Raw: `R(h[up_0]) FF FFO F(up_0) FO(up_0)`
+  Normalized: `pre=[] anchor=R.hidden slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
   Outcome: Accept
-  Notes: `FF/FFO` fallback to hidden anchor.
+  Notes: Hidden strict anchor. `FF/FFO` fall back to the anchor while the sealed replay item replays the declared slot.
 
-- Raw: `R(h) FF FFO F FO FF2 FFO2 F2 FO2`
+- Raw: `R(h[up_0,up_1]) FF FFO F(up_0) FO(up_0) FF2 FFO2 F(up_1) FO(up_1)`
   Normalized:
-  `pre=[] anchor=R.hidden slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[]`
+  `pre=[] anchor=R.hidden slots=[F(up_0),F(up_1),FF,FF2] outputs=[FFO,FO(up_0),FFO2,FO(up_1)] post=[]`
   Outcome: Accept
-  Notes: Mixed fabricated and sealed.
+  Notes: The declared segment stays first; later direct additions keep arrival order.
 
-- Raw: `R(h-empty-main) FF FFO F FO`
+- Raw: `R(h-empty-main[up_0]) FF FFO F(up_0) FO(up_0)`
   Normalized:
-  `pre=[] anchor=R.hidden(empty-main) slots=[F,FF] outputs=[FFO,FO] post=[]`
+  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
   Outcome: Accept
-  Notes: Same on hidden-empty main anchor.
+  Notes: Same on hidden-empty strict anchor.
 
-- Raw: `R(h-empty-main) FF FFO F FO FF2 FFO2 F2 FO2`
+- Raw: `R(h-empty-main[up_0,up_1]) FF FFO F(up_0) FO(up_0) FF2 FFO2 F(up_1) FO(up_1)`
   Normalized:
-  `pre=[] anchor=R.hidden(empty-main) slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[]`
+  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0),F(up_1),FF,FF2] outputs=[FFO,FO(up_0),FFO2,FO(up_1)] post=[]`
   Outcome: Accept
-  Notes: Same generalized bundle.
+  Notes: Same generalized bundle with empty public content.
+
+6B. Free explicit-anchor order
 
 - Raw: `R(c) M FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[]`
+  Normalized: `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[]`
   Outcome: Accept
-  Notes: `FF/FFO` fallback to explicit `M`.
+  Notes: Free explicit anchor. With no declared segment, direct calls stay in arrival order.
 
 - Raw: `R(c) M FF FFO F FO FF2 FFO2 F2 FO2`
   Normalized:
-  `pre=[] anchor=M slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[]`
+  `pre=[] anchor=M slots=[FF,F,FF2,F2] outputs=[FFO,FO,FFO2,FO2] post=[]`
   Outcome: Accept
-  Notes: Explicit `M`, mixed fabricated and sealed.
+  Notes: Same rule generalized across multiple direct additions.
 
 7. Free-anchor bundles
 
-Free anchors have no hidden declared main-side `tool_calls`.
+A free anchor has `declared(A)=[]`.
+
+- Therefore `slots(A)=added(A)`.
+- Direct anchor-owned calls appear in first-arrival order across both sealed
+  and fabricated calls.
 
 - A later assistant starts a new anchor immediately once the current bundle is
   settled.
@@ -317,22 +375,22 @@ Free anchors have no hidden declared main-side `tool_calls`.
 - Raw: `R(c) M FMa FF FFO F FO`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[F,FF] outputs=[FFO,FO]`
+  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO]`
   Outcome: Accept
-  Notes: Direct anchor-owned sealed calls stay in the sealed segment; direct fabricated calls append after it while outputs keep chronology.
+  Notes: The new free anchor has no declared segment, so its direct calls stay in arrival order while outputs keep chronology.
 
 - Raw: `R(c) M FMa FF FFO F1 F2 FO2 FO1`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[F1,F2,FF] outputs=[FFO,FO2,FO1]`
+  `bundle2 anchor=FMa slots=[FF,F1,F2] outputs=[FFO,FO2,FO1]`
   Outcome: Accept
-  Notes: The later assistant owns both fabricated and sealed calls, with sealed calls ahead of direct fabricated fallback in the slot order.
+  Notes: The later assistant owns both fabricated and sealed calls, and free-anchor direct order follows arrival order across both kinds.
 
 - Raw: `R(c) M FMa1 FF1 FFO1 FMa2 FF2 FFO2 F FO`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
   `bundle2 anchor=FMa1 slots=[FF1] outputs=[FFO1]`
-  `bundle3 anchor=FMa2 slots=[F,FF2] outputs=[FFO2,FO]`
+  `bundle3 anchor=FMa2 slots=[FF2,F] outputs=[FFO2,FO]`
   Outcome: Accept
   Notes: Each settled assistant mini-turn hands off to the next assistant anchor.
 
@@ -341,21 +399,21 @@ Free anchors have no hidden declared main-side `tool_calls`.
 - Raw: `R(c) M FMu FMa FF FFO F FO`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[] post=[P(FMu)]`
-  `bundle2 anchor=FMa slots=[F,FF] outputs=[FFO,FO]`
+  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO]`
   Outcome: Accept
   Notes: Plain message stays between bundles; the later assistant becomes the new anchor.
 
 - Raw: `R(c) M FMa FMu FF FFO F FO`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[F,FF] outputs=[FFO,FO] post=[P(FMu)]`
+  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO] post=[P(FMu)]`
   Outcome: Accept
   Notes: `FMu` cannot split the attached assistant mini-turn.
 
 - Raw: `R(c) M FMa FMu FF FFO F1 F2 FO2 FO1`
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[F1,F2,FF] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
+  `bundle2 anchor=FMa slots=[FF,F1,F2] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
   Outcome: Accept
   Notes: Same with parallel sealed calls.
 
@@ -363,32 +421,32 @@ Free anchors have no hidden declared main-side `tool_calls`.
   Normalized:
   `bundle1 anchor=M slots=[] outputs=[]`
   `bundle2 anchor=FMa1 slots=[FF1] outputs=[FFO1] post=[P(FMu1)]`
-  `bundle3 anchor=FMa2 slots=[F,FF2] outputs=[FFO2,FO] post=[P(FMu2)]`
+  `bundle3 anchor=FMa2 slots=[FF2,F] outputs=[FFO2,FO] post=[P(FMu2)]`
   Outcome: Accept
   Notes: Each interleaved plain message remains outside the assistant mini-turn that follows it.
 
 7D. Free-anchor non-assistant fallback
 
 - Raw: `R(c) M FMu FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu)]`
+  Normalized: `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[P(FMu)]`
   Outcome: Accept
   Notes: With no later assistant, `FF/FFO` fall back to `M`.
 
 - Raw: `R(c) M FMu FMu2 FF FFO F FO`
   Normalized:
-  `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu),P(FMu2)]`
+  `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[P(FMu),P(FMu2)]`
   Outcome: Accept
   Notes: Same fallback.
 
 - Raw: `R(c) M FMu FF FFO F1 F2 FO2 FO1`
   Normalized:
-  `pre=[] anchor=M slots=[F1,F2,FF] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
+  `pre=[] anchor=M slots=[FF,F1,F2] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
   Outcome: Accept
   Notes: Sealed outputs preserve chronology.
 
 - Raw: `R(c) M FMu FF FFO F FO FF2 FFO2 F2 FO2`
   Normalized:
-  `pre=[] anchor=M slots=[F,F2,FF,FF2] outputs=[FFO,FO,FFO2,FO2] post=[P(FMu)]`
+  `pre=[] anchor=M slots=[FF,F,FF2,F2] outputs=[FFO,FO,FFO2,FO2] post=[P(FMu)]`
   Outcome: Accept
   Notes: All fabricated calls bind to the current free anchor because no later assistant supersedes it.
 
@@ -417,8 +475,15 @@ Free anchors have no hidden declared main-side `tool_calls`.
 
 8. Strict-anchor bundles
 
-Strict anchors come from hidden main anchors or resolved patches that declare
-main-side `tool_calls`.
+A strict anchor has `declared(A)!=[]`. In this truth table, strict anchors come
+from hidden main anchors or resolved patches that declare main-side
+`tool_calls`.
+
+- Therefore `slots(A)=declared(A)+added(A)`.
+- The declared segment keeps the order supplied by hidden reasoning state or by
+  `R(p->M[up_0,...])`.
+- Later direct anchor additions append after that declared segment in
+  first-arrival order.
 
 - While any declared hidden tool call is unresolved, later assistants cluster.
 - Once all declared hidden tool calls are satisfied and the bundle is settled,
@@ -643,14 +708,16 @@ Synthetic main recovery is removed.
   Outcome: Silent discard
   Notes: Same discard rule.
 
-Three quick validation rules
+Quick validation rules
 
-- `R(p->M) M F FO -> M F FO`: yes
-- `R FM M F FO`: hoist immediately before `M`, not before whole `R`
+- `R(p->M[up_0]) M F(up_0) FO(up_0) -> M F FO`: yes
+- `R(p->M[up_0]) FMu M F(up_0) FO(up_0)`: hoist `FMu` immediately before `M`, not before whole `R`
 - `F1 F2 FO2 FO1`: keep `outputs=[FO2,FO1]`, do not reorder to slot order
+- `R(h[up_0]) FF FFO F(up_0) FO(up_0)`: attachment row, so the hidden declared slot stays first
+- `R(c) M FF FFO F FO`: free explicit anchor, so direct calls stay in arrival order as `slots=[FF,F]`
 - `M F M2 FO FF FFO`: `M2` clusters because the first free bundle is unsettled
 - `M F FO M2 FF FFO`: `M2` starts a new bundle because the first free bundle is settled
-- `R(p->M[up_0]) M F FO FF FFO`: `FF/FFO` may still attach to `M` until a later assistant supersedes it
+- `R(p->M[up_0]) M F(up_0) FO(up_0) FF FFO`: `FF/FFO` may still attach to `M` until a later assistant supersedes it
 - `R(p->M[up_0,up_1]) M F(up_0) FO(up_0) M2 ...`: `M2` still clusters because the strict bundle is only partially satisfied
 - later `R` forces finalization but does not define anchor lifetime by itself
 """
@@ -1059,7 +1126,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1079,7 +1146,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1101,7 +1168,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1186,7 +1253,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1233,7 +1300,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1258,7 +1325,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1335,7 +1402,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1358,7 +1425,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1383,7 +1450,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("hidden")
+h = _assistant_value("hidden", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1404,7 +1471,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("hidden")
+h = _assistant_value("hidden", "up_0", "up_1")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1431,7 +1498,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1452,7 +1519,7 @@ ACCEPT_CASES.append(
     )
 )
 
-h = _assistant_value("")
+h = _assistant_value("", "up_0", "up_1")
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -1492,7 +1559,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_0", "fo_0"),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "fab_0"),
+                _assistant_value("m", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
             ],
@@ -1518,7 +1585,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
+                _assistant_value("m", "fab_0", "up_0", "fab_1", "up_1"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
                 _tool_value("fab_1", "ffo_1"),
@@ -1603,7 +1670,7 @@ ACCEPT_CASES.append(
             ],
             expected_main=[
                 _assistant_value("m"),
-                _assistant_value("post", "up_0", "fab_0"),
+                _assistant_value("post", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
             ],
@@ -1630,7 +1697,7 @@ ACCEPT_CASES.append(
             ],
             expected_main=[
                 _assistant_value("m"),
-                _assistant_value("post", "up_0", "up_1", "fab_0"),
+                _assistant_value("post", "fab_0", "up_0", "up_1"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_1", "fo_1"),
                 _tool_value("up_0", "fo_0"),
@@ -1661,7 +1728,7 @@ ACCEPT_CASES.append(
                 _assistant_value("m"),
                 _assistant_value("post1", "fab_0"),
                 _tool_value("fab_0", "ffo_0"),
-                _assistant_value("post2", "up_0", "fab_1"),
+                _assistant_value("post2", "fab_1", "up_0"),
                 _tool_value("fab_1", "ffo_1"),
                 _tool_value("up_0", "fo_0"),
             ],
@@ -1688,7 +1755,7 @@ ACCEPT_CASES.append(
             expected_main=[
                 _assistant_value("m"),
                 _plain_value("user", "u1"),
-                _assistant_value("post", "up_0", "fab_0"),
+                _assistant_value("post", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
             ],
@@ -1714,7 +1781,7 @@ ACCEPT_CASES.append(
             ],
             expected_main=[
                 _assistant_value("m"),
-                _assistant_value("post", "up_0", "fab_0"),
+                _assistant_value("post", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
                 _plain_value("user", "u1"),
@@ -1769,7 +1836,7 @@ ACCEPT_CASES.append(
             ],
             expected_main=[
                 _assistant_value("m"),
-                _assistant_value("post", "up_0", "up_1", "fab_0"),
+                _assistant_value("post", "fab_0", "up_0", "up_1"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_1", "fo_1"),
                 _tool_value("up_0", "fo_0"),
@@ -1804,7 +1871,7 @@ ACCEPT_CASES.append(
                 _assistant_value("post1", "fab_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _plain_value("user", "u1"),
-                _assistant_value("post2", "up_0", "fab_1"),
+                _assistant_value("post2", "fab_1", "up_0"),
                 _tool_value("fab_1", "ffo_1"),
                 _tool_value("up_0", "fo_0"),
                 _plain_value("user", "u2"),
@@ -1828,7 +1895,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_0", "fo_0"),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "fab_0"),
+                _assistant_value("m", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
                 _plain_value("user", "u1"),
@@ -1853,7 +1920,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_0", "fo_0"),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "fab_0"),
+                _assistant_value("m", "fab_0", "up_0"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
                 _plain_value("user", "u1"),
@@ -1880,7 +1947,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "up_1", "fab_0"),
+                _assistant_value("m", "fab_0", "up_0", "up_1"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_1", "fo_1"),
                 _tool_value("up_0", "fo_0"),
@@ -1909,7 +1976,7 @@ ACCEPT_CASES.append(
                 _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
             ],
             expected_main=[
-                _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
+                _assistant_value("m", "fab_0", "up_0", "fab_1", "up_1"),
                 _tool_value("fab_0", "ffo_0"),
                 _tool_value("up_0", "fo_0"),
                 _tool_value("fab_1", "ffo_1"),

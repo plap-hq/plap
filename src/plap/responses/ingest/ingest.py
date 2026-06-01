@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 import jsonpatch
 
@@ -274,114 +275,122 @@ def _apply_side_patch(messages: list[Message], patch: list[dict[str, object]], *
     return rebuilt
 
 
-@dataclass(slots=True)
-class _TrackedCall:
-    has_function_call_item: bool
-    has_output_message: bool
+class _Phase(StrEnum):
+    DECLARED = "declared"
+    OPEN = "open"
+    CLOSED = "closed"
 
 
 @dataclass(slots=True)
 class _SideCalls:
-    calls_by_id: dict[str, _TrackedCall] = field(default_factory=dict)
+    by_id: dict[str, _Phase] = field(default_factory=dict)
+
+    @classmethod
+    def rebuild(cls, messages: list[Message]) -> _SideCalls:
+        side_calls = cls()
+        for message in messages:
+            if message.is_assistant() and message.tool_calls:
+                side_calls.register(message)
+                continue
+            if message.is_tool():
+                side_calls.settle_output(message)
+        return side_calls
+
+    def has_unfinished(self) -> bool:
+        return any(phase != _Phase.CLOSED for phase in self.by_id.values())
+
+    def phase(self, call_id: str) -> _Phase | None:
+        return self.by_id.get(call_id)
+
+    def register(self, message: Message) -> None:
+        for tool_call in message.tool_calls:
+            if tool_call.id in self.by_id:
+                raise _tool_replay_error(
+                    reason="duplicate_tool_call_id_in_history",
+                    private_message="tool call id appears more than once in side history",
+                )
+            self.by_id[tool_call.id] = _Phase.DECLARED
+
+    def settle_output(self, message: Message) -> None:
+        tool_call_id = message.tool_call_id
+        if tool_call_id is None:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
+        phase = self.by_id.get(tool_call_id)
+        if phase is None or phase == _Phase.CLOSED:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
+        self.by_id[tool_call_id] = _Phase.CLOSED
+
+    def record(self, call: _Call) -> None:
+        if call.id in self.by_id:
+            raise _tool_replay_error(
+                reason="duplicate_tool_call_id_in_history",
+                private_message="tool call id appears more than once in side history",
+            )
+        self.by_id[call.id] = call.phase
+
+    def merge(self, extra: _SideCalls) -> _SideCalls:
+        merged = _SideCalls(by_id=dict(self.by_id))
+        for call_id, phase in extra.by_id.items():
+            if call_id in merged.by_id:
+                raise _tool_replay_error(
+                    reason="duplicate_tool_call_id_in_history",
+                    private_message="tool call id appears more than once in side history",
+                )
+            merged.by_id[call_id] = phase
+        return merged
+
+    def open(self, call_id: str) -> bool:
+        phase = self.phase(call_id)
+        if phase is None:
+            return False
+        if phase == _Phase.CLOSED:
+            raise _tool_replay_error(
+                reason="function_call_already_satisfied",
+                private_message="function_call already has a tool output in history",
+            )
+        if phase == _Phase.OPEN:
+            raise _tool_replay_error(
+                reason="duplicate_pending_function_call",
+                private_message="duplicate pending function_call",
+            )
+        self.by_id[call_id] = _Phase.OPEN
+        return True
+
+    def close(self, call_id: str) -> bool:
+        phase = self.phase(call_id)
+        if phase is None:
+            return False
+        if phase != _Phase.OPEN:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
+        self.by_id[call_id] = _Phase.CLOSED
+        return True
+
+    def assert_finished(self) -> None:
+        for phase in self.by_id.values():
+            if phase == _Phase.CLOSED:
+                continue
+            if phase == _Phase.OPEN:
+                raise _tool_replay_error(
+                    reason="function_call_missing_function_call_output",
+                    private_message="function_call is missing function_call_output",
+                )
+            raise _reasoning_replay_error(
+                reason="reasoning_tool_call_missing_function_call_item",
+                private_message="reasoning tool call is missing function_call item",
+            )
 
 
 def _empty_calls_by_side() -> dict[Side, _SideCalls]:
     return {side: _SideCalls() for side in Side}
-
-
-def _is_open_function_call(call: _TrackedCall) -> bool:
-    return not call.has_output_message
-
-
-def _has_open_function_calls(calls_by_side: dict[Side, _SideCalls]) -> bool:
-    return any(_is_open_function_call(call) for side_calls in calls_by_side.values() for call in side_calls.calls_by_id.values())
-
-
-def _register_assistant_calls(side_calls: _SideCalls, message: Message) -> None:
-    for tool_call in message.tool_calls:
-        if tool_call.id in side_calls.calls_by_id:
-            raise _tool_replay_error(
-                reason="duplicate_tool_call_id_in_history",
-                private_message="tool call id appears more than once in side history",
-            )
-        side_calls.calls_by_id[tool_call.id] = _TrackedCall(
-            has_function_call_item=False,
-            has_output_message=False,
-        )
-
-
-def _mark_output_message(side_calls: _SideCalls, message: Message) -> None:
-    tool_call_id = message.tool_call_id
-    if tool_call_id is None:
-        raise _tool_replay_error(
-            reason="function_call_output_without_pending_function_call",
-            private_message="function_call_output has no pending function_call",
-        )
-    call = side_calls.calls_by_id.get(tool_call_id)
-    if call is None or call.has_output_message:
-        raise _tool_replay_error(
-            reason="function_call_output_without_pending_function_call",
-            private_message="function_call_output has no pending function_call",
-        )
-    call.has_output_message = True
-    call.has_function_call_item = False
-
-
-def _rebuild_calls(messages: list[Message]) -> _SideCalls:
-    side_calls = _SideCalls()
-    for message in messages:
-        if message.is_assistant() and message.tool_calls:
-            _register_assistant_calls(side_calls, message)
-            continue
-        if message.is_tool():
-            _mark_output_message(side_calls, message)
-    return side_calls
-
-
-def _merge_side_calls(base: _SideCalls, extra: _SideCalls) -> _SideCalls:
-    merged = _SideCalls(calls_by_id=dict(base.calls_by_id))
-    for call_id, call in extra.calls_by_id.items():
-        if call_id in merged.calls_by_id:
-            raise _tool_replay_error(
-                reason="duplicate_tool_call_id_in_history",
-                private_message="tool call id appears more than once in side history",
-            )
-        merged.calls_by_id[call_id] = call
-    return merged
-
-
-def _tracked_call(side_calls: _SideCalls, call_id: str) -> _TrackedCall | None:
-    return side_calls.calls_by_id.get(call_id)
-
-
-@dataclass(slots=True)
-class _MainCall:
-    id: str
-    name: str
-    arguments: str
-    has_function_call_item: bool
-    has_output_message: bool
-
-
-def _tool_call_from_main_call(call: _MainCall) -> ToolCall:
-    return ToolCall(id=call.id, name=call.name, arguments=call.arguments)
-
-
-def _tracked_call_from_main_call(call: _MainCall) -> _TrackedCall:
-    return _TrackedCall(
-        has_function_call_item=call.has_function_call_item,
-        has_output_message=call.has_output_message,
-    )
-
-
-def _main_call_from_tool_call(tool_call: ToolCall) -> _MainCall:
-    return _MainCall(
-        id=tool_call.id,
-        name=tool_call.name,
-        arguments=tool_call.arguments,
-        has_function_call_item=False,
-        has_output_message=False,
-    )
 
 
 def _copy_message(
@@ -403,389 +412,376 @@ def _copy_message(
 
 
 @dataclass(slots=True)
-class _AssistantCluster:
+class _Call:
+    id: str
+    name: str
+    arguments: str
+    phase: _Phase
+
+    @classmethod
+    def declared(cls, tool_call: ToolCall) -> _Call:
+        return cls(
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=tool_call.arguments,
+            phase=_Phase.DECLARED,
+        )
+
+    @classmethod
+    def opened(cls, item: RequestFunctionCallItem, *, call_id: str) -> _Call:
+        return cls(
+            id=call_id,
+            name=item.name,
+            arguments=item.arguments,
+            phase=_Phase.OPEN,
+        )
+
+    def to_tool_call(self) -> ToolCall:
+        return ToolCall(id=self.id, name=self.name, arguments=self.arguments)
+
+    def is_open(self) -> bool:
+        return self.phase == _Phase.OPEN
+
+    def is_closed(self) -> bool:
+        return self.phase == _Phase.CLOSED
+
+    def open(self) -> None:
+        if self.phase == _Phase.CLOSED:
+            raise _tool_replay_error(
+                reason="function_call_already_satisfied",
+                private_message="function_call already has a tool output in history",
+            )
+        if self.phase == _Phase.OPEN:
+            raise _tool_replay_error(
+                reason="duplicate_pending_function_call",
+                private_message="duplicate pending function_call",
+            )
+        self.phase = _Phase.OPEN
+
+    def settle(self) -> None:
+        if self.phase == _Phase.CLOSED:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
+        self.phase = _Phase.CLOSED
+
+    def close(self) -> None:
+        if self.phase != _Phase.OPEN:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="function_call_output has no pending function_call",
+            )
+        self.phase = _Phase.CLOSED
+
+
+@dataclass(slots=True)
+class _Turn:
     assistant: Message
-    calls: list[_MainCall] = field(default_factory=list)
+    calls: list[_Call] = field(default_factory=list)
     outputs: list[Message] = field(default_factory=list)
 
+    def call(self, call_id: str) -> _Call | None:
+        for call in self.calls:
+            if call.id == call_id:
+                return call
+        return None
 
-type _MainCluster = Message | _AssistantCluster
+    def settled(self) -> bool:
+        return all(call.is_closed() for call in self.calls)
+
+    def add_call(self, item: RequestFunctionCallItem, *, call_id: str) -> None:
+        self.calls.append(_Call.opened(item, call_id=call_id))
+
+    def add_output(self, message: Message) -> None:
+        self.outputs.append(message)
+
+    def render(self) -> list[Message]:
+        assistant = _copy_message(
+            self.assistant,
+            tool_calls=[call.to_tool_call() for call in self.calls],
+        )
+        return [assistant, *self.outputs]
+
+    def side_calls(self) -> _SideCalls:
+        side_calls = _SideCalls()
+        for call in self.calls:
+            side_calls.record(call)
+        return side_calls
+
+
+type _Cluster = Message | _Turn
 
 
 @dataclass(slots=True)
-class _MainAnchor:
+class _Anchor:
     assistant: Message | None
     patch: MessagePatch | None
-    hidden_suffix_outputs: list[Message]
-    calls: list[_MainCall]
-    fabricated_calls: list[_MainCall]
+    suffix: list[Message]
+    declared: list[_Call]
+    added: list[_Call]
     outputs: list[Message]
-    strict_declared_ids: set[str]
 
+    @classmethod
+    def from_hidden(cls, message: Message, suffix: list[Message]) -> _Anchor:
+        anchor = cls(
+            assistant=message,
+            patch=None,
+            suffix=[],
+            declared=[_Call.declared(tool_call) for tool_call in message.tool_calls],
+            added=[],
+            outputs=[],
+        )
+        anchor.apply_hidden_suffix(suffix)
+        return anchor
 
-@dataclass(slots=True)
-class _MainBundle:
-    anchor: _MainAnchor
-    after_anchor: bool
-    pre: list[_MainCluster] = field(default_factory=list)
-    post: list[_MainCluster] = field(default_factory=list)
+    @classmethod
+    def from_patch(cls, patch: MessagePatch, suffix: list[Message]) -> _Anchor:
+        return cls(
+            assistant=None,
+            patch=patch,
+            suffix=list(suffix),
+            declared=[],
+            added=[],
+            outputs=[],
+        )
 
+    @classmethod
+    def from_message(cls, message: Message) -> _Anchor:
+        return cls(
+            assistant=message,
+            patch=None,
+            suffix=[],
+            declared=[],
+            added=[],
+            outputs=[],
+        )
 
-def _pending_patch(anchor: _MainAnchor | None) -> bool:
-    return anchor is not None and anchor.assistant is None and anchor.patch is not None
+    def pending(self) -> bool:
+        return self.assistant is None and self.patch is not None
 
+    def declared_ids(self) -> set[str]:
+        if self.patch is not None:
+            if self.patch.tool_calls is None:
+                return set()
+            return {tool_call.id for tool_call in self.patch.tool_calls}
+        return {call.id for call in self.declared}
 
-def _build_hidden_anchor(message: Message, suffix_outputs: list[Message]) -> _MainAnchor:
-    anchor = _MainAnchor(
-        assistant=message,
-        patch=None,
-        hidden_suffix_outputs=[],
-        calls=[_main_call_from_tool_call(tool_call) for tool_call in message.tool_calls],
-        fabricated_calls=[],
-        outputs=[],
-        strict_declared_ids={tool_call.id for tool_call in message.tool_calls},
-    )
-    _apply_hidden_suffix_outputs_to_anchor(anchor, suffix_outputs)
-    return anchor
-
-
-def _build_patch_anchor(patch: MessagePatch, suffix_outputs: list[Message]) -> _MainAnchor:
-    strict_ids = {tool_call.id for tool_call in patch.tool_calls} if patch.tool_calls else set()
-    return _MainAnchor(
-        assistant=None,
-        patch=patch,
-        hidden_suffix_outputs=list(suffix_outputs),
-        calls=[],
-        fabricated_calls=[],
-        outputs=[],
-        strict_declared_ids=strict_ids,
-    )
-
-
-def _build_public_anchor(message: Message) -> _MainAnchor:
-    return _MainAnchor(
-        assistant=message,
-        patch=None,
-        hidden_suffix_outputs=[],
-        calls=[],
-        fabricated_calls=[],
-        outputs=[],
-        strict_declared_ids=set(),
-    )
-
-
-def _anchor_call(anchor: _MainAnchor, call_id: str) -> _MainCall | None:
-    for call in anchor.calls:
-        if call.id == call_id:
-            return call
-    return None
-
-
-def _anchor_owned_call(anchor: _MainAnchor, call_id: str) -> _MainCall | None:
-    for call in _anchor_all_calls(anchor):
-        if call.id == call_id:
-            return call
-    return None
-
-
-def _anchor_all_calls(anchor: _MainAnchor) -> list[_MainCall]:
-    return [*anchor.calls, *anchor.fabricated_calls]
-
-
-def _cluster_call(cluster: _AssistantCluster, call_id: str) -> _MainCall | None:
-    for call in cluster.calls:
-        if call.id == call_id:
-            return call
-    return None
-
-
-def _current_clusters(bundle: _MainBundle) -> list[_MainCluster]:
-    return bundle.post if bundle.after_anchor else bundle.pre
-
-
-def _nearest_assistant_cluster(clusters: list[_MainCluster]) -> _AssistantCluster | None:
-    for cluster in reversed(clusters):
-        if isinstance(cluster, _AssistantCluster):
-            return cluster
-    return None
-
-
-def _bundle_released(bundle: _MainBundle) -> bool:
-    if _pending_patch(bundle.anchor):
-        return False
-    if not bundle.anchor.strict_declared_ids:
-        return True
-    for call_id in bundle.anchor.strict_declared_ids:
-        call = _anchor_call(bundle.anchor, call_id)
-        if call is None or not call.has_output_message:
-            return False
-    return True
-
-
-def _cluster_settled(cluster: _AssistantCluster) -> bool:
-    return all(call.has_output_message for call in cluster.calls)
-
-
-def _bundle_settled(bundle: _MainBundle) -> bool:
-    if _pending_patch(bundle.anchor):
-        return False
-    if not all(call.has_output_message for call in _anchor_all_calls(bundle.anchor)):
-        return False
-    return all(
-        not isinstance(cluster, _AssistantCluster) or _cluster_settled(cluster)
-        for cluster in [*bundle.pre, *bundle.post]
-    )
-
-
-def _can_handoff(bundle: _MainBundle) -> bool:
-    return bundle.after_anchor and _bundle_released(bundle) and _bundle_settled(bundle)
-
-
-def _call_owner(bundle: _MainBundle, call_id: str) -> tuple[_AssistantCluster | _MainAnchor, _MainCall] | None:
-    for cluster in reversed(bundle.post):
-        if not isinstance(cluster, _AssistantCluster):
-            continue
-        call = _cluster_call(cluster, call_id)
-        if call is not None:
-            return cluster, call
-    call = _anchor_owned_call(bundle.anchor, call_id)
-    if call is not None:
-        return bundle.anchor, call
-    for cluster in reversed(bundle.pre):
-        if not isinstance(cluster, _AssistantCluster):
-            continue
-        call = _cluster_call(cluster, call_id)
-        if call is not None:
-            return cluster, call
-    return None
-
-
-def _pending_call_owner(bundle: _MainBundle, call_id: str) -> tuple[_AssistantCluster | _MainAnchor, _MainCall] | None:
-    owner = _call_owner(bundle, call_id)
-    if owner is None:
+    def call(self, call_id: str) -> _Call | None:
+        for call in self.declared:
+            if call.id == call_id:
+                return call
+        for call in self.added:
+            if call.id == call_id:
+                return call
         return None
-    call_owner, call = owner
-    if not call.has_function_call_item or call.has_output_message:
-        return None
-    return call_owner, call
 
+    def all_calls(self) -> list[_Call]:
+        return [*self.declared, *self.added]
 
-def _attachment_owner(bundle: _MainBundle, *, prefer_clusters: bool) -> _AssistantCluster | _MainAnchor | None:
-    if prefer_clusters:
-        cluster = _nearest_assistant_cluster(_current_clusters(bundle))
-        if cluster is not None:
-            return cluster
-    if bundle.anchor.assistant is not None:
-        return bundle.anchor
-    if not prefer_clusters:
-        return _nearest_assistant_cluster(_current_clusters(bundle))
-    return None
+    def released(self) -> bool:
+        return all(call.is_closed() for call in self.declared)
 
+    def add_call(self, item: RequestFunctionCallItem, *, call_id: str) -> None:
+        self.added.append(_Call.opened(item, call_id=call_id))
 
-def _owner_calls(owner: _AssistantCluster | _MainAnchor) -> list[_MainCall]:
-    if isinstance(owner, _MainAnchor):
-        return owner.fabricated_calls
-    return owner.calls
+    def add_output(self, message: Message) -> None:
+        self.outputs.append(message)
 
+    def apply_hidden_suffix(self, suffix: list[Message]) -> None:
+        if self.pending():
+            self.suffix = list(suffix)
+            return
+        for message in suffix:
+            if message.tool_call_id is None:
+                raise _reasoning_replay_error(
+                    reason="reasoning_message_invalid",
+                    private_message="hidden main tool output must include tool_call_id",
+                )
+            call = self.call(message.tool_call_id)
+            if call is None:
+                raise _reasoning_replay_error(
+                    reason="reasoning_message_invalid",
+                    private_message="hidden main tool output does not match an unresolved anchor tool call",
+                )
+            if call.is_closed():
+                raise _reasoning_replay_error(
+                    reason="reasoning_message_invalid",
+                    private_message="hidden main tool output duplicates an existing output",
+                )
+            call.settle()
+            self.outputs.append(message)
 
-def _append_fabricated_call(owner: _AssistantCluster | _MainAnchor, item: RequestFunctionCallItem) -> None:
-    _owner_calls(owner).append(
-        _MainCall(
-            id=item.call_id,
-            name=item.name,
-            arguments=item.arguments,
-            has_function_call_item=True,
-            has_output_message=False,
-        )
-    )
-
-
-def _append_sealed_call(
-    owner: _AssistantCluster | _MainAnchor,
-    item: RequestFunctionCallItem,
-    *,
-    upstream_tool_call_id: str,
-) -> None:
-    owner.calls.append(
-        _MainCall(
-            id=upstream_tool_call_id,
-            name=item.name,
-            arguments=item.arguments,
-            has_function_call_item=True,
-            has_output_message=False,
-        )
-    )
-
-
-def _mark_call_open(call: _MainCall) -> None:
-    if call.has_output_message:
-        raise _tool_replay_error(
-            reason="function_call_already_satisfied",
-            private_message="function_call already has a tool output in history",
-        )
-    if call.has_function_call_item:
-        raise _tool_replay_error(
-            reason="duplicate_pending_function_call",
-            private_message="duplicate pending function_call",
-        )
-    call.has_function_call_item = True
-
-
-def _append_tool_output_to_owner(owner: _AssistantCluster | _MainAnchor, message: Message) -> None:
-    owner.outputs.append(message)
-
-
-def _mark_call_closed(call: _MainCall) -> None:
-    call.has_output_message = True
-    call.has_function_call_item = False
-
-
-def _apply_hidden_suffix_outputs_to_anchor(anchor: _MainAnchor, suffix_outputs: list[Message]) -> None:
-    if _pending_patch(anchor):
-        anchor.hidden_suffix_outputs = list(suffix_outputs)
-        return
-    for message in suffix_outputs:
-        if message.tool_call_id is None:
-            raise _reasoning_replay_error(
-                reason="reasoning_message_invalid",
-                private_message="hidden main tool output must include tool_call_id",
+    def resolve(self, message: Message) -> None:
+        if self.patch is None:
+            raise RuntimeError("patch anchor resolution requires a pending patch")
+        if not message.is_assistant():
+            raise _tool_replay_error(
+                reason="main_message_patch_target_missing",
+                private_message="main message patch target must resolve to an assistant message",
             )
-        call = _anchor_call(anchor, message.tool_call_id)
-        if call is None:
-            raise _reasoning_replay_error(
-                reason="reasoning_message_invalid",
-                private_message="hidden main tool output does not match an unresolved anchor tool call",
-            )
-        if call.has_output_message:
-            raise _reasoning_replay_error(
-                reason="reasoning_message_invalid",
-                private_message="hidden main tool output duplicates an existing output",
-            )
-        _mark_call_closed(call)
-        anchor.outputs.append(message)
-
-
-def _resolve_patch_anchor(anchor: _MainAnchor, message: Message) -> None:
-    if anchor.patch is None:
-        raise RuntimeError("patch anchor resolution requires a pending patch")
-    if not message.is_assistant():
-        raise _tool_replay_error(
-            reason="main_message_patch_target_missing",
-            private_message="main message patch target must resolve to an assistant message",
+        tool_calls = [] if self.patch.tool_calls is None else list(self.patch.tool_calls)
+        self.assistant = _copy_message(
+            message,
+            tool_calls=tool_calls,
+            reasoning_content=self.patch.reasoning_content,
+            reasoning_details=[] if self.patch.reasoning_details is None else list(self.patch.reasoning_details),
         )
-    tool_calls = [] if anchor.patch.tool_calls is None else list(anchor.patch.tool_calls)
-    resolved = _copy_message(
-        message,
-        tool_calls=tool_calls,
-        reasoning_content=anchor.patch.reasoning_content,
-        reasoning_details=[] if anchor.patch.reasoning_details is None else list(anchor.patch.reasoning_details),
-    )
-    anchor.assistant = resolved
-    anchor.calls = [_main_call_from_tool_call(tool_call) for tool_call in tool_calls]
-    pending_outputs = list(anchor.hidden_suffix_outputs)
-    anchor.patch = None
-    anchor.hidden_suffix_outputs = []
-    _apply_hidden_suffix_outputs_to_anchor(anchor, pending_outputs)
+        self.declared = [_Call.declared(tool_call) for tool_call in tool_calls]
+        pending = list(self.suffix)
+        self.patch = None
+        self.suffix = []
+        self.apply_hidden_suffix(pending)
 
+    def render(self) -> list[Message]:
+        if self.assistant is None:
+            return []
+        assistant = _copy_message(
+            self.assistant,
+            tool_calls=[call.to_tool_call() for call in self.declared] + [call.to_tool_call() for call in self.added],
+        )
+        return [assistant, *self.outputs]
 
-def _append_cluster_message(clusters: list[_MainCluster], message: Message) -> None:
-    if message.is_assistant():
-        clusters.append(_AssistantCluster(assistant=message))
-        return
-    clusters.append(message)
-
-
-def _render_assistant_cluster(cluster: _AssistantCluster) -> list[Message]:
-    assistant = _copy_message(
-        cluster.assistant,
-        tool_calls=[_tool_call_from_main_call(call) for call in cluster.calls],
-    )
-    return [assistant, *cluster.outputs]
-
-
-def _render_anchor(anchor: _MainAnchor | None) -> list[Message]:
-    if anchor is None or anchor.assistant is None:
-        return []
-    tool_calls = [
-        *[_tool_call_from_main_call(call) for call in anchor.calls],
-        *[_tool_call_from_main_call(call) for call in anchor.fabricated_calls],
-    ]
-    assistant = _copy_message(anchor.assistant, tool_calls=tool_calls)
-    return [assistant, *anchor.outputs]
-
-
-def _render_clusters(clusters: list[_MainCluster]) -> list[Message]:
-    rendered: list[Message] = []
-    for cluster in clusters:
-        if isinstance(cluster, _AssistantCluster):
-            rendered.extend(_render_assistant_cluster(cluster))
-            continue
-        rendered.append(cluster)
-    return rendered
-
-
-def _render_bundle(bundle: _MainBundle) -> list[Message]:
-    return [*_render_clusters(bundle.pre), *_render_anchor(bundle.anchor), *_render_clusters(bundle.post)]
-
-
-def _build_calls_from_cluster(cluster: _AssistantCluster) -> _SideCalls:
-    side_calls = _SideCalls()
-    for call in cluster.calls:
-        side_calls.calls_by_id[call.id] = _tracked_call_from_main_call(call)
-    return side_calls
-
-
-def _build_calls_from_anchor(anchor: _MainAnchor | None) -> _SideCalls:
-    side_calls = _SideCalls()
-    if anchor is None or anchor.assistant is None:
+    def side_calls(self) -> _SideCalls:
+        side_calls = _SideCalls()
+        if self.assistant is None:
+            return side_calls
+        for call in self.all_calls():
+            side_calls.record(call)
         return side_calls
-    for call in anchor.calls:
-        side_calls.calls_by_id[call.id] = _tracked_call_from_main_call(call)
-    for call in anchor.fabricated_calls:
-        side_calls.calls_by_id[call.id] = _tracked_call_from_main_call(call)
-    return side_calls
-
-
-def _build_calls_from_clusters(clusters: list[_MainCluster]) -> _SideCalls:
-    side_calls = _SideCalls()
-    for cluster in clusters:
-        if not isinstance(cluster, _AssistantCluster):
-            continue
-        side_calls = _merge_side_calls(side_calls, _build_calls_from_cluster(cluster))
-    return side_calls
-
-
-def _build_calls_from_bundle(bundle: _MainBundle | None) -> _SideCalls:
-    if bundle is None:
-        return _SideCalls()
-    return _merge_side_calls(
-        _build_calls_from_anchor(bundle.anchor),
-        _merge_side_calls(_build_calls_from_clusters(bundle.pre), _build_calls_from_clusters(bundle.post)),
-    )
 
 
 @dataclass(slots=True)
-class _MainReplay:
+class _Bundle:
+    anchor: _Anchor
+    past_anchor: bool
+    before: list[_Cluster] = field(default_factory=list)
+    after: list[_Cluster] = field(default_factory=list)
+
+    def current(self) -> list[_Cluster]:
+        return self.after if self.past_anchor else self.before
+
+    def _last_turn(self, clusters: list[_Cluster]) -> _Turn | None:
+        for cluster in reversed(clusters):
+            if isinstance(cluster, _Turn):
+                return cluster
+        return None
+
+    def _render_clusters(self, clusters: list[_Cluster]) -> list[Message]:
+        rendered: list[Message] = []
+        for cluster in clusters:
+            if isinstance(cluster, _Turn):
+                rendered.extend(cluster.render())
+                continue
+            rendered.append(cluster)
+        return rendered
+
+    def _cluster_calls(self, clusters: list[_Cluster]) -> _SideCalls:
+        side_calls = _SideCalls()
+        for cluster in clusters:
+            if not isinstance(cluster, _Turn):
+                continue
+            side_calls = side_calls.merge(cluster.side_calls())
+        return side_calls
+
+    def released(self) -> bool:
+        return not self.anchor.pending() and self.anchor.released()
+
+    def settled(self) -> bool:
+        if self.anchor.pending():
+            return False
+        if not all(call.is_closed() for call in self.anchor.all_calls()):
+            return False
+        for cluster in [*self.before, *self.after]:
+            if isinstance(cluster, _Turn) and not cluster.settled():
+                return False
+        return True
+
+    def can_handoff(self) -> bool:
+        return self.past_anchor and self.released() and self.settled()
+
+    def append_message(self, message: Message) -> None:
+        if message.is_assistant():
+            self.current().append(_Turn(assistant=message))
+            return
+        self.current().append(message)
+
+    def owner(self, call_id: str) -> tuple[_Turn | _Anchor, _Call] | None:
+        for cluster in reversed(self.after):
+            if not isinstance(cluster, _Turn):
+                continue
+            call = cluster.call(call_id)
+            if call is not None:
+                return cluster, call
+        call = self.anchor.call(call_id)
+        if call is not None:
+            return self.anchor, call
+        for cluster in reversed(self.before):
+            if not isinstance(cluster, _Turn):
+                continue
+            call = cluster.call(call_id)
+            if call is not None:
+                return cluster, call
+        return None
+
+    def pending_owner(self, call_id: str) -> tuple[_Turn | _Anchor, _Call] | None:
+        owner = self.owner(call_id)
+        if owner is None:
+            return None
+        call_owner, call = owner
+        if not call.is_open():
+            return None
+        return call_owner, call
+
+    def fabricated_owner(self) -> _Turn | _Anchor | None:
+        turn = self._last_turn(self.current())
+        if turn is not None:
+            return turn
+        if self.anchor.assistant is not None:
+            return self.anchor
+        return None
+
+    def sealed_owner(self) -> _Turn | _Anchor | None:
+        if self.anchor.pending():
+            return None
+        if not self.past_anchor:
+            return self.anchor
+        turn = self._last_turn(self.after)
+        if turn is not None:
+            return turn
+        if self.anchor.assistant is not None:
+            return self.anchor
+        return None
+
+    def render(self) -> list[Message]:
+        return [*self._render_clusters(self.before), *self.anchor.render(), *self._render_clusters(self.after)]
+
+    def side_calls(self) -> _SideCalls:
+        return self.anchor.side_calls().merge(self._cluster_calls(self.before).merge(self._cluster_calls(self.after)))
+
+
+@dataclass(slots=True)
+class _Main:
     committed: list[Message] = field(default_factory=list)
-    bundle: _MainBundle | None = None
+    bundle: _Bundle | None = None
 
     def load_snapshot(self, messages: list[Message]) -> None:
         self.committed = list(messages)
         self.bundle = None
 
-    def _finalize_bundle(self) -> None:
+    def _finalize(self) -> None:
         if self.bundle is None:
             return
-        if _pending_patch(self.bundle.anchor):
+        if self.bundle.anchor.pending():
             raise _reasoning_replay_error(
                 reason="main_message_patch_target_missing",
                 private_message="main message patch target is missing",
             )
-        self.committed.extend(_render_bundle(self.bundle))
+        self.committed.extend(self.bundle.render())
         self.bundle = None
 
     def commit_before_reasoning(self) -> None:
-        self._finalize_bundle()
+        self._finalize()
 
     def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
         prefix, anchor, suffix = sides.split_main()
@@ -793,131 +789,137 @@ class _MainReplay:
         if anchor is None:
             return
         if isinstance(anchor, MessagePatch):
-            self.bundle = _MainBundle(anchor=_build_patch_anchor(anchor, suffix), after_anchor=False)
+            self.bundle = _Bundle(anchor=_Anchor.from_patch(anchor, suffix), past_anchor=False)
             return
-        self.bundle = _MainBundle(anchor=_build_hidden_anchor(anchor, suffix), after_anchor=False)
+        self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=False)
 
-    def _append_public_message(self, message: Message) -> None:
+    def _append_message(self, message: Message) -> None:
         if self.bundle is None:
             if message.is_assistant():
-                self.bundle = _MainBundle(anchor=_build_public_anchor(message), after_anchor=True)
+                self.bundle = _Bundle(anchor=_Anchor.from_message(message), past_anchor=True)
                 return
             self.committed.append(message)
             return
         anchor = self.bundle.anchor
-        if _pending_patch(anchor):
+        if anchor.pending():
             if message.is_assistant() and message.content_hash() == anchor.patch.content_hash:
-                _resolve_patch_anchor(anchor, message)
-                self.bundle.after_anchor = True
+                anchor.resolve(message)
+                self.bundle.past_anchor = True
                 return
-            _append_cluster_message(_current_clusters(self.bundle), message)
+            self.bundle.append_message(message)
             return
-        if message.is_assistant() and _can_handoff(self.bundle):
-            self._finalize_bundle()
-            self.bundle = _MainBundle(anchor=_build_public_anchor(message), after_anchor=True)
+        if message.is_assistant() and self.bundle.can_handoff():
+            self._finalize()
+            self.bundle = _Bundle(anchor=_Anchor.from_message(message), past_anchor=True)
             return
-        _append_cluster_message(_current_clusters(self.bundle), message)
+        self.bundle.append_message(message)
 
-    def _attach_fabricated_call(self, item: RequestFunctionCallItem) -> None:
+    def _fabricated_call(self, item: RequestFunctionCallItem) -> None:
         if self.bundle is None:
             raise _tool_replay_error(
                 reason="fabricated_function_call_without_previous_assistant",
                 private_message="fabricated function_call has no previous assistant message",
             )
-        existing = _call_owner(self.bundle, item.call_id)
+        existing = self.bundle.owner(item.call_id)
         if existing is not None:
-            _mark_call_open(existing[1])
+            existing[1].open()
+            if isinstance(existing[0], _Anchor):
+                self.bundle.past_anchor = True
             return
-        owner = _attachment_owner(self.bundle, prefer_clusters=True)
+        owner = self.bundle.fabricated_owner()
         if owner is None:
             raise _tool_replay_error(
                 reason="fabricated_function_call_without_previous_assistant",
                 private_message="fabricated function_call has no previous assistant message",
             )
-        _append_fabricated_call(owner, item)
-        if isinstance(owner, _MainAnchor):
-            self.bundle.after_anchor = True
+        owner.add_call(item, call_id=item.call_id)
+        if isinstance(owner, _Anchor):
+            self.bundle.past_anchor = True
 
-    def _attach_sealed_call(self, item: RequestFunctionCallItem, call_id: CallID) -> None:
+    def _sealed_call(self, item: RequestFunctionCallItem, call_id: CallID) -> None:
         if self.bundle is None:
             raise _tool_replay_error(
                 reason="sealed_function_call_without_attachment_owner",
                 private_message="sealed function call has no attachment owner",
             )
-        if _pending_patch(self.bundle.anchor) and call_id.upstream_tool_call_id in self.bundle.anchor.strict_declared_ids:
+        if self.bundle.anchor.pending():
+            if call_id.upstream_tool_call_id in self.bundle.anchor.declared_ids():
+                raise _tool_replay_error(
+                    reason="sealed_function_call_before_patch_target",
+                    private_message="sealed function call cannot attach before its patch target resolves",
+                )
             raise _tool_replay_error(
-                reason="sealed_function_call_before_patch_target",
-                private_message="sealed function call cannot attach before its patch target resolves",
+                reason="sealed_function_call_without_attachment_owner",
+                private_message="sealed function call has no attachment owner",
             )
-        existing = _call_owner(self.bundle, call_id.upstream_tool_call_id)
+        existing = self.bundle.owner(call_id.upstream_tool_call_id)
         if existing is not None:
-            _mark_call_open(existing[1])
-            if isinstance(existing[0], _MainAnchor):
-                self.bundle.after_anchor = True
+            existing[1].open()
+            if isinstance(existing[0], _Anchor):
+                self.bundle.past_anchor = True
             return
-        owner = _attachment_owner(self.bundle, prefer_clusters=self.bundle.after_anchor)
+        owner = self.bundle.sealed_owner()
         if owner is None:
             raise _tool_replay_error(
                 reason="sealed_function_call_without_attachment_owner",
                 private_message="sealed function call has no attachment owner",
             )
-        _append_sealed_call(owner, item, upstream_tool_call_id=call_id.upstream_tool_call_id)
-        if isinstance(owner, _MainAnchor):
-            self.bundle.after_anchor = True
+        owner.add_call(item, call_id=call_id.upstream_tool_call_id)
+        if isinstance(owner, _Anchor):
+            self.bundle.past_anchor = True
 
-    def _attach_output(self, item: RequestFunctionCallOutputItem, *, call_id: str) -> None:
+    def _output(self, item: RequestFunctionCallOutputItem, *, call_id: str) -> None:
         if self.bundle is None:
             raise _tool_replay_error(
                 reason="function_call_output_without_pending_function_call",
                 private_message="function_call_output has no pending function_call",
             )
-        owner = _pending_call_owner(self.bundle, call_id)
+        owner = self.bundle.pending_owner(call_id)
         if owner is None:
             raise _tool_replay_error(
                 reason="function_call_output_without_pending_function_call",
                 private_message="function_call_output has no pending function_call",
             )
         owner_state, call = owner
-        _append_tool_output_to_owner(
-            owner_state,
-            Message(role="tool", tool_call_id=call_id, content=_function_output_text(item)),
-        )
-        _mark_call_closed(call)
-        if isinstance(owner_state, _MainAnchor):
-            self.bundle.after_anchor = True
+        owner_state.add_output(Message(role="tool", tool_call_id=call_id, content=_function_output_text(item)))
+        call.close()
+        if isinstance(owner_state, _Anchor):
+            self.bundle.past_anchor = True
 
     def add_standalone_main_item(self, item: _DecodedInput) -> None:
         if isinstance(item, _DecodedMessage):
-            self._append_public_message(item.message)
+            self._append_message(item.message)
             return
         if isinstance(item, _DecodedSealedFunctionCall):
-            self._attach_sealed_call(item.item, item.call_id)
+            self._sealed_call(item.item, item.call_id)
             return
         if isinstance(item, _DecodedSealedFunctionCallOutput):
-            self._attach_output(item.item, call_id=item.call_id.upstream_tool_call_id)
+            self._output(item.item, call_id=item.call_id.upstream_tool_call_id)
             return
         if isinstance(item, _DecodedFabricatedFunctionCall):
-            self._attach_fabricated_call(item.item)
+            self._fabricated_call(item.item)
             return
         if isinstance(item, _DecodedFabricatedFunctionCallOutput):
-            self._attach_output(item.item, call_id=item.item.call_id)
+            self._output(item.item, call_id=item.item.call_id)
             return
         raise TypeError(f"unsupported standalone main item: {type(item).__name__}")
 
     def current_messages(self) -> list[Message]:
         if self.bundle is None:
             return list(self.committed)
-        return [*self.committed, *_render_bundle(self.bundle)]
+        return [*self.committed, *self.bundle.render()]
 
     def current_calls(self) -> _SideCalls:
-        committed_calls = _rebuild_calls(self.committed)
-        return _merge_side_calls(committed_calls, _build_calls_from_bundle(self.bundle))
+        committed_calls = _SideCalls.rebuild(self.committed)
+        if self.bundle is None:
+            return committed_calls
+        return committed_calls.merge(self.bundle.side_calls())
 
     def history_changed_by_last_event(self, item: _DecodedInput) -> bool:
         return not isinstance(item, _DecodedSealedFunctionCall)
 
     def assert_finished(self) -> None:
-        if self.bundle is not None and _pending_patch(self.bundle.anchor):
+        if self.bundle is not None and self.bundle.anchor.pending():
             raise _reasoning_replay_error(
                 reason="main_message_patch_target_missing",
                 private_message="main message patch target is missing",
@@ -930,7 +932,7 @@ class _Replay:
     sides: Sides
     last_side: Side | None
     calls_by_side: dict[Side, _SideCalls] = field(default_factory=_empty_calls_by_side)
-    main: _MainReplay = field(default_factory=_MainReplay)
+    main: _Main = field(default_factory=_Main)
     current_compaction_id: str | None = None
     last_reasoning_id: str | None = None
 
@@ -939,7 +941,7 @@ class _Replay:
         self.calls_by_side[Side.MAIN] = self.main.current_calls()
 
     def _rebuild_non_main_calls(self, side: Side) -> None:
-        self.calls_by_side[side] = _rebuild_calls(self.sides.messages(side))
+        self.calls_by_side[side] = _SideCalls.rebuild(self.sides.messages(side))
 
     def _rebuild_all_calls(self) -> None:
         self.calls_by_side = _empty_calls_by_side()
@@ -947,8 +949,8 @@ class _Replay:
         for side in NON_MAIN_SIDES:
             self._rebuild_non_main_calls(side)
 
-    def _assert_no_open_function_calls_before_reasoning(self) -> None:
-        if _has_open_function_calls(self.calls_by_side):
+    def _assert_no_unfinished_calls_before_reasoning(self) -> None:
+        if any(side_calls.has_unfinished() for side_calls in self.calls_by_side.values()):
             raise _tool_replay_error(
                 reason="pending_tool_outputs_block_message",
                 private_message="reasoning cannot appear before open function calls are closed",
@@ -976,7 +978,7 @@ class _Replay:
         self.last_side = None
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
-        self._assert_no_open_function_calls_before_reasoning()
+        self._assert_no_unfinished_calls_before_reasoning()
         self._assert_reasoning_chain_matches_state(payload)
         self.main.commit_before_reasoning()
         self.machine = _apply_machine_patch(self.machine, payload.machine)
@@ -993,31 +995,13 @@ class _Replay:
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:
         side_calls = self.calls_by_side[call_id.side]
-        call = _tracked_call(side_calls, call_id.upstream_tool_call_id)
-        if call is None:
+        if not side_calls.open(call_id.upstream_tool_call_id):
             return
-        if call.has_output_message:
-            raise _tool_replay_error(
-                reason="function_call_already_satisfied",
-                private_message="function_call already has a tool output in history",
-            )
-        if call.has_function_call_item:
-            raise _tool_replay_error(
-                reason="duplicate_pending_function_call",
-                private_message="duplicate pending function_call",
-            )
-        call.has_function_call_item = True
 
     def _step_non_main_function_call_output(self, item: RequestFunctionCallOutputItem, call_id: CallID) -> None:
         side_calls = self.calls_by_side[call_id.side]
-        call = _tracked_call(side_calls, call_id.upstream_tool_call_id)
-        if call is None:
+        if not side_calls.close(call_id.upstream_tool_call_id):
             return
-        if not call.has_function_call_item or call.has_output_message:
-            raise _tool_replay_error(
-                reason="function_call_output_without_pending_function_call",
-                private_message="function_call_output has no pending function_call",
-            )
         self.sides.messages(call_id.side).append(
             Message(
                 role="tool",
@@ -1037,18 +1021,7 @@ class _Replay:
     def _validate_all_calls_closed(self) -> None:
         self.main.assert_finished()
         for side_calls in self.calls_by_side.values():
-            for call in side_calls.calls_by_id.values():
-                if call.has_output_message:
-                    continue
-                if call.has_function_call_item:
-                    raise _tool_replay_error(
-                        reason="function_call_missing_function_call_output",
-                        private_message="function_call is missing function_call_output",
-                    )
-                raise _reasoning_replay_error(
-                    reason="reasoning_tool_call_missing_function_call_item",
-                    private_message="reasoning tool call is missing function_call item",
-                )
+            side_calls.assert_finished()
 
     def finish(self) -> Ingested:
         self._validate_all_calls_closed()
