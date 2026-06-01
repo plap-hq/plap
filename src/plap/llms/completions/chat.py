@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
+
+import blake3
+import msgspec
 
 
 class ChatRole(StrEnum):
@@ -48,6 +52,26 @@ type ServiceTier = str
 REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(ReasoningEffort)
 
 
+def _required_mapping(value: object, *, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be an object")
+    return value
+
+
+def _required_string(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} is required")
+    return value
+
+
+def _optional_string(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    return value
+
+
 @dataclass(frozen=True)
 class ChatFunctionTool:
     name: str
@@ -68,6 +92,22 @@ class ChatToolCall:
     name: str
     arguments: str
 
+    def to_primitive(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "arguments": self.arguments,
+        }
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatToolCall:
+        item = _required_mapping(value, label="tool call")
+        return cls(
+            id=_required_string(item.get("id"), label="tool call id"),
+            name=_required_string(item.get("name"), label="tool call name"),
+            arguments=_required_string(item.get("arguments"), label="tool call arguments"),
+        )
+
 
 @dataclass(frozen=True)
 class ChatToolChoiceFunction:
@@ -84,13 +124,68 @@ class ChatMessage:
     content: str | None = None
     name: str | None = None
     refusal: str | None = None
-    tool_calls: list[ChatToolCall] | None = None
+    tool_calls: list[ChatToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     reasoning_content: str | None = None
-    reasoning_details: list[dict[str, Any]] | None = None
+    reasoning_details: list[object] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", ChatRole(self.role))
+        object.__setattr__(self, "tool_calls", list(self.tool_calls))
+        object.__setattr__(self, "reasoning_details", list(self.reasoning_details))
+
+    def is_assistant(self) -> bool:
+        return self.role == ChatRole.ASSISTANT
+
+    def is_tool(self) -> bool:
+        return self.role == ChatRole.TOOL
+
+    def content_hash(self) -> str:
+        return blake3.blake3(msgspec.json.encode(self.to_primitive(), order="deterministic")).hexdigest()
+
+    def to_primitive(self) -> dict[str, object]:
+        value: dict[str, object] = {"role": self.role}
+        if self.content is not None:
+            value["content"] = self.content
+        if self.name is not None:
+            value["name"] = self.name
+        if self.refusal is not None:
+            value["refusal"] = self.refusal
+        if self.tool_call_id is not None:
+            value["tool_call_id"] = self.tool_call_id
+        if self.tool_calls:
+            value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
+        if self.reasoning_content is not None:
+            value["reasoning_content"] = self.reasoning_content
+        if self.reasoning_details:
+            value["reasoning_details"] = list(self.reasoning_details)
+        return value
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatMessage:
+        item = _required_mapping(value, label="message")
+        tool_calls_value = item.get("tool_calls")
+        tool_calls: list[ChatToolCall] = []
+        if tool_calls_value is not None:
+            if not isinstance(tool_calls_value, list):
+                raise TypeError("message tool_calls must be an array")
+            tool_calls = [ChatToolCall.from_primitive(call) for call in tool_calls_value]
+        reasoning_details_value = item.get("reasoning_details")
+        reasoning_details: list[object] = []
+        if reasoning_details_value is not None:
+            if not isinstance(reasoning_details_value, list):
+                raise TypeError("message reasoning_details must be an array")
+            reasoning_details = list(reasoning_details_value)
+        return cls(
+            role=ChatRole(_required_string(item.get("role"), label="message role")),
+            content=_optional_string(item.get("content"), label="message content"),
+            name=_optional_string(item.get("name"), label="message name"),
+            refusal=_optional_string(item.get("refusal"), label="message refusal"),
+            tool_calls=tool_calls,
+            tool_call_id=_optional_string(item.get("tool_call_id"), label="message tool_call_id"),
+            reasoning_content=_optional_string(item.get("reasoning_content"), label="message reasoning_content"),
+            reasoning_details=reasoning_details,
+        )
 
 
 @dataclass(frozen=True)

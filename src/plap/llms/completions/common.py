@@ -80,12 +80,12 @@ def _message_body(message: ChatMessage) -> dict[str, Any]:
     _set(
         value,
         "tool_calls",
-        [_tool_call_body(tool_call) for tool_call in message.tool_calls or []] or None,
+        [_tool_call_body(tool_call) for tool_call in message.tool_calls] or None,
     )
     if message.role == "assistant":
         _set(value, "refusal", message.refusal)
         _set(value, "reasoning_content", message.reasoning_content)
-        _set(value, "reasoning_details", message.reasoning_details)
+        _set(value, "reasoning_details", message.reasoning_details or None)
     return value
 
 
@@ -204,9 +204,9 @@ def to_data(value: Any) -> Any:
     return value
 
 
-def _tool_calls_from_data(tool_calls: Any) -> list[ChatToolCall] | None:
+def _tool_calls_from_data(tool_calls: Any) -> list[ChatToolCall]:
     if not tool_calls:
-        return None
+        return []
     normalized: list[ChatToolCall] = []
     for index, tool_call in enumerate(tool_calls):
         function = _get(tool_call, "function")
@@ -221,7 +221,7 @@ def _tool_calls_from_data(tool_calls: Any) -> list[ChatToolCall] | None:
                 arguments=arguments,
             )
         )
-    return normalized or None
+    return normalized
 
 
 def _usage_from_data(usage: Any) -> ChatUsage | None:
@@ -261,7 +261,7 @@ def completion_result_from_data(
             content=content,
             refusal=_get(message, "refusal"),
             reasoning_content=_get(message, "reasoning_content"),
-            reasoning_details=_get(message, "reasoning_details"),
+            reasoning_details=_get(message, "reasoning_details") or [],
             tool_calls=tool_calls,
         ),
         finish_reason=finish_reason,

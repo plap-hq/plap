@@ -44,7 +44,7 @@ def _tool_stubs(message: ChatMessage) -> tuple[ChatMessage, ...]:
             tool_call_id=call.id,
             content=RETRY_TOOL_PLACEHOLDER,
         )
-        for call in (message.tool_calls or ())
+        for call in message.tool_calls
     )
 
 
@@ -132,7 +132,7 @@ async def retry_on_unusable_tool_calls(
     result: ChatCompletionResult,
     request: ChatCompletionRequest,
 ) -> str | None:
-    tool_calls = result.message.tool_calls or ()
+    tool_calls = result.message.tool_calls
     if not tool_calls:
         return None
     tools_by_name = {tool.function.name: tool for tool in request.tools}

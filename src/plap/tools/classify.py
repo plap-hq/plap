@@ -147,7 +147,7 @@ def _classifier_result_context(result: ChatCompletionResult) -> dict[str, object
 
 def _classifier_single_tool_validator(*, retry_event: str, expected_tool_name: str) -> RetryValidator:
     async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
-        tool_calls = result.message.tool_calls or ()
+        tool_calls = result.message.tool_calls
         if len(tool_calls) == 1:
             return None
         retry_message_text = retry_message(
@@ -178,7 +178,7 @@ def _classifier_single_tool_validator(*, retry_event: str, expected_tool_name: s
 
 def _classifier_rationale_validator(*, retry_event: str, expected_tool_name: str) -> RetryValidator:
     async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
-        tool_calls = result.message.tool_calls or ()
+        tool_calls = result.message.tool_calls
         if len(tool_calls) != 1:
             return None
         tool_call = tool_calls[0]
@@ -568,7 +568,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
 
 
 def _parse_raw_output(message: ChatMessage, *, expected_tool_name: str) -> dict[str, Any]:
-    tool_calls = message.tool_calls or ()
+    tool_calls = message.tool_calls
     if len(tool_calls) != 1:
         raise _ClassifierShapeError("classifier did not return exactly one tool call")
     tool_call = tool_calls[0]

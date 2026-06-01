@@ -83,7 +83,7 @@ def _repair_message(
     tools_by_name: dict[str, ChatTool],
     partial: bool,
 ) -> ChatMessage:
-    tool_calls = message.tool_calls or []
+    tool_calls = message.tool_calls
     if not tool_calls:
         return message
     repaired = [_repair_tool_call(call, tools_by_name=tools_by_name, partial=partial) for call in tool_calls]
@@ -145,13 +145,13 @@ class Accumulator:
     def _message(self, *, partial: bool) -> ChatMessage:
         content = "".join(self._content) if self._has_content else None
         reasoning_content = "".join(self._reasoning) or None
-        tool_calls = [self._calls[index].tool_call() for index in sorted(self._calls)] or None
+        tool_calls = [self._calls[index].tool_call() for index in sorted(self._calls)]
         message = ChatMessage(
             role="assistant",
             content=content,
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
-            reasoning_details=list(self._reasoning_details) or None,
+            reasoning_details=list(self._reasoning_details),
         )
         return _repair_message(
             message,

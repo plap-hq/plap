@@ -4,10 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-import blake3
-import msgspec
-
-from plap.llms.completions.chat import ChatRole
+from plap.llms.completions.chat import ChatMessage as Message
+from plap.llms.completions.chat import ChatToolCall as ToolCall
 from plap.responses.patch import JSONPatch, JSONValue
 
 
@@ -67,29 +65,6 @@ def _validate_known_side_keys(item: Mapping[str, object], *, label: str) -> None
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCall:
-    id: str
-    name: str
-    arguments: str
-
-    def to_primitive(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "arguments": self.arguments,
-        }
-
-    @classmethod
-    def from_primitive(cls, value: object) -> ToolCall:
-        item = _required_mapping(value, label="tool call")
-        return cls(
-            id=_required_string(item.get("id"), label="tool call id"),
-            name=_required_string(item.get("name"), label="tool call name"),
-            arguments=_required_string(item.get("arguments"), label="tool call arguments"),
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class MessagePatch:
     content_hash: str
     tool_calls: list[ToolCall] | None = None
@@ -129,76 +104,6 @@ class MessagePatch:
             content_hash=_required_string(item.get("content_hash"), label="message patch content_hash"),
             tool_calls=tool_calls,
             reasoning_content=_optional_string(item.get("reasoning_content"), label="message patch reasoning_content"),
-            reasoning_details=reasoning_details,
-        )
-
-
-@dataclass(slots=True)
-class Message:
-    role: ChatRole
-    content: str | None = None
-    name: str | None = None
-    tool_call_id: str | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    reasoning_content: str | None = None
-    reasoning_details: list[object] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.role = ChatRole(self.role)
-
-    def is_assistant(self) -> bool:
-        return self.role == ChatRole.ASSISTANT
-
-    def is_tool(self) -> bool:
-        return self.role == ChatRole.TOOL
-
-    def append_tool_call(self, tool_call: ToolCall) -> None:
-        self.tool_calls.append(tool_call)
-
-    def tool_call_at(self, index: int) -> ToolCall:
-        return self.tool_calls[index]
-
-    def content_hash(self) -> str:
-        return blake3.blake3(msgspec.json.encode(self.to_primitive(), order="deterministic")).hexdigest()
-
-    def to_primitive(self) -> dict[str, object]:
-        value: dict[str, object] = {"role": self.role}
-        if self.content is not None:
-            value["content"] = self.content
-        if self.name is not None:
-            value["name"] = self.name
-        if self.tool_call_id is not None:
-            value["tool_call_id"] = self.tool_call_id
-        if self.tool_calls:
-            value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
-        if self.reasoning_content is not None:
-            value["reasoning_content"] = self.reasoning_content
-        if self.reasoning_details:
-            value["reasoning_details"] = list(self.reasoning_details)
-        return value
-
-    @classmethod
-    def from_primitive(cls, value: object) -> Message:
-        item = _required_mapping(value, label="message")
-        tool_calls_value = item.get("tool_calls")
-        tool_calls: list[ToolCall] = []
-        if tool_calls_value is not None:
-            if not isinstance(tool_calls_value, list):
-                raise TypeError("message tool_calls must be an array")
-            tool_calls = [ToolCall.from_primitive(call) for call in tool_calls_value]
-        reasoning_details_value = item.get("reasoning_details")
-        reasoning_details: list[object] = []
-        if reasoning_details_value is not None:
-            if not isinstance(reasoning_details_value, list):
-                raise TypeError("message reasoning_details must be an array")
-            reasoning_details = list(reasoning_details_value)
-        return cls(
-            role=ChatRole(_required_string(item.get("role"), label="message role")),
-            content=_optional_string(item.get("content"), label="message content"),
-            name=_optional_string(item.get("name"), label="message name"),
-            tool_call_id=_optional_string(item.get("tool_call_id"), label="message tool_call_id"),
-            tool_calls=tool_calls,
-            reasoning_content=_optional_string(item.get("reasoning_content"), label="message reasoning_content"),
             reasoning_details=reasoning_details,
         )
 

@@ -1186,7 +1186,7 @@ async def test_completions_client_coerces_complete_finish_reason_to_stop_when_no
 
     assert result.finish_reason == "stop"
     assert result.message.content == "hello back"
-    assert result.message.tool_calls is None
+    assert result.message.tool_calls == []
 
 
 async def test_completions_client_coerces_empty_complete_tool_handoff_to_stop_when_no_tool_calls_exist() -> None:
@@ -1207,7 +1207,7 @@ async def test_completions_client_coerces_empty_complete_tool_handoff_to_stop_wh
 
     assert result.finish_reason == "stop"
     assert result.message.content is None
-    assert result.message.tool_calls is None
+    assert result.message.tool_calls == []
 
 
 async def test_completions_client_coerces_stream_finish_reason_to_tool_handoff_when_tool_calls_present() -> None:
@@ -1735,7 +1735,7 @@ def test_crof_request_quirks_map_max_tokens_for_flash_model() -> None:
 
     body = _body_for(_crof_provider(), request, stream=False)
 
-    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["messages"][0] == {"role": "developer", "content": "be precise"}
     assert body["max_tokens"] == 128
     assert "max_completion_tokens" not in body
     assert "extra_body" not in body
