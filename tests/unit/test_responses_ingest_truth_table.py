@@ -113,6 +113,8 @@ Call attachment
 - If such an assistant exists, the call belongs to that assistant mini-turn
   cluster.
 - Otherwise the call belongs directly to the current anchor.
+- A pending patch has no resolved anchor assistant yet, so before `M` appears a
+  direct call without a preceding assistant has no owner and replay rejects.
 - If a direct sealed call belongs to the anchor and its id is already in
   `declared(A)`, it replays that declared slot.
 - Otherwise the direct call contributes the next entry in `added(A)`.
@@ -239,10 +241,21 @@ row is testing hoist or attachment rather than free-anchor direct-call order.
   Outcome: Accept
   Notes: `FF/FFO` bind to `FMa`, sealed pair binds to hidden anchor.
 
+- Raw: `R(h-empty-main[up_0]) FMa F(tx) FO(tx) F(up_0) FO(up_0)`
+  Normalized:
+  `pre=[A(FMa;F(tx),FO(tx))] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
+  Outcome: Accept
+  Notes: Sealed transplant binds to `FMa`, declared sealed pair binds to the hidden anchor.
+
 - Raw: `R(p->M[up_0]) FMa FF FFO M F(up_0) FO(up_0)`
   Normalized: `pre=[A(FMa;FF,FFO)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
   Outcome: Accept
   Notes: Same, explicit anchor.
+
+- Raw: `R(p->M[up_0]) FMa F(tx) FO(tx) M F(up_0) FO(up_0)`
+  Normalized: `pre=[A(FMa;F(tx),FO(tx))] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
+  Outcome: Accept
+  Notes: Same, explicit patch target.
 
 4. Pre-anchor mixed `FMa` / `FMu`
 
@@ -296,6 +309,16 @@ tests which anchor owns `FF/FFO`, not free-anchor direct-call ordering.
   Normalized: N/A
   Outcome: Reject
   Notes: Same reason.
+
+- Raw: `R(p->M[up_0]) F(tx) FO(tx) M F(up_0) FO(up_0)`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: No assistant exists before `M` for the sealed transplant to bind to.
+
+- Raw: `R(p->M[up_0]) FMu F(tx) FO(tx) M F(up_0) FO(up_0)`
+  Normalized: N/A
+  Outcome: Reject
+  Notes: `FMu` is not an assistant anchor for the sealed transplant.
 
 6. Mixed direct calls on one anchor
 
@@ -714,6 +737,7 @@ Quick validation rules
 - `R(p->M[up_0]) FMu M F(up_0) FO(up_0)`: hoist `FMu` immediately before `M`, not before whole `R`
 - `F1 F2 FO2 FO1`: keep `outputs=[FO2,FO1]`, do not reorder to slot order
 - `R(h[up_0]) FF FFO F(up_0) FO(up_0)`: attachment row, so the hidden declared slot stays first
+- `R(p->M[up_0]) FMa F(tx) FO(tx) M F(up_0) FO(up_0)`: sealed transplant binds to `FMa`; the declared slot stays on `M`
 - `R(c) M FF FFO F FO`: free explicit anchor, so direct calls stay in arrival order as `slots=[FF,F]`
 - `M F M2 FO FF FFO`: `M2` clusters because the first free bundle is unsettled
 - `M F FO M2 FF FFO`: `M2` starts a new bundle because the first free bundle is settled
@@ -1276,6 +1300,29 @@ ACCEPT_CASES.append(
     )
 )
 
+h = _assistant_value("", "up_0")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _reasoning_hidden_main(h),
+                _assistant_item("pre"),
+                _sealed_main_call(h, "up_tx"),
+                _sealed_main_output(h, "up_tx", "fo_tx"),
+                _sealed_main_call(h, "up_0"),
+                _sealed_main_output(h, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("pre", "up_tx"),
+                _tool_value("up_tx", "fo_tx"),
+                _assistant_value("", "up_0"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="pre_anchor_assistant_sealed_transplant_hidden",
+    )
+)
+
 m = _assistant_value("m")
 ACCEPT_CASES.append(
     pytest.param(
@@ -1297,6 +1344,30 @@ ACCEPT_CASES.append(
             ],
         ),
         id="pre_anchor_assistant_minibundle_patch",
+    )
+)
+
+m = _assistant_value("m")
+ACCEPT_CASES.append(
+    pytest.param(
+        _AcceptCase(
+            items=[
+                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
+                _assistant_item("pre"),
+                _sealed_main_call(m, "up_tx"),
+                _sealed_main_output(m, "up_tx", "fo_tx"),
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_main=[
+                _assistant_value("pre", "up_tx"),
+                _tool_value("up_tx", "fo_tx"),
+                _assistant_value("m", "up_0"),
+                _tool_value("up_0", "fo_0"),
+            ],
+        ),
+        id="pre_anchor_assistant_sealed_transplant_patch",
     )
 )
 
@@ -2729,6 +2800,23 @@ REJECT_CASES.append(
             expected_reason="fabricated_function_call_without_previous_assistant",
         ),
         id="reject_patch_anchor_missing_public_target_before_sealed_pair",
+    )
+)
+
+REJECT_CASES.append(
+    pytest.param(
+        _RejectCase(
+            items=[
+                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
+                _sealed_main_call(m, "up_tx"),
+                _sealed_main_output(m, "up_tx", "fo_tx"),
+                _assistant_item("m"),
+                _sealed_main_call(m, "up_0"),
+                _sealed_main_output(m, "up_0", "fo_0"),
+            ],
+            expected_reason="sealed_function_call_without_attachment_owner",
+        ),
+        id="reject_patch_anchor_sealed_transplant_without_previous_assistant",
     )
 )
 

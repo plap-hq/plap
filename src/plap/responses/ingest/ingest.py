@@ -742,11 +742,7 @@ class _Bundle:
         return None
 
     def sealed_owner(self) -> _Turn | _Anchor | None:
-        if self.anchor.pending():
-            return None
-        if not self.past_anchor:
-            return self.anchor
-        turn = self._last_turn(self.after)
+        turn = self._last_turn(self.current())
         if turn is not None:
             return turn
         if self.anchor.assistant is not None:
@@ -838,16 +834,6 @@ class _Main:
 
     def _sealed_call(self, item: RequestFunctionCallItem, call_id: CallID) -> None:
         if self.bundle is None:
-            raise _tool_replay_error(
-                reason="sealed_function_call_without_attachment_owner",
-                private_message="sealed function call has no attachment owner",
-            )
-        if self.bundle.anchor.pending():
-            if call_id.upstream_tool_call_id in self.bundle.anchor.declared_ids():
-                raise _tool_replay_error(
-                    reason="sealed_function_call_before_patch_target",
-                    private_message="sealed function call cannot attach before its patch target resolves",
-                )
             raise _tool_replay_error(
                 reason="sealed_function_call_without_attachment_owner",
                 private_message="sealed function call has no attachment owner",
