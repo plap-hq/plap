@@ -30,6 +30,7 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
+from plap.responses.patch import JSONPatch, JSONValue
 
 ENABLE_PHASE2 = True
 
@@ -234,7 +235,7 @@ def _decode_queue(items: list[RequestInputItem], *, keyring: SealingKeyring) -> 
     return [_decode_item(item, keyring=keyring) for item in items]
 
 
-def _apply_machine_patch(machine: dict[str, object], patch: list[dict[str, object]]) -> dict[str, object]:
+def _apply_machine_patch(machine: dict[str, JSONValue], patch: JSONPatch) -> dict[str, JSONValue]:
     try:
         result = jsonpatch.apply_patch(machine, patch, in_place=False)
     except (jsonpatch.JsonPatchException, TypeError, ValueError) as exc:
@@ -1092,7 +1093,7 @@ class _MainReplay:
 
 @dataclass(slots=True)
 class _Replay:
-    machine: dict[str, object]
+    machine: dict[str, JSONValue]
     sides: Sides
     last_side: Side | None
     calls_by_side: dict[Side, _SideCalls] = field(default_factory=_empty_calls_by_side)

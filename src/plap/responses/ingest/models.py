@@ -8,10 +8,7 @@ import blake3
 import msgspec
 
 from plap.llms.completions.chat import ChatRole
-
-type JSONValue = object
-type JSONPatchOperation = dict[str, JSONValue]
-type JSONPatch = list[JSONPatchOperation]
+from plap.responses.patch import JSONPatch, JSONValue
 
 
 def _required_mapping(value: object, *, label: str) -> Mapping[str, object]:
