@@ -935,6 +935,13 @@ class _Replay:
         for side in NON_MAIN_SIDES:
             self._rebuild_non_main_calls(side)
 
+    def _assert_sides_shape_matches_sides(self, sides: SidesUpdate) -> None:
+        if self.sides.shape() != sides.shape:
+            raise _reasoning_replay_error(
+                reason="reasoning_sides_shape_mismatch",
+                private_message="reasoning sides shape does not match replay history",
+            )
+
     def _assert_no_unfinished_calls_before_reasoning(self) -> None:
         if any(side_calls.has_unfinished() for side_calls in self.calls_by_side.values()):
             raise _tool_replay_error(
@@ -967,15 +974,22 @@ class _Replay:
         self._assert_no_unfinished_calls_before_reasoning()
         self._assert_reasoning_chain_matches_state(payload)
         self.main.commit_before_reasoning()
+        self._sync_main()
+        self._assert_sides_shape_matches_sides(payload.sides)
         self.machine = _apply_machine_patch(self.machine, payload.machine)
-        for side in NON_MAIN_SIDES:
-            if not payload.sides.others[side]:
+        for side in Side:
+            patch = payload.sides.patches[side]
+            if not patch:
                 continue
-            self.sides.others[side] = _apply_side_patch(self.sides.others[side], payload.sides.others[side], side=side)
+            if side == Side.MAIN:
+                self.sides.main = _apply_side_patch(self.sides.main, patch, side=side)
+                self.main.load_snapshot(self.sides.main)
+                continue
+            self.sides.others[side] = _apply_side_patch(self.sides.others[side], patch, side=side)
             self._rebuild_non_main_calls(side)
         if payload.sides.main:
             self.main.apply_hidden_main_updates(payload.sides)
-            self._sync_main()
+        self._sync_main()
         self.last_reasoning_id = payload.id
         self.last_side = None
 

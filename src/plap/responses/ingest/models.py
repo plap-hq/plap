@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from plap.llms.completions.chat import ChatMessage as Message
 from plap.llms.completions.chat import ChatToolCall as ToolCall
+from plap.responses.ingest.shape import shape_primitive
 from plap.responses.patch import JSONPatch, JSONValue
 
 
@@ -132,6 +133,16 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
     return updates
 
 
+def _required_shape(value: object, *, label: str) -> JSONValue:
+    item = _required_mapping(value, label=label)
+    _validate_known_side_keys(item, label=label)
+    missing = {side.value for side in Side} - set(item)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"{label} is missing side keys: {names}")
+    return {str(key): item[key] for key in item}
+
+
 def _tool_call_ids(tool_calls: list[ToolCall], *, label: str) -> list[str]:
     call_ids = [tool_call.id for tool_call in tool_calls]
     if len(call_ids) != len(set(call_ids)):
@@ -232,6 +243,9 @@ class Sides:
             value[side.value] = [message.to_primitive() for message in self.others[side]]
         return value
 
+    def shape(self) -> JSONValue:
+        return shape_primitive(self.to_primitive())
+
     @classmethod
     def from_primitive(cls, value: object) -> Sides:
         item = _required_mapping(value, label="sides")
@@ -247,23 +261,23 @@ class Sides:
 
 @dataclass(frozen=True, slots=True)
 class SidesUpdate:
+    shape: JSONValue
     main: list[MainUpdate] = field(default_factory=list)
-    others: dict[Side, JSONPatch] = field(default_factory=dict)
+    patches: dict[Side, JSONPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_main_updates(self.main)
         normalized: dict[Side, JSONPatch] = {}
-        for raw_side, patch in self.others.items():
+        for raw_side, patch in self.patches.items():
             side = Side(raw_side)
-            if side == Side.MAIN:
-                raise ValueError("sides update others must not include main")
             normalized[side] = list(patch)
-        for side in NON_MAIN_SIDES:
+        for side in Side:
             normalized.setdefault(side, [])
-        object.__setattr__(self, "others", normalized)
+        object.__setattr__(self, "patches", normalized)
+        object.__setattr__(self, "shape", _required_shape(self.shape, label="sides update shape"))
 
     def is_empty(self) -> bool:
-        return not self.main and not any(self.others[side] for side in NON_MAIN_SIDES)
+        return not self.main and not any(self.patches[side] for side in Side)
 
     def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message]]:
         anchor_index = _main_anchor_index(self.main)
@@ -276,21 +290,31 @@ class SidesUpdate:
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
+            "shape": self.shape,
             "main": [message.to_primitive() for message in self.main],
+            "patches": {
+                side.value: list(self.patches[side])
+                for side in Side
+            },
         }
-        for side in NON_MAIN_SIDES:
-            value[side.value] = list(self.others[side])
         return value
 
     @classmethod
     def from_primitive(cls, value: object) -> SidesUpdate:
         item = _required_mapping(value, label="sides update")
-        _validate_known_side_keys(item, label="sides update")
+        allowed = {"shape", "main", "patches"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"sides update contains unknown keys: {names}")
+        patches_value = _required_mapping(item.get("patches"), label="sides update patches")
+        _validate_known_side_keys(patches_value, label="sides update patches")
         return cls(
+            shape=_required_shape(item.get("shape"), label="sides update shape"),
             main=_required_main_update_list(item.get("main"), label="sides update main"),
-            others={
-                side: _required_patch(item.get(side.value), label=f"sides update {side.value}")
-                for side in NON_MAIN_SIDES
+            patches={
+                side: _required_patch(patches_value.get(side.value), label=f"sides update patches.{side.value}")
+                for side in Side
             },
         )
 

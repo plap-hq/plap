@@ -765,7 +765,7 @@ from plap.responses.contracts import (
     SummaryTextContent,
 )
 from plap.responses.ingest.ingest import ingest_response_request
-from plap.responses.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, SidesUpdate, ToolCall
+from plap.responses.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, Sides, SidesUpdate, ToolCall
 from plap.responses.ingest.sealing import (
     open_reasoning_payload,
     seal_call_id,
@@ -817,6 +817,19 @@ def _reasoning_payload(
         previous_compaction_id=previous_compaction_id,
         machine=machine,
         sides=sides,
+    )
+
+
+def _sides_update(
+    *,
+    main: list[Message | MessagePatch] | None = None,
+    patches: dict[Side, list[dict[str, object]]] | None = None,
+    current: Sides | None = None,
+) -> SidesUpdate:
+    return SidesUpdate(
+        shape=(Sides() if current is None else current).shape(),
+        main=[] if main is None else list(main),
+        patches={} if patches is None else dict(patches),
     )
 
 
@@ -901,7 +914,7 @@ def _reasoning_closed_main(label: str) -> RequestReasoningItem:
     return _sealed_reasoning(
         _reasoning_payload(
             machine=[{"op": "add", "path": f"/{label}", "value": True}],
-            sides=SidesUpdate(),
+            sides=_sides_update(),
         )
     )
 
@@ -910,7 +923,7 @@ def _reasoning_hidden_main(*messages: dict[str, object]) -> RequestReasoningItem
     return _sealed_reasoning(
         _reasoning_payload(
             machine=[],
-            sides=SidesUpdate(main=[Message.from_primitive(message) for message in messages]),
+            sides=_sides_update(main=[Message.from_primitive(message) for message in messages]),
         )
     )
 
@@ -919,8 +932,8 @@ def _reasoning_closed_non_main(side: Side, assistant: dict[str, object], tool_ou
     return _sealed_reasoning(
         _reasoning_payload(
             machine=[],
-            sides=SidesUpdate(
-                others={
+            sides=_sides_update(
+                patches={
                     side: [
                         {"op": "add", "path": "/0", "value": assistant},
                         {"op": "add", "path": "/1", "value": tool_output},
@@ -944,7 +957,7 @@ def _reasoning_patch_main(
     return _sealed_reasoning(
         _reasoning_payload(
             machine=[],
-            sides=SidesUpdate(
+            sides=_sides_update(
                 main=[
                     patch,
                     *[Message.from_primitive(output) for output in deferred_outputs],
@@ -2661,7 +2674,7 @@ ACCEPT_CASES.append(
                 _sealed_reasoning(
                     _reasoning_payload(
                         machine=[],
-                        sides=SidesUpdate(
+                        sides=_sides_update(
                             main=[
                                 Message(
                                     role="assistant",
@@ -2698,7 +2711,7 @@ ACCEPT_CASES.append(
                 _sealed_reasoning(
                     _reasoning_payload(
                         machine=[],
-                        sides=SidesUpdate(
+                        sides=_sides_update(
                             main=[
                                 Message(
                                     role="assistant",
@@ -2733,7 +2746,7 @@ ACCEPT_CASES.append(
                 _sealed_reasoning(
                     _reasoning_payload(
                         machine=[],
-                        sides=SidesUpdate(
+                        sides=_sides_update(
                             main=[
                                 Message(
                                     role="assistant",
@@ -2867,13 +2880,25 @@ REJECT_CASES.append(
                 _assistant_item("m1"),
                 _sealed_main_call(m1, "up_0"),
                 _sealed_main_output(m1, "up_0", "fo_0"),
-                _reasoning_closed_main("retro_2"),
+                _sealed_reasoning(
+                    _reasoning_payload(
+                        machine=[{"op": "add", "path": "/retro_2", "value": True}],
+                        sides=_sides_update(
+                            current=Sides(
+                                main=[
+                                    Message.from_primitive(_assistant_value("m1", "up_0")),
+                                    Message.from_primitive(_tool_value("up_0", "fo_0")),
+                                ]
+                            )
+                        ),
+                    )
+                ),
                 _assistant_item("m2"),
                 _sealed_main_call(m2, "up_1"),
                 _sealed_main_output(m2, "up_1", "fo_1"),
-                _sealed_main_call(m1, "up_old"),
+                _sealed_main_call(m1, "up_0"),
             ],
-            expected_reason="function_call_missing_function_call_output",
+            expected_reason="duplicate_tool_call_id_in_history",
         ),
         id="reject_retroactive_reopen_older_explicit_anchor",
     )

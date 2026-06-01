@@ -5,16 +5,16 @@ from copy import deepcopy
 import jsonpatch
 from jsonpointer import resolve_pointer
 
-type JSONValue = object
+type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 type JSONPatchOperation = dict[str, JSONValue]
 type JSONPatch = list[JSONPatchOperation]
 
 
-def _apply_single_operation(document: object, operation: JSONPatchOperation) -> object:
+def _apply_single_operation(document: JSONValue, operation: JSONPatchOperation) -> JSONValue:
     return jsonpatch.apply_patch(document, [operation], in_place=False)
 
 
-def _expand_move(operation: JSONPatchOperation, document: object) -> list[JSONPatchOperation]:
+def _expand_move(operation: JSONPatchOperation, document: JSONValue) -> list[JSONPatchOperation]:
     from_path = operation.get("from")
     path = operation.get("path")
     if not isinstance(from_path, str):
@@ -27,7 +27,7 @@ def _expand_move(operation: JSONPatchOperation, document: object) -> list[JSONPa
     ]
 
 
-def expand_moves(patch: JSONPatch, source: object) -> JSONPatch:
+def expand_moves(patch: JSONPatch, source: JSONValue) -> JSONPatch:
     current = deepcopy(source)
     expanded: JSONPatch = []
     for raw_operation in patch:
@@ -40,5 +40,5 @@ def expand_moves(patch: JSONPatch, source: object) -> JSONPatch:
     return expanded
 
 
-def diff(source: object, target: object) -> JSONPatch:
+def diff(source: JSONValue, target: JSONValue) -> JSONPatch:
     return expand_moves(jsonpatch.make_patch(source, target).patch, source)

@@ -99,6 +99,19 @@ def _reasoning_payload(
     )
 
 
+def _sides_update(
+    *,
+    main: list[Message | MessagePatch] | None = None,
+    patches: dict[Side, list[dict[str, object]]] | None = None,
+    current: Sides | None = None,
+) -> SidesUpdate:
+    return SidesUpdate(
+        shape=(Sides() if current is None else current).shape(),
+        main=[] if main is None else list(main),
+        patches={} if patches is None else dict(patches),
+    )
+
+
 def _sealed_compaction(payload: CompactionPayload) -> RequestCompactionItem:
     return RequestCompactionItem(
         encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
@@ -191,7 +204,7 @@ def test_decode_queue_opens_compaction_payload() -> None:
 def test_decode_queue_opens_reasoning_payload() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     decoded = _decode_queue([_sealed_reasoning(payload)], keyring=_keyring())
@@ -200,7 +213,7 @@ def test_decode_queue_opens_reasoning_payload() -> None:
 
 
 def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:
-    payload = _reasoning_payload(machine=[{"op": "add", "path": "/active", "value": []}], sides=SidesUpdate())
+    payload = _reasoning_payload(machine=[{"op": "add", "path": "/active", "value": []}], sides=_sides_update())
     item = RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
         id="rs_wrong",
@@ -326,7 +339,7 @@ def test_call_id_roundtrips_zero_based_main_side() -> None:
 
 
 def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
-    update = SidesUpdate(
+    update = _sides_update(
         main=[
             Message(role="assistant", content="prefix"),
             MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
@@ -339,7 +352,7 @@ def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messag
 
 def test_sides_update_main_rejects_second_patch() -> None:
     with pytest.raises(ValueError, match="at most one message patch"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 MessagePatch(content_hash="abcd", reasoning_content="first"),
                 MessagePatch(content_hash="efgh", reasoning_content="second"),
@@ -349,7 +362,7 @@ def test_sides_update_main_rejects_second_patch() -> None:
 
 def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
     with pytest.raises(ValueError, match="message patch must be the last non-tool main update"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 MessagePatch(content_hash="abcd", reasoning_content="hidden"),
                 Message(role="assistant", content="later assistant"),
@@ -359,7 +372,7 @@ def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
 
 def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch() -> None:
     with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
                 Message(role="tool", content="missing id"),
@@ -368,7 +381,7 @@ def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch
 
 
 def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
-    update = SidesUpdate(
+    update = _sides_update(
         main=[
             Message(
                 role="assistant",
@@ -385,7 +398,7 @@ def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
 
 
 def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
-    update = SidesUpdate(
+    update = _sides_update(
         main=[
             Message(
                 role="assistant",
@@ -407,7 +420,7 @@ def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> No
 
 def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 Message(
                     role="assistant",
@@ -421,7 +434,7 @@ def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None
 
 def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> None:
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 Message(
                     role="assistant",
@@ -435,7 +448,7 @@ def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> 
 
 def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
     with pytest.raises(ValueError, match="cannot appear before earlier tool calls are satisfied"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 Message(
                     role="assistant",
@@ -451,12 +464,60 @@ def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_clo
 
 def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
     with pytest.raises(ValueError, match="does not match an unresolved anchor tool call"):
-        SidesUpdate(
+        _sides_update(
             main=[
                 MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
                 Message(role="tool", tool_call_id="wrong", content="hidden output"),
             ]
         )
+
+
+def test_sides_shape_ignores_textual_leaves() -> None:
+    first = Sides(
+        main=[
+            Message(
+                role="assistant",
+                content="hello",
+                tool_calls=[ToolCall(id="call_0", name="read_file", arguments='{"path":"README.md"}')],
+                reasoning_content="because",
+                reasoning_details=[{"step": 1, "note": "alpha"}],
+            ),
+            Message(role="tool", tool_call_id="call_0", content="first output"),
+        ],
+        others={Side.REVIEWER: [Message(role="assistant", content="review one")]},
+    )
+    second = Sides(
+        main=[
+            Message(
+                role="assistant",
+                content="goodbye",
+                tool_calls=[ToolCall(id="call_0", name="list_files", arguments='{"path":"docs"}')],
+                reasoning_content="therefore",
+                reasoning_details=[{"step": 9, "note": "omega"}],
+            ),
+            Message(role="tool", tool_call_id="call_0", content="second output"),
+        ],
+        others={Side.REVIEWER: [Message(role="assistant", content="review two")]},
+    )
+
+    assert first.shape() == second.shape()
+
+
+def test_sides_shape_preserves_tool_call_edges() -> None:
+    first = Sides(
+        main=[
+            Message(role="assistant", tool_calls=[ToolCall(id="call_0", name="read_file", arguments="{}")]),
+            Message(role="tool", tool_call_id="call_0", content="output"),
+        ]
+    )
+    second = Sides(
+        main=[
+            Message(role="assistant", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            Message(role="tool", tool_call_id="call_1", content="output"),
+        ]
+    )
+
+    assert first.shape() != second.shape()
 
 
 def test_decode_queue_preserves_item_order() -> None:
@@ -523,14 +584,17 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         payload_id="rs_first",
         previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
+        sides=_sides_update(main=[Message(role="assistant", content="first")], current=compaction.sides),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
         previous_reasoning_id=first.id,
         previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+        sides=_sides_update(
+            main=[Message(role="assistant", content="second")],
+            current=Sides(main=[Message(role="assistant", content="snapshot"), Message(role="assistant", content="first")]),
+        ),
     )
 
     result = await ingest_response_request(
@@ -555,7 +619,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
 async def test_ingest_response_request_applies_reasoning_machine_patch() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     result = await ingest_response_request(
@@ -573,8 +637,8 @@ async def test_ingest_response_request_applies_reasoning_machine_patch() -> None
 async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": {"role": "assistant", "content": "review hidden"}},
                 ]
@@ -594,7 +658,7 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
 async def test_ingest_response_request_appends_main_messages_from_reasoning() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
-        sides=SidesUpdate(main=[Message(role="assistant", content="main hidden")]),
+        sides=_sides_update(main=[Message(role="assistant", content="main hidden")]),
     )
 
     result = await ingest_response_request(
@@ -609,11 +673,11 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
 async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
     first_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(main=[Message(role="assistant", content="first")]),
+        sides=_sides_update(main=[Message(role="assistant", content="first")]),
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=SidesUpdate(main=[Message(role="assistant", content="second")]),
+        sides=_sides_update(main=[Message(role="assistant", content="second")], current=Sides(main=[Message(role="assistant", content="first")])),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -637,7 +701,7 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
         payload_id="rs_first",
         previous_reasoning_id="rs_missing",
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -655,7 +719,7 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
         payload_id="rs_first",
         previous_compaction_id="cmp_missing",
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -673,7 +737,7 @@ async def test_ingest_response_request_rejects_reasoning_with_none_previous_comp
     payload = _reasoning_payload(
         payload_id="rs_first",
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -686,16 +750,42 @@ async def test_ingest_response_request_rejects_reasoning_with_none_previous_comp
     assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
 
 
+async def test_ingest_response_request_rejects_reasoning_when_sides_shape_drifts() -> None:
+    compaction = _compaction_payload(
+        payload_id="cmp_root",
+        machine={"active": []},
+        sides=Sides(main=[Message(role="assistant", content="snapshot")]),
+    )
+    payload = _reasoning_payload(
+        payload_id="rs_first",
+        previous_compaction_id=compaction.id,
+        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        sides=_sides_update(
+            main=[Message(role="assistant", content="hidden")],
+            current=compaction.sides,
+        ),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(compaction), _message("drift"), _sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_sides_shape_mismatch"
+
+
 async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
     first = _reasoning_payload(
         payload_id="rs_first",
         machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -712,13 +802,13 @@ async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_wh
     first = _reasoning_payload(
         payload_id="rs_duplicate",
         machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
     second = _reasoning_payload(
         payload_id="rs_duplicate",
         previous_reasoning_id=first.id,
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     result = await ingest_response_request(
@@ -738,8 +828,8 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
     )
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -781,8 +871,8 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
     hidden_output = {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "hidden result"}
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                     {"op": "add", "path": "/1", "value": hidden_output},
@@ -811,7 +901,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
     )
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=SidesUpdate(main=[assistant]),
+        sides=_sides_update(main=[assistant]),
     )
     call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
 
@@ -842,7 +932,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=SidesUpdate(
+        sides=_sides_update(
             main=[
                 Message(
                     role="assistant",
@@ -855,7 +945,7 @@ async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_
     later = _sealed_reasoning(
         _reasoning_payload(
             machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-            sides=SidesUpdate(),
+            sides=_sides_update(),
             previous_reasoning_id=payload.id,
         )
     )
@@ -878,8 +968,8 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
     )
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -905,8 +995,8 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
     )
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -939,8 +1029,8 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
     )
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -973,8 +1063,8 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
     )
     first_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -983,12 +1073,13 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
                 ]
-            }
+            },
+            current=Sides(others={Side.REVIEWER: [assistant]}),
         ),
         previous_reasoning_id=first_payload.id,
     )
@@ -1026,8 +1117,8 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
     )
     first_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
@@ -1036,7 +1127,7 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -1071,7 +1162,7 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
 async def test_ingest_response_request_rejects_main_message_patch_until_supported() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
-        sides=SidesUpdate(
+        sides=_sides_update(
             main=[
                 MessagePatch(
                     content_hash="abcd",
@@ -1189,7 +1280,7 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_pair_even_
 async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "replace", "path": "/missing", "value": 1}],
-        sides=SidesUpdate(),
+        sides=_sides_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -1205,8 +1296,8 @@ async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -
 async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> None:
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=SidesUpdate(
-            others={
+        sides=_sides_update(
+            patches={
                 Side.REVIEWER: [
                     {"op": "add", "path": "/0", "value": 1},
                 ]
