@@ -100,6 +100,9 @@ def build_openrouter_provider(*, api_key: str) -> Provider:
         name="openrouter",
         api_key=api_key,
         base_url=OPENROUTER_OPENAI_BASE_URL,
+        # Live probing showed OpenRouter responses alias assistant reasoning as
+        # `reasoning`, but request-side replay is not safely normalized the same
+        # way across models, so we only rename on the way back out.
         quirks=(SystemRole(), Only(*OPENROUTER_FIELDS), RenameOutput("reasoning", "reasoning_content")),
         models=OPENROUTER_MODELS,
     )
