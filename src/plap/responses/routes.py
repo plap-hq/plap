@@ -31,6 +31,7 @@ from plap.responses.contracts import (
 )
 from plap.responses.dependencies import HTTP_ROUTE_DEPENDENCIES, WEBSOCKET_ROUTE_DEPENDENCIES
 from plap.responses.projection import ResponseProjection
+from plap.responses.store import ResponseStore
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import RuntimeSelector, Settings
 
@@ -56,6 +57,24 @@ def _not_implemented_error(*, action: str) -> PlapError:
             message=f"responses {action} route is not implemented yet",
             level=ErrorLevel.WARNING,
             context={"action": action},
+        ),
+    )
+
+
+def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=404,
+            type="not_found_error",
+            code="response_not_found",
+            message=f"Response '{response_id}' not found.",
+        ),
+        private=PrivateError(
+            event="response.not_found",
+            reason="response_not_found",
+            message=f"response not found for {action}: {response_id}",
+            level=ErrorLevel.WARNING,
+            context={"action": action, "response_id": response_id},
         ),
     )
 
@@ -165,13 +184,18 @@ async def model_info(
 async def retrieve_response(
     response_id: str,
     auth_context: AuthContext,
+    response_store: ResponseStore,
     include: list[str] | None = None,
     include_obfuscation: bool | None = None,
     starting_after: int | None = None,
     stream: bool | None = None,
 ) -> ResponseObject:
-    _ = response_id, auth_context, include, include_obfuscation, starting_after, stream
-    raise _not_implemented_error(action="retrieve")
+    _ = starting_after, stream
+    response = await response_store.get_response(auth_context, response_id)
+    if response is None:
+        raise _response_not_found_error(response_id, action="retrieve")
+    projection = ResponseProjection.from_query(include, include_obfuscation=include_obfuscation)
+    return projection.response(response)
 
 
 @delete(
@@ -182,9 +206,12 @@ async def retrieve_response(
 async def delete_response(
     response_id: str,
     auth_context: AuthContext,
+    response_store: ResponseStore,
 ) -> ResponseDeleted:
-    _ = response_id, auth_context
-    raise _not_implemented_error(action="delete")
+    deleted = await response_store.delete_response(auth_context, response_id)
+    if not deleted:
+        raise _response_not_found_error(response_id, action="delete")
+    return ResponseDeleted(deleted=True, id=response_id)
 
 
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -203,13 +230,21 @@ async def compact_response(
 async def list_input_items(
     response_id: str,
     auth_context: AuthContext,
+    response_store: ResponseStore,
     after: str | None = None,
     include: list[str] | None = None,
     limit: int | None = None,
     order: str | None = None,
 ) -> InputItemsPage:
-    _ = response_id, auth_context, after, include, limit, order
-    raise _not_implemented_error(action="list_input_items")
+    page = await response_store.list_input_items(
+        auth_context,
+        response_id,
+        after=after,
+        limit=limit,
+        order=order,
+    )
+    projection = ResponseProjection.from_query(include)
+    return projection.input_items_page(page)
 
 
 @websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
