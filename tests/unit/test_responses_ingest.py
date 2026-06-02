@@ -33,6 +33,8 @@ from plap.responses.ingest.ingest import (
 from plap.responses.ingest.models import (
     CallID,
     CompactionPayload,
+    GuardedPatch,
+    MAIN_SIDE,
     Message,
     MessagePatch,
     ReasoningPayload,
@@ -107,10 +109,18 @@ def _sides_update(
     patches: dict[Side, list[dict[str, object]]] | None = None,
     current: Sides | None = None,
 ) -> SidesUpdate:
-    return SidesUpdate(
-        shape=(Sides() if current is None else current).shape(),
-        main=[] if main is None else list(main),
-        patches={} if patches is None else dict(patches),
+    current_sides = Sides() if current is None else current
+    normalized_patches = {
+        side: _guarded_patch(side, current_sides.get(side, []) or [], patch)
+        for side, patch in ({} if patches is None else patches).items()
+    }
+    return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
+
+
+def _guarded_patch(side: Side, current: list[Message], patch: list[dict[str, object]]) -> GuardedPatch:
+    return GuardedPatch(
+        shape=Sides(messages={side: list(current)}).shape(side),
+        patch=patch,
     )
 
 
@@ -518,7 +528,7 @@ def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None
 
 def test_sides_shape_ignores_textual_leaves() -> None:
     first = Sides(
-        main=[
+        messages={MAIN_SIDE: [
             Message(
                 role="assistant",
                 content="hello",
@@ -527,11 +537,10 @@ def test_sides_shape_ignores_textual_leaves() -> None:
                 reasoning_details=[{"step": 1, "note": "alpha"}],
             ),
             Message(role="tool", tool_call_id="call_0", content="first output"),
-        ],
-        others={Side.REVIEWER: [Message(role="assistant", content="review one")]},
+        ], "reviewer": [Message(role="assistant", content="review one")]},
     )
     second = Sides(
-        main=[
+        messages={MAIN_SIDE: [
             Message(
                 role="assistant",
                 content="goodbye",
@@ -540,28 +549,27 @@ def test_sides_shape_ignores_textual_leaves() -> None:
                 reasoning_details=[{"step": 9, "note": "omega"}],
             ),
             Message(role="tool", tool_call_id="call_0", content="second output"),
-        ],
-        others={Side.REVIEWER: [Message(role="assistant", content="review two")]},
+        ], "reviewer": [Message(role="assistant", content="review two")]},
     )
 
-    assert first.shape() == second.shape()
+    assert first.shape(MAIN_SIDE) == second.shape(MAIN_SIDE)
 
 
 def test_sides_shape_preserves_tool_call_edges() -> None:
     first = Sides(
-        main=[
+        messages={MAIN_SIDE: [
             Message(role="assistant", tool_calls=[ToolCall(id="call_0", name="read_file", arguments="{}")]),
             Message(role="tool", tool_call_id="call_0", content="output"),
-        ]
+        ]}
     )
     second = Sides(
-        main=[
+        messages={MAIN_SIDE: [
             Message(role="assistant", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
             Message(role="tool", tool_call_id="call_1", content="output"),
-        ]
+        ]}
     )
 
-    assert first.shape() != second.shape()
+    assert first.shape(MAIN_SIDE) != second.shape(MAIN_SIDE)
 
 
 def test_decode_queue_preserves_item_order() -> None:
@@ -600,10 +608,7 @@ def test_decode_queue_rejects_unsealed_reasoning_input() -> None:
 async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_only_queue() -> None:
     payload = _compaction_payload(
         machine={"active": ["reviewer"]},
-        sides=Sides(
-            main=[Message(role="assistant", content="main snapshot")],
-            others={Side.REVIEWER: [Message(role="assistant", content="review snapshot")]},
-        ),
+        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="main snapshot")], "reviewer": [Message(role="assistant", content="review snapshot")]}),
     )
 
     result = await ingest_response_request(
@@ -622,7 +627,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
     compaction = _compaction_payload(
         payload_id="cmp_root",
         machine={"active": []},
-        sides=Sides(main=[Message(role="assistant", content="snapshot")]),
+        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot")]}),
     )
     first = _reasoning_payload(
         payload_id="rs_first",
@@ -637,7 +642,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             main=[Message(role="assistant", content="second")],
-            current=Sides(main=[Message(role="assistant", content="snapshot"), Message(role="assistant", content="first")]),
+            current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot"), Message(role="assistant", content="first")]}),
         ),
     )
 
@@ -650,7 +655,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
     )
 
     assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
-    assert result.sides.main == [
+    assert result.sides[MAIN_SIDE] == [
         Message(role="assistant", content="snapshot"),
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
@@ -683,7 +688,7 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": {"role": "assistant", "content": "review hidden"}},
                 ]
             }
@@ -695,7 +700,7 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
         keyring=_keyring(),
     )
 
-    assert result.sides.others[Side.REVIEWER] == [Message(role="assistant", content="review hidden")]
+    assert result.sides["reviewer"] == [Message(role="assistant", content="review hidden")]
     assert result.last_side is None
 
 
@@ -710,7 +715,7 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
         keyring=_keyring(),
     )
 
-    assert result.sides.main == [Message(role="assistant", content="main hidden")]
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="main hidden")]
     assert result.last_side is None
 
 
@@ -721,7 +726,7 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(main=[Message(role="assistant", content="second")], current=Sides(main=[Message(role="assistant", content="first")])),
+        sides=_sides_update(main=[Message(role="assistant", content="second")], current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="first")]})),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -733,7 +738,7 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     )
 
     assert result.machine == {"active": ["reviewer"], "meta": {"step": 2}}
-    assert result.sides.main == [
+    assert result.sides[MAIN_SIDE] == [
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
     ]
@@ -794,18 +799,20 @@ async def test_ingest_response_request_rejects_reasoning_with_none_previous_comp
     assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
 
 
-async def test_ingest_response_request_rejects_reasoning_when_sides_shape_drifts() -> None:
+async def test_ingest_response_request_rejects_reasoning_when_guarded_patch_shape_drifts() -> None:
     compaction = _compaction_payload(
         payload_id="cmp_root",
         machine={"active": []},
-        sides=Sides(main=[Message(role="assistant", content="snapshot")]),
+        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot")]}),
     )
     payload = _reasoning_payload(
         payload_id="rs_first",
         previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            main=[Message(role="assistant", content="hidden")],
+            patches={
+                MAIN_SIDE: [{"op": "add", "path": "/1", "value": {"role": "assistant", "content": "hidden"}}],
+            },
             current=compaction.sides,
         ),
     )
@@ -874,7 +881,7 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -899,11 +906,11 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
         keyring=_keyring(),
     )
 
-    assert result.sides.others[Side.REVIEWER] == [
+    assert result.sides["reviewer"] == [
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="review result"),
     ]
-    assert result.last_side == Side.REVIEWER
+    assert result.last_side == "reviewer"
 
 
 async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_output_only() -> None:
@@ -917,7 +924,7 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                     {"op": "add", "path": "/1", "value": hidden_output},
                 ]
@@ -930,7 +937,7 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
         keyring=_keyring(),
     )
 
-    assert result.sides.others[Side.REVIEWER] == [
+    assert result.sides["reviewer"] == [
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="hidden result"),
     ]
@@ -966,11 +973,11 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         keyring=_keyring(),
     )
 
-    assert result.sides.main == [
+    assert result.sides[MAIN_SIDE] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
     ]
-    assert result.last_side == Side.MAIN
+    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
@@ -1014,7 +1021,7 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -1041,7 +1048,7 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -1075,7 +1082,7 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -1109,7 +1116,7 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -1119,11 +1126,11 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
                 ]
             },
-            current=Sides(others={Side.REVIEWER: [assistant]}),
+            current=Sides(messages={"reviewer": [assistant]}),
         ),
         previous_reasoning_id=first_payload.id,
     )
@@ -1163,7 +1170,7 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
             }
@@ -1232,8 +1239,8 @@ async def test_ingest_response_request_accepts_standalone_main_message() -> None
         keyring=_keyring(),
     )
 
-    assert result.sides.main == [Message(role="user", content="hello")]
-    assert result.last_side == Side.MAIN
+    assert result.sides[MAIN_SIDE] == [Message(role="user", content="hello")]
+    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
@@ -1249,7 +1256,7 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_function_c
         keyring=_keyring(),
     )
 
-    assert result.sides.others[Side.REVIEWER] == []
+    assert result.sides.get("reviewer", []) == []
     assert result.last_side is None
 
 
@@ -1299,7 +1306,7 @@ async def test_ingest_response_request_accepts_closed_anchor_then_stripped_hidde
         keyring=_keyring(),
     )
 
-    assert result.sides.main == [
+    assert result.sides[MAIN_SIDE] == [
         Message(role="assistant", content="m", tool_calls=[ToolCall(id="syn_0", name="read_file", arguments='{"path":"README.md"}')]),
         Message(role="tool", tool_call_id="syn_0", content="fo_0"),
     ]
@@ -1318,7 +1325,7 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_pair_even_
         keyring=_keyring(),
     )
 
-    assert result.sides.others[Side.REVIEWER] == []
+    assert result.sides.get("reviewer", []) == []
 
 
 async def test_ingest_response_request_fails_closed_on_invalid_machine_patch() -> None:
@@ -1342,7 +1349,7 @@ async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> N
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={
-                Side.REVIEWER: [
+                "reviewer": [
                     {"op": "add", "path": "/0", "value": 1},
                 ]
             }

@@ -18,9 +18,9 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
 )
 from plap.responses.ingest.models import (
-    NON_MAIN_SIDES,
     CallID,
     CompactionPayload,
+    MAIN_SIDE,
     Ingested,
     Message,
     MessagePatch,
@@ -387,10 +387,6 @@ class _SideCalls:
                 reason="reasoning_tool_call_missing_function_call_item",
                 private_message="reasoning tool call is missing function_call item",
             )
-
-
-def _empty_calls_by_side() -> dict[Side, _SideCalls]:
-    return {side: _SideCalls() for side in Side}
 
 
 def _copy_message(
@@ -917,29 +913,32 @@ class _Replay:
     machine: dict[str, JSONValue]
     sides: Sides
     last_side: Side | None
-    calls_by_side: dict[Side, _SideCalls] = field(default_factory=_empty_calls_by_side)
+    calls_by_side: dict[Side, _SideCalls] = field(default_factory=dict)
     main: _Main = field(default_factory=_Main)
     current_compaction_id: str | None = None
     last_reasoning_id: str | None = None
 
     def _sync_main(self) -> None:
-        self.sides.main = self.main.current_messages()
-        self.calls_by_side[Side.MAIN] = self.main.current_calls()
+        messages = self.main.current_messages()
+        self.sides[MAIN_SIDE] = messages
+        self.calls_by_side[MAIN_SIDE] = self.main.current_calls()
 
     def _rebuild_non_main_calls(self, side: Side) -> None:
-        self.calls_by_side[side] = _SideCalls.rebuild(self.sides.messages(side))
+        self.calls_by_side[side] = _SideCalls.rebuild(self.sides.get(side, []) or [])
 
     def _rebuild_all_calls(self) -> None:
-        self.calls_by_side = _empty_calls_by_side()
+        self.calls_by_side = {}
         self._sync_main()
-        for side in NON_MAIN_SIDES:
+        for side in self.sides.messages:
+            if side == MAIN_SIDE:
+                continue
             self._rebuild_non_main_calls(side)
 
-    def _assert_sides_shape_matches_sides(self, sides: SidesUpdate) -> None:
-        if self.sides.shape() != sides.shape:
+    def _assert_side_patch_matches_history(self, side: Side, shape: JSONValue) -> None:
+        if self.sides.shape(side) != shape:
             raise _reasoning_replay_error(
                 reason="reasoning_sides_shape_mismatch",
-                private_message="reasoning sides shape does not match replay history",
+                private_message=f"reasoning {side} shape does not match replay history",
             )
 
     def _assert_no_unfinished_calls_before_reasoning(self) -> None:
@@ -964,7 +963,7 @@ class _Replay:
     def _step_compaction(self, payload: CompactionPayload) -> None:
         self.machine = dict(payload.machine)
         self.sides = Sides.from_primitive(payload.sides.to_primitive())
-        self.main.load_snapshot(self.sides.main)
+        self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
         self._rebuild_all_calls()
         self.current_compaction_id = payload.id
         self.last_reasoning_id = None
@@ -975,17 +974,18 @@ class _Replay:
         self._assert_reasoning_chain_matches_state(payload)
         self.main.commit_before_reasoning()
         self._sync_main()
-        self._assert_sides_shape_matches_sides(payload.sides)
+        for side, guarded in payload.sides.patches.items():
+            self._assert_side_patch_matches_history(side, guarded.shape)
         self.machine = _apply_machine_patch(self.machine, payload.machine)
-        for side in Side:
-            patch = payload.sides.patches[side]
+        for side, guarded in payload.sides.patches.items():
+            patch = guarded.patch
             if not patch:
                 continue
-            if side == Side.MAIN:
-                self.sides.main = _apply_side_patch(self.sides.main, patch, side=side)
-                self.main.load_snapshot(self.sides.main)
+            if side == MAIN_SIDE:
+                self.sides[MAIN_SIDE] = _apply_side_patch(self.sides.get(MAIN_SIDE, []) or [], patch, side=side)
+                self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
                 continue
-            self.sides.others[side] = _apply_side_patch(self.sides.others[side], patch, side=side)
+            self.sides[side] = _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
             self._rebuild_non_main_calls(side)
         if payload.sides.main:
             self.main.apply_hidden_main_updates(payload.sides)
@@ -994,15 +994,20 @@ class _Replay:
         self.last_side = None
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:
-        side_calls = self.calls_by_side[call_id.side]
+        side_calls = self.calls_by_side.get(call_id.side)
+        if side_calls is None:
+            return
         if not side_calls.open(call_id.upstream_tool_call_id):
             return
 
     def _step_non_main_function_call_output(self, item: RequestFunctionCallOutputItem, call_id: CallID) -> None:
-        side_calls = self.calls_by_side[call_id.side]
+        side_calls = self.calls_by_side.get(call_id.side)
+        if side_calls is None:
+            return
         if not side_calls.close(call_id.upstream_tool_call_id):
             return
-        self.sides.messages(call_id.side).append(
+        side_messages = self.sides.ensure(call_id.side)
+        side_messages.append(
             Message(
                 role="tool",
                 tool_call_id=call_id.upstream_tool_call_id,
@@ -1016,7 +1021,7 @@ class _Replay:
         self.main.add_standalone_main_item(item)
         self._sync_main()
         if self.main.history_changed_by_last_event(item):
-            self.last_side = Side.MAIN
+            self.last_side = MAIN_SIDE
 
     def _validate_all_calls_closed(self) -> None:
         self.main.assert_finished()
@@ -1041,13 +1046,13 @@ class _Replay:
             self._step_reasoning(item.payload)
             return
         if isinstance(item, _DecodedSealedFunctionCall):
-            if item.call_id.side == Side.MAIN:
+            if item.call_id.side == MAIN_SIDE:
                 self._step_standalone_main_item(item)
                 return
             self._step_non_main_function_call(item.call_id)
             return
         if isinstance(item, _DecodedSealedFunctionCallOutput):
-            if item.call_id.side == Side.MAIN:
+            if item.call_id.side == MAIN_SIDE:
                 self._step_standalone_main_item(item)
                 return
             self._step_non_main_function_call_output(item.item, item.call_id)

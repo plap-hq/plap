@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from plap.llms.completions.chat import ChatMessage as Message
 from plap.responses.patch import JSONValue
 
 _TEXT = ""
@@ -71,8 +72,8 @@ def _shape_value(value: JSONValue) -> JSONValue:
     return _shape_scalar(value)
 
 
-def shape_primitive(value: JSONValue) -> JSONValue:
-    return _shape_value(value)
+def shape(messages: list[Message]) -> JSONValue:
+    return [_shape_message(message.to_primitive()) for message in messages]
 
 
-__all__ = ["shape_primitive"]
+__all__ = ["shape"]

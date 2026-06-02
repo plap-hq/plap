@@ -129,7 +129,7 @@ from nacl.secret import Aead
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring, associated_data, purpose_label
-from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload, Side
+from plap.responses.ingest.models import MAIN_SIDE, CallID, CompactionPayload, ReasoningPayload, Side
 
 COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
@@ -149,10 +149,8 @@ _PACKED_META_RESERVED_MASK = 0xF8
 _PACKED_META_UNUSED_MASK = 0x07
 _BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _BASE64URL_BY_CHAR = {char: index for index, char in enumerate(_BASE64URL_ALPHABET)}
-_SIDE_CODES: dict[Side, int] = {Side.MAIN: 0, Side.DEFENDER: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
+_SIDE_CODES: dict[Side, int] = {MAIN_SIDE: 0, "defender": 1, "reviewer": 2, "arbitrator": 3}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
-if set(_SIDE_CODES) != set(Side):
-    raise RuntimeError("_SIDE_CODES must include every Side")
 if len(_SIDES) != len(_SIDE_CODES):
     raise RuntimeError("_SIDE_CODES values must be unique")
 
@@ -452,7 +450,7 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
 
 
 def _pack_call_id(value: CallID) -> bytes:
-    if value.side not in {Side.MAIN, Side.DEFENDER, Side.REVIEWER, Side.ARBITRATOR}:
+    if value.side not in _SIDE_CODES:
         raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")

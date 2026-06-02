@@ -765,7 +765,7 @@ from plap.responses.contracts import (
     SummaryTextContent,
 )
 from plap.responses.ingest.ingest import ingest_response_request
-from plap.responses.ingest.models import CallID, Message, MessagePatch, ReasoningPayload, Side, Sides, SidesUpdate, ToolCall
+from plap.responses.ingest.models import CallID, GuardedPatch, MAIN_SIDE, Message, MessagePatch, ReasoningPayload, Side, Sides, SidesUpdate, ToolCall
 from plap.responses.ingest.sealing import (
     open_reasoning_payload,
     seal_call_id,
@@ -826,10 +826,18 @@ def _sides_update(
     patches: dict[Side, list[dict[str, object]]] | None = None,
     current: Sides | None = None,
 ) -> SidesUpdate:
-    return SidesUpdate(
-        shape=(Sides() if current is None else current).shape(),
-        main=[] if main is None else list(main),
-        patches={} if patches is None else dict(patches),
+    current_sides = Sides() if current is None else current
+    normalized_patches = {
+        side: _guarded_patch(side, current_sides.get(side, []) or [], patch)
+        for side, patch in ({} if patches is None else patches).items()
+    }
+    return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
+
+
+def _guarded_patch(side: Side, current: list[Message], patch: list[dict[str, object]]) -> GuardedPatch:
+    return GuardedPatch(
+        shape=Sides(messages={side: list(current)}).shape(side),
+        patch=patch,
     )
 
 
@@ -1028,11 +1036,11 @@ def _fabricated_output(call_id: str, output: str) -> RequestFunctionCallOutputIt
 
 
 def _main_primitives(result) -> list[dict[str, object]]:
-    return [message.to_primitive() for message in result.sides.main]
+    return [message.to_primitive() for message in result.sides[MAIN_SIDE]]
 
 
 def _side_primitives(result, side: Side) -> list[dict[str, object]]:
-    return [message.to_primitive() for message in result.sides.messages(side)]
+    return [message.to_primitive() for message in result.sides.get(side, []) or []]
 
 
 def _append_patch_analogue_case(
@@ -2582,7 +2590,7 @@ DISCARD_CASES.extend(
                         type="function_call_output",
                     ),
                 ],
-                side=Side.REVIEWER,
+                side="reviewer",
                 expected_side=[],
             ),
             id="discard_non_main_naked_reviewer_pair",
@@ -2602,7 +2610,7 @@ DISCARD_CASES.extend(
                         type="function_call_output",
                     ),
                 ],
-                side=Side.ARBITRATOR,
+                side="arbitrator",
                 expected_side=[],
             ),
             id="discard_non_main_naked_arbitrator_pair",
@@ -2611,7 +2619,7 @@ DISCARD_CASES.extend(
             _DiscardCase(
                 items=[
                     _reasoning_closed_non_main(
-                        Side.REVIEWER,
+                        "reviewer",
                         _assistant_value("review hidden", "up_existing"),
                         _tool_value("up_existing", "existing result"),
                     ),
@@ -2627,7 +2635,7 @@ DISCARD_CASES.extend(
                         type="function_call_output",
                     ),
                 ],
-                side=Side.REVIEWER,
+                side="reviewer",
                 expected_side=[
                     _assistant_value("review hidden", "up_existing"),
                     _tool_value("up_existing", "existing result"),
@@ -2639,7 +2647,7 @@ DISCARD_CASES.extend(
             _DiscardCase(
                 items=[
                     _reasoning_closed_non_main(
-                        Side.ARBITRATOR,
+                        "arbitrator",
                         _assistant_value("arb hidden", "up_existing"),
                         _tool_value("up_existing", "existing result"),
                     ),
@@ -2655,7 +2663,7 @@ DISCARD_CASES.extend(
                         type="function_call_output",
                     ),
                 ],
-                side=Side.ARBITRATOR,
+                side="arbitrator",
                 expected_side=[
                     _assistant_value("arb hidden", "up_existing"),
                     _tool_value("up_existing", "existing result"),
@@ -2885,10 +2893,10 @@ REJECT_CASES.append(
                         machine=[{"op": "add", "path": "/retro_2", "value": True}],
                         sides=_sides_update(
                             current=Sides(
-                                main=[
+                                messages={MAIN_SIDE: [
                                     Message.from_primitive(_assistant_value("m1", "up_0")),
                                     Message.from_primitive(_tool_value("up_0", "fo_0")),
-                                ]
+                                ]}
                             )
                         ),
                     )

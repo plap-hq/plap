@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 
 from plap.llms.completions.chat import ChatMessage as Message
 from plap.llms.completions.chat import ChatToolCall as ToolCall
-from plap.responses.ingest.shape import shape_primitive
+from plap.responses.ingest.shape import shape
 from plap.responses.patch import JSONPatch, JSONValue
 
 
@@ -47,22 +46,13 @@ def _required_patch(value: object, *, label: str) -> JSONPatch:
     return patch
 
 
-class Side(StrEnum):
-    MAIN = "main"
-    DEFENDER = "defender"
-    REVIEWER = "reviewer"
-    ARBITRATOR = "arbitrator"
+type Side = str
+
+MAIN_SIDE: Side = "main"
 
 
-NON_MAIN_SIDES: tuple[Side, ...] = tuple(side for side in Side if side != Side.MAIN)
-
-
-def _validate_known_side_keys(item: Mapping[str, object], *, label: str) -> None:
-    allowed = {Side.MAIN.value, *(side.value for side in NON_MAIN_SIDES)}
-    unknown = set(item) - allowed
-    if unknown:
-        names = ", ".join(sorted(unknown))
-        raise ValueError(f"{label} contains unknown side keys: {names}")
+def _required_side(value: object, *, label: str) -> Side:
+    return _required_string(value, label=label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,13 +124,9 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
 
 
 def _required_shape(value: object, *, label: str) -> JSONValue:
-    item = _required_mapping(value, label=label)
-    _validate_known_side_keys(item, label=label)
-    missing = {side.value for side in Side} - set(item)
-    if missing:
-        names = ", ".join(sorted(missing))
-        raise ValueError(f"{label} is missing side keys: {names}")
-    return {str(key): item[key] for key in item}
+    if not isinstance(value, list):
+        raise TypeError(f"{label} must be an array")
+    return value
 
 
 def _tool_call_ids(tool_calls: list[ToolCall], *, label: str) -> list[str]:
@@ -216,68 +202,104 @@ def _validate_main_updates(main: list[MainUpdate]) -> None:
 
 @dataclass(slots=True)
 class Sides:
-    main: list[Message] = field(default_factory=list)
-    others: dict[Side, list[Message]] = field(default_factory=dict)
+    messages: dict[Side, list[Message]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         normalized: dict[Side, list[Message]] = {}
-        for raw_side, messages in self.others.items():
-            side = Side(raw_side)
-            if side == Side.MAIN:
-                raise ValueError("sides others must not include main")
-            normalized[side] = list(messages)
-        for side in NON_MAIN_SIDES:
-            normalized.setdefault(side, [])
-        self.others = normalized
+        for raw_side, messages in self.messages.items():
+            side = _required_side(raw_side, label="sides key")
+            items = list(messages)
+            if not items:
+                continue
+            normalized[side] = items
+        self.messages = normalized
 
-    def messages(self, side: Side) -> list[Message]:
-        if side == Side.MAIN:
-            return self.main
-        return self.others[Side(side)]
+    def get(self, side: Side, default: list[Message] | None = None) -> list[Message] | None:
+        return self.messages.get(_required_side(side, label="side"), default)
+
+    def __getitem__(self, side: Side) -> list[Message]:
+        return self.messages[_required_side(side, label="side")]
+
+    def __setitem__(self, side: Side, messages: list[Message]) -> None:
+        key = _required_side(side, label="side")
+        items = list(messages)
+        if items:
+            self.messages[key] = items
+            return
+        self.messages.pop(key, None)
+
+    def ensure(self, side: Side) -> list[Message]:
+        key = _required_side(side, label="side")
+        messages = self.messages.get(key)
+        if messages is None:
+            messages = []
+            self.messages[key] = messages
+        return messages
+
+    def items(self):
+        return self.messages.items()
 
     def to_primitive(self) -> dict[str, object]:
-        value: dict[str, object] = {
-            "main": [message.to_primitive() for message in self.main],
+        return {
+            side: [message.to_primitive() for message in self.messages[side]]
+            for side in sorted(self.messages)
         }
-        for side in NON_MAIN_SIDES:
-            value[side.value] = [message.to_primitive() for message in self.others[side]]
-        return value
 
-    def shape(self) -> JSONValue:
-        return shape_primitive(self.to_primitive())
+    def shape(self, side: Side) -> JSONValue:
+        return shape(self.get(side, []) or [])
 
     @classmethod
     def from_primitive(cls, value: object) -> Sides:
         item = _required_mapping(value, label="sides")
-        _validate_known_side_keys(item, label="sides")
         return cls(
-            main=_required_message_list(item.get("main", []), label="sides.main"),
-            others={
-                side: _required_message_list(item.get(side.value, []), label=f"sides.{side.value}")
-                for side in NON_MAIN_SIDES
-            },
+            messages={
+                _required_side(side, label="sides key"): _required_message_list(messages, label=f"sides.{side}")
+                for side, messages in item.items()
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GuardedPatch:
+    shape: JSONValue
+    patch: JSONPatch = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", _required_shape(self.shape, label="guarded patch shape"))
+        object.__setattr__(self, "patch", _required_patch(self.patch, label="guarded patch patch"))
+
+    def to_primitive(self) -> dict[str, object]:
+        return {
+            "shape": self.shape,
+            "patch": list(self.patch),
+        }
+
+    @classmethod
+    def from_primitive(cls, value: object) -> GuardedPatch:
+        item = _required_mapping(value, label="guarded patch")
+        allowed = {"shape", "patch"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"guarded patch contains unknown keys: {names}")
+        return cls(
+            shape=_required_shape(item.get("shape"), label="guarded patch shape"),
+            patch=_required_patch(item.get("patch", []), label="guarded patch patch"),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class SidesUpdate:
-    shape: JSONValue
     main: list[MainUpdate] = field(default_factory=list)
-    patches: dict[Side, JSONPatch] = field(default_factory=dict)
+    patches: dict[Side, GuardedPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_main_updates(self.main)
-        normalized: dict[Side, JSONPatch] = {}
-        for raw_side, patch in self.patches.items():
-            side = Side(raw_side)
-            normalized[side] = list(patch)
-        for side in Side:
-            normalized.setdefault(side, [])
+        normalized: dict[Side, GuardedPatch] = {}
+        for raw_side, guarded in self.patches.items():
+            side = _required_side(raw_side, label="sides update patches key")
+            normalized[side] = guarded
         object.__setattr__(self, "patches", normalized)
-        object.__setattr__(self, "shape", _required_shape(self.shape, label="sides update shape"))
-
-    def is_empty(self) -> bool:
-        return not self.main and not any(self.patches[side] for side in Side)
 
     def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message]]:
         anchor_index = _main_anchor_index(self.main)
@@ -290,11 +312,10 @@ class SidesUpdate:
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "shape": self.shape,
             "main": [message.to_primitive() for message in self.main],
             "patches": {
-                side.value: list(self.patches[side])
-                for side in Side
+                side: guarded.to_primitive()
+                for side, guarded in sorted(self.patches.items())
             },
         }
         return value
@@ -302,19 +323,17 @@ class SidesUpdate:
     @classmethod
     def from_primitive(cls, value: object) -> SidesUpdate:
         item = _required_mapping(value, label="sides update")
-        allowed = {"shape", "main", "patches"}
+        allowed = {"main", "patches"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"sides update contains unknown keys: {names}")
-        patches_value = _required_mapping(item.get("patches"), label="sides update patches")
-        _validate_known_side_keys(patches_value, label="sides update patches")
+        patches_value = _required_mapping(item.get("patches", {}), label="sides update patches")
         return cls(
-            shape=_required_shape(item.get("shape"), label="sides update shape"),
-            main=_required_main_update_list(item.get("main"), label="sides update main"),
+            main=_required_main_update_list(item.get("main", []), label="sides update main"),
             patches={
-                side: _required_patch(patches_value.get(side.value), label=f"sides update patches.{side.value}")
-                for side in Side
+                _required_side(side, label="sides update patches key"): GuardedPatch.from_primitive(guarded)
+                for side, guarded in patches_value.items()
             },
         )
 
@@ -331,7 +350,7 @@ class ReasoningPayload:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
         _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
-        if not self.machine and self.sides.is_empty():
+        if not self.machine and not self.sides.main and not any(guarded.patch for guarded in self.sides.patches.values()):
             raise ValueError("reasoning payload must change machine or sides")
 
     def to_primitive(self) -> dict[str, object]:
@@ -394,7 +413,7 @@ class CallID:
     upstream_tool_call_id: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "side", Side(self.side))
+        object.__setattr__(self, "side", _required_side(self.side, label="function call side"))
 
 
 @dataclass(slots=True)
