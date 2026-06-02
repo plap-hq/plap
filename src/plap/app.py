@@ -6,6 +6,8 @@ from typing import Any
 import structlog
 from cachetools import LRUCache
 from litestar import Litestar, Request, Response
+from litestar.channels import ChannelsPlugin
+from litestar.channels.backends.memory import MemoryChannelsBackend
 from litestar.datastructures import State
 from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
 
@@ -513,6 +515,13 @@ def create_app(settings: Settings | None = None) -> Litestar:
 
     return Litestar(
         route_handlers=RESPONSE_ROUTE_HANDLERS,
+        plugins=[
+            ChannelsPlugin(
+                backend=MemoryChannelsBackend(),
+                arbitrary_channels_allowed=True,
+                create_ws_route_handlers=False,
+            )
+        ],
         exception_handlers={
             HTTPException: handle_http_exception,
             NotAuthorizedException: handle_auth_exception,

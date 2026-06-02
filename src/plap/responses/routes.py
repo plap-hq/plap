@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import anyio
+import msgspec
 import structlog
 from litestar import delete, get, post, websocket
+from litestar.channels import ChannelsPlugin, Subscriber
 from litestar.connection import WebSocket
 from litestar.response import ServerSentEvent
+from pydantic import TypeAdapter, ValidationError
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
@@ -16,16 +20,22 @@ from plap.responses.contracts import (
     ModelInfoListObject,
     ModelListObject,
     ReasoningEffort,
+    ResponseCompletedEvent,
+    ResponseCreateClientEvent,
     ResponseCreateRequest,
     ResponseDeleted,
     ResponseErrorEvent,
     ResponseObject,
+    ResponseStreamEvent,
     ServiceTier,
 )
 from plap.responses.dependencies import HTTP_ROUTE_DEPENDENCIES, WEBSOCKET_ROUTE_DEPENDENCIES
+from plap.responses.projection import ResponseProjection
+from plap.responses.streaming import StreamCoordinator
 from plap.settings import RuntimeSelector, Settings
 
 logger = structlog.get_logger(__name__)
+_STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
 
 
 def _not_implemented_public_error(*, action: str) -> PublicError:
@@ -56,15 +66,66 @@ async def _sse_not_implemented_payload(*, action: str) -> AsyncIterator[str]:
     yield "[DONE]"
 
 
+def _is_terminal_event(event: ResponseStreamEvent) -> bool:
+    return isinstance(event, ResponseCompletedEvent | ResponseErrorEvent)
+
+
+def _decode_stream_event(payload: bytes) -> ResponseStreamEvent:
+    return _STREAM_EVENT_ADAPTER.validate_json(payload)
+
+
+async def _iter_projected_events(
+    subscriber: Subscriber,
+    *,
+    projection: ResponseProjection,
+) -> AsyncIterator[str]:
+    async for payload in subscriber.iter_events():
+        event = _decode_stream_event(payload)
+        yield msgspec.json.encode(projection.stream_payload(event)).decode()
+        if _is_terminal_event(event):
+            break
+
+
+async def _publish_not_implemented_sequence(
+    *,
+    coordinator: StreamCoordinator,
+    action: str,
+) -> None:
+    await coordinator.created()
+    await coordinator.in_progress()
+    await coordinator.fail(_not_implemented_public_error(action=action))
+
+
+async def _sse_not_implemented_channel_payload(
+    *,
+    request: ResponseCreateRequest,
+    channels: ChannelsPlugin,
+    action: str,
+) -> AsyncIterator[str]:
+    projection = ResponseProjection.from_create_request(request, transport="stream")
+    projection.validate_create_request(request)
+    coordinator = StreamCoordinator(request=request, channels=channels)
+    subscriber = await channels.subscribe(coordinator.channel)
+    try:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(_publish_not_implemented_sequence, coordinator=coordinator, action=action)
+            async for payload in _iter_projected_events(subscriber, projection=projection):
+                yield payload
+    finally:
+        await channels.unsubscribe(subscriber, coordinator.channel)
+    yield "[DONE]"
+
+
 @post("/v1/responses", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
 async def create_response(
     data: ResponseCreateRequest,
     auth_context: AuthContext,
+    channels: ChannelsPlugin,
 ) -> object:
     _ = auth_context
     if data.stream:
         return ServerSentEvent(
-            _sse_not_implemented_payload(action="create"),
+            _sse_not_implemented_channel_payload(request=data, channels=channels, action="create"),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
     raise _not_implemented_error(action="create")
@@ -156,16 +217,46 @@ async def responses_socket(
     socket: WebSocket,
     auth_context: AuthContext,
     settings: Settings,
+    channels: ChannelsPlugin,
 ) -> None:
     _ = auth_context, settings
     await socket.accept()
-    await socket.send_json(
-        build_error_event(public=_not_implemented_public_error(action="websocket_create")).model_dump(
-            mode="json",
-            exclude_none=True,
-        )
-    )
-    await socket.close()
+
+    while True:
+        try:
+            payload = await socket.receive_json()
+        except Exception:
+            return
+
+        try:
+            client_event = ResponseCreateClientEvent.model_validate(payload)
+        except ValidationError:
+            await socket.send_json(
+                build_error_event(
+                    public=PublicError(
+                        status_code=400,
+                        type="invalid_request_error",
+                        code="invalid_client_event",
+                        message="Invalid client event.",
+                    )
+                ).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
+            continue
+
+        projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
+        projection.validate_create_request(client_event.response)
+        coordinator = StreamCoordinator(request=client_event.response, channels=channels)
+        subscriber = await channels.subscribe(coordinator.channel)
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(_publish_not_implemented_sequence, coordinator=coordinator, action="websocket_create")
+                async for payload_json in _iter_projected_events(subscriber, projection=projection):
+                    await socket.send_json(msgspec.json.decode(payload_json.encode()))
+        finally:
+            await channels.unsubscribe(subscriber, coordinator.channel)
 
 
 def build_error_event(*, public: PublicError) -> ResponseErrorEvent:
