@@ -64,11 +64,18 @@ Sealed call ids
 
     header[1]
     || side_code_be_u16[2]
-    || upstream_tool_call_id[utf8 bytes]
+    || encoded_upstream_tool_call_id[bytes]
 
 - `header` bit layout:
   - bits 7..4: format version (`2`)
-  - bits 3..0: reserved and must be zero
+  - bits 3..2: reserved and must be zero
+  - bits 1..0: upstream id codec
+
+- Upstream id codecs:
+  - `00 = utf8`
+  - `01 = ascii7`
+  - `10 = base64url6`
+  - `11` is reserved
 
 - `side_code_be_u16` is the side code as an unsigned 16-bit big-endian integer.
 
@@ -79,7 +86,18 @@ Sealed call ids
   - `arbitrator = 3`
 - Other `u16` values are currently unassigned.
 
-- `upstream_tool_call_id` is required, non-empty, and UTF-8.
+- `encoded_upstream_tool_call_id` decodes to the required, non-empty UTF-8
+  `upstream_tool_call_id`.
+- Packed codecs store:
+
+    packed_meta[1] || packed_bytes[...]
+
+- `packed_meta` bit layout:
+  - bits 7..3: reserved and must be zero
+  - bits 2..0: unused bits in the final packed byte
+- `ascii7` packs one 7-bit ASCII byte per symbol.
+- `base64url6` packs one 6-bit symbol per base64url character using alphabet:
+  `A-Z a-z 0-9 - _`.
 
 Call-id encryption
 - Call-id plaintext is encrypted with `cryptography` `AESSIV`.
@@ -98,6 +116,8 @@ Call-id encryption
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import msgspec
@@ -123,7 +143,12 @@ CALL_ID_HEADER_BYTES = 3
 TAG_BYTES = 16
 _CALL_ID_VERSION_SHIFT = 4
 _CALL_ID_VERSION_MASK = 0xF0
-_CALL_ID_FLAGS_MASK = 0x0F
+_CALL_ID_RESERVED_MASK = 0x0C
+_CALL_ID_CODEC_MASK = 0x03
+_PACKED_META_RESERVED_MASK = 0xF8
+_PACKED_META_UNUSED_MASK = 0x07
+_BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_BASE64URL_BY_CHAR = {char: index for index, char in enumerate(_BASE64URL_ALPHABET)}
 _SIDE_CODES: dict[Side, int] = {Side.MAIN: 0, Side.DEFENDER: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
 if set(_SIDE_CODES) != set(Side):
@@ -252,6 +277,128 @@ def _decode_upstream_id(value: bytes) -> str:
         ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class _Codec:
+    code: int
+    matches: Callable[[str], bool]
+    encode: Callable[[str], bytes]
+    decode: Callable[[bytes], str]
+
+
+def _pack_fixed_width(values: list[int], *, bits_per_value: int) -> bytes:
+    packed = bytearray()
+    accumulator = 0
+    count = 0
+    for value in values:
+        accumulator = (accumulator << bits_per_value) | value
+        count += bits_per_value
+        while count >= 8:
+            count -= 8
+            packed.append((accumulator >> count) & 0xFF)
+    unused_bits = 0
+    if count:
+        unused_bits = 8 - count
+        packed.append((accumulator << unused_bits) & 0xFF)
+    return bytes([unused_bits]) + bytes(packed)
+
+
+def _unpack_fixed_width(value: bytes, *, bits_per_value: int) -> list[int]:
+    if len(value) < 2:
+        raise _tool_replay_error(
+            reason="function_call_id_packed_payload_too_short",
+            private_message="packed function call id payload is too short",
+        )
+    meta = value[0]
+    if meta & _PACKED_META_RESERVED_MASK:
+        raise _tool_replay_error(
+            reason="function_call_id_packed_meta_invalid",
+            private_message="packed function call id metadata is invalid",
+        )
+    unused_bits = meta & _PACKED_META_UNUSED_MASK
+    packed = value[1:]
+    total_bits = len(packed) * 8 - unused_bits
+    if total_bits <= 0 or total_bits % bits_per_value != 0:
+        raise _tool_replay_error(
+            reason="function_call_id_packed_payload_invalid",
+            private_message="packed function call id payload is invalid",
+        )
+    payload = int.from_bytes(packed, byteorder="big")
+    values: list[int] = []
+    total_packed_bits = len(packed) * 8
+    for offset in range(0, total_bits, bits_per_value):
+        shift = total_packed_bits - bits_per_value - offset
+        values.append((payload >> shift) & ((1 << bits_per_value) - 1))
+    return values
+
+
+def _matches_utf8(value: str) -> bool:
+    _ = value
+    return True
+
+
+def _matches_ascii7(value: str) -> bool:
+    return all(byte < 0x80 for byte in value.encode())
+
+
+def _matches_base64url6(value: str) -> bool:
+    return all(char in _BASE64URL_BY_CHAR for char in value)
+
+
+def _encode_utf8(value: str) -> bytes:
+    return value.encode()
+
+
+def _encode_ascii7(value: str) -> bytes:
+    return _pack_fixed_width(list(value.encode()), bits_per_value=7)
+
+
+def _encode_base64url6(value: str) -> bytes:
+    return _pack_fixed_width([_BASE64URL_BY_CHAR[char] for char in value], bits_per_value=6)
+
+
+def _decode_ascii7(value: bytes) -> str:
+    decoded = bytes(_unpack_fixed_width(value, bits_per_value=7))
+    try:
+        return decoded.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise _tool_replay_error(
+            reason="upstream_tool_call_id_not_utf8",
+            private_message="upstream_tool_call_id is not UTF-8",
+            cause=exc,
+        ) from exc
+
+
+def _decode_base64url6(value: bytes) -> str:
+    try:
+        return "".join(_BASE64URL_ALPHABET[symbol] for symbol in _unpack_fixed_width(value, bits_per_value=6))
+    except IndexError as exc:
+        raise _tool_replay_error(
+            reason="function_call_id_packed_payload_invalid",
+            private_message="packed function call id payload is invalid",
+            cause=exc,
+        ) from exc
+
+
+_CODECS: dict[int, _Codec] = {
+    0: _Codec(code=0, matches=_matches_utf8, encode=_encode_utf8, decode=_decode_upstream_id),
+    1: _Codec(code=1, matches=_matches_ascii7, encode=_encode_ascii7, decode=_decode_ascii7),
+    2: _Codec(code=2, matches=_matches_base64url6, encode=_encode_base64url6, decode=_decode_base64url6),
+}
+_CODEC_PREFERENCE: tuple[_Codec, ...] = (_CODECS[2], _CODECS[1], _CODECS[0])
+
+
+def _decode_encoded_upstream_id(header: int, value: bytes) -> str:
+    codec = header & _CALL_ID_CODEC_MASK
+    try:
+        return _CODECS[codec].decode(value)
+    except KeyError as exc:
+        raise _tool_replay_error(
+            reason="unsupported_function_call_id_codec",
+            private_message="unsupported function call id codec",
+            cause=exc,
+        ) from exc
+
+
 def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
     return {
         "version": PAYLOAD_FORMAT_VERSION,
@@ -312,14 +459,19 @@ def _pack_call_id(value: CallID) -> bytes:
     side_code = _SIDE_CODES[value.side]
     if not 0 <= side_code <= 0xFFFF:
         raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
-    header = CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT
-    return b"".join(
-        (
-            bytes([header]),
-            side_code.to_bytes(2, byteorder="big"),
-            value.upstream_tool_call_id.encode(),
+    for codec in _CODEC_PREFERENCE:
+        if not codec.matches(value.upstream_tool_call_id):
+            continue
+        encoded_upstream_id = codec.encode(value.upstream_tool_call_id)
+        header = (CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT) | codec.code
+        return b"".join(
+            (
+                bytes([header]),
+                side_code.to_bytes(2, byteorder="big"),
+                encoded_upstream_id,
+            )
         )
-    )
+    raise RuntimeError("at least one call id codec must match")
 
 
 def _unpack_call_id(value: bytes) -> CallID:
@@ -330,7 +482,7 @@ def _unpack_call_id(value: bytes) -> CallID:
     version = (header & _CALL_ID_VERSION_MASK) >> _CALL_ID_VERSION_SHIFT
     if version != CALL_ID_FORMAT_VERSION:
         raise _tool_replay_error(reason="unsupported_function_call_id_version", private_message="unsupported function call id version")
-    if header & _CALL_ID_FLAGS_MASK:
+    if header & _CALL_ID_RESERVED_MASK:
         raise _tool_replay_error(
             reason="function_call_id_reserved_bits_nonzero",
             private_message="function call id reserved bits must be zero",
@@ -344,7 +496,7 @@ def _unpack_call_id(value: bytes) -> CallID:
         ) from exc
     return CallID(
         side=side,
-        upstream_tool_call_id=_decode_upstream_id(value[CALL_ID_HEADER_BYTES:]),
+        upstream_tool_call_id=_decode_encoded_upstream_id(header, value[CALL_ID_HEADER_BYTES:]),
     )
 
 

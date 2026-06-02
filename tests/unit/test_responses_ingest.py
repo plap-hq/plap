@@ -42,6 +42,8 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import (
+    _pack_call_id,
+    _unpack_call_id,
     open_call_id,
     seal_call_id,
     seal_compaction_payload,
@@ -336,6 +338,48 @@ def test_call_id_roundtrips_zero_based_main_side() -> None:
     token = seal_call_id(value, keyring=_keyring())
 
     assert open_call_id(token, keyring=_keyring()) == value
+
+
+def test_pack_call_id_uses_base64url6_codec_when_possible() -> None:
+    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="up_main_0"))
+
+    assert packed[0] == 0x22
+
+
+def test_pack_call_id_uses_ascii7_codec_for_ascii_non_base64url_ids() -> None:
+    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="call:1"))
+
+    assert packed[0] == 0x21
+
+
+def test_pack_call_id_uses_utf8_codec_for_non_ascii_ids() -> None:
+    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="café"))
+
+    assert packed[0] == 0x20
+
+
+def test_unpack_call_id_rejects_reserved_codec() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        _unpack_call_id(bytes([0x23, 0x00, 0x00, ord("a")]))
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "unsupported_function_call_id_codec"
+
+
+def test_unpack_call_id_rejects_invalid_packed_meta() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        _unpack_call_id(bytes([0x21, 0x00, 0x00, 0x80, 0x00]))
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "function_call_id_packed_meta_invalid"
+
+
+def test_unpack_call_id_rejects_invalid_packed_payload() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        _unpack_call_id(bytes([0x21, 0x00, 0x00, 0x02, 0x00]))
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "function_call_id_packed_payload_invalid"
 
 
 def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
