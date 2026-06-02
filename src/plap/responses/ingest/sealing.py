@@ -63,22 +63,21 @@ Sealed call ids
 - Before encryption, the plaintext byte layout is:
 
     header[1]
-    || side_header[1]
+    || side_code_be_u16[2]
     || upstream_tool_call_id[utf8 bytes]
 
 - `header` bit layout:
   - bits 7..4: format version (`2`)
   - bits 3..0: reserved and must be zero
 
-- `side_header` bit layout:
-  - bits 7..5: reserved and must be zero
-  - bits 4..0: side code
+- `side_code_be_u16` is the side code as an unsigned 16-bit big-endian integer.
 
 - Side codes:
   - `main = 0`
   - `defender = 1`
   - `reviewer = 2`
   - `arbitrator = 3`
+- Other `u16` values are currently unassigned.
 
 - `upstream_tool_call_id` is required, non-empty, and UTF-8.
 
@@ -120,13 +119,11 @@ PAYLOAD_FORMAT_VERSION = 2
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
-CALL_ID_HEADER_BYTES = 2
+CALL_ID_HEADER_BYTES = 3
 TAG_BYTES = 16
 _CALL_ID_VERSION_SHIFT = 4
 _CALL_ID_VERSION_MASK = 0xF0
 _CALL_ID_FLAGS_MASK = 0x0F
-_CALL_ID_SIDE_MASK = 0x1F
-_CALL_ID_SIDE_RESERVED_MASK = 0xE0
 _SIDE_CODES: dict[Side, int] = {Side.MAIN: 0, Side.DEFENDER: 1, Side.REVIEWER: 2, Side.ARBITRATOR: 3}
 _SIDES = {code: side for side, code in _SIDE_CODES.items()}
 if set(_SIDE_CODES) != set(Side):
@@ -313,13 +310,13 @@ def _pack_call_id(value: CallID) -> bytes:
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
     side_code = _SIDE_CODES[value.side]
-    if side_code & _CALL_ID_SIDE_RESERVED_MASK:
+    if not 0 <= side_code <= 0xFFFF:
         raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
     header = CALL_ID_FORMAT_VERSION << _CALL_ID_VERSION_SHIFT
     return b"".join(
         (
             bytes([header]),
-            bytes([side_code]),
+            side_code.to_bytes(2, byteorder="big"),
             value.upstream_tool_call_id.encode(),
         )
     )
@@ -338,14 +335,9 @@ def _unpack_call_id(value: bytes) -> CallID:
             reason="function_call_id_reserved_bits_nonzero",
             private_message="function call id reserved bits must be zero",
         )
-    side_header = value[1]
-    if side_header & _CALL_ID_SIDE_RESERVED_MASK:
-        raise _tool_replay_error(
-            reason="function_call_id_reserved_bits_nonzero",
-            private_message="function call id reserved bits must be zero",
-        )
+    side_code = int.from_bytes(value[1:CALL_ID_HEADER_BYTES], byteorder="big")
     try:
-        side = _SIDES[side_header & _CALL_ID_SIDE_MASK]
+        side = _SIDES[side_code]
     except KeyError as exc:
         raise _tool_replay_error(
             reason="invalid_function_call_id_side", private_message="invalid function call id side", cause=exc
