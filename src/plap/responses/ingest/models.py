@@ -124,6 +124,8 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
 
 
 def _required_shape(value: object, *, label: str) -> JSONValue:
+    if value is None:
+        return None
     if not isinstance(value, list):
         raise TypeError(f"{label} must be an array")
     return value
@@ -208,10 +210,7 @@ class Sides:
         normalized: dict[Side, list[Message]] = {}
         for raw_side, messages in self.messages.items():
             side = _required_side(raw_side, label="sides key")
-            items = list(messages)
-            if not items:
-                continue
-            normalized[side] = items
+            normalized[side] = list(messages)
         self.messages = normalized
 
     def get(self, side: Side, default: list[Message] | None = None) -> list[Message] | None:
@@ -222,19 +221,13 @@ class Sides:
 
     def __setitem__(self, side: Side, messages: list[Message]) -> None:
         key = _required_side(side, label="side")
-        items = list(messages)
-        if items:
-            self.messages[key] = items
-            return
-        self.messages.pop(key, None)
+        self.messages[key] = list(messages)
 
-    def ensure(self, side: Side) -> list[Message]:
+    def setdefault(self, side: Side, default: list[Message] | None = None) -> list[Message]:
         key = _required_side(side, label="side")
-        messages = self.messages.get(key)
-        if messages is None:
-            messages = []
-            self.messages[key] = messages
-        return messages
+        if key not in self.messages:
+            self.messages[key] = [] if default is None else list(default)
+        return self.messages[key]
 
     def items(self):
         return self.messages.items()
@@ -246,7 +239,10 @@ class Sides:
         }
 
     def shape(self, side: Side) -> JSONValue:
-        return shape(self.get(side, []) or [])
+        messages = self.get(side)
+        if messages is None:
+            return None
+        return shape(messages)
 
     @classmethod
     def from_primitive(cls, value: object) -> Sides:
@@ -262,16 +258,17 @@ class Sides:
 @dataclass(frozen=True, slots=True)
 class GuardedPatch:
     shape: JSONValue
-    patch: JSONPatch = field(default_factory=list)
+    patch: JSONPatch | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "shape", _required_shape(self.shape, label="guarded patch shape"))
-        object.__setattr__(self, "patch", _required_patch(self.patch, label="guarded patch patch"))
+        if self.patch is not None:
+            object.__setattr__(self, "patch", _required_patch(self.patch, label="guarded patch patch"))
 
     def to_primitive(self) -> dict[str, object]:
         return {
             "shape": self.shape,
-            "patch": list(self.patch),
+            "patch": None if self.patch is None else list(self.patch),
         }
 
     @classmethod
@@ -282,9 +279,13 @@ class GuardedPatch:
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"guarded patch contains unknown keys: {names}")
+        missing = allowed - set(item)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"guarded patch is missing keys: {names}")
         return cls(
-            shape=_required_shape(item.get("shape"), label="guarded patch shape"),
-            patch=_required_patch(item.get("patch", []), label="guarded patch patch"),
+            shape=_required_shape(item["shape"], label="guarded patch shape"),
+            patch=None if item["patch"] is None else _required_patch(item["patch"], label="guarded patch patch"),
         )
 
 
@@ -350,7 +351,7 @@ class ReasoningPayload:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
         _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
-        if not self.machine and not self.sides.main and not any(guarded.patch for guarded in self.sides.patches.values()):
+        if not self.machine and not self.sides.main and not any(guarded.patch is not None for guarded in self.sides.patches.values()):
             raise ValueError("reasoning payload must change machine or sides")
 
     def to_primitive(self) -> dict[str, object]:

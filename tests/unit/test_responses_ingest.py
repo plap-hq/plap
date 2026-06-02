@@ -106,20 +106,20 @@ def _reasoning_payload(
 def _sides_update(
     *,
     main: list[Message | MessagePatch] | None = None,
-    patches: dict[Side, list[dict[str, object]]] | None = None,
+    patches: dict[Side, list[dict[str, object]] | None] | None = None,
     current: Sides | None = None,
 ) -> SidesUpdate:
     current_sides = Sides() if current is None else current
     normalized_patches = {
-        side: _guarded_patch(side, current_sides.get(side, []) or [], patch)
+        side: _guarded_patch(side, current_sides.get(side), patch)
         for side, patch in ({} if patches is None else patches).items()
     }
     return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
 
 
-def _guarded_patch(side: Side, current: list[Message], patch: list[dict[str, object]]) -> GuardedPatch:
+def _guarded_patch(side: Side, current: list[Message] | None, patch: list[dict[str, object]] | None) -> GuardedPatch:
     return GuardedPatch(
-        shape=Sides(messages={side: list(current)}).shape(side),
+        shape=None if current is None else Sides(messages={side: list(current)}).shape(side),
         patch=patch,
     )
 
@@ -524,6 +524,16 @@ def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None
                 Message(role="tool", tool_call_id="wrong", content="hidden output"),
             ]
         )
+
+
+def test_guarded_patch_from_primitive_requires_shape_key() -> None:
+    with pytest.raises(ValueError, match="guarded patch is missing keys: shape"):
+        GuardedPatch.from_primitive({"patch": []})
+
+
+def test_guarded_patch_from_primitive_requires_patch_key() -> None:
+    with pytest.raises(ValueError, match="guarded patch is missing keys: patch"):
+        GuardedPatch.from_primitive({"shape": None})
 
 
 def test_sides_shape_ignores_textual_leaves() -> None:

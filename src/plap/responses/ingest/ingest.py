@@ -920,7 +920,8 @@ class _Replay:
 
     def _sync_main(self) -> None:
         messages = self.main.current_messages()
-        self.sides[MAIN_SIDE] = messages
+        if messages or MAIN_SIDE in self.sides.messages:
+            self.sides[MAIN_SIDE] = messages
         self.calls_by_side[MAIN_SIDE] = self.main.current_calls()
 
     def _rebuild_non_main_calls(self, side: Side) -> None:
@@ -979,13 +980,14 @@ class _Replay:
         self.machine = _apply_machine_patch(self.machine, payload.machine)
         for side, guarded in payload.sides.patches.items():
             patch = guarded.patch
-            if not patch:
+            if patch is None:
                 continue
             if side == MAIN_SIDE:
-                self.sides[MAIN_SIDE] = _apply_side_patch(self.sides.get(MAIN_SIDE, []) or [], patch, side=side)
+                next_main = [] if not patch else _apply_side_patch(self.sides.get(MAIN_SIDE, []) or [], patch, side=side)
+                self.sides[MAIN_SIDE] = next_main
                 self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
                 continue
-            self.sides[side] = _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
+            self.sides[side] = [] if not patch else _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
             self._rebuild_non_main_calls(side)
         if payload.sides.main:
             self.main.apply_hidden_main_updates(payload.sides)
@@ -1006,7 +1008,7 @@ class _Replay:
             return
         if not side_calls.close(call_id.upstream_tool_call_id):
             return
-        side_messages = self.sides.ensure(call_id.side)
+        side_messages = self.sides.setdefault(call_id.side)
         side_messages.append(
             Message(
                 role="tool",
