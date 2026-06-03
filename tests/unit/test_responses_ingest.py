@@ -31,10 +31,10 @@ from plap.responses.ingest.ingest import (
     ingest_response_request,
 )
 from plap.responses.ingest.models import (
+    MAIN_SIDE,
     CallID,
     CompactionPayload,
     GuardedPatch,
-    MAIN_SIDE,
     Message,
     MessagePatch,
     ReasoningPayload,
@@ -222,6 +222,13 @@ def test_decode_queue_opens_reasoning_payload() -> None:
     decoded = _decode_queue([_sealed_reasoning(payload)], keyring=_keyring())
 
     assert decoded == [_DecodedReasoning(payload=payload)]
+
+
+def test_reasoning_payload_allows_empty_delta() -> None:
+    payload = _reasoning_payload(machine=[], sides=_sides_update())
+
+    assert payload.machine == []
+    assert payload.sides == _sides_update()
 
 
 def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:

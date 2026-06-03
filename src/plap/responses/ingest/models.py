@@ -351,8 +351,6 @@ class ReasoningPayload:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
         _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
-        if not self.machine and not self.sides.main and not any(guarded.patch is not None for guarded in self.sides.patches.values()):
-            raise ValueError("reasoning payload must change machine or sides")
 
     def to_primitive(self) -> dict[str, object]:
         return {
