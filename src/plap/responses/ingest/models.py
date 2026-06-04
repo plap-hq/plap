@@ -163,15 +163,30 @@ def _anchor_open_call_ids(anchor: MainUpdate) -> set[str]:
     return set(_tool_call_ids(anchor.tool_calls, label="anchor tool_calls"))
 
 
-def _main_anchor_index(main: list[MainUpdate]) -> int | None:
-    anchor_index = len(main) - 1
-    while anchor_index >= 0:
-        candidate = main[anchor_index]
-        if isinstance(candidate, Message) and candidate.is_tool():
-            anchor_index -= 1
+def split_tail(items: list[MainUpdate]) -> tuple[list[Message], MainUpdate | None, list[Message], list[Message]]:
+    anchor_index: int | None = None
+    for index in range(len(items) - 1, -1, -1):
+        candidate = items[index]
+        if isinstance(candidate, MessagePatch) or candidate.is_assistant():
+            anchor_index = index
+            break
+    if anchor_index is None:
+        return [], None, [], [item for item in items if isinstance(item, Message)]
+
+    prefix = [item for item in items[:anchor_index] if isinstance(item, Message)]
+    anchor = items[anchor_index]
+    suffix: list[Message] = []
+    after: list[Message] = []
+    after_started = False
+    for item in items[anchor_index + 1 :]:
+        if not isinstance(item, Message):
+            raise TypeError("sides update main may not contain a message patch after the anchor")
+        if not after_started and item.is_tool():
+            suffix.append(item)
             continue
-        return anchor_index
-    return None
+        after_started = True
+        after.append(item)
+    return prefix, anchor, suffix, after
 
 
 def _validate_main_updates(main: list[MainUpdate]) -> None:
@@ -180,26 +195,35 @@ def _validate_main_updates(main: list[MainUpdate]) -> None:
     patch_indices = [index for index, update in enumerate(main) if isinstance(update, MessagePatch)]
     if len(patch_indices) > 1:
         raise ValueError("sides update main may contain at most one message patch")
-    anchor_index = _main_anchor_index(main)
-    if anchor_index is None:
-        raise ValueError("sides update main must contain an assistant anchor or message patch")
-    anchor = main[anchor_index]
+    prefix, anchor, suffix, after = split_tail(main)
+    if anchor is None:
+        if any(message.is_tool() for message in after):
+            raise ValueError("sides update main without an assistant anchor may not contain tool outputs")
+        _validate_closed_prefix_messages(after, label="sides update main")
+        return
+
+    anchor_index = next(index for index, update in enumerate(main) if update is anchor)
     if isinstance(anchor, MessagePatch):
         if patch_indices != [anchor_index]:
             raise ValueError("message patch must be the last non-tool main update")
-    elif not anchor.is_assistant():
-        raise ValueError("sides update main anchor must be an assistant message or message patch")
-    prefix = main[:anchor_index]
-    if any(isinstance(update, MessagePatch) for update in prefix):
+        if after:
+            raise ValueError("message patch anchor may not have trailing non-assistant tail")
+    prefix_updates = main[:anchor_index]
+    if any(isinstance(update, MessagePatch) for update in prefix_updates):
         raise ValueError("message patch must be the last non-tool main update")
-    _validate_closed_prefix_messages([update for update in prefix if isinstance(update, Message)], label="sides update main prefix")
+    _validate_closed_prefix_messages(prefix, label="sides update main prefix")
     pending_anchor_call_ids = _anchor_open_call_ids(anchor)
-    for index, update in enumerate(main[anchor_index + 1 :], start=anchor_index + 1):
-        if not isinstance(update, Message) or not update.is_tool() or update.tool_call_id is None:
-            raise ValueError(f"sides update main[{index}] must be a tool message with tool_call_id after the anchor")
+    for offset, update in enumerate(suffix, start=anchor_index + 1):
+        if update.tool_call_id is None:
+            raise ValueError(f"sides update main[{offset}] must be a tool message with tool_call_id after the anchor")
         if update.tool_call_id not in pending_anchor_call_ids:
-            raise ValueError(f"sides update main[{index}] does not match an unresolved anchor tool call")
+            raise ValueError(f"sides update main[{offset}] does not match an unresolved anchor tool call")
         pending_anchor_call_ids.remove(update.tool_call_id)
+    if pending_anchor_call_ids and after:
+        raise ValueError("sides update main with unresolved anchor tool calls may not have trailing non-assistant tail")
+    for offset, update in enumerate(after, start=anchor_index + 1 + len(suffix)):
+        if update.is_assistant() or update.is_tool():
+            raise ValueError(f"sides update main[{offset}] must be a closed non-assistant tail message")
 
 
 @dataclass(slots=True)
@@ -302,14 +326,8 @@ class SidesUpdate:
             normalized[side] = guarded
         object.__setattr__(self, "patches", normalized)
 
-    def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message]]:
-        anchor_index = _main_anchor_index(self.main)
-        if anchor_index is None:
-            return [], None, []
-        anchor = self.main[anchor_index]
-        prefix = [update for update in self.main[:anchor_index] if isinstance(update, Message)]
-        suffix = [update for update in self.main[anchor_index + 1 :] if isinstance(update, Message)]
-        return prefix, anchor, suffix
+    def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message], list[Message]]:
+        return split_tail(self.main)
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {

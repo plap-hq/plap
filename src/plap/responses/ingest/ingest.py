@@ -29,6 +29,7 @@ from plap.responses.ingest.models import (
     Sides,
     SidesUpdate,
     ToolCall,
+    split_tail,
 )
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
 from plap.responses.patch import JSONPatch, JSONValue
@@ -273,42 +274,6 @@ def _apply_side_patch(messages: list[Message], patch: list[dict[str, object]], *
                 cause=exc,
             ) from exc
     return rebuilt
-
-
-def _split_attachable_main_snapshot(messages: list[Message]) -> tuple[list[Message], Message | None, list[Message], list[Message]]:
-    anchor_index: int | None = None
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].is_assistant():
-            anchor_index = index
-            break
-    if anchor_index is None:
-        return list(messages), None, [], []
-
-    before = list(messages[:anchor_index])
-    anchor = messages[anchor_index]
-    pending = {tool_call.id for tool_call in anchor.tool_calls}
-    suffix: list[Message] = []
-    index = anchor_index + 1
-    while index < len(messages):
-        message = messages[index]
-        if not message.is_tool():
-            break
-        tool_call_id = message.tool_call_id
-        if tool_call_id is None or tool_call_id not in pending:
-            raise _tool_replay_error(
-                reason="function_call_output_without_pending_function_call",
-                private_message="main snapshot tool output has no pending function_call",
-            )
-        pending.remove(tool_call_id)
-        suffix.append(message)
-        index += 1
-    after = list(messages[index:])
-    if any(message.is_tool() for message in after):
-        raise _tool_replay_error(
-            reason="function_call_output_without_pending_function_call",
-            private_message="main snapshot contains tool output after non-tool tail content",
-        )
-    return before, anchor, suffix, after
 
 
 class _Phase(StrEnum):
@@ -795,12 +760,14 @@ class _Main:
         self.bundle = None
 
     def load_attachable_snapshot(self, messages: list[Message]) -> None:
-        before, anchor, suffix, after = _split_attachable_main_snapshot(messages)
-        self.committed = before
+        before, anchor, suffix, after = split_tail(messages)
+        self.committed = list(before)
         if anchor is None:
             self.committed.extend(after)
             self.bundle = None
             return
+        if not isinstance(anchor, Message):  # pragma: no cover
+            raise TypeError("main snapshot anchor must be a message")
         self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=True, after=list(after))
 
     def _finalize(self) -> None:
@@ -818,14 +785,15 @@ class _Main:
         self._finalize()
 
     def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
-        prefix, anchor, suffix = sides.split_main()
+        prefix, anchor, suffix, after = sides.split_main()
         self.committed.extend(prefix)
         if anchor is None:
+            self.committed.extend(after)
             return
         if isinstance(anchor, MessagePatch):
             self.bundle = _Bundle(anchor=_Anchor.from_patch(anchor, suffix), past_anchor=False)
             return
-        self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=False)
+        self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=bool(after), after=list(after))
 
     def _append_message(self, message: Message) -> None:
         if self.bundle is None:

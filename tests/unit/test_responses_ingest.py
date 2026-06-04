@@ -479,6 +479,53 @@ def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> No
     assert len(update.main) == 4
 
 
+def test_sides_update_main_accepts_closed_non_assistant_tail_without_anchor() -> None:
+    update = _sides_update(
+        main=[
+            Message(role="user", content="u"),
+            Message(role="system", content="s"),
+            Message(role="developer", content="d"),
+        ]
+    )
+
+    assert len(update.main) == 3
+
+
+def test_sides_update_main_accepts_closed_assistant_with_user_tail() -> None:
+    update = _sides_update(
+        main=[
+            Message(role="assistant", content="done"),
+            Message(role="user", content="tail"),
+        ]
+    )
+
+    assert len(update.main) == 2
+
+
+def test_sides_update_main_rejects_message_patch_with_user_tail() -> None:
+    with pytest.raises(ValueError, match="message patch anchor may not have trailing non-assistant tail"):
+        _sides_update(
+            main=[
+                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                Message(role="user", content="tail"),
+            ]
+        )
+
+
+def test_sides_update_main_rejects_open_assistant_with_user_tail() -> None:
+    with pytest.raises(ValueError, match="unresolved anchor tool calls may not have trailing non-assistant tail"):
+        _sides_update(
+            main=[
+                Message(
+                    role="assistant",
+                    content="anchor",
+                    tool_calls=[ToolCall(id="anchor_0", name="read_file", arguments="{}")],
+                ),
+                Message(role="user", content="tail"),
+            ]
+        )
+
+
 def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
         _sides_update(
@@ -993,6 +1040,187 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
     assert result.sides[MAIN_SIDE] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
+    ]
+    assert result.last_side == MAIN_SIDE
+
+
+async def test_ingest_response_request_accepts_main_patched_open_cluster_with_empty_main_updates() -> None:
+    assistant = Message(
+        role="assistant",
+        content="main hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=_sides_update(
+            patches={
+                MAIN_SIDE: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                ]
+            }
+        ),
+    )
+    call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id=call_id,
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        assistant,
+        Message(role="tool", tool_call_id="up_main_0", content="main result"),
+    ]
+    assert result.last_side == MAIN_SIDE
+
+
+async def test_ingest_response_request_accepts_main_patched_closed_cluster_with_fabricated_pair() -> None:
+    assistant = Message(
+        role="assistant",
+        content="main hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=_sides_update(
+            patches={
+                MAIN_SIDE: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                    {"op": "add", "path": "/1", "value": {"role": "tool", "tool_call_id": "up_main_0", "content": "hidden result"}},
+                ]
+            }
+        ),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="fab_0",
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id="fab_0", output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="main hidden",
+            tool_calls=[
+                ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}'),
+                ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}'),
+            ],
+        ),
+        Message(role="tool", tool_call_id="up_main_0", content="hidden result"),
+        Message(role="tool", tool_call_id="fab_0", content="main result"),
+    ]
+    assert result.last_side == MAIN_SIDE
+
+
+async def test_ingest_response_request_accepts_fabricated_main_pair_after_closed_cluster_and_user() -> None:
+    assistant = Message(
+        role="assistant",
+        content="main hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=_sides_update(
+            patches={
+                MAIN_SIDE: [
+                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
+                    {"op": "add", "path": "/1", "value": {"role": "tool", "tool_call_id": "up_main_0", "content": "hidden result"}},
+                    {"op": "add", "path": "/2", "value": Message(role="user", content="later user").to_primitive()},
+                ]
+            }
+        ),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="fab_0",
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id="fab_0", output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="main hidden",
+            tool_calls=[
+                ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}'),
+                ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}'),
+            ],
+        ),
+        Message(role="tool", tool_call_id="up_main_0", content="hidden result"),
+        Message(role="tool", tool_call_id="fab_0", content="main result"),
+        Message(role="user", content="later user"),
+    ]
+    assert result.last_side == MAIN_SIDE
+
+
+async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_reasoning_step() -> None:
+    initial = Message(role="assistant", content="main hidden")
+    first = _reasoning_payload(
+        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
+        sides=_sides_update(main=[initial]),
+    )
+    second = _reasoning_payload(
+        machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        sides=_sides_update(),
+        previous_reasoning_id=first.id,
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(first),
+                _sealed_reasoning(second),
+                RequestFunctionCallItem(
+                    arguments='{"path":"README.md"}',
+                    call_id="fab_0",
+                    name="read_file",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id="fab_0", output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="main hidden", tool_calls=[ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}')]),
+        Message(role="tool", tool_call_id="fab_0", content="main result"),
     ]
     assert result.last_side == MAIN_SIDE
 
