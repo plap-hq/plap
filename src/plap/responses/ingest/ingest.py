@@ -18,9 +18,9 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
 )
 from plap.responses.ingest.models import (
+    MAIN_SIDE,
     CallID,
     CompactionPayload,
-    MAIN_SIDE,
     Ingested,
     Message,
     MessagePatch,
@@ -273,6 +273,42 @@ def _apply_side_patch(messages: list[Message], patch: list[dict[str, object]], *
                 cause=exc,
             ) from exc
     return rebuilt
+
+
+def _split_attachable_main_snapshot(messages: list[Message]) -> tuple[list[Message], Message | None, list[Message], list[Message]]:
+    anchor_index: int | None = None
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].is_assistant():
+            anchor_index = index
+            break
+    if anchor_index is None:
+        return list(messages), None, [], []
+
+    before = list(messages[:anchor_index])
+    anchor = messages[anchor_index]
+    pending = {tool_call.id for tool_call in anchor.tool_calls}
+    suffix: list[Message] = []
+    index = anchor_index + 1
+    while index < len(messages):
+        message = messages[index]
+        if not message.is_tool():
+            break
+        tool_call_id = message.tool_call_id
+        if tool_call_id is None or tool_call_id not in pending:
+            raise _tool_replay_error(
+                reason="function_call_output_without_pending_function_call",
+                private_message="main snapshot tool output has no pending function_call",
+            )
+        pending.remove(tool_call_id)
+        suffix.append(message)
+        index += 1
+    after = list(messages[index:])
+    if any(message.is_tool() for message in after):
+        raise _tool_replay_error(
+            reason="function_call_output_without_pending_function_call",
+            private_message="main snapshot contains tool output after non-tool tail content",
+        )
+    return before, anchor, suffix, after
 
 
 class _Phase(StrEnum):
@@ -688,10 +724,7 @@ class _Bundle:
             return False
         if not all(call.is_closed() for call in self.anchor.all_calls()):
             return False
-        for cluster in [*self.before, *self.after]:
-            if isinstance(cluster, _Turn) and not cluster.settled():
-                return False
-        return True
+        return all(not isinstance(cluster, _Turn) or cluster.settled() for cluster in [*self.before, *self.after])
 
     def can_handoff(self) -> bool:
         return self.past_anchor and self.released() and self.settled()
@@ -760,6 +793,15 @@ class _Main:
     def load_snapshot(self, messages: list[Message]) -> None:
         self.committed = list(messages)
         self.bundle = None
+
+    def load_attachable_snapshot(self, messages: list[Message]) -> None:
+        before, anchor, suffix, after = _split_attachable_main_snapshot(messages)
+        self.committed = before
+        if anchor is None:
+            self.committed.extend(after)
+            self.bundle = None
+            return
+        self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=True, after=list(after))
 
     def _finalize(self) -> None:
         if self.bundle is None:
@@ -964,7 +1006,7 @@ class _Replay:
     def _step_compaction(self, payload: CompactionPayload) -> None:
         self.machine = dict(payload.machine)
         self.sides = Sides.from_primitive(payload.sides.to_primitive())
-        self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
+        self.main.load_attachable_snapshot(self.sides.get(MAIN_SIDE) or [])
         self._rebuild_all_calls()
         self.current_compaction_id = payload.id
         self.last_reasoning_id = None
@@ -985,12 +1027,14 @@ class _Replay:
             if side == MAIN_SIDE:
                 next_main = [] if not patch else _apply_side_patch(self.sides.get(MAIN_SIDE, []) or [], patch, side=side)
                 self.sides[MAIN_SIDE] = next_main
-                self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
                 continue
             self.sides[side] = [] if not patch else _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
             self._rebuild_non_main_calls(side)
         if payload.sides.main:
+            self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
             self.main.apply_hidden_main_updates(payload.sides)
+        else:
+            self.main.load_attachable_snapshot(self.sides.get(MAIN_SIDE, []) or [])
         self._sync_main()
         self.last_reasoning_id = payload.id
         self.last_side = None
