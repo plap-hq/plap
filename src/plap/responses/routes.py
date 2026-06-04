@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from functools import partial
 
 import anyio
 import msgspec
 import structlog
-from litestar import delete, get, post, websocket
+from litestar import Request, delete, get, post, websocket
 from litestar.channels import ChannelsPlugin, Subscriber
 from litestar.connection import WebSocket
 from litestar.response import ServerSentEvent
@@ -13,6 +14,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.keyring import SealingKeyring
+from plap.llms.completions.chat import IChatCompletionClient
 from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
@@ -30,10 +33,15 @@ from plap.responses.contracts import (
     ServiceTier,
 )
 from plap.responses.dependencies import HTTP_ROUTE_DEPENDENCIES, WEBSOCKET_ROUTE_DEPENDENCIES
+from plap.responses.ingest.ingest import ingest_response_request
+from plap.responses.ingest.models import Ingested
 from plap.responses.projection import ResponseProjection
-from plap.responses.store import ResponseStore
+from plap.responses.runtime import run_response
+from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import RuntimeSelector, Settings
+from plap.tools import IToolCallPolicyResolver, IToolPolicyResolver
+from plap.tools.mcp import IMCPToolProvider
 
 logger = structlog.get_logger(__name__)
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
@@ -79,10 +87,54 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
     )
 
 
-async def _sse_not_implemented_payload(*, action: str) -> AsyncIterator[str]:
-    public = _not_implemented_public_error(action=action)
-    yield build_error_event(public=public).model_dump_json(exclude_none=True)
-    yield "[DONE]"
+async def _prepare_create(
+    *,
+    auth_context: AuthContext,
+    request: ResponseCreateRequest,
+    response_store: ResponseStore,
+    sealing_keyring: SealingKeyring,
+    channels: ChannelsPlugin,
+) -> tuple[PreparedRequest, Ingested, StreamCoordinator]:
+    prepared = await response_store.prepare_request(auth_context, request)
+    ingested = await ingest_response_request(
+        prepared.execution_request,
+        keyring=sealing_keyring,
+    )
+    coordinator = StreamCoordinator(
+        request=prepared.response_request,
+        channels=channels,
+        prepared=prepared,
+        response_store=response_store,
+        sealing_keyring=sealing_keyring,
+        last_reasoning_id=ingested.last_reasoning_id,
+        current_compaction_id=ingested.current_compaction_id,
+    )
+    return prepared, ingested, coordinator
+
+
+async def _watch_http_disconnect(
+    request: Request[object, object, object],
+    cancel_scope: anyio.CancelScope,
+) -> None:
+    while True:
+        event = await request.receive()
+        if event["type"] == "http.disconnect":
+            cancel_scope.cancel()
+            return
+
+
+async def _watch_socket_disconnect(
+    socket: WebSocket,
+    cancel_scope: anyio.CancelScope,
+) -> None:
+    while True:
+        event = await socket.receive()
+        if event["type"] == "websocket.disconnect":
+            cancel_scope.cancel()
+            return
+        await socket.close(code=1008, reason="Only one active response is allowed per websocket connection.")
+        cancel_scope.cancel()
+        return
 
 
 def _is_terminal_event(event: ResponseStreamEvent) -> bool:
@@ -93,61 +145,152 @@ def _decode_stream_event(payload: bytes) -> ResponseStreamEvent:
     return _STREAM_EVENT_ADAPTER.validate_json(payload)
 
 
-async def _iter_projected_events(
+async def _iter_projected_payloads(
     subscriber: Subscriber,
     *,
     projection: ResponseProjection,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[dict[str, object]]:
     async for payload in subscriber.iter_events():
         event = _decode_stream_event(payload)
-        yield msgspec.json.encode(projection.stream_payload(event)).decode()
+        yield projection.stream_payload(event)
         if _is_terminal_event(event):
             break
 
 
-async def _publish_not_implemented_sequence(
+async def _run_stream(
     *,
+    prepared: PreparedRequest,
+    ingested: Ingested,
     coordinator: StreamCoordinator,
-    action: str,
+    sealing_keyring: SealingKeyring,
+    settings: Settings,
+    chat_completion_client: IChatCompletionClient,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> None:
-    await coordinator.created()
-    await coordinator.in_progress()
-    await coordinator.fail(_not_implemented_public_error(action=action))
+    try:
+        await run_response(
+            prepared=prepared,
+            ingested=ingested,
+            coordinator=coordinator,
+            sealing_keyring=sealing_keyring,
+            settings=settings,
+            chat_completion_client=chat_completion_client,
+            tool_policy_resolver=tool_policy_resolver,
+            tool_call_policy_resolver=tool_call_policy_resolver,
+            mcp_tool_providers=mcp_tool_providers,
+        )
+    except anyio.get_cancelled_exc_class():
+        return
+    except Exception:
+        return
 
 
-async def _sse_not_implemented_channel_payload(
+async def _sse_response_payload(
     *,
+    http_request: Request[object, object, object],
     request: ResponseCreateRequest,
+    auth_context: AuthContext,
     channels: ChannelsPlugin,
-    action: str,
+    response_store: ResponseStore,
+    sealing_keyring: SealingKeyring,
+    settings: Settings,
+    chat_completion_client: IChatCompletionClient,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> AsyncIterator[str]:
     projection = ResponseProjection.from_create_request(request, transport="stream")
     projection.validate_create_request(request)
-    coordinator = StreamCoordinator(request=request, channels=channels)
-    subscriber = await channels.subscribe(coordinator.channel)
-    try:
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(_publish_not_implemented_sequence, coordinator=coordinator, action=action)
-            async for payload in _iter_projected_events(subscriber, projection=projection):
-                yield payload
-    finally:
-        await channels.unsubscribe(subscriber, coordinator.channel)
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_watch_http_disconnect, http_request, task_group.cancel_scope)
+        prepared, ingested, coordinator = await _prepare_create(
+            auth_context=auth_context,
+            request=request,
+            response_store=response_store,
+            sealing_keyring=sealing_keyring,
+            channels=channels,
+        )
+        subscriber = await channels.subscribe(coordinator.channel)
+        try:
+            task_group.start_soon(
+                partial(
+                    _run_stream,
+                    prepared=prepared,
+                    ingested=ingested,
+                    coordinator=coordinator,
+                    sealing_keyring=sealing_keyring,
+                    settings=settings,
+                    chat_completion_client=chat_completion_client,
+                    tool_policy_resolver=tool_policy_resolver,
+                    tool_call_policy_resolver=tool_call_policy_resolver,
+                    mcp_tool_providers=mcp_tool_providers,
+                ),
+            )
+            async for payload in _iter_projected_payloads(subscriber, projection=projection):
+                yield msgspec.json.encode(payload).decode()
+        finally:
+            task_group.cancel_scope.cancel()
+            with anyio.CancelScope(shield=True):
+                await channels.unsubscribe(subscriber, coordinator.channel)
     yield "[DONE]"
 
 
 @post("/v1/responses", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
 async def create_response(
+    request: Request[object, object, object],
     data: ResponseCreateRequest,
     auth_context: AuthContext,
     channels: ChannelsPlugin,
+    response_store: ResponseStore,
+    sealing_keyring: SealingKeyring,
+    settings: Settings,
+    chat_completion_client: IChatCompletionClient,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> object:
-    _ = auth_context
+    projection = ResponseProjection.from_create_request(data, transport="stream" if data.stream else "snapshot")
+    projection.validate_create_request(data)
     if data.stream:
         return ServerSentEvent(
-            _sse_not_implemented_channel_payload(request=data, channels=channels, action="create"),
+            _sse_response_payload(
+                http_request=request,
+                request=data,
+                auth_context=auth_context,
+                channels=channels,
+                response_store=response_store,
+                sealing_keyring=sealing_keyring,
+                settings=settings,
+                chat_completion_client=chat_completion_client,
+                tool_policy_resolver=tool_policy_resolver,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                mcp_tool_providers=mcp_tool_providers,
+            ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
-    raise _not_implemented_error(action="create")
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_watch_http_disconnect, request, task_group.cancel_scope)
+        prepared, ingested, coordinator = await _prepare_create(
+            auth_context=auth_context,
+            request=data,
+            response_store=response_store,
+            sealing_keyring=sealing_keyring,
+            channels=channels,
+        )
+        await run_response(
+            prepared=prepared,
+            ingested=ingested,
+            coordinator=coordinator,
+            sealing_keyring=sealing_keyring,
+            settings=settings,
+            chat_completion_client=chat_completion_client,
+            tool_policy_resolver=tool_policy_resolver,
+            tool_call_policy_resolver=tool_call_policy_resolver,
+            mcp_tool_providers=mcp_tool_providers,
+        )
+        return projection.response(coordinator.current_response())
 
 
 @get("/v1/models", dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -253,6 +396,12 @@ async def responses_socket(
     auth_context: AuthContext,
     settings: Settings,
     channels: ChannelsPlugin,
+    response_store: ResponseStore,
+    sealing_keyring: SealingKeyring,
+    chat_completion_client: IChatCompletionClient,
+    tool_policy_resolver: IToolPolicyResolver,
+    tool_call_policy_resolver: IToolCallPolicyResolver,
+    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> None:
     _ = auth_context, settings
     await socket.accept()
@@ -283,15 +432,37 @@ async def responses_socket(
 
         projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
         projection.validate_create_request(client_event.response)
-        coordinator = StreamCoordinator(request=client_event.response, channels=channels)
-        subscriber = await channels.subscribe(coordinator.channel)
-        try:
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(_publish_not_implemented_sequence, coordinator=coordinator, action="websocket_create")
-                async for payload_json in _iter_projected_events(subscriber, projection=projection):
-                    await socket.send_json(msgspec.json.decode(payload_json.encode()))
-        finally:
-            await channels.unsubscribe(subscriber, coordinator.channel)
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
+            prepared, ingested, coordinator = await _prepare_create(
+                auth_context=auth_context,
+                request=client_event.response,
+                response_store=response_store,
+                sealing_keyring=sealing_keyring,
+                channels=channels,
+            )
+            subscriber = await channels.subscribe(coordinator.channel)
+            try:
+                task_group.start_soon(
+                    partial(
+                        _run_stream,
+                        prepared=prepared,
+                        ingested=ingested,
+                        coordinator=coordinator,
+                        sealing_keyring=sealing_keyring,
+                        settings=settings,
+                        chat_completion_client=chat_completion_client,
+                        tool_policy_resolver=tool_policy_resolver,
+                        tool_call_policy_resolver=tool_call_policy_resolver,
+                        mcp_tool_providers=mcp_tool_providers,
+                    ),
+                )
+                async for payload in _iter_projected_payloads(subscriber, projection=projection):
+                    await socket.send_json(payload)
+            finally:
+                task_group.cancel_scope.cancel()
+                with anyio.CancelScope(shield=True):
+                    await channels.unsubscribe(subscriber, coordinator.channel)
 
 
 def build_error_event(*, public: PublicError) -> ResponseErrorEvent:
