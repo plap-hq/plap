@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import partial
+from typing import cast
 from uuid import uuid4
 
 import anyio
 import pytest
 from pydantic import TypeAdapter
 
-from plap.errors import PlapError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ChatUsage
+from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage
+from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
 from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
-from plap.responses.runtime import State, UsageLedger, run_response
+from plap.responses.runner import State, UsageLedger
+from plap.responses.runtime import run_response
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import PublicUsageConfig, Settings
@@ -39,6 +41,7 @@ class _RecordingStore:
         self.begin_calls = 0
         self.append_calls = 0
         self.replace_calls = 0
+        self.finish_calls = 0
         self.cancel_calls = 0
         self.fail_calls = 0
 
@@ -53,6 +56,10 @@ class _RecordingStore:
     async def replace_output_item(self, prepared: PreparedRequest, response_id: str, output_index: int, item: object) -> None:
         _ = prepared, response_id, output_index, item
         self.replace_calls += 1
+
+    async def finish_response(self, prepared: PreparedRequest, response) -> None:
+        _ = prepared, response
+        self.finish_calls += 1
 
     async def cancel_response(self, prepared: PreparedRequest, response) -> bool:
         _ = prepared, response
@@ -69,16 +76,16 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
-def _request() -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap-ai/wisp-mini", input="hello")
+def _request(**updates: object) -> ResponseCreateRequest:
+    return ResponseCreateRequest(model="plap-ai/wisp-mini", input="hello", **updates)
 
 
-def _prepared() -> PreparedRequest:
-    request = _request()
+def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
+    actual_request = request or _request()
     return PreparedRequest(
         scope_id=uuid4(),
-        response_request=request,
-        execution_request=request,
+        response_request=actual_request,
+        execution_request=actual_request,
         current_input_items=[],
         stored_input_items=[],
         parent_response_id=None,
@@ -101,11 +108,16 @@ def _settings() -> Settings:
     return Settings(api_key_pepper="pepper", database_url="postgres://example", sealing_keys=["key"])
 
 
-def _coordinator(store: _RecordingStore, channels: _RecordingChannels) -> StreamCoordinator:
+def _coordinator(
+    store: _RecordingStore,
+    channels: _RecordingChannels,
+    request: ResponseCreateRequest | None = None,
+) -> StreamCoordinator:
+    actual_request = request or _request()
     return StreamCoordinator(
-        request=_request(),
+        request=actual_request,
         channels=channels,
-        prepared=_prepared(),
+        prepared=_prepared(actual_request),
         response_store=store,
         sealing_keyring=_keyring(),
     )
@@ -139,6 +151,61 @@ def _usage(
         cached_tokens=cached_tokens,
         reasoning_tokens=reasoning_tokens,
     )
+
+
+def _delta(
+    *,
+    content_delta: str | None = None,
+    reasoning_delta: str | None = None,
+    tool_call_delta: ChatToolCallDelta | None = None,
+    finish_reason: ChatFinishReason | None = None,
+    usage: ChatUsage | None = None,
+) -> ChatCompletionDelta:
+    return ChatCompletionDelta(
+        id="cmpl_test",
+        model="test-model",
+        created_at=None,
+        choice_index=0,
+        content_delta=content_delta,
+        reasoning_delta=reasoning_delta,
+        tool_call_delta=tool_call_delta,
+        finish_reason=finish_reason,
+        usage=usage,
+        service_tier="default",
+    )
+
+
+class _StubChatClient:
+    def __init__(self, *attempts: list[ChatCompletionDelta]) -> None:
+        self._attempts = list(attempts)
+        self.requests: list[object] = []
+
+    async def complete(self, request):  # pragma: no cover - unused protocol method
+        _ = request
+        raise NotImplementedError
+
+    def stream(self, request):
+        self.requests.append(request)
+        index = len(self.requests) - 1
+        if index >= len(self._attempts):  # pragma: no cover
+            raise AssertionError("unexpected extra attempt")
+        deltas = list(self._attempts[index])
+
+        async def _iterator():
+            for delta in deltas:
+                yield delta
+
+        return _iterator()
+
+
+class _FakeReasoningSummarizer:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def stream(self, *, mode: str, prior_summary: str | None, fragment: str):
+        assert mode == "concise"
+        _ = prior_summary, fragment, self.kwargs
+        yield "summary part"
 
 
 def test_usage_ledger_returns_none_without_input_anchor() -> None:
@@ -244,35 +311,94 @@ def test_usage_ledger_rejects_duplicate_hidden_output_promotion() -> None:
         ledger.promote_hidden_to_output(hidden_index)
 
 
-async def test_run_response_not_implemented_fails_and_reraises() -> None:
+async def test_run_response_completes_simple_turn_without_midstream_flushes() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    coordinator = _coordinator(store, channels)
+    request = _request()
+    coordinator = _coordinator(store, channels, request)
+    client = _StubChatClient(
+        [
+            _delta(content_delta="hel"),
+            _delta(
+                content_delta="lo",
+                finish_reason=ChatFinishReason.STOP,
+                usage=_usage(input_tokens=7, output_tokens=3),
+            ),
+        ]
+    )
 
-    with pytest.raises(PlapError) as exc_info:
-        await run_response(
-            prepared=_prepared(),
-            ingested=_ingested(),
-            coordinator=coordinator,
-            sealing_keyring=_keyring(),
-            settings=_settings(),
-            chat_completion_client=object(),
-            tool_policy_resolver=StaticToolPolicyResolver(),
-            tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-            mcp_tool_providers=(),
-        )
+    await run_response(
+        prepared=_prepared(request),
+        ingested=Ingested(
+            machine={},
+            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            last_side=MAIN_SIDE,
+            last_reasoning_id=None,
+            current_compaction_id=None,
+        ),
+        coordinator=coordinator,
+        sealing_keyring=_keyring(),
+        settings=_settings(),
+        chat_completion_client=client,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
+        mcp_tool_providers=(),
+    )
 
-    assert exc_info.value.public is not None
-    assert exc_info.value.public.code == "not_implemented"
     assert store.begin_calls == 1
     assert store.cancel_calls == 0
-    assert store.fail_calls == 1
-    assert coordinator.current_response().status == "failed"
-    assert _published_event_types(channels) == [
-        "response.created",
-        "response.in_progress",
-        "error",
-    ]
+    assert store.fail_calls == 0
+    assert store.replace_calls == 0
+    assert store.finish_calls == 1
+    response = coordinator.current_response()
+    assert response.status == "completed"
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseMessageItem)
+    assert response.output[0].content[0].text == "hello"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 7
+
+
+async def test_run_response_prepends_profile_prompt_before_request_instructions() -> None:
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    request = _request(instructions="Follow the caller instructions.")
+    coordinator = _coordinator(store, channels, request)
+    client = _StubChatClient(
+        [
+            _delta(
+                content_delta="hello",
+                finish_reason=ChatFinishReason.STOP,
+                usage=_usage(input_tokens=7, output_tokens=3),
+            ),
+        ]
+    )
+
+    await run_response(
+        prepared=_prepared(request),
+        ingested=Ingested(
+            machine={},
+            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            last_side=MAIN_SIDE,
+            last_reasoning_id=None,
+            current_compaction_id=None,
+        ),
+        coordinator=coordinator,
+        sealing_keyring=_keyring(),
+        settings=_settings(),
+        chat_completion_client=client,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
+        mcp_tool_providers=(),
+    )
+
+    sent_messages = client.requests[0].messages
+    assert sent_messages[0].role == "developer"
+    assert sent_messages[0].content == "You are Wisp Mini, an AI assistant."
+    assert sent_messages[1].role == "developer"
+    assert sent_messages[1].content == "Follow the caller instructions."
+    assert sent_messages[2].role == "user"
+    assert sent_messages[2].content == "hello"
 
 
 async def test_run_response_cancellation_before_created_is_noop() -> None:
@@ -311,7 +437,7 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
         body_started.set()
         await anyio.sleep(10)
 
-    monkeypatch.setattr("plap.responses.runtime._execute_not_implemented", _block)
+    monkeypatch.setattr("plap.responses.runtime.execute", _block)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(
@@ -340,6 +466,144 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
         "response.in_progress",
         "response.completed",
     ]
+
+
+async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_first_attempt() -> None:
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    request = _request(
+        max_output_tokens=20,
+        tools=[{"type": "function", "name": "good", "parameters": {"type": "object"}}],
+    )
+    coordinator = _coordinator(store, channels, request)
+    client = _StubChatClient(
+        [
+            _delta(
+                tool_call_delta=ChatToolCallDelta(index=0, id="call_bad", name="bad", arguments_delta="{}"),
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=_usage(input_tokens=20, output_tokens=9),
+            )
+        ],
+        [
+            _delta(
+                content_delta="fixed",
+                finish_reason=ChatFinishReason.STOP,
+                usage=_usage(input_tokens=5, output_tokens=2),
+            )
+        ],
+    )
+
+    await run_response(
+        prepared=_prepared(request),
+        ingested=_ingested(),
+        coordinator=coordinator,
+        sealing_keyring=_keyring(),
+        settings=_settings(),
+        chat_completion_client=client,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
+        mcp_tool_providers=(),
+    )
+
+    assert len(client.requests) == 2
+    assert client.requests[0].max_completion_tokens == 20
+    assert client.requests[1].max_completion_tokens == 6
+
+    response = coordinator.current_response()
+    assert response.status == "completed"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 20
+    assert response.usage.total_tokens == 36
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert payload.sides.main[0].is_assistant()
+    assert payload.sides.main[0].tool_calls[0].name == "bad"
+    assert payload.sides.main[1].is_tool()
+    assert payload.sides.main[1].content == RETRY_TOOL_PLACEHOLDER
+    assert payload.sides.main[2].role == "user"
+    assert "undeclared tool" in cast(str, payload.sides.main[2].content)
+    assert isinstance(response.output[1], ResponseMessageItem)
+    assert response.output[1].content[0].text == "fixed"
+
+
+async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    request = _request(reasoning={"summary": "concise"})
+    coordinator = _coordinator(store, channels, request)
+    client = _StubChatClient(
+        [
+            _delta(content_delta="he", reasoning_delta="private "),
+            _delta(
+                content_delta="llo",
+                reasoning_delta="reasoning",
+                finish_reason=ChatFinishReason.STOP,
+                usage=_usage(input_tokens=9, output_tokens=4, reasoning_tokens=2),
+            ),
+        ]
+    )
+    monkeypatch.setattr("plap.responses.runner.ChatReasoningSummarizer", _FakeReasoningSummarizer)
+
+    await run_response(
+        prepared=_prepared(request),
+        ingested=_ingested(),
+        coordinator=coordinator,
+        sealing_keyring=_keyring(),
+        settings=_settings(),
+        chat_completion_client=client,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
+        mcp_tool_providers=(),
+    )
+
+    assert store.replace_calls == 2
+    response = coordinator.current_response()
+    assert response.status == "completed"
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    assert response.output[0].summary[0].text == "summary part"
+    event_types = _published_event_types(channels)
+    assert event_types.index("response.output_item.added") < event_types.index("response.reasoning_summary_part.added")
+    assert "response.reasoning_summary_part.done" in event_types
+
+
+async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    request = _request(
+        max_output_tokens=10,
+        tools=[{"type": "function", "name": "good", "parameters": {"type": "object"}}],
+    )
+    coordinator = _coordinator(store, channels, request)
+    client = _StubChatClient(
+        [
+            _delta(
+                tool_call_delta=ChatToolCallDelta(index=0, id="call_bad", name="bad", arguments_delta="{}"),
+                finish_reason=ChatFinishReason.TOOL_CALLS,
+                usage=_usage(input_tokens=20, output_tokens=9),
+            )
+        ]
+    )
+
+    await run_response(
+        prepared=_prepared(request),
+        ingested=_ingested(),
+        coordinator=coordinator,
+        sealing_keyring=_keyring(),
+        settings=_settings(),
+        chat_completion_client=client,
+        tool_policy_resolver=StaticToolPolicyResolver(),
+        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
+        mcp_tool_providers=(),
+    )
+
+    response = coordinator.current_response()
+    assert response.status == "incomplete"
+    assert response.incomplete_details is not None
+    assert response.incomplete_details.reason == "max_output_tokens"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 20
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseReasoningItem)
 
 
 async def test_state_flush_persists_stubbed_open_tail_calls() -> None:
