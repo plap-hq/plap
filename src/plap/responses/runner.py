@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import secrets
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from math import ceil
 from typing import cast
 
+import structlog
 from pydantic import BaseModel, ConfigDict
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
@@ -26,6 +27,7 @@ from plap.llms.completions.chat import (
 )
 from plap.llms.retry import retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
+from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
     OutputTextContent,
@@ -46,6 +48,7 @@ from plap.tools import IMCPToolProvider, IToolCallPolicyResolver, IToolPolicyRes
 
 INTERRUPTED_TOOL_OUTPUT = "Tool output unavailable because the response was interrupted."
 DEVELOPER_PROMPT_TEMPLATE = "You are {model_name}, an AI assistant."
+logger = structlog.get_logger(__name__)
 
 
 class Machine(BaseModel):
@@ -560,6 +563,7 @@ async def execute(
     _ = tool_policy_resolver, tool_call_policy_resolver, mcp_tool_providers
 
     base_request = _base_request(prepared, state, profile)
+    summary_mode = _summary_mode(prepared)
     ledger = UsageLedger(
         budget=prepared.execution_request.max_output_tokens,
         reasoning_to_output=profile.reasoning_to_output,
@@ -569,6 +573,15 @@ async def execute(
     budget_exhausted = False
     latest_snapshot = None
 
+    log_debug(
+        logger,
+        "response.runtime.turn",
+        continuation_side=MAIN_SIDE,
+        main_model=base_request.model,
+        reasoning_summary_mode=summary_mode,
+        tool_count=len(base_request.tools),
+    )
+
     def next_request(history):
         nonlocal hidden_results_accounted, input_anchor_seen, budget_exhausted
         for result in history.results[hidden_results_accounted:]:
@@ -577,18 +590,45 @@ async def execute(
                 input_anchor_seen = True
             ledger.record_hidden(profile.main.public_usage, result.usage)
             hidden_results_accounted += 1
+        attempt_index = hidden_results_accounted + 1
         attempt_budget = ledger.cap_for(profile.main.public_usage)
         attempt_cap = profile.main.cap_max_completion_tokens(attempt_budget)
         if attempt_cap == 0:
             budget_exhausted = True
+            log_debug(
+                logger,
+                "response.runtime.main_request.skipped",
+                attempt_budget=attempt_budget,
+                attempt_index=attempt_index,
+                hidden_history_messages=len(history.messages),
+                hidden_history_results=len(history.results),
+                remaining_budget=ledger.remaining(),
+                reason="budget_exhausted",
+            )
             return None
-        return replace(
+        attempt_request = replace(
             base_request,
             messages=[*base_request.messages, *history.messages],
             max_completion_tokens=attempt_cap,
         )
+        log_debug(
+            logger,
+            "response.runtime.main_request",
+            attempt_budget=attempt_budget,
+            attempt_index=attempt_index,
+            hidden_history_messages=len(history.messages),
+            hidden_history_results=len(history.results),
+            main_cap=attempt_cap,
+            remaining_budget=ledger.remaining(),
+        )
+        log_payload(
+            logger,
+            "response.runtime.main_request.payload",
+            attempt_index=attempt_index,
+            request=asdict(attempt_request),
+        )
+        return attempt_request
 
-    summary_mode = _summary_mode(prepared)
     source = retry_stream(
         chat_completion_client,
         next_request=next_request,

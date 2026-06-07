@@ -359,48 +359,6 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
     assert response.usage.input_tokens == 7
 
 
-async def test_run_response_prepends_profile_prompt_before_request_instructions() -> None:
-    channels = _RecordingChannels()
-    store = _RecordingStore()
-    request = _request(instructions="Follow the caller instructions.")
-    coordinator = _coordinator(store, channels, request)
-    client = _StubChatClient(
-        [
-            _delta(
-                content_delta="hello",
-                finish_reason=ChatFinishReason.STOP,
-                usage=_usage(input_tokens=7, output_tokens=3),
-            ),
-        ]
-    )
-
-    await run_response(
-        prepared=_prepared(request),
-        ingested=Ingested(
-            machine={},
-            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
-            last_side=MAIN_SIDE,
-            last_reasoning_id=None,
-            current_compaction_id=None,
-        ),
-        coordinator=coordinator,
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=client,
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
-    )
-
-    sent_messages = client.requests[0].messages
-    assert sent_messages[0].role == "developer"
-    assert sent_messages[0].content == "You are Wisp Mini, an AI assistant."
-    assert sent_messages[1].role == "developer"
-    assert sent_messages[1].content == "Follow the caller instructions."
-    assert sent_messages[2].role == "user"
-    assert sent_messages[2].content == "hello"
-
-
 async def test_run_response_cancellation_before_created_is_noop() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()

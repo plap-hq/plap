@@ -6,6 +6,7 @@ from functools import partial
 import anyio
 import msgspec
 import structlog
+from anyio.abc import TaskStatus
 from litestar import Request, delete, get, post, websocket
 from litestar.channels import ChannelsPlugin, Subscriber
 from litestar.connection import WebSocket
@@ -115,12 +116,16 @@ async def _prepare_create(
 async def _watch_http_disconnect(
     request: Request[object, object, object],
     cancel_scope: anyio.CancelScope,
+    *,
+    task_status: TaskStatus[anyio.CancelScope] = anyio.TASK_STATUS_IGNORED,
 ) -> None:
-    while True:
-        event = await request.receive()
-        if event["type"] == "http.disconnect":
-            cancel_scope.cancel()
-            return
+    with anyio.CancelScope() as watcher_scope:
+        task_status.started(watcher_scope)
+        while True:
+            event = await request.receive()
+            if event["type"] == "http.disconnect":
+                cancel_scope.cancel()
+                return
 
 
 async def _watch_socket_disconnect(
@@ -270,8 +275,9 @@ async def create_response(
             ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
+    response: object
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(_watch_http_disconnect, request, task_group.cancel_scope)
+        watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
         prepared, ingested, coordinator = await _prepare_create(
             auth_context=auth_context,
             request=data,
@@ -290,7 +296,9 @@ async def create_response(
             tool_call_policy_resolver=tool_call_policy_resolver,
             mcp_tool_providers=mcp_tool_providers,
         )
-        return projection.response(coordinator.current_response())
+        response = projection.response(coordinator.current_response())
+        watcher_scope.cancel()
+    return response
 
 
 @get("/v1/models", dependencies=HTTP_ROUTE_DEPENDENCIES)

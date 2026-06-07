@@ -13,6 +13,8 @@ seq_port_explicit="${PLAP_SEQ_PORT:+1}"
 seq_startup_timeout_seconds="${PLAP_SEQ_STARTUP_TIMEOUT_SECONDS:-30}"
 seq_batch_size="${PLAP_SEQ_BATCH_SIZE:-100}"
 seq_poll_interval_seconds="${PLAP_SEQ_POLL_INTERVAL_SECONDS:-0.25}"
+seq_raw_event_limit_bytes="${PLAP_SEQ_RAW_EVENT_LIMIT_BYTES:-134217728}"
+seq_raw_payload_limit_bytes="${PLAP_SEQ_RAW_PAYLOAD_LIMIT_BYTES:-$((seq_raw_event_limit_bytes * 2))}"
 seq_container_name=""
 seq_data_volume=""
 cleanup_done=0
@@ -36,6 +38,8 @@ Environment overrides:
   PLAP_SEQ_STARTUP_TIMEOUT_SECONDS  Default: 30
   PLAP_SEQ_BATCH_SIZE               Default: 100
   PLAP_SEQ_POLL_INTERVAL_SECONDS    Default: 0.25
+  PLAP_SEQ_RAW_EVENT_LIMIT_BYTES    Default: 134217728 (128 MiB)
+  PLAP_SEQ_RAW_PAYLOAD_LIMIT_BYTES  Default: 268435456 (2x event limit)
 
 If 5341 is already in use and you did not explicitly set PLAP_SEQ_PORT,
 the script will auto-pick a free local port.
@@ -183,6 +187,61 @@ raise SystemExit(1)
 PY
 }
 
+configure_seq_limits() {
+  local seq_url="$1"
+  local event_limit_bytes="$2"
+  local payload_limit_bytes="$3"
+  python3 - "$seq_url" "$event_limit_bytes" "$payload_limit_bytes" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+import urllib.request
+
+seq_url = sys.argv[1].rstrip("/")
+
+try:
+    event_limit = int(sys.argv[2])
+    payload_limit = int(sys.argv[3])
+except ValueError as exc:
+    raise SystemExit(f"Seq limits must be integers: {exc}") from exc
+
+if event_limit <= 0:
+    raise SystemExit("PLAP_SEQ_RAW_EVENT_LIMIT_BYTES must be positive")
+if payload_limit <= 0:
+    raise SystemExit("PLAP_SEQ_RAW_PAYLOAD_LIMIT_BYTES must be positive")
+if payload_limit < event_limit:
+    raise SystemExit("PLAP_SEQ_RAW_PAYLOAD_LIMIT_BYTES must be >= PLAP_SEQ_RAW_EVENT_LIMIT_BYTES")
+
+
+def update(setting_id: str, name: str, value: int) -> None:
+    request = urllib.request.Request(
+        f"{seq_url}/api/settings/{setting_id}",
+        data=json.dumps({"Name": name, "Value": value, "Id": setting_id}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(request, timeout=10.0) as response:
+        payload = json.loads(response.read().decode())
+    if payload.get("Value") != value:
+        raise SystemExit(
+            f"Seq setting {setting_id} did not persist expected value {value}: {payload!r}"
+        )
+
+
+update(
+    "setting-raweventmaximumcontentlength",
+    "raweventmaximumcontentlength",
+    event_limit,
+)
+update(
+    "setting-rawpayloadmaximumcontentlength",
+    "rawpayloadmaximumcontentlength",
+    payload_limit,
+)
+PY
+}
+
 print_seq_logs_on_failure() {
   if [[ -z "$seq_container_name" ]]; then
     return
@@ -249,11 +308,14 @@ main() {
   fi
 
   seq_url="http://$seq_ui_ip:$resolved_port"
+  configure_seq_limits "$seq_url" "$seq_raw_event_limit_bytes" "$seq_raw_payload_limit_bytes"
 
   printf 'Using Seq image: %s\n' "$seq_image"
   printf 'Reading log file: %s\n' "$log_file"
   printf 'Web UI: %s\n' "$seq_url"
   printf 'Seq data volume: %s\n' "$seq_data_volume"
+  printf 'Seq raw event limit: %s bytes\n' "$seq_raw_event_limit_bytes"
+  printf 'Seq raw payload limit: %s bytes\n' "$seq_raw_payload_limit_bytes"
   printf 'Behavior: full import on launch, live tail while running, full cleanup on exit.\n'
   printf 'Stop with Ctrl-C.\n\n'
 

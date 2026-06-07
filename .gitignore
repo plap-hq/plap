@@ -29,3 +29,5 @@ archive/
 .dev/
 .env*
 node_modules/
+
+jobs/

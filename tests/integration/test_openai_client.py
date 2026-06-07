@@ -1,3 +1,4 @@
+import anyio
 import pytest
 from openai import APIStatusError, AsyncOpenAI, AuthenticationError
 
@@ -15,20 +16,21 @@ async def openai_client(live_server, seeded_auth_data):
 
 
 async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> None:
-    created = await openai_client.responses.create(
-        model="plap/test",
-        input="hello world",
-        context_management=[{"type": "compaction", "compact_threshold": 128}],
-        tool_choice="auto",
-        tools=[
-            {
-                "type": "function",
-                "name": "lookup_record",
-                "parameters": {"type": "object"},
-                "strict": True,
-            },
-        ],
-    )
+    with anyio.fail_after(5):
+        created = await openai_client.responses.create(
+            model="plap/test",
+            input="hello world",
+            context_management=[{"type": "compaction", "compact_threshold": 128}],
+            tool_choice="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "lookup_record",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                },
+            ],
+        )
     assert created.object == "response"
     assert created.id.startswith("resp_")
     message_item = next(item for item in created.output if item.type == "message")
@@ -36,7 +38,8 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
 
 
 async def test_async_openai_client_stateful_methods(openai_client: AsyncOpenAI) -> None:
-    created = await openai_client.responses.create(model="plap/test", input="hello stateful")
+    with anyio.fail_after(5):
+        created = await openai_client.responses.create(model="plap/test", input="hello stateful")
     retrieved = await openai_client.responses.retrieve(created.id)
     input_items = await openai_client.responses.input_items.list(created.id)
     await openai_client.responses.delete(created.id)

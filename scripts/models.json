@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "plap": {
+      "baseUrl": "$PLAP_PI_BASE_URL",
+      "api": "openai-responses",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": [
+        {
+          "id": "plap-ai/wisp",
+          "name": "Wisp",
+          "reasoning": true,
+          "input": ["text"],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 131072
+        },
+        {
+          "id": "plap-ai/wisp-mini",
+          "name": "Wisp Mini",
+          "reasoning": true,
+          "input": ["text"],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 393216
+        }
+      ]
+    }
+  }
+}
