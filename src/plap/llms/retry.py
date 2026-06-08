@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from typing import Any
-
-import blake3
-import fastjsonschema
-import msgspec
 
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatMessage, ChatTool, IChatCompletionClient
 from plap.llms.completions.errors import ChatCompletionProviderError
 from plap.llms.json import decode_json_object_or_none
+from plap.llms.json.schema import ValidationError, compile_validator, validation_error_message
 
 RETRY_TOOL_PLACEHOLDER = (
     "This tool call was not executed because the assistant attempt was rejected. If you still need this tool, call it again."
@@ -33,10 +29,6 @@ class RetryToolSchemaError(RetryError):
 
 type RetryValidator = Callable[[ChatCompletionResult, ChatCompletionRequest], Awaitable[str | None]]
 type NextRequest = Callable[[Snapshot], ChatCompletionRequest | None]
-
-type _SchemaValidator = Callable[[Any], Any]
-_SCHEMA_VALIDATORS: dict[bytes, _SchemaValidator] = {}
-
 
 def _tool_stubs(message: ChatMessage) -> tuple[ChatMessage, ...]:
     return tuple(
@@ -98,27 +90,13 @@ def _schema_mismatch_retry_message(tool_name: str, *, error_message: str, strict
     )
 
 
-def _schema_cache_key(schema: dict[str, Any] | None, *, tool_name: str) -> bytes:
-    if schema is None:
-        raise RetryToolSchemaError(f"tool schema for {tool_name!r} is missing")
+def _compiled_schema_validator(tool: ChatTool):
+    if tool.function.parameters is None:
+        raise RetryToolSchemaError(f"tool schema for {tool.function.name!r} is missing")
     try:
-        encoded = msgspec.json.encode(schema, order="deterministic")
-    except Exception as exc:  # pragma: no cover - defensive encode failure
-        raise RetryToolSchemaError(f"tool schema for {tool_name!r} could not be encoded") from exc
-    return blake3.blake3(encoded).digest()
-
-
-def _compiled_schema_validator(tool: ChatTool) -> _SchemaValidator:
-    cache_key = _schema_cache_key(tool.function.parameters, tool_name=tool.function.name)
-    validator = _SCHEMA_VALIDATORS.get(cache_key)
-    if validator is not None:
-        return validator
-    try:
-        validator = fastjsonschema.compile(tool.function.parameters, use_default=False)
+        return compile_validator(tool.function.parameters)
     except Exception as exc:
         raise RetryToolSchemaError(f"tool schema for {tool.function.name!r} could not be compiled") from exc
-    _SCHEMA_VALIDATORS[cache_key] = validator
-    return validator
 
 
 async def retry_on_unusable_tool_calls(
@@ -140,9 +118,9 @@ async def retry_on_unusable_tool_calls(
             continue
         validator = _compiled_schema_validator(tool)
         try:
-            validator(arguments)
-        except fastjsonschema.JsonSchemaValueException as exc:
-            error_message = getattr(exc, "message", str(exc)).strip()
+            validator.validate(arguments)
+        except ValidationError as exc:
+            error_message = validation_error_message(exc)
             return _schema_mismatch_retry_message(
                 tool.function.name,
                 error_message=error_message,

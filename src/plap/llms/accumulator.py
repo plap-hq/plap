@@ -4,10 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 import blake3
-import msgspec
-import repairjson
 import structlog
-from partialjson import JSONParser
 
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
@@ -18,7 +15,7 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     ChatUsage,
 )
-from plap.llms.json import decode_json_value_with_error, schema_property_keys
+from plap.llms.json import Outcome, decode_json_value_with_error, encode_json_object, recover, schema_property_keys
 from plap.logging import log_payload
 
 logger = structlog.get_logger(__name__)
@@ -63,18 +60,10 @@ def _arguments_hash(arguments: str | None) -> str | None:
     return blake3.blake3(arguments.encode()).hexdigest()
 
 
-def _canonical_tool_arguments(arguments: dict[str, Any]) -> str:
-    return msgspec.json.encode(arguments, order="deterministic").decode()
-
-
 def _mapping_keys(value: Any) -> list[str] | None:
     if not isinstance(value, dict):
         return None
     return sorted(str(key) for key in value)
-
-
-def _ignore_extra_token(*_args: object, **_kwargs: object) -> None:
-    return None
 
 
 def _tool_call_repair_issues(
@@ -176,39 +165,12 @@ def _repair_tool_call(
     tool = tools_by_name.get(call.name)
     repaired: dict[str, Any] | None = None
     repaired_arguments: str | None = None
-    raw_value, _ = decode_json_value_with_error(call.arguments)
-
-    if isinstance(raw_value, dict) and not partial:
-        repaired = raw_value
-        repaired_arguments = _canonical_tool_arguments(repaired)
-        _log_tool_call_repair(
-            call,
-            tool=tool,
-            partial=partial,
-            raw_arguments=call.arguments,
-            repaired_arguments=repaired_arguments,
-            repaired=repaired,
-            repair_error=None,
-        )
-        return replace(call, arguments=repaired_arguments)
-
-    try:
-        if partial:
-            value = JSONParser(strict=False, json5_enabled=True, on_extra_token=_ignore_extra_token).parse(call.arguments)
-        else:
-            value = repairjson.loads(call.arguments)
-    except Exception as exc:
-        _log_tool_call_repair(
-            call,
-            tool=tool,
-            partial=partial,
-            raw_arguments=call.arguments,
-            repaired_arguments=None,
-            repaired=None,
-            repair_error=exc,
-        )
-        return call
-    if not isinstance(value, dict):
+    recovery = recover(
+        call.arguments,
+        partial=partial,
+        schema=None if tool is None else tool.function.parameters,
+    )
+    if recovery.outcome == Outcome.REJECTED or not isinstance(recovery.value, dict):
         _log_tool_call_repair(
             call,
             tool=tool,
@@ -219,8 +181,8 @@ def _repair_tool_call(
             repair_error=None,
         )
         return call
-    repaired = value
-    repaired_arguments = _canonical_tool_arguments(repaired)
+    repaired = recovery.value
+    repaired_arguments = encode_json_object(repaired)
     _log_tool_call_repair(
         call,
         tool=tool,

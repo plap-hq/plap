@@ -30,6 +30,14 @@ def decode_json_object_with_error(arguments: str) -> tuple[dict[str, Any] | None
     return value, None
 
 
+def encode_json_value(value: Any) -> str:
+    return msgspec.json.encode(value, order="deterministic").decode()
+
+
+def encode_json_object(value: dict[str, Any]) -> str:
+    return encode_json_value(value)
+
+
 def schema_property_keys(schema: dict[str, Any] | None) -> list[str]:
     if not isinstance(schema, dict):
         return []
@@ -44,5 +52,7 @@ __all__ = [
     "decode_json_object_with_error",
     "decode_json_value",
     "decode_json_value_with_error",
+    "encode_json_object",
+    "encode_json_value",
     "schema_property_keys",
 ]

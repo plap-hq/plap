@@ -565,6 +565,74 @@ def test_accumulator_repairs_tool_call_json_syntax_without_schema_coercion() -> 
     assert final.results[0].message.tool_calls[0].arguments == '{"n":"4","x":1}'
 
 
+def test_accumulator_recovers_inline_comment_tool_arguments() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="bash",
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        )
+    )
+    accumulator = Accumulator(tools=(tool,))
+
+    final = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_1",
+                name="bash",
+                arguments_delta='{"command":"printf ok" // keep this\n}',
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    assert final.results
+    assert final.results[0].message.tool_calls is not None
+    assert final.results[0].message.tool_calls[0].arguments == '{"command":"printf ok"}'
+
+
+def test_accumulator_recovers_broken_inner_quotes_without_splitting_keys() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="bash",
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        )
+    )
+    accumulator = Accumulator(tools=(tool,))
+
+    final = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_1",
+                name="bash",
+                arguments_delta='{"command": "say "hello" now"}',
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    assert final.results
+    assert final.results[0].message.tool_calls is not None
+    assert final.results[0].message.tool_calls[0].arguments == '{"command":"say \\"hello\\" now"}'
+
+
 def test_accumulator_logs_final_tool_call_repair_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = ChatTool(
         function=ChatFunctionTool(
@@ -1164,7 +1232,10 @@ async def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_sch
 
     assert retry_message is not None
     assert "`lookup`" in retry_message
-    assert "data.n must be integer" in retry_message
+    assert "declared schema" in retry_message
+    assert "Validation error:" in retry_message
+    assert "data.n" in retry_message
+    assert "integer" in retry_message
 
 
 async def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_strict_schema_mismatch() -> None:
@@ -1200,7 +1271,10 @@ async def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_strict
 
     assert retry_message is not None
     assert "`lookup`" in retry_message
-    assert "data.n must be integer" in retry_message
+    assert "declared schema" in retry_message
+    assert "Validation error:" in retry_message
+    assert "data.n" in retry_message
+    assert "integer" in retry_message
     assert "strict tool" not in retry_message
 
 
