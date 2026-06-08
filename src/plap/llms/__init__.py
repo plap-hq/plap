@@ -7,6 +7,7 @@ from plap.llms.retry import (
     RetryToolSchemaError,
     RetryValidator,
     complete,
+    retry_on_tool_choice_mismatch,
     retry_on_unusable_tool_calls,
     stream,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "SummaryUpdate",
     "collect_summary",
     "complete",
+    "retry_on_tool_choice_mismatch",
     "retry_on_unusable_tool_calls",
     "stream",
     "with_summary",

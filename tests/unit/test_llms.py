@@ -65,7 +65,13 @@ from plap.llms.completions.providers import (
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient, UnavailableChatCompletionClient
-from plap.llms.retry import RETRY_TOOL_PLACEHOLDER, RetryLimitExceededError, RetryToolSchemaError, retry_on_unusable_tool_calls
+from plap.llms.retry import (
+    RETRY_TOOL_PLACEHOLDER,
+    RetryLimitExceededError,
+    RetryToolSchemaError,
+    retry_on_tool_choice_mismatch,
+    retry_on_unusable_tool_calls,
+)
 from plap.llms.retry import complete as retry_complete
 from plap.llms.retry import stream as retry_stream
 from plap.settings import Settings
@@ -1172,6 +1178,174 @@ async def test_retry_on_unusable_tool_calls_returns_retry_message_for_unknown_to
     assert retry_message is not None
     assert "`read_file`" in retry_message
     assert "`lookup`" in retry_message
+
+
+async def test_retry_on_tool_choice_mismatch_returns_retry_message_for_tool_choice_none() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"}))],
+        tool_choice="none",
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments='{"path":"README.md"}')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = await retry_on_tool_choice_mismatch(result, request)
+
+    assert retry_message is not None
+    assert "disabled" in retry_message
+    assert "Do not call tools" in retry_message
+
+
+async def test_retry_on_tool_choice_mismatch_returns_retry_message_for_required_choice_without_tool_call() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"}))],
+        tool_choice="required",
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(role="assistant", content="plain answer"),
+        finish_reason="stop",
+    )
+
+    retry_message = await retry_on_tool_choice_mismatch(result, request)
+
+    assert retry_message is not None
+    assert "required a tool call" in retry_message
+    assert "`lookup`" in retry_message
+
+
+async def test_retry_on_tool_choice_mismatch_returns_retry_message_for_specific_required_tool() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[
+            ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"})),
+            ChatTool(function=ChatFunctionTool(name="search", parameters={"type": "object"})),
+        ],
+        tool_choice=ChatToolChoiceFunction(name="lookup"),
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="search", arguments='{"q":"x"}')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = await retry_on_tool_choice_mismatch(result, request)
+
+    assert retry_message is not None
+    assert "`lookup`" in retry_message
+    assert "`search`" in retry_message
+
+
+async def test_retry_on_tool_choice_mismatch_returns_retry_message_when_parallel_tool_calls_disabled() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[
+            ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"})),
+            ChatTool(function=ChatFunctionTool(name="search", parameters={"type": "object"})),
+        ],
+        parallel_tool_calls=False,
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(id="call_1", name="lookup", arguments='{"q":"x"}'),
+                ChatToolCall(id="call_2", name="search", arguments='{"q":"y"}'),
+            ],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = await retry_on_tool_choice_mismatch(result, request)
+
+    assert retry_message is not None
+    assert "parallel tool calls were disabled" in retry_message
+    assert "at most one tool" in retry_message
+
+
+async def test_retry_stream_uses_tool_choice_validator_before_tool_argument_validator() -> None:
+    tool = ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "object"}))
+    client = _RetryStreamClient(
+        [
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_1",
+                    model="model-a",
+                    created_at=10,
+                    choice_index=0,
+                    tool_call_delta=ChatToolCallDelta(
+                        index=0,
+                        id="call_1",
+                        name="search",
+                        arguments_delta='["README.md"]',
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                ChatCompletionDelta(
+                    id="chatcmpl_2",
+                    model="model-a",
+                    created_at=11,
+                    choice_index=0,
+                    tool_call_delta=ChatToolCallDelta(
+                        index=0,
+                        id="call_2",
+                        name="lookup",
+                        arguments_delta='{"q":"x"}',
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+        ]
+    )
+
+    def next_request(snapshot: Snapshot) -> ChatCompletionRequest | None:
+        return ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="developer", content="be precise"), *snapshot.messages],
+            tools=[tool, ChatTool(function=ChatFunctionTool(name="search", parameters={"type": "object"}))],
+            tool_choice=ChatToolChoiceFunction(name="lookup"),
+        )
+
+    items = [
+        item
+        async for item in retry_stream(
+            client,
+            next_request=next_request,
+            validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
+            max_attempts=2,
+        )
+    ]
+
+    assert len(items) == 3
+    assert items[1].messages[-1].role == "user"
+    assert items[1].messages[-1].content is not None
+    assert "`lookup`" in items[1].messages[-1].content
+    assert "`search`" in items[1].messages[-1].content
 
 
 async def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_object_arguments() -> None:

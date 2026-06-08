@@ -25,7 +25,7 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.llms.retry import retry_on_unusable_tool_calls
+from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
@@ -630,7 +630,7 @@ async def execute(
     source = retry_stream(
         chat_completion_client,
         next_request=next_request,
-        validators=(retry_on_unusable_tool_calls,),
+        validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
     )
 
     try:

@@ -3,7 +3,15 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 from plap.llms.accumulator import Accumulator, Snapshot
-from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatMessage, ChatTool, IChatCompletionClient
+from plap.llms.completions.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResult,
+    ChatMessage,
+    ChatTool,
+    ChatToolChoiceFunction,
+    ChatToolChoiceMode,
+    IChatCompletionClient,
+)
 from plap.llms.completions.errors import ChatCompletionProviderError
 from plap.llms.json import decode_json_object_or_none
 from plap.llms.json.schema import ValidationError, compile_validator, validation_error_message
@@ -78,6 +86,52 @@ def _invalid_tool_arguments_retry_message(tool_name: str) -> str:
     )
 
 
+def _tool_choice_none_retry_message() -> str:
+    return retry_message(
+        problems=("You called a tool even though tool use was disabled for this request.",),
+        rules=("Do not call tools in your next reply.",),
+    )
+
+
+def _required_tool_call_retry_message(*, tools: Sequence[ChatTool]) -> str:
+    declared_tool_name = _single_declared_tool_name(tools)
+    rule = (
+        f"Call the declared tool: {declared_tool_name}."
+        if declared_tool_name is not None
+        else "Call one of the declared tools in your next reply."
+    )
+    return retry_message(
+        problems=("This request required a tool call, but you did not call a tool.",),
+        rules=(rule,),
+    )
+
+
+def _specific_tool_choice_retry_message(required_name: str, *, actual_names: Sequence[str]) -> str:
+    if not actual_names:
+        problem = f"This request required the tool `{required_name}`, but you did not call it."
+    elif len(actual_names) == 1:
+        problem = f"This request required the tool `{required_name}`, but you called `{actual_names[0]}` instead."
+    else:
+        joined = ", ".join(f"`{name}`" for name in actual_names)
+        problem = f"This request required the tool `{required_name}`, but you called multiple tools: {joined}."
+    return retry_message(
+        problems=(problem,),
+        rules=(f"Call exactly the required tool: `{required_name}`.",),
+    )
+
+
+def _parallel_tool_calls_retry_message(*, required_name: str | None = None) -> str:
+    rule = (
+        f"Call exactly one tool in your next reply, and it must be `{required_name}`."
+        if required_name is not None
+        else "If you call tools in your next reply, call at most one tool."
+    )
+    return retry_message(
+        problems=("You called multiple tools in one reply, but parallel tool calls were disabled for this request.",),
+        rules=(rule,),
+    )
+
+
 def _schema_mismatch_retry_message(tool_name: str, *, error_message: str, strict: bool) -> str:
     tool_label = "strict tool" if strict else "tool"
     exact_rule = " exactly" if strict else ""
@@ -97,6 +151,35 @@ def _compiled_schema_validator(tool: ChatTool):
         return compile_validator(tool.function.parameters)
     except Exception as exc:
         raise RetryToolSchemaError(f"tool schema for {tool.function.name!r} could not be compiled") from exc
+
+
+async def retry_on_tool_choice_mismatch(
+    result: ChatCompletionResult,
+    request: ChatCompletionRequest,
+) -> str | None:
+    tool_calls = result.message.tool_calls
+    actual_names = [call.name for call in tool_calls]
+    tool_choice = request.tool_choice
+
+    if request.parallel_tool_calls is False and len(tool_calls) > 1:
+        required_name = tool_choice.name if isinstance(tool_choice, ChatToolChoiceFunction) else None
+        return _parallel_tool_calls_retry_message(required_name=required_name)
+
+    if tool_choice is None or tool_choice == ChatToolChoiceMode.AUTO:
+        return None
+    if tool_choice == ChatToolChoiceMode.NONE:
+        if tool_calls:
+            return _tool_choice_none_retry_message()
+        return None
+    if tool_choice == ChatToolChoiceMode.REQUIRED:
+        if not tool_calls:
+            return _required_tool_call_retry_message(tools=request.tools)
+        return None
+    if isinstance(tool_choice, ChatToolChoiceFunction):
+        if len(tool_calls) != 1 or tool_calls[0].name != tool_choice.name:
+            return _specific_tool_choice_retry_message(tool_choice.name, actual_names=actual_names)
+        return None
+    return None
 
 
 async def retry_on_unusable_tool_calls(
@@ -230,6 +313,7 @@ __all__ = [
     "RetryValidator",
     "complete",
     "retry_message",
+    "retry_on_tool_choice_mismatch",
     "retry_on_unusable_tool_calls",
     "stream",
 ]
