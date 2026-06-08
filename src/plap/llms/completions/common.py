@@ -51,17 +51,29 @@ def _finish_reason(value: Any) -> ChatFinishReason | None:
     return value
 
 
+def has_output(delta: ChatCompletionDelta) -> bool:
+    return any(
+        value is not None
+        for value in (
+            delta.content_delta,
+            delta.refusal_delta,
+            delta.reasoning_delta,
+            delta.tool_call_delta,
+        )
+    )
+
+
 def _terminal_finish_reason(
     finish_reason: ChatFinishReason | None,
     *,
     saw_tool_calls: bool,
-    saw_content: bool,
+    saw_output: bool,
 ) -> ChatFinishReason | None:
     if saw_tool_calls:
         return ChatFinishReason.TOOL_CALLS
     if finish_reason in {ChatFinishReason.TOOL_CALLS, ChatFinishReason.FUNCTION_CALL}:
         return ChatFinishReason.STOP
-    if saw_content and finish_reason is None:
+    if saw_output and finish_reason is None:
         return ChatFinishReason.STOP
     return finish_reason
 
@@ -245,11 +257,13 @@ def completion_result_from_data(
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message") or {}
     content = _get(message, "content")
+    refusal = _get(message, "refusal")
+    reasoning_content = _get(message, "reasoning_content")
     tool_calls = _tool_calls_from_data(_get(message, "tool_calls"))
     finish_reason = _terminal_finish_reason(
         _finish_reason(_get(choice, "finish_reason")),
         saw_tool_calls=bool(tool_calls),
-        saw_content=content is not None,
+        saw_output=any(value is not None for value in (content, refusal, reasoning_content)) or bool(tool_calls),
     )
     return ChatCompletionResult(
         id=_get(response, "id"),
@@ -258,8 +272,8 @@ def completion_result_from_data(
         message=ChatMessage(
             role="assistant",
             content=content,
-            refusal=_get(message, "refusal"),
-            reasoning_content=_get(message, "reasoning_content"),
+            refusal=refusal,
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
         ),
         finish_reason=finish_reason,
@@ -367,7 +381,7 @@ class StreamState:
     last_choice_index: int = 0
     last_system_fingerprint: str | None = None
     last_service_tier: str | None = None
-    saw_content: bool = False
+    saw_output: bool = False
     saw_tool_calls: bool = False
     saw_finish_reason: bool = False
 
@@ -383,8 +397,8 @@ class StreamState:
             self.last_system_fingerprint = delta.system_fingerprint
         if delta.service_tier is not None:
             self.last_service_tier = delta.service_tier
-        if delta.content_delta is not None:
-            self.saw_content = True
+        if has_output(delta):
+            self.saw_output = True
         if delta.tool_call_delta is not None:
             self.saw_tool_calls = True
         if delta.finish_reason is not None:
@@ -396,7 +410,7 @@ class StreamState:
         finish_reason = _terminal_finish_reason(
             None,
             saw_tool_calls=self.saw_tool_calls,
-            saw_content=self.saw_content,
+            saw_output=self.saw_output,
         )
         if finish_reason is None:
             return None
@@ -416,7 +430,7 @@ class StreamState:
         finish_reason = _terminal_finish_reason(
             delta.finish_reason,
             saw_tool_calls=self.saw_tool_calls,
-            saw_content=self.saw_content,
+            saw_output=self.saw_output,
         )
         if finish_reason == delta.finish_reason:
             return delta
@@ -424,7 +438,7 @@ class StreamState:
 
 
 def raise_incomplete_stream_error() -> None:
-    raise ChatCompletionProviderError("stream ended without finish_reason and without inferable content or tool calls")
+    raise ChatCompletionProviderError("stream ended without finish_reason and without inferable output")
 
 
 async def close_stream_object(stream: Any) -> None:
@@ -454,6 +468,7 @@ __all__ = [
     "close_stream_object",
     "completion_result_from_data",
     "delta_from_data",
+    "has_output",
     "raise_incomplete_stream_error",
     "response_to_stream_chunks",
     "to_data",

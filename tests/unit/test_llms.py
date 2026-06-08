@@ -227,13 +227,14 @@ def _chunk(
     *,
     model: str,
     content: str | None = None,
+    refusal: str | None = None,
     reasoning_content: str | None = None,
     reasoning: str | None = None,
     finish_reason: str | None = None,
 ) -> dict[str, Any]:
     delta: dict[str, Any] = {
         "content": content,
-        "refusal": None,
+        "refusal": refusal,
         "reasoning_content": reasoning_content,
         "tool_calls": None,
     }
@@ -425,13 +426,24 @@ def _completion_result(model: str, content: str):
     )
 
 
-def _delta(model: str, *, content_delta: str | None = None, finish_reason: str | None = None):
+def _delta(
+    model: str,
+    *,
+    content_delta: str | None = None,
+    refusal_delta: str | None = None,
+    reasoning_delta: str | None = None,
+    tool_call_delta: ChatToolCallDelta | None = None,
+    finish_reason: str | None = None,
+):
     return ChatCompletionDelta(
         id="chatcmpl_test",
         model=model,
         created_at=None,
         choice_index=0,
         content_delta=content_delta,
+        refusal_delta=refusal_delta,
+        reasoning_delta=reasoning_delta,
+        tool_call_delta=tool_call_delta,
         finish_reason=finish_reason,
     )
 
@@ -1484,6 +1496,43 @@ async def test_completions_client_coerces_empty_stream_tool_handoff_to_stop_when
     assert deltas[-1].finish_reason == "stop"
 
 
+async def test_completions_client_infers_stop_for_reasoning_only_stream_without_finish_reason() -> None:
+    fake_client = _FakeOpenAIClient(
+        [_AsyncListStream([_chunk(model="ignored-model", reasoning_content="because")])],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[-1].finish_reason == "stop"
+
+
+async def test_completions_client_infers_stop_for_refusal_only_stream_without_finish_reason() -> None:
+    fake_client = _FakeOpenAIClient(
+        [_AsyncListStream([_chunk(model="ignored-model", refusal="refused")])],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert deltas[0].refusal_delta == "refused"
+    assert deltas[-1].finish_reason == "stop"
+
+
+async def test_completions_client_rejects_truly_empty_stream_without_finish_reason() -> None:
+    fake_client = _FakeOpenAIClient(
+        [_AsyncListStream([_chunk(model="ignored-model")])],
+        base_url=NOVITA_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_novita_provider(client=fake_client))
+
+    with pytest.raises(ChatCompletionProviderError):
+        _ = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+
 def _lightning_provider(*, client: Any | None = None) -> OpenAIProvider:
     provider = build_lightning_provider(api_key="lightning-key")
     if client is not None:
@@ -2374,6 +2423,128 @@ async def test_router_stream_does_not_fallback_after_first_delta(monkeypatch: py
 
     with pytest.raises(ChatCompletionProviderError, match="boom"):
         [
+            delta
+            async for delta in router.stream(
+                ChatCompletionRequest(
+                    model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                    messages=[ChatMessage(role="user", content="hello")],
+                )
+            )
+        ]
+
+    assert fallback.stream_requests == []
+    assert events == []
+
+
+async def test_router_stream_falls_back_after_empty_first_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
+    primary = _StubChatClient(
+        stream_result=[
+            _delta("crof/qwen3.5-9b"),
+            ChatCompletionProviderError("boom"),
+        ]
+    )
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="fallback"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [request.model for request in primary.stream_requests] == ["qwen3.5-9b", "qwen3.5-9b", "qwen3.5-9b"]
+    assert fallback.stream_requests[0].model == "XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_retry",
+        "llm.router.attempt_retry",
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+    assert len(delays) == 2
+
+
+async def test_router_stream_falls_back_after_finish_only_empty_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    delays = _capture_router_retry_sleeps(monkeypatch)
+    primary = _StubChatClient(
+        stream_result=[
+            _delta("crof/qwen3.5-9b"),
+            _delta("crof/qwen3.5-9b", finish_reason="stop"),
+        ]
+    )
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="fallback"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_retry",
+        "llm.router.attempt_retry",
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+    assert len(delays) == 2
+
+
+async def test_router_stream_does_not_fallback_after_reasoning_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    primary = _StubChatClient(
+        stream_result=[
+            _delta("crof/qwen3.5-9b", reasoning_delta="because"),
+            ChatCompletionProviderError("boom"),
+        ]
+    )
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="fallback"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=primary),
+            ModelRoute(prefix="gmicloud/", client=fallback),
+        ]
+    )
+
+    with pytest.raises(ChatCompletionProviderError, match="boom"):
+        _ = [
             delta
             async for delta in router.stream(
                 ChatCompletionRequest(

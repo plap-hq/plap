@@ -14,6 +14,7 @@ from plap.llms.completions.chat import (
     ChatCompletionResult,
     IChatCompletionClient,
 )
+from plap.llms.completions.common import has_output
 from plap.llms.completions.errors import (
     ChatCompletionProviderError,
     ChatCompletionTimeoutError,
@@ -200,22 +201,31 @@ async def _next_stream_delta(
         ) from exc
 
 
-async def _first_stream_delta(
+async def _first_output_delta(
     iterator: AsyncIterator[ChatCompletionDelta],
     *,
     timeout_seconds: float | None,
     attempt_model: str,
 ) -> ChatCompletionDelta:
-    delta = await _next_stream_delta(
-        iterator,
-        timeout_seconds=timeout_seconds,
-        attempt_model=attempt_model,
-        timeout_label="first delta",
-    )
-    if delta is not None:
-        return delta
-    await _close_async_iterator(iterator)
-    raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first delta")
+    try:
+        if timeout_seconds is None:
+            while True:
+                delta = await anext(iterator)
+                if has_output(delta):
+                    return delta
+        with anyio.fail_after(timeout_seconds):
+            while True:
+                delta = await anext(iterator)
+                if has_output(delta):
+                    return delta
+    except StopAsyncIteration:
+        await _close_async_iterator(iterator)
+        raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first output delta") from None
+    except TimeoutError as exc:
+        await _close_async_iterator(iterator)
+        raise ChatCompletionTimeoutError(
+            f"stream for model {attempt_model!r} produced no first output delta within {timeout_seconds} seconds"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -325,12 +335,12 @@ class RoutingChatCompletionClient(IChatCompletionClient):
                 iterator = None
                 try:
                     iterator = route.client.stream(attempt_request).__aiter__()
-                    first_delta = await _first_stream_delta(
+                    first_delta = await _first_output_delta(
                         iterator,
                         timeout_seconds=self._stream_first_delta_timeout_seconds,
                         attempt_model=attempt_model,
                     )
-                    yielded = True
+                    yielded = has_output(first_delta)
                     yield replace(first_delta, model=attempt_model)
                     while True:
                         delta = await _next_stream_delta(
@@ -341,7 +351,7 @@ class RoutingChatCompletionClient(IChatCompletionClient):
                         )
                         if delta is None:
                             break
-                        yielded = True
+                        yielded = yielded or has_output(delta)
                         yield replace(delta, model=attempt_model)
                 except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
                     if yielded:
