@@ -10,6 +10,7 @@ import msgspec
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatMessage, ChatTool, IChatCompletionClient
 from plap.llms.completions.errors import ChatCompletionProviderError
+from plap.llms.json import decode_json_object_or_none
 
 RETRY_TOOL_PLACEHOLDER = (
     "This tool call was not executed because the assistant attempt was rejected. If you still need this tool, call it again."
@@ -85,23 +86,25 @@ def _invalid_tool_arguments_retry_message(tool_name: str) -> str:
     )
 
 
-def _strict_schema_mismatch_retry_message(tool_name: str, *, error_message: str) -> str:
+def _schema_mismatch_retry_message(tool_name: str, *, error_message: str, strict: bool) -> str:
+    tool_label = "strict tool" if strict else "tool"
+    exact_rule = " exactly" if strict else ""
     return retry_message(
         problems=(
-            f"The arguments for strict tool `{tool_name}` did not match its declared schema.",
+            f"The arguments for {tool_label} `{tool_name}` did not match its declared schema.",
             f"Validation error: `{error_message}`.",
         ),
-        rules=(f"If you call `{tool_name}`, its `arguments` must match the declared schema exactly.",),
+        rules=(f"If you call `{tool_name}`, its `arguments` must match the declared schema{exact_rule}.",),
     )
 
 
 def _schema_cache_key(schema: dict[str, Any] | None, *, tool_name: str) -> bytes:
     if schema is None:
-        raise RetryToolSchemaError(f"strict tool schema for {tool_name!r} is missing")
+        raise RetryToolSchemaError(f"tool schema for {tool_name!r} is missing")
     try:
         encoded = msgspec.json.encode(schema, order="deterministic")
     except Exception as exc:  # pragma: no cover - defensive encode failure
-        raise RetryToolSchemaError(f"strict tool schema for {tool_name!r} could not be encoded") from exc
+        raise RetryToolSchemaError(f"tool schema for {tool_name!r} could not be encoded") from exc
     return blake3.blake3(encoded).digest()
 
 
@@ -113,19 +116,9 @@ def _compiled_schema_validator(tool: ChatTool) -> _SchemaValidator:
     try:
         validator = fastjsonschema.compile(tool.function.parameters, use_default=False)
     except Exception as exc:
-        raise RetryToolSchemaError(f"strict tool schema for {tool.function.name!r} could not be compiled") from exc
+        raise RetryToolSchemaError(f"tool schema for {tool.function.name!r} could not be compiled") from exc
     _SCHEMA_VALIDATORS[cache_key] = validator
     return validator
-
-
-def _decoded_json_object(arguments: str) -> dict[str, Any] | None:
-    try:
-        value = msgspec.json.decode(arguments.encode())
-    except msgspec.DecodeError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    return value
 
 
 async def retry_on_unusable_tool_calls(
@@ -140,17 +133,21 @@ async def retry_on_unusable_tool_calls(
         tool = tools_by_name.get(call.name)
         if tool is None:
             return _unknown_tool_retry_message(call.name, tools=request.tools)
-        arguments = _decoded_json_object(call.arguments)
+        arguments = decode_json_object_or_none(call.arguments)
         if arguments is None:
             return _invalid_tool_arguments_retry_message(call.name)
-        if tool.function.strict is not True:
+        if tool.function.parameters is None:
             continue
         validator = _compiled_schema_validator(tool)
         try:
             validator(arguments)
         except fastjsonschema.JsonSchemaValueException as exc:
             error_message = getattr(exc, "message", str(exc)).strip()
-            return _strict_schema_mismatch_retry_message(tool.function.name, error_message=error_message)
+            return _schema_mismatch_retry_message(
+                tool.function.name,
+                error_message=error_message,
+                strict=tool.function.strict is True,
+            )
     return None
 
 

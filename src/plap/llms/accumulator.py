@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import blake3
 import msgspec
-from json_repair import repair_json
+import repairjson
+import structlog
+from partialjson import JSONParser
 
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
@@ -15,6 +18,10 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     ChatUsage,
 )
+from plap.llms.json import decode_json_value_with_error, schema_property_keys
+from plap.logging import log_payload
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,116 @@ class _ToolCall:
         )
 
 
+def _arguments_hash(arguments: str | None) -> str | None:
+    if arguments is None:
+        return None
+    return blake3.blake3(arguments.encode()).hexdigest()
+
+
+def _canonical_tool_arguments(arguments: dict[str, Any]) -> str:
+    return msgspec.json.encode(arguments, order="deterministic").decode()
+
+
+def _mapping_keys(value: Any) -> list[str] | None:
+    if not isinstance(value, dict):
+        return None
+    return sorted(str(key) for key in value)
+
+
+def _ignore_extra_token(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+def _tool_call_repair_issues(
+    *,
+    raw_value: Any | None,
+    raw_decode_error: str | None,
+    raw_keys: list[str] | None,
+    repaired: dict[str, Any] | None,
+    repaired_keys: list[str] | None,
+    repair_error: Exception | None,
+    undeclared_keys: list[str],
+) -> list[str]:
+    issues: list[str] = []
+    if raw_decode_error is not None:
+        issues.append("raw_invalid_json")
+    elif raw_keys is None:
+        issues.append("raw_not_object")
+    if repair_error is not None:
+        issues.append("repair_failed")
+    elif repaired is None:
+        issues.append("repaired_not_object")
+    else:
+        if raw_keys is not None and raw_keys != repaired_keys:
+            issues.append("key_set_changed")
+        if isinstance(raw_value, dict) and raw_value != repaired:
+            issues.append("value_changed")
+        if undeclared_keys:
+            issues.append("undeclared_keys")
+    return issues
+
+
+def _log_tool_call_repair(
+    call: ChatToolCall,
+    *,
+    tool: ChatTool | None,
+    partial: bool,
+    raw_arguments: str,
+    repaired_arguments: str | None,
+    repaired: dict[str, Any] | None,
+    repair_error: Exception | None,
+) -> None:
+    if partial:
+        return
+    raw_value, raw_decode_error = decode_json_value_with_error(raw_arguments)
+    raw_decode_error_message = None if raw_decode_error is None else str(raw_decode_error)
+    raw_keys = _mapping_keys(raw_value)
+    repaired_keys = _mapping_keys(repaired)
+    schema_keys = schema_property_keys(None if tool is None else tool.function.parameters)
+    undeclared_keys = [] if repaired_keys is None or not schema_keys else [key for key in repaired_keys if key not in schema_keys]
+    issues = _tool_call_repair_issues(
+        raw_value=raw_value,
+        raw_decode_error=raw_decode_error_message,
+        raw_keys=raw_keys,
+        repaired=repaired,
+        repaired_keys=repaired_keys,
+        repair_error=repair_error,
+        undeclared_keys=undeclared_keys,
+    )
+    decoded_key_set_changed = None if raw_keys is None or repaired_keys is None else raw_keys != repaired_keys
+    decoded_value_changed = None if not isinstance(raw_value, dict) or repaired is None else raw_value != repaired
+    repair_outcome = "error" if repair_error is not None else "dict" if repaired is not None else "non_dict"
+
+    log_payload(
+        logger,
+        "llm.accumulator.tool_call_repair.payload",
+        decoded_key_set_changed=decoded_key_set_changed,
+        decoded_value_changed=decoded_value_changed,
+        issues=issues,
+        raw_arguments=raw_arguments,
+        raw_arguments_hash=_arguments_hash(raw_arguments),
+        raw_arguments_length=len(raw_arguments),
+        raw_decode_error=raw_decode_error_message,
+        raw_is_object=isinstance(raw_value, dict),
+        raw_json_valid=raw_decode_error is None,
+        raw_keys=raw_keys,
+        repaired_arguments=repaired_arguments,
+        repaired_arguments_hash=_arguments_hash(repaired_arguments),
+        repaired_arguments_length=None if repaired_arguments is None else len(repaired_arguments),
+        repaired_is_object=repaired is not None,
+        repaired_keys=repaired_keys,
+        repair_changed=repaired_arguments is not None and repaired_arguments != raw_arguments,
+        repair_error_message=None if repair_error is None else str(repair_error),
+        repair_error_type=None if repair_error is None else type(repair_error).__name__,
+        repair_outcome=repair_outcome,
+        schema_keys=schema_keys,
+        tool_call_id=call.id,
+        tool_name=call.name,
+        tool_strict=None if tool is None else tool.function.strict,
+        undeclared_keys=undeclared_keys,
+    )
+
+
 def _repair_tool_call(
     call: ChatToolCall,
     *,
@@ -57,24 +174,63 @@ def _repair_tool_call(
     partial: bool,
 ) -> ChatToolCall:
     tool = tools_by_name.get(call.name)
-    schema = tool.function.parameters if tool is not None else None
-    try:
-        value = repair_json(
-            call.arguments,
-            return_objects=True,
-            skip_json_loads=True,
-            stream_stable=partial,
-            schema=schema,
-            schema_repair_mode="standard",
+    repaired: dict[str, Any] | None = None
+    repaired_arguments: str | None = None
+    raw_value, _ = decode_json_value_with_error(call.arguments)
+
+    if isinstance(raw_value, dict) and not partial:
+        repaired = raw_value
+        repaired_arguments = _canonical_tool_arguments(repaired)
+        _log_tool_call_repair(
+            call,
+            tool=tool,
+            partial=partial,
+            raw_arguments=call.arguments,
+            repaired_arguments=repaired_arguments,
+            repaired=repaired,
+            repair_error=None,
         )
-    except Exception:
+        return replace(call, arguments=repaired_arguments)
+
+    try:
+        if partial:
+            value = JSONParser(strict=False, json5_enabled=True, on_extra_token=_ignore_extra_token).parse(call.arguments)
+        else:
+            value = repairjson.loads(call.arguments)
+    except Exception as exc:
+        _log_tool_call_repair(
+            call,
+            tool=tool,
+            partial=partial,
+            raw_arguments=call.arguments,
+            repaired_arguments=None,
+            repaired=None,
+            repair_error=exc,
+        )
         return call
     if not isinstance(value, dict):
+        _log_tool_call_repair(
+            call,
+            tool=tool,
+            partial=partial,
+            raw_arguments=call.arguments,
+            repaired_arguments=None,
+            repaired=None,
+            repair_error=None,
+        )
         return call
-    return replace(
+    repaired = value
+    repaired_arguments = _canonical_tool_arguments(repaired)
+    _log_tool_call_repair(
         call,
-        arguments=msgspec.json.encode(value, order="deterministic").decode(),
+        tool=tool,
+        partial=partial,
+        raw_arguments=call.arguments,
+        repaired_arguments=repaired_arguments,
+        repaired=repaired,
+        repair_error=None,
     )
+    return replace(call, arguments=repaired_arguments)
 
 
 def _repair_message(

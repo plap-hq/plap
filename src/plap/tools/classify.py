@@ -16,6 +16,7 @@ from plap.llms.completions.chat import (
     ChatTool,
     IChatCompletionClient,
 )
+from plap.llms.json import decode_json_object_with_error
 from plap.llms.retry import RetryValidator, retry_message, retry_on_unusable_tool_calls
 from plap.llms.retry import complete as retry_complete
 from plap.logging import log_debug, log_payload
@@ -574,11 +575,10 @@ def _parse_raw_output(message: ChatMessage, *, expected_tool_name: str) -> dict[
     tool_call = tool_calls[0]
     if tool_call.name != expected_tool_name:
         raise _ClassifierShapeError("classifier returned an unexpected tool call")
-    try:
-        decoded = msgspec.json.decode(tool_call.arguments.encode())
-    except msgspec.DecodeError as exc:
-        raise _ClassifierShapeError("classifier tool arguments were not a valid JSON object") from exc
-    if not isinstance(decoded, dict):
+    decoded, error = decode_json_object_with_error(tool_call.arguments)
+    if error is not None:
+        raise _ClassifierShapeError("classifier tool arguments were not a valid JSON object") from error
+    if decoded is None:
         raise _ClassifierShapeError("classifier tool arguments were not a valid JSON object")
     return decoded
 

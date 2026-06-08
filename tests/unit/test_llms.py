@@ -11,6 +11,7 @@ from fireworks.client.error import APITimeoutError as FireworksAPITimeoutError
 from fireworks.client.error import InvalidRequestError
 from openai import APITimeoutError, BadRequestError
 
+import plap.llms.accumulator as accumulator_module
 import plap.llms.completions.providers.fireworks as fireworks_provider_module
 import plap.llms.completions.providers.openai as openai_provider_module
 import plap.llms.completions.quirks as quirks_module
@@ -77,6 +78,16 @@ def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, obje
         events.append({"event": event, **context})
 
     monkeypatch.setattr(router_module, "log_debug", record)
+    return events
+
+
+def _capture_accumulator_payload_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+
+    def record(_logger: object, event: str, /, **context: object) -> None:
+        events.append({"event": event, **context})
+
+    monkeypatch.setattr(accumulator_module, "log_payload", record)
     return events
 
 
@@ -470,7 +481,7 @@ def test_accumulator_assembles_streamed_tool_call_and_final_result() -> None:
 
     assert first == Snapshot(messages=first.messages, results=(), delta=first.delta)
     assert first.messages[0].tool_calls is not None
-    assert first.messages[0].tool_calls[0].arguments == '{"n":""}'
+    assert first.messages[0].tool_calls[0].arguments == '{"n":null}'
     assert second.results
     assert second.messages[0].tool_calls is not None
     assert second.messages[0].tool_calls[0].arguments == '{"n":"4","x":1}'
@@ -507,7 +518,7 @@ def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
     assert second.results[0].message.content == "hello"
 
 
-def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
+def test_accumulator_repairs_tool_call_json_syntax_without_schema_coercion() -> None:
     tool = ChatTool(
         function=ChatFunctionTool(
             name="lookup",
@@ -538,10 +549,67 @@ def test_accumulator_repairs_tool_call_arguments_automatically() -> None:
     )
 
     assert final.messages[0].tool_calls is not None
-    assert final.messages[0].tool_calls[0].arguments == '{"n":4}'
+    assert final.messages[0].tool_calls[0].arguments == '{"n":"4","x":1}'
     assert final.results
     assert final.results[0].message.tool_calls is not None
-    assert final.results[0].message.tool_calls[0].arguments == '{"n":4}'
+    assert final.results[0].message.tool_calls[0].arguments == '{"n":"4","x":1}'
+
+
+def test_accumulator_logs_final_tool_call_repair_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="bash",
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        )
+    )
+    events = _capture_accumulator_payload_logs(monkeypatch)
+    accumulator = Accumulator(tools=(tool,))
+
+    final = accumulator.apply(
+        ChatCompletionDelta(
+            id="chatcmpl_1",
+            model="model-a",
+            created_at=10,
+            choice_index=0,
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_1",
+                name="bash",
+                arguments_delta='{"command":"printf ok","entityId":"123"}',
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    assert final.results
+    assert final.results[0].message.tool_calls[0].arguments == '{"command":"printf ok","entityId":"123"}'
+    assert len(events) == 1
+
+    event = events[0]
+    assert event["event"] == "llm.accumulator.tool_call_repair.payload"
+    assert event["issues"] == ["undeclared_keys"]
+    assert event["repair_outcome"] == "dict"
+    assert event["repair_changed"] is False
+    assert event["decoded_key_set_changed"] is False
+    assert event["decoded_value_changed"] is False
+    assert event["raw_arguments"] == '{"command":"printf ok","entityId":"123"}'
+    assert event["repaired_arguments"] == '{"command":"printf ok","entityId":"123"}'
+    assert event["raw_keys"] == ["command", "entityId"]
+    assert event["repaired_keys"] == ["command", "entityId"]
+    assert event["schema_keys"] == ["command"]
+    assert event["undeclared_keys"] == ["entityId"]
+    assert event["raw_json_valid"] is True
+    assert event["raw_is_object"] is True
+    assert event["repaired_is_object"] is True
+    assert event["tool_call_id"] == "call_1"
+    assert event["tool_name"] == "bash"
+    assert event["tool_strict"] is None
+    assert event["raw_arguments_hash"]
+    assert event["repaired_arguments_hash"]
 
 
 class _RetryStreamClient(IChatCompletionClient):
@@ -1089,6 +1157,43 @@ async def test_retry_on_unusable_tool_calls_returns_retry_message_for_strict_sch
     assert "data.n must be integer" in retry_message
 
 
+async def test_retry_on_unusable_tool_calls_returns_retry_message_for_non_strict_schema_mismatch() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[
+            ChatTool(
+                function=ChatFunctionTool(
+                    name="lookup",
+                    parameters={
+                        "type": "object",
+                        "properties": {"n": {"type": "integer"}},
+                        "required": ["n"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        ],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments='{"n":null}')],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    retry_message = await retry_on_unusable_tool_calls(result, request)
+
+    assert retry_message is not None
+    assert "`lookup`" in retry_message
+    assert "data.n must be integer" in retry_message
+    assert "strict tool" not in retry_message
+
+
 async def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schema() -> None:
     request = ChatCompletionRequest(
         model="model-a",
@@ -1106,7 +1211,28 @@ async def test_retry_on_unusable_tool_calls_raises_for_uncompilable_strict_schem
         finish_reason="tool_calls",
     )
 
-    with pytest.raises(RetryToolSchemaError, match="strict tool schema"):
+    with pytest.raises(RetryToolSchemaError, match="tool schema"):
+        await retry_on_unusable_tool_calls(result, request)
+
+
+async def test_retry_on_unusable_tool_calls_raises_for_uncompilable_non_strict_schema() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[ChatMessage(role="developer", content="be precise")],
+        tools=[ChatTool(function=ChatFunctionTool(name="lookup", parameters={"type": "wat"}))],
+    )
+    result = ChatCompletionResult(
+        id="chatcmpl_1",
+        model="model-a",
+        created_at=10,
+        message=ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_1", name="lookup", arguments="{}")],
+        ),
+        finish_reason="tool_calls",
+    )
+
+    with pytest.raises(RetryToolSchemaError, match="tool schema"):
         await retry_on_unusable_tool_calls(result, request)
 
 

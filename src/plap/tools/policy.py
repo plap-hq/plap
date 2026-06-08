@@ -12,6 +12,7 @@ from cachetools import LRUCache
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.completions.chat import ChatToolCall
+from plap.llms.json import decode_json_object_with_error
 from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
 
@@ -256,15 +257,14 @@ def signature_hash_hex(signature_hash: bytes) -> str:
 
 
 def _strict_json_object(arguments: str) -> dict[str, Any]:
-    try:
-        decoded = msgspec.json.decode(arguments.encode())
-    except msgspec.DecodeError as exc:
+    decoded, error = decode_json_object_with_error(arguments)
+    if error is not None:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_invalid_json",
             private_message="function call arguments must be valid JSON",
-            cause=exc,
-        ) from exc
-    if not isinstance(decoded, dict):
+            cause=error,
+        ) from error
+    if decoded is None:
         raise _invalid_tool_arguments_error(
             reason="tool_arguments_not_object",
             private_message="function call arguments must be a JSON object",
