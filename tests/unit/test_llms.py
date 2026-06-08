@@ -528,7 +528,7 @@ def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
     assert second.results[0].message.content == "hello"
 
 
-def test_accumulator_repairs_tool_call_json_syntax_without_schema_coercion() -> None:
+def test_accumulator_repairs_tool_call_json_syntax_with_safe_scalar_normalization() -> None:
     tool = ChatTool(
         function=ChatFunctionTool(
             name="lookup",
@@ -559,10 +559,10 @@ def test_accumulator_repairs_tool_call_json_syntax_without_schema_coercion() -> 
     )
 
     assert final.messages[0].tool_calls is not None
-    assert final.messages[0].tool_calls[0].arguments == '{"n":"4","x":1}'
+    assert final.messages[0].tool_calls[0].arguments == '{"n":4,"x":1}'
     assert final.results
     assert final.results[0].message.tool_calls is not None
-    assert final.results[0].message.tool_calls[0].arguments == '{"n":"4","x":1}'
+    assert final.results[0].message.tool_calls[0].arguments == '{"n":4,"x":1}'
 
 
 def test_accumulator_recovers_inline_comment_tool_arguments() -> None:

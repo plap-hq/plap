@@ -5,7 +5,8 @@ import json
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from plap.llms.json import Outcome, decode_json_value, encode_json_value, recover
+from plap.llms.json import Outcome, decode_json_value, encode_json_value, normalize, recover
+from plap.llms.json.schema import compile_validator
 
 _SAFE_CHARS = st.characters(blacklist_categories=("Cs",))
 _JSON_SCALARS = st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False, allow_infinity=False) | st.text(_SAFE_CHARS)
@@ -74,3 +75,17 @@ def test_recover_hypothesis_never_crashes_and_complete_values_round_trip(
 
     encoded = encode_json_value(result.value)
     assert decode_json_value(encoded) == result.value
+
+
+@settings(max_examples=150, deadline=200)
+@given(value=_JSON_VALUES, schema=_SCHEMAS)
+def test_normalize_hypothesis_never_crashes(value: object, schema: dict[str, object] | None) -> None:
+    normalize(value, schema=schema)
+
+
+@settings(max_examples=100, deadline=200)
+@given(value=_JSON_VALUES, schema=_SCHEMAS.filter(lambda item: item is not None))
+def test_normalize_hypothesis_is_noop_for_valid_values(value: object, schema: dict[str, object]) -> None:
+    validator = compile_validator(schema)
+    if validator.is_valid(value):
+        assert normalize(value, schema=schema) == value

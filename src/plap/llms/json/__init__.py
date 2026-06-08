@@ -1,3 +1,4 @@
+from plap.llms.json.normalize import normalize
 from plap.llms.json.recovery import Outcome, Result, recover
 from plap.llms.json.schema import (
     ValidationError,
@@ -27,6 +28,7 @@ __all__ = [
     "decode_json_value_with_error",
     "encode_json_object",
     "encode_json_value",
+    "normalize",
     "recover",
     "schema_property_keys",
     "validation_error_message",

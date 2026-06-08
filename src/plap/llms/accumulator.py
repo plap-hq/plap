@@ -15,7 +15,7 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     ChatUsage,
 )
-from plap.llms.json import Outcome, decode_json_value_with_error, encode_json_object, recover, schema_property_keys
+from plap.llms.json import Outcome, decode_json_value_with_error, encode_json_object, normalize, recover, schema_property_keys
 from plap.logging import log_payload
 
 logger = structlog.get_logger(__name__)
@@ -181,7 +181,7 @@ def _repair_tool_call(
             repair_error=None,
         )
         return call
-    repaired = recovery.value
+    repaired = normalize(recovery.value, schema=None if partial or tool is None else tool.function.parameters)
     repaired_arguments = encode_json_object(repaired)
     _log_tool_call_repair(
         call,
