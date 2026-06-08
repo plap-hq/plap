@@ -56,6 +56,53 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
     }
 
 
+def test_token_surface_schema_values_place_required_immediately_before_properties() -> None:
+    tool = ChatTool(
+        function=ChatFunctionTool(
+            name="apply_change",
+            description="Apply a structured change.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "change": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                        },
+                        "required": ["file_path", "old_string", "new_string"],
+                    }
+                },
+                "required": ["change"],
+            },
+        )
+    )
+    response_format = ChatResponseFormat(
+        type="json_schema",
+        name="answer",
+        schema={
+            "type": "object",
+            "properties": {
+                "result": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                }
+            },
+            "required": ["result"],
+        },
+    )
+
+    tool_schema = tokens_module._tool_definition_value(tool)["function"]["parameters"]
+    assert list(tool_schema) == ["type", "required", "properties"]
+    assert list(tool_schema["properties"]["change"]) == ["type", "required", "properties"]
+
+    response_schema = tokens_module._response_format_value(response_format)["json_schema"]["schema"]
+    assert list(response_schema) == ["type", "required", "properties"]
+    assert list(response_schema["properties"]["result"]) == ["type", "required", "properties"]
+
+
 def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch) -> None:
     captured_messages = None
     captured_tools = None

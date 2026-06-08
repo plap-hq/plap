@@ -29,6 +29,25 @@ def _set(target: dict[str, Any], key: str, value: Any) -> None:
         target[key] = value
 
 
+def required_before_properties(value: Any) -> Any:
+    if isinstance(value, list):
+        return [required_before_properties(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    reordered: dict[str, Any] = {}
+    has_properties = "properties" in value
+    required_emitted = False
+    for key, item in value.items():
+        if key == "required" and has_properties:
+            continue
+        if key == "properties" and has_properties and "required" in value and not required_emitted:
+            reordered["required"] = required_before_properties(value["required"])
+            required_emitted = True
+        reordered[key] = required_before_properties(item)
+    return reordered
+
+
 def _get(value: Any, key: str) -> Any:
     if value is None:
         return None
@@ -102,7 +121,7 @@ def _message_body(message: ChatMessage) -> dict[str, Any]:
 
 def _tool_body(tool: ChatTool) -> dict[str, Any]:
     function: dict[str, Any] = {"name": tool.function.name}
-    _set(function, "parameters", tool.function.parameters)
+    _set(function, "parameters", required_before_properties(tool.function.parameters))
     _set(function, "strict", tool.function.strict)
     _set(function, "description", tool.function.description)
     return {"type": tool.type, "function": function}
@@ -133,7 +152,7 @@ def _response_format_body(
         return {"type": response_format.type}
     json_schema: dict[str, Any] = {
         "name": response_format.name,
-        "schema": response_format.schema or {},
+        "schema": required_before_properties(response_format.schema or {}),
     }
     _set(json_schema, "strict", response_format.strict)
     _set(json_schema, "description", response_format.description)
@@ -470,6 +489,7 @@ __all__ = [
     "delta_from_data",
     "has_output",
     "raise_incomplete_stream_error",
+    "required_before_properties",
     "response_to_stream_chunks",
     "to_data",
 ]

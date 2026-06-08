@@ -1634,6 +1634,65 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
     assert body["stream_options"] == {"include_usage": True}
 
 
+def test_build_chat_body_places_required_immediately_before_properties_recursively() -> None:
+    request = replace(
+        _request(),
+        tools=[
+            ChatTool(
+                function=ChatFunctionTool(
+                    name="apply_change",
+                    description="Apply a structured change.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "change": {
+                                "type": "object",
+                                "properties": {
+                                    "file_path": {"type": "string"},
+                                    "old_string": {"type": "string"},
+                                    "new_string": {"type": "string"},
+                                },
+                                "required": ["file_path", "old_string", "new_string"],
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["change"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        ],
+        response_format=ChatResponseFormat(
+            type="json_schema",
+            name="answer",
+            schema={
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "object",
+                        "properties": {
+                            "ok": {"type": "boolean"},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["ok", "message"],
+                    }
+                },
+                "required": ["result"],
+            },
+        ),
+    )
+
+    body = build_chat_body(request, stream=False)
+
+    parameters = body["tools"][0]["function"]["parameters"]
+    assert list(parameters) == ["type", "required", "properties", "additionalProperties"]
+    assert list(parameters["properties"]["change"]) == ["type", "required", "properties"]
+
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert list(schema) == ["type", "required", "properties"]
+    assert list(schema["properties"]["result"]) == ["type", "required", "properties"]
+
+
 def test_lightning_request_quirks_keep_supported_fields_and_map_role() -> None:
     body = _body_for(_lightning_provider(), _request_for_model("lightning-ai/gpt-oss-20b"), stream=True)
 

@@ -10,6 +10,7 @@ import tiktoken
 from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
 from plap.llms.completions.chat import ChatMessage as LLMChatMessage
 from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
+from plap.llms.completions.common import required_before_properties
 from plap.llms.completions.encoding_dsv4 import encode_messages as encode_dsv4_messages
 
 
@@ -59,7 +60,7 @@ def _tool_definition_value(tool: ChatTool) -> dict[str, object]:
         "function": {
             "name": tool.function.name,
             "description": tool.function.description,
-            "parameters": tool.function.parameters or {},
+            "parameters": required_before_properties(tool.function.parameters or {}),
             "strict": tool.function.strict,
         },
     }
@@ -102,7 +103,7 @@ def _response_format_value(response_format: ChatResponseFormat | None) -> dict[s
         return {"type": response_format.type}
     json_schema: dict[str, object] = {
         "name": response_format.name,
-        "schema": response_format.schema or {},
+        "schema": required_before_properties(response_format.schema or {}),
     }
     if response_format.strict is not None:
         json_schema["strict"] = response_format.strict
