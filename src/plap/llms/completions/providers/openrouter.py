@@ -3,7 +3,7 @@ from __future__ import annotations
 from plap.llms.completions.client import Provider, Quirk
 from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.completions.providers.openai import OpenAIProvider
-from plap.llms.completions.quirks import ExtraBody, Only, RenameOutput, Set, SystemRole
+from plap.llms.completions.quirks import ExtraBody, Only, RenameMessageField, RenameOutput, Set, SystemRole
 
 OPENROUTER_OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(
@@ -100,10 +100,15 @@ def build_openrouter_provider(*, api_key: str) -> Provider:
         name="openrouter",
         api_key=api_key,
         base_url=OPENROUTER_OPENAI_BASE_URL,
-        # Live probing showed OpenRouter responses alias assistant reasoning as
-        # `reasoning`, but request-side replay is not safely normalized the same
-        # way across models, so we only rename on the way back out.
-        quirks=(SystemRole(), Only(*OPENROUTER_FIELDS), RenameOutput("reasoning", "reasoning_content")),
+        # OpenRouter emits assistant hidden reasoning as `reasoning`. Internally
+        # plap keeps a single hidden reasoning field, `reasoning_content`, and
+        # maps it back to `reasoning` when replaying assistant messages.
+        quirks=(
+            SystemRole(),
+            Only(*OPENROUTER_FIELDS),
+            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
+            RenameOutput("reasoning", "reasoning_content"),
+        ),
         models=OPENROUTER_MODELS,
     )
 

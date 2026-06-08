@@ -85,7 +85,6 @@ def _message_body(message: ChatMessage) -> dict[str, Any]:
     if message.role == "assistant":
         _set(value, "refusal", message.refusal)
         _set(value, "reasoning_content", message.reasoning_content)
-        _set(value, "reasoning_details", message.reasoning_details or None)
     return value
 
 
@@ -261,7 +260,6 @@ def completion_result_from_data(
             content=content,
             refusal=_get(message, "refusal"),
             reasoning_content=_get(message, "reasoning_content"),
-            reasoning_details=_get(message, "reasoning_details") or [],
             tool_calls=tool_calls,
         ),
         finish_reason=finish_reason,
@@ -288,7 +286,6 @@ def delta_from_data(
         content_delta=_get(delta, "content"),
         refusal_delta=_get(delta, "refusal"),
         reasoning_delta=_get(delta, "reasoning_content"),
-        reasoning_details_delta=_get(delta, "reasoning_details"),
         tool_call_delta=ChatToolCallDelta(
             index=_get(tool_call_delta, "index") or 0,
             id=_get(tool_call_delta, "id"),
@@ -323,7 +320,6 @@ def response_to_stream_chunks(
                         "content": result.message.content,
                         "refusal": result.message.refusal,
                         "reasoning_content": result.message.reasoning_content,
-                        "reasoning_details": result.message.reasoning_details,
                     },
                 }
             ],

@@ -504,7 +504,7 @@ async def test_live_cerebras_glm_4_7_reasoning_request() -> None:
     )
 
     assert _message_has_output(result.message)
-    assert result.message.reasoning_content or result.message.reasoning_details
+    assert result.message.reasoning_content
 
 
 async def test_live_gmicloud_deepseek_v4_flash_basic_reasoning_request() -> None:
@@ -732,7 +732,7 @@ async def test_live_crof_qwen_3_5_9b_reasoning_request() -> None:
         ),
     )
 
-    assert result.message.reasoning_content or result.message.reasoning_details
+    assert result.message.reasoning_content
 
 
 def _client(provider: ProviderCase) -> IChatCompletionClient:
@@ -818,15 +818,12 @@ def _unquote(value: str) -> str:
 
 
 def _message_has_output(message: ChatMessage) -> bool:
-    return bool(
-        (message.content or "").strip() or (message.reasoning_content or "").strip() or message.reasoning_details or message.tool_calls
-    )
+    return bool((message.content or "").strip() or (message.reasoning_content or "").strip() or message.tool_calls)
 
 
 def _delta_has_output(delta: ChatCompletionDelta) -> bool:
     return bool(
         (delta.content_delta or "").strip()
         or (delta.reasoning_delta or "").strip()
-        or delta.reasoning_details_delta
         or delta.tool_call_delta
     )

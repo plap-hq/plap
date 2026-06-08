@@ -395,7 +395,6 @@ def _copy_message(
     *,
     tool_calls: list[ToolCall] | None = None,
     reasoning_content: str | None = None,
-    reasoning_details: list[object] | None = None,
 ) -> Message:
     return Message(
         role=message.role,
@@ -404,7 +403,6 @@ def _copy_message(
         tool_call_id=message.tool_call_id,
         tool_calls=list(message.tool_calls if tool_calls is None else tool_calls),
         reasoning_content=message.reasoning_content if reasoning_content is None else reasoning_content,
-        reasoning_details=list(message.reasoning_details if reasoning_details is None else reasoning_details),
     )
 
 
@@ -622,7 +620,6 @@ class _Anchor:
             message,
             tool_calls=tool_calls,
             reasoning_content=self.patch.reasoning_content,
-            reasoning_details=[] if self.patch.reasoning_details is None else list(self.patch.reasoning_details),
         )
         self.declared = [_Call.declared(tool_call) for tool_call in tool_calls]
         pending = list(self.suffix)

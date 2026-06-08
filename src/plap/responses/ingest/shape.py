@@ -51,8 +51,6 @@ def _shape_message(value: Mapping[str, JSONValue]) -> JSONValue:
         ]
     if "reasoning_content" in value:
         shaped["reasoning_content"] = _shape_scalar(value["reasoning_content"])
-    if "reasoning_details" in value:
-        shaped["reasoning_details"] = _shape_value(value["reasoning_details"])
     return shaped
 
 

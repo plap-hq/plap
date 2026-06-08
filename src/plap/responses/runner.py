@@ -269,15 +269,13 @@ class State:
         if message.content is None:
             return None
         tool_calls = list(message.tool_calls) or None
-        reasoning_details = list(message.reasoning_details) or None
-        if tool_calls is None and message.reasoning_content is None and reasoning_details is None:
+        if tool_calls is None and message.reasoning_content is None:
             return None
         visible = Message(role="assistant", content=message.content)
         return MessagePatch(
             content_hash=visible.content_hash(),
             tool_calls=tool_calls,
             reasoning_content=message.reasoning_content,
-            reasoning_details=reasoning_details,
         )
 
     def _message_item(self, message: Message) -> ResponseMessageItem | None:

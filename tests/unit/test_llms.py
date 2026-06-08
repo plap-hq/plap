@@ -190,14 +190,12 @@ def _completion_response(
     finish_reason: str = "stop",
     reasoning_content: str | None = None,
     reasoning: str | None = None,
-    reasoning_details: list[dict[str, Any]] | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {
         "content": content,
         "refusal": None,
         "reasoning_content": reasoning_content,
-        "reasoning_details": reasoning_details,
         "tool_calls": tool_calls,
     }
     if reasoning is not None:
@@ -1656,6 +1654,7 @@ def test_groq_request_quirks_skip_include_reasoning_for_unsupported_models() -> 
     [
         pytest.param(_groq_provider, "openai/gpt-oss-20b", id="groq"),
         pytest.param(_cerebras_provider, "gpt-oss-120b", id="cerebras"),
+        pytest.param(_openrouter_provider, "deepseek/deepseek-v4-flash", id="openrouter"),
     ],
 )
 def test_provider_request_quirks_rename_assistant_reasoning_content_for_replay(

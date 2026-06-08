@@ -28,7 +28,6 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
                 tool_call_id="tool_output_1",
                 tool_calls=[ChatToolCall(id="tool_call_1", name="search", arguments='{"b":2,"a":1}')],
                 reasoning_content="kept thinking",
-                reasoning_details=[{"b": 2, "a": 1}],
             )
         ],
         tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
@@ -42,7 +41,6 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
                 "content": "visible content",
                 "tool_call_id": "tool_output_1",
                 "reasoning_content": "kept thinking",
-                "reasoning_details": [{"a": 1, "b": 2}],
                 "tool_calls": [
                     {
                         "id": "tool_call_1",
@@ -539,33 +537,3 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_response_forma
             {"role": "user", "content": 'Return {"ok": true}.'},
         ]
     ]
-
-
-def test_measure_request_tokens_falls_back_when_dsv4_only_has_reasoning_details(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "plap.llms.completions.tokens.encode_dsv4_messages", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError())
-    )
-
-    def fake_tokenize(text: str, *, tokenizer_config):
-        _ = tokenizer_config
-        assert json.loads(text) == {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "reasoning_details": [{"type": "reasoning.summary", "text": "hi"}],
-                }
-            ]
-        }
-        return 17
-
-    monkeypatch.setattr("plap.llms.completions.tokens._tokenize_text_with_tokenizer_config", fake_tokenize)
-
-    count = measure_request_tokens(
-        ChatCompletionRequest(
-            model="deepseek/deepseek-v4-flash",
-            messages=[ChatMessage(role="assistant", reasoning_details=[{"type": "reasoning.summary", "text": "hi"}])],
-        ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
-    )
-
-    assert count == 17

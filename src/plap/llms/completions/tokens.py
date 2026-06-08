@@ -123,8 +123,6 @@ def _fallback_message_value(message: LLMChatMessage) -> dict[str, object]:
         value["refusal"] = message.refusal
     if message.reasoning_content is not None:
         value["reasoning_content"] = message.reasoning_content
-    if message.reasoning_details:
-        value["reasoning_details"] = message.reasoning_details
     if message.tool_calls:
         value["tool_calls"] = [_fallback_tool_call(tool_call) for tool_call in message.tool_calls]
     return value
@@ -165,14 +163,9 @@ def _template_message(message: LLMChatMessage) -> dict[str, object]:
 
 
 def _reasoning_value(message: LLMChatMessage) -> str | None:
-    value: dict[str, object] = {}
-    if message.reasoning_content is not None:
-        value["reasoning_content"] = message.reasoning_content
-    if message.reasoning_details:
-        value["reasoning_details"] = message.reasoning_details
-    if not value:
+    if message.reasoning_content is None:
         return None
-    return _json_text(value)
+    return _json_text({"reasoning_content": message.reasoning_content})
 
 
 def _uses_dsv4_encoding(tokenizer_config: ITokenizerConfig) -> bool:
@@ -180,8 +173,6 @@ def _uses_dsv4_encoding(tokenizer_config: ITokenizerConfig) -> bool:
 
 
 def _dsv4_message(message: LLMChatMessage) -> dict[str, object] | None:
-    if message.reasoning_details and message.reasoning_content is None:
-        return None
     value: dict[str, object] = {"role": message.role}
     if message.content is not None:
         value["content"] = message.content

@@ -255,7 +255,6 @@ class Accumulator:
         self._content: list[str] = []
         self._has_content = False
         self._reasoning: list[str] = []
-        self._reasoning_details: list[dict[str, Any]] = []
         self._calls: dict[int, _ToolCall] = {}
         self._finish: ChatFinishReason | None = None
         self._usage: ChatUsage | None = None
@@ -284,8 +283,6 @@ class Accumulator:
             self._content.append(delta.content_delta)
         if delta.reasoning_delta is not None:
             self._reasoning.append(delta.reasoning_delta)
-        if delta.reasoning_details_delta:
-            self._reasoning_details.extend(delta.reasoning_details_delta)
         if delta.tool_call_delta is not None:
             call = self._calls.setdefault(delta.tool_call_delta.index, _ToolCall())
             call.apply(delta.tool_call_delta)
@@ -307,7 +304,6 @@ class Accumulator:
             content=content,
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
-            reasoning_details=list(self._reasoning_details),
         )
         return _repair_message(
             message,

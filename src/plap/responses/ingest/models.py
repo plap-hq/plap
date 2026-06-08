@@ -60,10 +60,9 @@ class MessagePatch:
     content_hash: str
     tool_calls: list[ToolCall] | None = None
     reasoning_content: str | None = None
-    reasoning_details: list[object] | None = None
 
     def __post_init__(self) -> None:
-        if self.tool_calls is None and self.reasoning_content is None and self.reasoning_details is None:
+        if self.tool_calls is None and self.reasoning_content is None:
             raise ValueError("message patch must change hidden assistant fields")
 
     def to_primitive(self) -> dict[str, object]:
@@ -72,8 +71,6 @@ class MessagePatch:
             value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
         if self.reasoning_content is not None:
             value["reasoning_content"] = self.reasoning_content
-        if self.reasoning_details is not None:
-            value["reasoning_details"] = list(self.reasoning_details)
         return value
 
     @classmethod
@@ -85,17 +82,10 @@ class MessagePatch:
             if not isinstance(tool_calls_value, list):
                 raise TypeError("message patch tool_calls must be an array")
             tool_calls = [ToolCall.from_primitive(call) for call in tool_calls_value]
-        reasoning_details_value = item.get("reasoning_details")
-        reasoning_details: list[object] | None = None
-        if reasoning_details_value is not None:
-            if not isinstance(reasoning_details_value, list):
-                raise TypeError("message patch reasoning_details must be an array")
-            reasoning_details = list(reasoning_details_value)
         return cls(
             content_hash=_required_string(item.get("content_hash"), label="message patch content_hash"),
             tool_calls=tool_calls,
             reasoning_content=_optional_string(item.get("reasoning_content"), label="message patch reasoning_content"),
-            reasoning_details=reasoning_details,
         )
 
 

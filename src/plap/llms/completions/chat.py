@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -127,12 +126,10 @@ class ChatMessage:
     tool_calls: list[ChatToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     reasoning_content: str | None = None
-    reasoning_details: list[object] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", ChatRole(self.role))
         object.__setattr__(self, "tool_calls", list(self.tool_calls))
-        object.__setattr__(self, "reasoning_details", list(self.reasoning_details))
 
     def is_assistant(self) -> bool:
         return self.role == ChatRole.ASSISTANT
@@ -157,8 +154,6 @@ class ChatMessage:
             value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
         if self.reasoning_content is not None:
             value["reasoning_content"] = self.reasoning_content
-        if self.reasoning_details:
-            value["reasoning_details"] = list(self.reasoning_details)
         return value
 
     @classmethod
@@ -170,12 +165,6 @@ class ChatMessage:
             if not isinstance(tool_calls_value, list):
                 raise TypeError("message tool_calls must be an array")
             tool_calls = [ChatToolCall.from_primitive(call) for call in tool_calls_value]
-        reasoning_details_value = item.get("reasoning_details")
-        reasoning_details: list[object] = []
-        if reasoning_details_value is not None:
-            if not isinstance(reasoning_details_value, list):
-                raise TypeError("message reasoning_details must be an array")
-            reasoning_details = list(reasoning_details_value)
         return cls(
             role=ChatRole(_required_string(item.get("role"), label="message role")),
             content=_optional_string(item.get("content"), label="message content"),
@@ -184,7 +173,6 @@ class ChatMessage:
             tool_calls=tool_calls,
             tool_call_id=_optional_string(item.get("tool_call_id"), label="message tool_call_id"),
             reasoning_content=_optional_string(item.get("reasoning_content"), label="message reasoning_content"),
-            reasoning_details=reasoning_details,
         )
 
 
@@ -292,7 +280,6 @@ class ChatCompletionDelta:
     content_delta: str | None = None
     refusal_delta: str | None = None
     reasoning_delta: str | None = None
-    reasoning_details_delta: list[dict[str, Any]] | None = None
     tool_call_delta: ChatToolCallDelta | None = None
     finish_reason: ChatFinishReason | None = None
     usage: ChatUsage | None = None

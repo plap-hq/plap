@@ -598,7 +598,6 @@ def test_sides_shape_ignores_textual_leaves() -> None:
                 content="hello",
                 tool_calls=[ToolCall(id="call_0", name="read_file", arguments='{"path":"README.md"}')],
                 reasoning_content="because",
-                reasoning_details=[{"step": 1, "note": "alpha"}],
             ),
             Message(role="tool", tool_call_id="call_0", content="first output"),
         ], "reviewer": [Message(role="assistant", content="review one")]},
@@ -610,7 +609,6 @@ def test_sides_shape_ignores_textual_leaves() -> None:
                 content="goodbye",
                 tool_calls=[ToolCall(id="call_0", name="list_files", arguments='{"path":"docs"}')],
                 reasoning_content="therefore",
-                reasoning_details=[{"step": 9, "note": "omega"}],
             ),
             Message(role="tool", tool_call_id="call_0", content="second output"),
         ], "reviewer": [Message(role="assistant", content="review two")]},
@@ -672,7 +670,12 @@ def test_decode_queue_rejects_unsealed_reasoning_input() -> None:
 async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_only_queue() -> None:
     payload = _compaction_payload(
         machine={"active": ["reviewer"]},
-        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="main snapshot")], "reviewer": [Message(role="assistant", content="review snapshot")]}),
+        sides=Sides(
+            messages={
+                MAIN_SIDE: [Message(role="assistant", content="main snapshot")],
+                "reviewer": [Message(role="assistant", content="review snapshot")],
+            }
+        ),
     )
 
     result = await ingest_response_request(
@@ -706,7 +709,14 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             main=[Message(role="assistant", content="second")],
-            current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot"), Message(role="assistant", content="first")]}),
+            current=Sides(
+                messages={
+                    MAIN_SIDE: [
+                        Message(role="assistant", content="snapshot"),
+                        Message(role="assistant", content="first"),
+                    ]
+                }
+            ),
         ),
     )
 
@@ -790,7 +800,10 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(main=[Message(role="assistant", content="second")], current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="first")]})),
+        sides=_sides_update(
+            main=[Message(role="assistant", content="second")],
+            current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="first")]}),
+        ),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -1219,7 +1232,11 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_
     )
 
     assert result.sides[MAIN_SIDE] == [
-        Message(role="assistant", content="main hidden", tool_calls=[ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}')]),
+        Message(
+            role="assistant",
+            content="main hidden",
+            tool_calls=[ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}')],
+        ),
         Message(role="tool", tool_call_id="fab_0", content="main result"),
     ]
     assert result.last_side == MAIN_SIDE
