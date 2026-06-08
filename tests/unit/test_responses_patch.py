@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import jsonpatch
 
-from plap.responses.patch import diff, expand_moves
+from plap.responses.ingest.patch import diff, expand_moves
 
 
 def test_diff_expands_forward_list_move() -> None:

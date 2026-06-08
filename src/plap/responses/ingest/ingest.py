@@ -31,8 +31,8 @@ from plap.responses.ingest.models import (
     ToolCall,
     split_tail,
 )
+from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
-from plap.responses.patch import JSONPatch, JSONValue
 
 
 def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:

@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 from plap.llms.completions.chat import ChatMessage as Message
 from plap.llms.completions.chat import ChatToolCall as ToolCall
+from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.shape import shape
-from plap.responses.patch import JSONPatch, JSONValue
 
 
 def _required_mapping(value: object, *, label: str) -> Mapping[str, object]:

@@ -39,8 +39,8 @@ from plap.responses.contracts import (
     ToolChoiceFunction,
 )
 from plap.responses.ingest.models import MAIN_SIDE, CallID, GuardedPatch, Ingested, Message, MessagePatch, Sides, SidesUpdate, split_tail
+from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
 from plap.responses.ingest.sealing import seal_call_id
-from plap.responses.patch import JSONPatch, JSONValue, diff
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import PublicUsageConfig, RuntimeModelProfileConfig

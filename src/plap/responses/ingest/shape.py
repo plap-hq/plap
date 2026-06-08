@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from plap.llms.completions.chat import ChatMessage as Message
-from plap.responses.patch import JSONValue
+from plap.responses.ingest.patch import JSONValue
 
 _TEXT = ""
 _NUMBER = 0

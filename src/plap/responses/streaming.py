@@ -42,8 +42,8 @@ from plap.responses.contracts import (
     SummaryTextContent,
 )
 from plap.responses.ingest.models import CompactionPayload, ReasoningPayload, Sides, SidesUpdate
+from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import seal_compaction_payload, seal_reasoning_payload
-from plap.responses.patch import JSONPatch, JSONValue
 from plap.responses.store import PreparedRequest, ResponseStore
 
 
