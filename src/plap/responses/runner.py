@@ -27,7 +27,6 @@ from plap.llms.completions.chat import (
 )
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
-from plap.logging import log_debug, log_payload
 from plap.responses.contracts import (
     FunctionTool,
     OutputTextContent,
@@ -48,7 +47,7 @@ from plap.tools import IMCPToolProvider, IToolCallPolicyResolver, IToolPolicyRes
 
 INTERRUPTED_TOOL_OUTPUT = "Tool output unavailable because the response was interrupted."
 DEVELOPER_PROMPT_TEMPLATE = "You are {model_name}, an AI assistant."
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 class Machine(BaseModel):
@@ -259,10 +258,7 @@ class State:
         if anchor is None:
             return [*deepcopy(prefix), *deepcopy(after)]
         shadow = [*deepcopy(prefix), anchor, *deepcopy(suffix), *deepcopy(after)]
-        shadow.extend(
-            Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT)
-            for tool_call in open_calls
-        )
+        shadow.extend(Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls)
         return shadow
 
     def _message_patch(self, message: Message) -> MessagePatch | None:
@@ -571,8 +567,7 @@ async def execute(
     budget_exhausted = False
     latest_snapshot = None
 
-    log_debug(
-        logger,
+    logger.info(
         "response.runtime.turn",
         continuation_side=MAIN_SIDE,
         main_model=base_request.model,
@@ -593,8 +588,7 @@ async def execute(
         attempt_cap = profile.main.cap_max_completion_tokens(attempt_budget)
         if attempt_cap == 0:
             budget_exhausted = True
-            log_debug(
-                logger,
+            logger.info(
                 "response.runtime.main_request.skipped",
                 attempt_budget=attempt_budget,
                 attempt_index=attempt_index,
@@ -609,8 +603,7 @@ async def execute(
             messages=[*base_request.messages, *history.messages],
             max_completion_tokens=attempt_cap,
         )
-        log_debug(
-            logger,
+        logger.info(
             "response.runtime.main_request",
             attempt_budget=attempt_budget,
             attempt_index=attempt_index,
@@ -619,8 +612,7 @@ async def execute(
             main_cap=attempt_cap,
             remaining_budget=ledger.remaining(),
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "response.runtime.main_request.payload",
             attempt_index=attempt_index,
             request=asdict(attempt_request),

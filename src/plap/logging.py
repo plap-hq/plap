@@ -1,46 +1,79 @@
 from __future__ import annotations
 
 import logging as stdlib_logging
-import sys
 from contextlib import AbstractContextManager, nullcontext
-from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 import structlog
 
-_DEBUG_ENABLED = False
-_PAYLOAD_DEBUG_ENABLED = False
-_LOG_STREAM: TextIO | None = None
+_LOG_KWARG_NAMES = ("exc_info", "stack_info", "stacklevel")
 
 
-def configure_logging(settings: Any) -> None:
-    global _DEBUG_ENABLED, _PAYLOAD_DEBUG_ENABLED, _LOG_STREAM  # noqa: PLW0603
+class _DefaultRecordAttributesFilter(stdlib_logging.Filter):
+    def filter(self, record: stdlib_logging.LogRecord) -> bool:
+        if not hasattr(record, "event"):
+            record.event = record.getMessage()
+        if not hasattr(record, "log_channel"):
+            record.log_channel = "app"
+        if not hasattr(record, "logger"):
+            record.logger = record.name
+        if not hasattr(record, "level"):
+            record.level = record.levelname.lower()
+        return True
 
-    _DEBUG_ENABLED = bool(getattr(settings, "debug", False))
-    _PAYLOAD_DEBUG_ENABLED = bool(getattr(settings, "debug_payloads", False))
-    log_json = bool(getattr(settings, "log_json", False))
-    level = stdlib_logging.DEBUG if _DEBUG_ENABLED else stdlib_logging.INFO
 
-    if _LOG_STREAM is not None and _LOG_STREAM is not sys.stderr:
-        _LOG_STREAM.close()
-    _LOG_STREAM = _resolve_log_stream(getattr(settings, "log_file", None))
+def _add_default_log_channel(_logger: Any, _method_name: str, event_dict: structlog.typing.EventDict) -> structlog.typing.EventDict:
+    event_dict.setdefault("log_channel", "app")
+    return event_dict
 
-    renderer = structlog.processors.JSONRenderer(sort_keys=True) if log_json else structlog.dev.ConsoleRenderer(colors=_LOG_STREAM.isatty())
-    processors = [
+
+def _render_to_log_kwargs(_logger: Any, _method_name: str, event_dict: structlog.typing.EventDict) -> dict[str, object]:
+    extra = dict(event_dict)
+    kwargs = {key: extra.pop(key) for key in _LOG_KWARG_NAMES if key in extra}
+    event = extra.get("event")
+    return {
+        "msg": event,
+        "extra": extra,
+        **kwargs,
+    }
+
+
+def _logging_level(settings: Any) -> int:
+    return stdlib_logging.DEBUG if bool(getattr(settings, "debug", False)) else stdlib_logging.INFO
+
+
+def _processors() -> list[structlog.types.Processor]:
+    return [
         structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        _add_default_log_channel,
         structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
+        _render_to_log_kwargs,
     ]
-    if log_json:
-        processors.append(structlog.processors.dict_tracebacks)
-    processors.append(renderer)
+
+
+def configure_logging(settings: Any, *, handlers: tuple[stdlib_logging.Handler, ...]) -> None:
+    level = _logging_level(settings)
     structlog.configure(
-        cache_logger_on_first_use=True,
-        logger_factory=structlog.PrintLoggerFactory(file=_LOG_STREAM),
-        processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(level),
+        cache_logger_on_first_use=False,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        processors=_processors(),
+        wrapper_class=structlog.stdlib.BoundLogger,
     )
+
+    root_logger = stdlib_logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        handler.close()
+    root_logger.setLevel(level)
+
+    for handler in handlers:
+        handler.setLevel(level)
+        handler.addFilter(_DefaultRecordAttributesFilter())
+        root_logger.addHandler(handler)
+
+    stdlib_logging.getLogger("uvicorn.access").setLevel(stdlib_logging.WARNING)
 
 
 def bound_context(**context: object) -> AbstractContextManager[None]:
@@ -48,21 +81,3 @@ def bound_context(**context: object) -> AbstractContextManager[None]:
     if not filtered:
         return nullcontext()
     return structlog.contextvars.bound_contextvars(**filtered)
-
-
-def _resolve_log_stream(log_file: str | None) -> TextIO:
-    if not log_file:
-        return sys.stderr
-    path = Path(log_file).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path.open("a", encoding="utf-8", buffering=1)
-
-
-def log_debug(logger: structlog.typing.FilteringBoundLogger, event: str, /, **context: object) -> None:
-    if _DEBUG_ENABLED:
-        logger.debug(event, **context)
-
-
-def log_payload(logger: structlog.typing.FilteringBoundLogger, event: str, /, **context: object) -> None:
-    if _PAYLOAD_DEBUG_ENABLED:
-        logger.debug(event, **context)

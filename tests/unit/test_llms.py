@@ -80,23 +80,42 @@ from plap.llms.retry import stream as retry_stream
 from plap.settings import Settings
 
 
+class _RecorderLogger:
+    def __init__(self, events: list[dict[str, object]], base_context: dict[str, object] | None = None) -> None:
+        self._events = events
+        self._base_context = base_context or {}
+
+    def _record(self, level: str, event: str, /, **context: object) -> None:
+        self._events.append({"event": event, "level": level, **self._base_context, **context})
+
+    def bind(self, **context: object) -> _RecorderLogger:
+        return _RecorderLogger(self._events, {**self._base_context, **context})
+
+    def debug(self, event: str, /, **context: object) -> None:
+        self._record("debug", event, **context)
+
+    def info(self, event: str, /, **context: object) -> None:
+        self._record("info", event, **context)
+
+    def warning(self, event: str, /, **context: object) -> None:
+        self._record("warning", event, **context)
+
+    def error(self, event: str, /, **context: object) -> None:
+        self._record("error", event, **context)
+
+    def exception(self, event: str, /, **context: object) -> None:
+        self._record("error", event, **context)
+
+
 def _capture_router_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-
-    def record(_logger: object, event: str, /, **context: object) -> None:
-        events.append({"event": event, **context})
-
-    monkeypatch.setattr(router_module, "log_debug", record)
+    monkeypatch.setattr(router_module, "logger", _RecorderLogger(events))
     return events
 
 
 def _capture_accumulator_payload_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-
-    def record(_logger: object, event: str, /, **context: object) -> None:
-        events.append({"event": event, **context})
-
-    monkeypatch.setattr(accumulator_module, "log_payload", record)
+    monkeypatch.setattr(accumulator_module, "logger", _RecorderLogger(events))
     return events
 
 
@@ -112,21 +131,13 @@ def _capture_router_retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]
 
 def _capture_openai_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-
-    def record(_logger: object, event: str, /, **context: object) -> None:
-        events.append({"event": event, **context})
-
-    monkeypatch.setattr(openai_provider_module, "log_debug", record)
+    monkeypatch.setattr(openai_provider_module, "logger", _RecorderLogger(events))
     return events
 
 
 def _capture_fireworks_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
-
-    def record(_logger: object, event: str, /, **context: object) -> None:
-        events.append({"event": event, **context})
-
-    monkeypatch.setattr(fireworks_provider_module, "log_debug", record)
+    monkeypatch.setattr(fireworks_provider_module, "logger", _RecorderLogger(events))
     return events
 
 

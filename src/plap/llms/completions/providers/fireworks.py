@@ -33,9 +33,8 @@ from plap.llms.completions.providers._transport import (
     timeout_error_message,
 )
 from plap.llms.completions.quirks import Only, Set, SystemRole
-from plap.logging import log_debug
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 def _fireworks_base_url(client: Any) -> str | None:
@@ -55,13 +54,12 @@ def _fireworks_timeout_seconds(client: Any) -> float | None:
         return None
     try:
         return float(timeout)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
 def _log_fireworks_transport_error(*, provider: str, client: Any, call: Call, exc: Exception, streaming: bool) -> None:
     log_transport_error(
-        log_fn=log_debug,
         logger=logger,
         provider=provider,
         base_url=_fireworks_base_url(client),

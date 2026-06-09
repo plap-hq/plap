@@ -19,7 +19,6 @@ from plap.llms.completions.chat import (
 from plap.llms.json import decode_json_object_with_error
 from plap.llms.retry import RetryValidator, retry_message, retry_on_unusable_tool_calls
 from plap.llms.retry import complete as retry_complete
-from plap.logging import log_debug, log_payload
 from plap.tools.policy import (
     EffectClass,
     IToolCallClassifier,
@@ -31,7 +30,7 @@ from plap.tools.policy import (
     ToolSignature,
 )
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 class _ClassifierShapeError(ValueError):
@@ -160,14 +159,12 @@ def _classifier_single_tool_validator(*, retry_event: str, expected_tool_name: s
                 "Put your explanation only in the `rationale` field.",
             ),
         )
-        log_debug(
-            logger,
+        logger.warning(
             retry_event,
             expected_tool_name=expected_tool_name,
             retry_message=retry_message_text,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").warning(
             f"{retry_event}.payload",
             request=asdict(request),
             result=asdict(result),
@@ -200,14 +197,12 @@ def _classifier_rationale_validator(*, retry_event: str, expected_tool_name: str
                 "The `rationale` field must be a non-empty string.",
             ),
         )
-        log_debug(
-            logger,
+        logger.warning(
             retry_event,
             expected_tool_name=expected_tool_name,
             retry_message=retry_message_text,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").warning(
             f"{retry_event}.payload",
             request=asdict(request),
             result=asdict(result),
@@ -331,8 +326,7 @@ class LLMToolClassifier(IToolClassifier):
             max_completion_tokens=TOOL_EFFECT_CLASSIFIER_MAX_TOKENS,
             temperature=0,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "tool.classifier.request.payload",
             request=asdict(request),
             signature=signature.signature,
@@ -353,8 +347,7 @@ class LLMToolClassifier(IToolClassifier):
                 raw=raw,
             )
         except Exception as exc:
-            log_debug(
-                logger,
+            logger.warning(
                 "tool.classifier.failed",
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
@@ -365,14 +358,12 @@ class LLMToolClassifier(IToolClassifier):
                 **(_classifier_result_context(result) if result is not None else {}),
                 signature_hash=signature.signature_hash.hex(),
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").warning(
                 "tool.classifier.failed.payload",
                 signature=signature.signature,
             )
             if result is not None:
-                log_payload(
-                    logger,
+                logger.bind(log_channel="payload").warning(
                     "tool.classifier.failed.result.payload",
                     request=asdict(request),
                     result=asdict(result),
@@ -387,8 +378,7 @@ class LLMToolClassifier(IToolClassifier):
                 raw_output={},
             )
         else:
-            log_debug(
-                logger,
+            logger.info(
                 "tool.classifier.fresh",
                 classifier=self.classifier,
                 classifier_model=self.classifier_model,
@@ -397,8 +387,7 @@ class LLMToolClassifier(IToolClassifier):
                 effect_class=classification.effect_class,
                 signature_hash=signature.signature_hash.hex(),
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").info(
                 "tool.classifier.fresh.payload",
                 raw_output=raw,
                 result=asdict(result),
@@ -484,8 +473,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
             max_completion_tokens=TOOL_CALL_EFFECT_CLASSIFIER_MAX_TOKENS,
             temperature=0,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "tool.call_classifier.request.payload",
             arguments=call.arguments,
             request=asdict(request),
@@ -508,8 +496,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 raw=raw,
             )
         except Exception as exc:
-            log_debug(
-                logger,
+            logger.warning(
                 "tool.call_classifier.failed",
                 arguments_hash=call.arguments_hash.hex(),
                 classifier=self.classifier,
@@ -521,15 +508,13 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 **(_classifier_result_context(result) if result is not None else {}),
                 signature_hash=call.signature_hash.hex(),
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").warning(
                 "tool.call_classifier.failed.payload",
                 arguments=call.arguments,
                 signature=call.signature.signature,
             )
             if result is not None:
-                log_payload(
-                    logger,
+                logger.bind(log_channel="payload").warning(
                     "tool.call_classifier.failed.result.payload",
                     arguments=call.arguments,
                     request=asdict(request),
@@ -546,8 +531,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 raw_output={},
             )
         else:
-            log_debug(
-                logger,
+            logger.info(
                 "tool.call_classifier.fresh",
                 arguments_hash=call.arguments_hash.hex(),
                 classifier=self.classifier,
@@ -557,8 +541,7 @@ class LLMToolCallClassifier(IToolCallClassifier):
                 effect_class=classification.effect_class,
                 signature_hash=call.signature_hash.hex(),
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").info(
                 "tool.call_classifier.fresh.payload",
                 arguments=call.arguments,
                 raw_output=raw,

@@ -16,9 +16,8 @@ from plap.llms.completions.chat import (
     ChatUsage,
 )
 from plap.llms.json import Outcome, decode_json_value_with_error, encode_json_object, normalize, recover, schema_property_keys
-from plap.logging import log_payload
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,8 +125,16 @@ def _log_tool_call_repair(
     decoded_value_changed = None if not isinstance(raw_value, dict) or repaired is None else raw_value != repaired
     repair_outcome = "error" if repair_error is not None else "dict" if repaired is not None else "non_dict"
 
-    log_payload(
-        logger,
+    if (
+        not issues
+        and not decoded_key_set_changed
+        and not decoded_value_changed
+        and repair_error is None
+        and not (repaired_arguments is not None and repaired_arguments != raw_arguments)
+    ):
+        return
+
+    logger.bind(log_channel="payload").info(
         "llm.accumulator.tool_call_repair.payload",
         decoded_key_set_changed=decoded_key_set_changed,
         decoded_value_changed=decoded_value_changed,

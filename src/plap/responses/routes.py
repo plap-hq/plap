@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from functools import partial
 
@@ -11,12 +12,14 @@ from litestar import Request, delete, get, post, websocket
 from litestar.channels import ChannelsPlugin, Subscriber
 from litestar.connection import WebSocket
 from litestar.response import ServerSentEvent
+from opentelemetry import trace
 from pydantic import TypeAdapter, ValidationError
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import IChatCompletionClient
+from plap.logging import bound_context
 from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
@@ -41,10 +44,12 @@ from plap.responses.runtime import run_response
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import RuntimeSelector, Settings
+from plap.telemetry import record_scope_context
 from plap.tools import IToolCallPolicyResolver, IToolPolicyResolver
 from plap.tools.mcp import IMCPToolProvider
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
 
 
@@ -96,21 +101,45 @@ async def _prepare_create(
     sealing_keyring: SealingKeyring,
     channels: ChannelsPlugin,
 ) -> tuple[PreparedRequest, Ingested, StreamCoordinator]:
-    prepared = await response_store.prepare_request(auth_context, request)
-    ingested = await ingest_response_request(
-        prepared.execution_request,
-        keyring=sealing_keyring,
+    with tracer.start_as_current_span("response.prepare") as span:
+        prepared = await response_store.prepare_request(auth_context, request)
+        ingested = await ingest_response_request(
+            prepared.execution_request,
+            keyring=sealing_keyring,
+        )
+        coordinator = StreamCoordinator(
+            request=prepared.response_request,
+            channels=channels,
+            prepared=prepared,
+            response_store=response_store,
+            sealing_keyring=sealing_keyring,
+            last_reasoning_id=ingested.last_reasoning_id,
+            current_compaction_id=ingested.current_compaction_id,
+        )
+        span.set_attribute("plap.response.id", coordinator.response_id)
+        span.set_attribute("plap.response.model", prepared.response_request.model)
+        if prepared.conversation_id is not None:
+            span.set_attribute("plap.response.conversation_id", prepared.conversation_id)
+        return prepared, ingested, coordinator
+
+
+def _response_context(prepared: PreparedRequest, coordinator: StreamCoordinator):
+    return bound_context(
+        conversation_id=prepared.conversation_id,
+        response_id=coordinator.response_id,
     )
-    coordinator = StreamCoordinator(
-        request=prepared.response_request,
-        channels=channels,
-        prepared=prepared,
-        response_store=response_store,
-        sealing_keyring=sealing_keyring,
-        last_reasoning_id=ingested.last_reasoning_id,
-        current_compaction_id=ingested.current_compaction_id,
+
+
+def _record_request_scope_context(
+    request: Request[object, object, object],
+    prepared: PreparedRequest,
+    coordinator: StreamCoordinator,
+) -> None:
+    record_scope_context(
+        request.scope,
+        conversation_id=prepared.conversation_id,
+        response_id=coordinator.response_id,
     )
-    return prepared, ingested, coordinator
 
 
 async def _watch_http_disconnect(
@@ -217,24 +246,26 @@ async def _sse_response_payload(
             sealing_keyring=sealing_keyring,
             channels=channels,
         )
+        _record_request_scope_context(http_request, prepared, coordinator)
         subscriber = await channels.subscribe(coordinator.channel)
         try:
-            task_group.start_soon(
-                partial(
-                    _run_stream,
-                    prepared=prepared,
-                    ingested=ingested,
-                    coordinator=coordinator,
-                    sealing_keyring=sealing_keyring,
-                    settings=settings,
-                    chat_completion_client=chat_completion_client,
-                    tool_policy_resolver=tool_policy_resolver,
-                    tool_call_policy_resolver=tool_call_policy_resolver,
-                    mcp_tool_providers=mcp_tool_providers,
-                ),
-            )
-            async for payload in _iter_projected_payloads(subscriber, projection=projection):
-                yield msgspec.json.encode(payload).decode()
+            with _response_context(prepared, coordinator):
+                task_group.start_soon(
+                    partial(
+                        _run_stream,
+                        prepared=prepared,
+                        ingested=ingested,
+                        coordinator=coordinator,
+                        sealing_keyring=sealing_keyring,
+                        settings=settings,
+                        chat_completion_client=chat_completion_client,
+                        tool_policy_resolver=tool_policy_resolver,
+                        tool_call_policy_resolver=tool_call_policy_resolver,
+                        mcp_tool_providers=mcp_tool_providers,
+                    ),
+                )
+                async for payload in _iter_projected_payloads(subscriber, projection=projection):
+                    yield msgspec.json.encode(payload).decode()
         finally:
             task_group.cancel_scope.cancel()
             with anyio.CancelScope(shield=True):
@@ -285,18 +316,20 @@ async def create_response(
             sealing_keyring=sealing_keyring,
             channels=channels,
         )
-        await run_response(
-            prepared=prepared,
-            ingested=ingested,
-            coordinator=coordinator,
-            sealing_keyring=sealing_keyring,
-            settings=settings,
-            chat_completion_client=chat_completion_client,
-            tool_policy_resolver=tool_policy_resolver,
-            tool_call_policy_resolver=tool_call_policy_resolver,
-            mcp_tool_providers=mcp_tool_providers,
-        )
-        response = projection.response(coordinator.current_response())
+        _record_request_scope_context(request, prepared, coordinator)
+        with _response_context(prepared, coordinator):
+            await run_response(
+                prepared=prepared,
+                ingested=ingested,
+                coordinator=coordinator,
+                sealing_keyring=sealing_keyring,
+                settings=settings,
+                chat_completion_client=chat_completion_client,
+                tool_policy_resolver=tool_policy_resolver,
+                tool_call_policy_resolver=tool_call_policy_resolver,
+                mcp_tool_providers=mcp_tool_providers,
+            )
+            response = projection.response(coordinator.current_response())
         watcher_scope.cancel()
     return response
 
@@ -342,11 +375,12 @@ async def retrieve_response(
     stream: bool | None = None,
 ) -> ResponseObject:
     _ = starting_after, stream
-    response = await response_store.get_response(auth_context, response_id)
-    if response is None:
-        raise _response_not_found_error(response_id, action="retrieve")
-    projection = ResponseProjection.from_query(include, include_obfuscation=include_obfuscation)
-    return projection.response(response)
+    with bound_context(response_id=response_id):
+        response = await response_store.get_response(auth_context, response_id)
+        if response is None:
+            raise _response_not_found_error(response_id, action="retrieve")
+        projection = ResponseProjection.from_query(include, include_obfuscation=include_obfuscation)
+        return projection.response(response)
 
 
 @delete(
@@ -359,10 +393,11 @@ async def delete_response(
     auth_context: AuthContext,
     response_store: ResponseStore,
 ) -> ResponseDeleted:
-    deleted = await response_store.delete_response(auth_context, response_id)
-    if not deleted:
-        raise _response_not_found_error(response_id, action="delete")
-    return ResponseDeleted(deleted=True, id=response_id)
+    with bound_context(response_id=response_id):
+        deleted = await response_store.delete_response(auth_context, response_id)
+        if not deleted:
+            raise _response_not_found_error(response_id, action="delete")
+        return ResponseDeleted(deleted=True, id=response_id)
 
 
 @post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
@@ -387,15 +422,16 @@ async def list_input_items(
     limit: int | None = None,
     order: str | None = None,
 ) -> InputItemsPage:
-    page = await response_store.list_input_items(
-        auth_context,
-        response_id,
-        after=after,
-        limit=limit,
-        order=order,
-    )
-    projection = ResponseProjection.from_query(include)
-    return projection.input_items_page(page)
+    with bound_context(response_id=response_id):
+        page = await response_store.list_input_items(
+            auth_context,
+            response_id,
+            after=after,
+            limit=limit,
+            order=order,
+        )
+        projection = ResponseProjection.from_query(include)
+        return projection.input_items_page(page)
 
 
 @websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
@@ -411,7 +447,6 @@ async def responses_socket(
     tool_call_policy_resolver: IToolCallPolicyResolver,
     mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> None:
-    _ = auth_context, settings
     await socket.accept()
 
     while True:
@@ -438,39 +473,47 @@ async def responses_socket(
             )
             continue
 
-        projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
-        projection.validate_create_request(client_event.response)
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
-            prepared, ingested, coordinator = await _prepare_create(
-                auth_context=auth_context,
-                request=client_event.response,
-                response_store=response_store,
-                sealing_keyring=sealing_keyring,
-                channels=channels,
-            )
-            subscriber = await channels.subscribe(coordinator.channel)
-            try:
-                task_group.start_soon(
-                    partial(
-                        _run_stream,
-                        prepared=prepared,
-                        ingested=ingested,
-                        coordinator=coordinator,
-                        sealing_keyring=sealing_keyring,
-                        settings=settings,
-                        chat_completion_client=chat_completion_client,
-                        tool_policy_resolver=tool_policy_resolver,
-                        tool_call_policy_resolver=tool_call_policy_resolver,
-                        mcp_tool_providers=mcp_tool_providers,
-                    ),
+        started_at = time.perf_counter()
+        with tracer.start_as_current_span("websocket.response.create") as span:
+            projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
+            projection.validate_create_request(client_event.response)
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
+                prepared, ingested, coordinator = await _prepare_create(
+                    auth_context=auth_context,
+                    request=client_event.response,
+                    response_store=response_store,
+                    sealing_keyring=sealing_keyring,
+                    channels=channels,
                 )
-                async for payload in _iter_projected_payloads(subscriber, projection=projection):
-                    await socket.send_json(payload)
-            finally:
-                task_group.cancel_scope.cancel()
-                with anyio.CancelScope(shield=True):
-                    await channels.unsubscribe(subscriber, coordinator.channel)
+                span.set_attribute("plap.response.id", coordinator.response_id)
+                subscriber = await channels.subscribe(coordinator.channel)
+                try:
+                    with _response_context(prepared, coordinator):
+                        task_group.start_soon(
+                            partial(
+                                _run_stream,
+                                prepared=prepared,
+                                ingested=ingested,
+                                coordinator=coordinator,
+                                sealing_keyring=sealing_keyring,
+                                settings=settings,
+                                chat_completion_client=chat_completion_client,
+                                tool_policy_resolver=tool_policy_resolver,
+                                tool_call_policy_resolver=tool_call_policy_resolver,
+                                mcp_tool_providers=mcp_tool_providers,
+                            ),
+                        )
+                        async for payload in _iter_projected_payloads(subscriber, projection=projection):
+                            await socket.send_json(payload)
+                        logger.info(
+                            "websocket.response.completed",
+                            duration_ms=round((time.perf_counter() - started_at) * 1000.0, 3),
+                        )
+                finally:
+                    task_group.cancel_scope.cancel()
+                    with anyio.CancelScope(shield=True):
+                        await channels.unsubscribe(subscriber, coordinator.channel)
 
 
 def build_error_event(*, public: PublicError) -> ResponseErrorEvent:

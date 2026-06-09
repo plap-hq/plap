@@ -16,7 +16,6 @@ from sqlalchemy.sql.elements import TextClause
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
-from plap.logging import log_debug, log_payload
 from plap.persistence import Database
 from plap.responses.contracts import (
     ConversationReference,
@@ -32,7 +31,7 @@ from plap.responses.contracts import (
 
 _REQUEST_INPUT_ADAPTER = TypeAdapter(RequestInputItem)
 _INPUT_ITEMS_PAGE_ADAPTER = TypeAdapter(InputItemsPageItem)
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 type PayloadObject = dict[str, object]
 type ResponseFields = dict[str, object]
@@ -241,8 +240,7 @@ class ResponseStore:
 
         response_request = request.model_copy(update={"previous_response_id": parent_response_id})
         execution_request = request.model_copy(update={"input": [*execution_replay_items, *execution_current_input_items]})
-        log_debug(
-            logger,
+        logger.info(
             "response.store.prepared",
             conversation_id=conversation_id,
             current_input_items=len(current_input_items),
@@ -250,8 +248,7 @@ class ResponseStore:
             persist_response=request.store is not False,
             replay_items=len(replay_items),
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "response.store.prepared.payload",
             current_input_items=[item.model_dump(mode="json", exclude_none=True) for item in current_input_items],
             execution_request=execution_request.model_dump(mode="json", exclude_none=True),
@@ -272,14 +269,12 @@ class ResponseStore:
         if not prepared.persist_response:
             return
         input_items = self._stored_input_payloads(response.id, prepared.stored_input_items)
-        log_debug(
-            logger,
+        logger.info(
             "response.store.begin",
             input_item_count=len(input_items),
             response_id=response.id,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "response.store.begin.payload",
             input_items=input_items,
             response=response.model_dump(mode="json", exclude_none=True),
@@ -323,15 +318,13 @@ class ResponseStore:
     ) -> None:
         if not prepared.persist_response:
             return
-        log_debug(
-            logger,
+        logger.debug(
             "response.store.append_output_item",
             output_index=output_index,
             response_id=response_id,
             type=item.get("type") if isinstance(item, dict) else None,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").debug(
             "response.store.append_output_item.payload",
             item=item,
             output_index=output_index,
@@ -372,15 +365,13 @@ class ResponseStore:
     ) -> None:
         if not prepared.persist_response:
             return
-        log_debug(
-            logger,
+        logger.debug(
             "response.store.replace_output_item",
             output_index=output_index,
             response_id=response_id,
             type=item.get("type") if isinstance(item, dict) else None,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").debug(
             "response.store.replace_output_item.payload",
             item=item,
             output_index=output_index,
@@ -435,15 +426,13 @@ class ResponseStore:
     async def finish_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
         if not prepared.persist_response:
             return
-        log_debug(
-            logger,
+        logger.info(
             "response.store.finish",
             output_count=len(response.output),
             response_id=response.id,
             status=response.status,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "response.store.finish.payload",
             response=response.model_dump(mode="json", exclude_none=True),
         )
@@ -485,8 +474,7 @@ class ResponseStore:
         if not prepared.persist_response:
             return False
         completed_at = datetime.now(UTC)
-        log_debug(
-            logger,
+        logger.warning(
             "response.store.fail",
             response_id=response_id,
         )
@@ -516,14 +504,12 @@ class ResponseStore:
     async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
         if not prepared.persist_response:
             return False
-        log_debug(
-            logger,
+        logger.info(
             "response.store.cancel",
             response_id=response.id,
             status=response.status,
         )
-        log_payload(
-            logger,
+        logger.bind(log_channel="payload").info(
             "response.store.cancel.payload",
             response=response.model_dump(mode="json", exclude_none=True),
         )

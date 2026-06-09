@@ -4,20 +4,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import secrets
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+import docker
+from docker.errors import DockerException, ImageNotFound
 from sqlalchemy import select
+from testcontainers.core.container import DockerContainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -34,10 +39,13 @@ STATE_ENV_KEYS = (
     "PLAP_DATABASE_URL",
     "PLAP_API_KEY_PEPPER",
     "PLAP_DEBUG",
-    "PLAP_DEBUG_PAYLOADS",
     "PLAP_DEBUG_DEBATE_SUMMARIES",
-    "PLAP_LOG_FILE",
-    "PLAP_LOG_JSON",
+    "PLAP_DEV_LOG_FILE",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_LOGS_EXPORTER",
+    "OTEL_SERVICE_NAME",
+    "OTEL_TRACES_EXPORTER",
     "PLAP_SEALING_KEYS",
     "PLAP_DEV_API_KEY",
     "PLAP_DEV_BASE_URL",
@@ -57,6 +65,10 @@ DEFAULT_POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
 DEFAULT_DEV_EMAIL = "dev@example.com"
 DEFAULT_DEV_ORG_SLUG = "plap-dev"
 DEFAULT_HOST = "127.0.0.1"
+DEFAULT_OTEL_COLLECTOR_CONTAINER = "plap-dev-otelcol"
+DEFAULT_OTEL_COLLECTOR_HEALTH_PORT = 13133
+DEFAULT_OTEL_COLLECTOR_IMAGE = "otel/opentelemetry-collector-contrib:0.153.0"
+DEFAULT_OTEL_COLLECTOR_PORT = 4318
 DEFAULT_PORT = 8000
 DEFAULT_POSTGRES_PORT = 55432
 DEFAULT_MODEL = "plap-ai/wisp-mini"
@@ -83,8 +95,10 @@ PROVIDER_ENV_ALIASES = {_provider_env_var(slug): _provider_env_alias(slug) for s
 @dataclass(slots=True)
 class EphemeralResources:
     state_file: Path
-    postgres_container: str | None = None
-    server_process: subprocess.Popen[bytes] | None = None
+    collector_config_file: Path | None = None
+    collector_container: DockerContainer | None = None
+    postgres_container: DockerContainer | None = None
+    server_process: subprocess.Popen[str] | None = None
 
 
 def main() -> int:
@@ -116,14 +130,13 @@ def main() -> int:
 
         _ensure_managed_postgres(args, managed_state, resources)
         os.environ.setdefault("PLAP_DEBUG", "true")
-        os.environ.setdefault("PLAP_DEBUG_PAYLOADS", "true")
         os.environ.setdefault("PLAP_DEBUG_DEBATE_SUMMARIES", "true")
-        os.environ.setdefault("PLAP_LOG_JSON", "true")
-        os.environ.setdefault("PLAP_LOG_FILE", str(DEFAULT_LOG_FILE))
+        os.environ.setdefault("PLAP_DEV_LOG_FILE", str(DEFAULT_LOG_FILE))
         os.environ.setdefault("PLAP_API_KEY_PEPPER", secrets.token_hex(24))
         os.environ.setdefault("PLAP_SEALING_KEYS", json.dumps([_generate_sealing_key()]))
         _normalize_sealing_keys_env()
-        _reset_log_file(Path(os.environ["PLAP_LOG_FILE"]))
+        _reset_log_file(Path(os.environ["PLAP_DEV_LOG_FILE"]))
+        _ensure_managed_collector(managed_state, resources)
         _require_provider_keys()
 
         managed_state.update(
@@ -131,10 +144,13 @@ def main() -> int:
                 "PLAP_DATABASE_URL": os.environ["PLAP_DATABASE_URL"],
                 "PLAP_API_KEY_PEPPER": os.environ["PLAP_API_KEY_PEPPER"],
                 "PLAP_DEBUG": os.environ["PLAP_DEBUG"],
-                "PLAP_DEBUG_PAYLOADS": os.environ["PLAP_DEBUG_PAYLOADS"],
                 "PLAP_DEBUG_DEBATE_SUMMARIES": os.environ["PLAP_DEBUG_DEBATE_SUMMARIES"],
-                "PLAP_LOG_FILE": os.environ["PLAP_LOG_FILE"],
-                "PLAP_LOG_JSON": os.environ["PLAP_LOG_JSON"],
+                "PLAP_DEV_LOG_FILE": os.environ["PLAP_DEV_LOG_FILE"],
+                "OTEL_EXPORTER_OTLP_ENDPOINT": os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"],
+                "OTEL_EXPORTER_OTLP_PROTOCOL": os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"],
+                "OTEL_LOGS_EXPORTER": os.environ["OTEL_LOGS_EXPORTER"],
+                "OTEL_SERVICE_NAME": os.environ["OTEL_SERVICE_NAME"],
+                "OTEL_TRACES_EXPORTER": os.environ["OTEL_TRACES_EXPORTER"],
                 "PLAP_SEALING_KEYS": os.environ["PLAP_SEALING_KEYS"],
             }
         )
@@ -153,7 +169,7 @@ def main() -> int:
         _write_state_file(state_file, managed_state)
         _print_summary(
             state_file=state_file,
-            log_file=Path(os.environ["PLAP_LOG_FILE"]),
+            log_file=Path(os.environ["PLAP_DEV_LOG_FILE"]),
             host=client_host,
             port=args.port,
             api_key=api_key,
@@ -267,49 +283,36 @@ def _route_model_attempts(model: str) -> list[str]:
     return attempts
 
 
-def _ensure_managed_postgres(args: argparse.Namespace, managed_state: dict[str, str], resources: EphemeralResources) -> None:
-    docker = shutil.which("docker")
-    if docker is None:
-        raise SystemExit("docker is required for the ephemeral dev bootstrap, but it is not installed.")
+def _docker_client() -> docker.DockerClient:
+    try:
+        client = docker.from_env()
+        client.ping()
+    except DockerException as exc:  # pragma: no cover - local env dependent
+        raise SystemExit("docker is required for the ephemeral dev bootstrap, but it is not available.") from exc
+    else:
+        return client
 
-    _ensure_postgres_image(docker, args.postgres_image)
+
+def _ensure_managed_postgres(args: argparse.Namespace, managed_state: dict[str, str], resources: EphemeralResources) -> None:
+    _ensure_postgres_image(args.postgres_image)
 
     container_name = f"{args.postgres_container}-{os.getpid()}-{secrets.token_hex(4)}"
     host_port = _pick_port(args.postgres_port)
-    _run_checked(
-        [
-            docker,
-            "run",
-            "-d",
-            "--name",
-            container_name,
-            "--label",
-            "plap.dev.ephemeral=true",
-            "-e",
-            f"POSTGRES_DB={DEFAULT_POSTGRES_DB}",
-            "-e",
-            f"POSTGRES_USER={DEFAULT_POSTGRES_USER}",
-            "-e",
-            f"POSTGRES_PASSWORD={DEFAULT_POSTGRES_PASSWORD}",
-            "-p",
-            f"127.0.0.1:{host_port}:5432",
-            args.postgres_image,
-            "postgres",
-            "-c",
-            "shared_preload_libraries=pg_cron",
-            "-c",
-            f"cron.database_name={DEFAULT_POSTGRES_DB}",
-        ],
-        cwd=REPO_ROOT,
+    container = (
+        DockerContainer(args.postgres_image)
+        .with_name(container_name)
+        .with_env("POSTGRES_DB", DEFAULT_POSTGRES_DB)
+        .with_env("POSTGRES_USER", DEFAULT_POSTGRES_USER)
+        .with_env("POSTGRES_PASSWORD", DEFAULT_POSTGRES_PASSWORD)
+        .with_bind_ports("5432/tcp", host_port)
+        .with_kwargs(labels={"plap.dev.ephemeral": "true"})
+        .with_command(f"postgres -c shared_preload_libraries=pg_cron -c cron.database_name={DEFAULT_POSTGRES_DB}")
     )
-    resources.postgres_container = container_name
-    inspected = _docker_inspect(docker, container_name)
-    if inspected is None:
-        raise SystemExit(f"failed to inspect managed postgres container {container_name!r} after creation")
-
-    host_port = _docker_host_port(inspected)
-    if host_port is None:
-        raise SystemExit(f"managed postgres container {container_name!r} is missing a published 5432 port")
+    try:
+        container.start()
+    except Exception as exc:  # pragma: no cover - local env dependent
+        raise SystemExit(f"failed to start managed postgres container {container_name!r}: {exc}") from exc
+    resources.postgres_container = container
 
     database_url = f"postgresql+asyncpg://{DEFAULT_POSTGRES_USER}:{DEFAULT_POSTGRES_PASSWORD}@127.0.0.1:{host_port}/{DEFAULT_POSTGRES_DB}"
     os.environ["PLAP_DATABASE_URL"] = database_url
@@ -319,60 +322,100 @@ def _ensure_managed_postgres(args: argparse.Namespace, managed_state: dict[str, 
     asyncio.run(_wait_for_database(database_url))
 
 
-def _ensure_postgres_image(docker: str, image: str) -> None:
-    result = subprocess.run(
-        [docker, "image", "inspect", image],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+def _collector_config(*, log_file: Path) -> str:
+    return f"""
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  debug/traces:
+    verbosity: basic
+  file/logs:
+    path: /data/{log_file.name}
+    format: json
+    flush_interval: 1s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/logs]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug/traces]
+""".strip()
+
+
+def _ensure_managed_collector(managed_state: dict[str, str], resources: EphemeralResources) -> None:
+    log_file = Path(os.environ["PLAP_DEV_LOG_FILE"]).resolve()
+    _prepare_collector_output(log_file)
+    config_file = log_file.parent / "otelcol-dev.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(_collector_config(log_file=log_file) + "\n", encoding="utf-8")
+    resources.collector_config_file = config_file
+
+    container_name = f"{DEFAULT_OTEL_COLLECTOR_CONTAINER}-{os.getpid()}-{secrets.token_hex(4)}"
+    host_port = _pick_port(DEFAULT_OTEL_COLLECTOR_PORT)
+    health_port = _pick_port(DEFAULT_OTEL_COLLECTOR_HEALTH_PORT)
+    container = (
+        DockerContainer(DEFAULT_OTEL_COLLECTOR_IMAGE)
+        .with_name(container_name)
+        .with_bind_ports("4318/tcp", host_port)
+        .with_bind_ports("13133/tcp", health_port)
+        .with_kwargs(labels={"plap.dev.ephemeral": "true"})
+        .with_volume_mapping(config_file, "/etc/otelcol/config.yaml", mode="ro")
+        .with_volume_mapping(log_file.parent, "/data", mode="rw")
+        .with_command("--config=/etc/otelcol/config.yaml")
     )
-    if result.returncode == 0:
+    try:
+        container.start()
+    except Exception as exc:  # pragma: no cover - local env dependent
+        raise SystemExit(f"failed to start collector container {container_name!r}: {exc}") from exc
+    resources.collector_container = container
+    _wait_for_collector(container, health_port=health_port)
+
+    otlp_endpoint = f"http://127.0.0.1:{host_port}"
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = otlp_endpoint
+    os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
+    os.environ["OTEL_LOGS_EXPORTER"] = "otlp"
+    os.environ["OTEL_SERVICE_NAME"] = "plap"
+    os.environ["OTEL_TRACES_EXPORTER"] = "otlp"
+    managed_state["OTEL_EXPORTER_OTLP_ENDPOINT"] = otlp_endpoint
+    managed_state["OTEL_EXPORTER_OTLP_PROTOCOL"] = os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"]
+    managed_state["OTEL_LOGS_EXPORTER"] = os.environ["OTEL_LOGS_EXPORTER"]
+    managed_state["OTEL_SERVICE_NAME"] = os.environ["OTEL_SERVICE_NAME"]
+    managed_state["OTEL_TRACES_EXPORTER"] = os.environ["OTEL_TRACES_EXPORTER"]
+
+
+def _ensure_postgres_image(image: str) -> None:
+    client = _docker_client()
+    try:
+        client.images.get(image)
+    except ImageNotFound:
+        pass
+    else:
         return
-
     dockerfile_dir = REPO_ROOT / "tests" / "postgres"
-    _run_checked([docker, "build", "-t", image, str(dockerfile_dir)], cwd=REPO_ROOT)
+    client.images.build(path=str(dockerfile_dir), tag=image, rm=True)
 
 
-def _docker_inspect(docker: str, container_name: str) -> dict[str, object] | None:
-    result = subprocess.run(
-        [docker, "inspect", container_name],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    payload = json.loads(result.stdout)
-    return payload[0] if payload else None
-
-
-def _docker_host_port(inspected: dict[str, object]) -> int | None:
-    network_settings = inspected.get("NetworkSettings")
-    if not isinstance(network_settings, dict):
-        return None
-    ports = network_settings.get("Ports")
-    if not isinstance(ports, dict):
-        return None
-    published = ports.get("5432/tcp")
-    if not isinstance(published, list) or not published:
-        return None
-    first = published[0]
-    if not isinstance(first, dict):
-        return None
-    host_port = first.get("HostPort")
-    if not isinstance(host_port, str):
-        return None
-    return int(host_port)
-
-
-def _container_uses_image(inspected: dict[str, object], image: str) -> bool:
-    config = inspected.get("Config")
-    if not isinstance(config, dict):
-        return False
-    configured_image = config.get("Image")
-    return configured_image == image
+def _container_logs(container: DockerContainer) -> str:
+    stdout, stderr = container.get_logs()
+    output = (stdout + stderr).decode("utf-8", errors="replace").strip()
+    return output or "<no collector logs available>"
 
 
 def _pick_port(preferred_port: int) -> int:
@@ -395,6 +438,40 @@ def _pick_ephemeral_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _wait_for_tcp_listener(host: str, port: int, *, timeout_seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            if sock.connect_ex((host, port)) == 0:
+                return
+        time.sleep(0.25)
+    raise SystemExit(f"endpoint {host}:{port} did not become ready in {timeout_seconds:.0f}s")
+
+
+def _wait_for_collector(container: DockerContainer, *, health_port: int, timeout_seconds: float = 30.0) -> None:
+    _wait_for_tcp_listener("127.0.0.1", health_port, timeout_seconds=timeout_seconds)
+    deadline = time.monotonic() + timeout_seconds
+    health_url = f"http://127.0.0.1:{health_port}/"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(health_url, timeout=1) as response:
+                if 200 <= response.status < 300:
+                    return
+        except urllib.error.URLError, OSError:
+            time.sleep(0.25)
+            continue
+    logs = _container_logs(container)
+    raise SystemExit(f"collector did not become healthy in {timeout_seconds:.0f}s\nCollector logs:\n{logs}")
+
+
+def _prepare_collector_output(log_file: Path) -> None:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.touch(exist_ok=True)
+    log_file.chmod(0o666)
+    log_file.parent.chmod(0o777)
 
 
 async def _wait_for_database(database_url: str, *, timeout_seconds: float = 30.0) -> None:
@@ -539,6 +616,8 @@ def _run_server(args: argparse.Namespace, resources: EphemeralResources) -> int:
         "--factory",
         "--host",
         args.host,
+        "--log-level",
+        "warning",
         "--port",
         str(args.port),
     ]
@@ -573,11 +652,13 @@ def _run_server(args: argparse.Namespace, resources: EphemeralResources) -> int:
 
 def _cleanup(resources: EphemeralResources) -> None:
     _stop_server(resources.server_process)
-    _remove_postgres_container(resources.postgres_container)
+    _remove_container(resources.collector_container)
+    _remove_container(resources.postgres_container)
+    _remove_state_file(resources.collector_config_file)
     _remove_state_file(resources.state_file)
 
 
-def _stop_server(process: subprocess.Popen[bytes] | None) -> None:
+def _stop_server(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
         return
     process.terminate()
@@ -588,22 +669,16 @@ def _stop_server(process: subprocess.Popen[bytes] | None) -> None:
         process.wait()
 
 
-def _remove_postgres_container(container_name: str | None) -> None:
-    if container_name is None:
+def _remove_container(container: DockerContainer | None) -> None:
+    if container is None:
         return
-    docker = shutil.which("docker")
-    if docker is None:
-        return
-    subprocess.run(
-        [docker, "rm", "-f", container_name],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    with contextlib.suppress(Exception):
+        container.stop()
 
 
-def _remove_state_file(path: Path) -> None:
+def _remove_state_file(path: Path | None) -> None:
+    if path is None:
+        return
     if path.exists():
         path.unlink()
     if path.parent.exists() and not any(path.parent.iterdir()):

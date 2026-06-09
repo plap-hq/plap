@@ -20,9 +20,8 @@ from plap.llms.completions.errors import (
     ChatCompletionTimeoutError,
     ChatCompletionUnsupportedRequestError,
 )
-from plap.logging import log_debug
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 DEFAULT_STREAM_FIRST_DELTA_TIMEOUT_SECONDS = 60.0
 DEFAULT_STREAM_IDLE_DELTA_TIMEOUT_SECONDS = 60.0
 TRANSIENT_RETRIES_BEFORE_FALLBACK = 2
@@ -70,8 +69,7 @@ def _log_router_attempt_failed(
     exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
     streaming: bool,
 ) -> None:
-    log_debug(
-        logger,
+    logger.warning(
         "llm.router.attempt_failed",
         attempt_count=attempt_count,
         attempt_index=attempt_index,
@@ -96,8 +94,7 @@ def _log_router_attempt_retry(
     exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
     streaming: bool,
 ) -> None:
-    log_debug(
-        logger,
+    logger.warning(
         "llm.router.attempt_retry",
         attempt_count=attempt_count,
         attempt_index=attempt_index,
@@ -120,8 +117,7 @@ def _log_router_fallback_succeeded(
     attempt_count: int,
     streaming: bool,
 ) -> None:
-    log_debug(
-        logger,
+    logger.info(
         "llm.router.fallback_succeeded",
         attempt_count=attempt_count,
         request_model=request_model,
@@ -147,8 +143,7 @@ def _log_router_fallback_exhausted(
     exc: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError,
     streaming: bool,
 ) -> None:
-    log_debug(
-        logger,
+    logger.error(
         "llm.router.fallback_exhausted",
         attempt_count=attempt_count,
         error_message=str(exc),

@@ -13,10 +13,9 @@ from cachetools import LRUCache
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms.completions.chat import ChatToolCall
 from plap.llms.json import decode_json_object_with_error
-from plap.logging import log_debug, log_payload
 from plap.responses.contracts import FunctionTool
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 def _invalid_tool_arguments_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
@@ -360,8 +359,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 classification=classification,
             )
             source = classification_sources.get(signature.signature_hash, "unknown")
-            log_debug(
-                logger,
+            logger.info(
                 "tool.policy.resolved",
                 classifier=classification.classifier,
                 classifier_model=classification.classifier_model,
@@ -370,8 +368,7 @@ class CachedToolPolicyResolver(IToolPolicyResolver):
                 source=source,
                 tool_name=tool_name,
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").info(
                 "tool.policy.resolved.payload",
                 raw_output=classification.raw_output,
                 signature=signature.signature,
@@ -412,9 +409,8 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
         for call in calls:
             if call.policy.effect_class != "contextual":
                 resolved.append(call.policy)
-                log_debug(logger, "tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
-                log_payload(
-                    logger,
+                logger.info("tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
+                logger.bind(log_channel="payload").info(
                     "tool.call_policy.preclassified.payload",
                     arguments=call.arguments,
                     tool=normalize_function_tool(call.tool),
@@ -493,8 +489,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                 classification=classification,
             )
             source = classification_sources.get(call_signature.classification_key, "unknown")
-            log_debug(
-                logger,
+            logger.info(
                 "tool.call_policy.resolved",
                 classifier=classification.classifier,
                 classifier_model=classification.classifier_model,
@@ -503,8 +498,7 @@ class CachedToolCallPolicyResolver(IToolCallPolicyResolver):
                 source=source,
                 tool_name=call.tool.name,
             )
-            log_payload(
-                logger,
+            logger.bind(log_channel="payload").info(
                 "tool.call_policy.resolved.payload",
                 arguments=call_signature.arguments,
                 raw_output=classification.raw_output,
@@ -549,8 +543,12 @@ class StaticToolPolicyResolver(IToolPolicyResolver):
                     effect_class="contextual",
                 ),
             )
-            log_debug(logger, "tool.policy.static", effect_class="contextual", tool_name=tool.name)
-            log_payload(logger, "tool.policy.static.payload", signature=signature.signature, tool_name=tool.name)
+            logger.info("tool.policy.static", effect_class="contextual", tool_name=tool.name)
+            logger.bind(log_channel="payload").info(
+                "tool.policy.static.payload",
+                signature=signature.signature,
+                tool_name=tool.name,
+            )
         return policies
 
 
@@ -560,18 +558,16 @@ class StaticToolCallPolicyResolver(IToolCallPolicyResolver):
         for call in calls:
             if call.policy.effect_class != "contextual":
                 policies.append(call.policy)
-                log_debug(logger, "tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
-                log_payload(
-                    logger,
+                logger.info("tool.call_policy.preclassified", effect_class=call.policy.effect_class, tool_name=call.tool.name)
+                logger.bind(log_channel="payload").info(
                     "tool.call_policy.preclassified.payload",
                     arguments=call.arguments,
                     tool=normalize_function_tool(call.tool),
                     tool_name=call.tool.name,
                 )
                 continue
-            log_debug(logger, "tool.call_policy.static", effect_class="unknown", tool_name=call.tool.name)
-            log_payload(
-                logger,
+            logger.info("tool.call_policy.static", effect_class="unknown", tool_name=call.tool.name)
+            logger.bind(log_channel="payload").info(
                 "tool.call_policy.static.payload",
                 arguments=call.arguments,
                 tool=normalize_function_tool(call.tool),

@@ -26,10 +26,11 @@ from plap.llms.completions.router import (
     _model_attempts,
 )
 from plap.llms.completions.tokens import measure_request_tokens
-from plap.logging import configure_logging, log_debug
+from plap.logging import configure_logging
 from plap.persistence import Database
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.settings import MCPServerConfig, Settings, get_settings
+from plap.telemetry import build_telemetry, emit_access_log, request_context_middleware, shutdown_telemetry
 from plap.tools import (
     IToolCallClassifier,
     IToolClassifier,
@@ -41,7 +42,7 @@ from plap.tools.mcp import (
     MCPToolProvider,
 )
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 def _error_body(
@@ -456,7 +457,8 @@ def _has_configured_chat_completion_route(
 
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
-    configure_logging(resolved_settings)
+    telemetry = build_telemetry()
+    configure_logging(resolved_settings, handlers=(telemetry.log_handler,))
     providers = _configured_chat_completion_providers(resolved_settings)
     try:
         chat_completion_client = _create_chat_completion_client(
@@ -482,12 +484,9 @@ def create_app(settings: Settings | None = None) -> Litestar:
     except PlapError as exc:
         exc.log(logger)
         raise
-    log_debug(
-        logger,
+    logger.info(
         "app.startup",
-        debug_payloads=resolved_settings.debug_payloads,
-        log_file=resolved_settings.log_file,
-        log_json=resolved_settings.log_json,
+        debug=resolved_settings.debug,
         mcp_servers=[server.name for server in resolved_settings.mcp_servers],
         provider_routes=sorted(
             _configured_chat_completion_prefixes(
@@ -515,12 +514,16 @@ def create_app(settings: Settings | None = None) -> Litestar:
 
     return Litestar(
         route_handlers=RESPONSE_ROUTE_HANDLERS,
+        before_send=[emit_access_log],
+        logging_config=None,
+        middleware=[request_context_middleware],
         plugins=[
+            telemetry.plugin,
             ChannelsPlugin(
                 backend=MemoryChannelsBackend(),
                 arbitrary_channels_allowed=True,
                 create_ws_route_handlers=False,
-            )
+            ),
         ],
         exception_handlers={
             HTTPException: handle_http_exception,
@@ -529,6 +532,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
             ValidationException: handle_validation_exception,
             Exception: handle_unexpected_exception,
         },
-        on_shutdown=[_shutdown_database],
+        on_shutdown=[_shutdown_database, shutdown_telemetry],
         state=state,
     )

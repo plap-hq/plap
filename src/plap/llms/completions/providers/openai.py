@@ -50,9 +50,8 @@ from plap.llms.completions.quirks import (
     Set,
     SystemRole,
 )
-from plap.logging import log_debug
 
-logger = structlog.get_logger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 
 def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletionContextLengthExceededError | None:
@@ -75,7 +74,6 @@ def _log_transport_error(*, provider: str, client: Any, call: Call, exc: Excepti
     timeout = timeout_config(getattr(client, "timeout", None))
     base_url = getattr(client, "base_url", None)
     log_transport_error(
-        log_fn=log_debug,
         logger=logger,
         provider=provider,
         base_url=str(base_url) if base_url is not None else None,

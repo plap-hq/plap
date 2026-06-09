@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import msgspec
-import httpx
 from typing import Any
+
+import httpx
+import msgspec
 
 from plap.llms.completions.client import Call
 
@@ -51,7 +52,7 @@ def timeout_value(value: object) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -83,7 +84,6 @@ def timeout_error_message(exc: BaseException) -> str:
 
 def log_transport_error(
     *,
-    log_fn,
     logger: Any,
     provider: str,
     base_url: str | None,
@@ -122,7 +122,7 @@ def log_transport_error(
     }
     if extra_context is not None:
         context.update(extra_context)
-    log_fn(logger, "llm.provider.request_error", **context)
+    logger.warning("llm.provider.request_error", **context)
 
 
 __all__ = [
