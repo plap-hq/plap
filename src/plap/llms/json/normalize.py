@@ -7,6 +7,7 @@ from plap.llms.json.schema import _schema_for_path, compile_validator
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _NUMBER_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)?$")
+_MISSING = object()
 
 
 def _validated(schema: dict[str, Any] | None, value: Any) -> bool:
@@ -69,53 +70,145 @@ def _normalize_number(token: str) -> int | float | None:
         return None
 
 
-def _normalized_enum_candidates(value: str, schema: dict[str, Any]) -> list[str]:
+def _json_scalar_key(value: Any) -> tuple[str, Any] | None:
+    if value is None:
+        return "null", None
+    if isinstance(value, bool):
+        return "boolean", value
+    if isinstance(value, int | float):
+        return "number", value
+    if isinstance(value, str):
+        return "string", value
+    return None
+
+
+def _append_unique_scalar_candidate(candidates: list[Any], candidate: Any) -> None:
+    key = _json_scalar_key(candidate)
+    if key is None:
+        return
+    if any(_json_scalar_key(existing) == key for existing in candidates):
+        return
+    candidates.append(candidate)
+
+
+def _schema_string_targets(schema: dict[str, Any]) -> list[str]:
+    targets: list[str] = []
+    const_value = schema.get("const", _MISSING)
+    if isinstance(const_value, str) and const_value not in targets:
+        targets.append(const_value)
+
     enum_values = schema.get("enum")
-    if not isinstance(enum_values, list) or not all(isinstance(item, str) for item in enum_values):
+    if not isinstance(enum_values, list):
+        return targets
+    for item in enum_values:
+        if isinstance(item, str) and item not in targets:
+            targets.append(item)
+    return targets
+
+
+def _schema_non_string_scalar_targets(schema: dict[str, Any]) -> list[Any]:
+    targets: list[Any] = []
+    const_value = schema.get("const", _MISSING)
+    if _json_scalar_key(const_value) is not None and not isinstance(const_value, str):
+        _append_unique_scalar_candidate(targets, const_value)
+
+    enum_values = schema.get("enum")
+    if not isinstance(enum_values, list):
+        return targets
+    for item in enum_values:
+        if _json_scalar_key(item) is None or isinstance(item, str):
+            continue
+        _append_unique_scalar_candidate(targets, item)
+    return targets
+
+
+def _normalized_string_candidates(value: str, targets: list[str]) -> list[str]:
+    if not targets:
         return []
     stripped = value.strip()
-    exact = [item for item in enum_values if item == stripped]
+    exact = [item for item in targets if item == stripped]
     if len(exact) == 1:
         return exact
-    folded = [item for item in enum_values if item.casefold() == stripped.casefold()]
+    folded = [item for item in targets if item.casefold() == stripped.casefold()]
     if len(folded) == 1:
         return folded
     return []
 
 
-def _normalized_scalar_candidates(value: str, schema: dict[str, Any]) -> list[Any]:
+def _normalized_non_string_scalar_target_candidate(value: str, target: Any) -> Any:
     stripped = value.strip()
     if not stripped:
-        return _normalized_enum_candidates(value, schema)
+        return _MISSING
+    if isinstance(target, bool):
+        lowered = stripped.casefold()
+        if lowered in {"true", "false"} and (lowered == "true") == target:
+            return target
+        return _MISSING
+    if target is None:
+        if stripped.casefold() in {"null", "none"}:
+            return None
+        return _MISSING
+    if isinstance(target, int):
+        hex_number = _normalize_hex_number(stripped)
+        if hex_number == target:
+            return target
+        relaxed_number = _normalize_number(stripped)
+        if isinstance(relaxed_number, int) and relaxed_number == target:
+            return target
+        if isinstance(relaxed_number, float) and relaxed_number.is_integer() and int(relaxed_number) == target:
+            return target
+        return _MISSING
+    if isinstance(target, float):
+        hex_number = _normalize_hex_number(stripped)
+        if hex_number is not None and float(hex_number) == target:
+            return target
+        relaxed_number = _normalize_number(stripped)
+        if relaxed_number is not None and float(relaxed_number) == target:
+            return target
+    return _MISSING
 
+
+def _normalized_schema_target_candidates(value: str, schema: dict[str, Any]) -> list[Any]:
     candidates: list[Any] = []
-    candidates.extend(_normalized_enum_candidates(value, schema))
+    for candidate in _normalized_string_candidates(value, _schema_string_targets(schema)):
+        _append_unique_scalar_candidate(candidates, candidate)
+    for target in _schema_non_string_scalar_targets(schema):
+        candidate = _normalized_non_string_scalar_target_candidate(value, target)
+        if candidate is _MISSING:
+            continue
+        _append_unique_scalar_candidate(candidates, candidate)
+    return candidates
+
+
+def _normalized_scalar_candidates(value: str, schema: dict[str, Any]) -> list[Any]:
+    candidates: list[Any] = []
+    for candidate in _normalized_schema_target_candidates(value, schema):
+        _append_unique_scalar_candidate(candidates, candidate)
+
+    stripped = value.strip()
+    if not stripped:
+        return candidates
+
     hex_number = _normalize_hex_number(stripped)
     relaxed_number = _normalize_number(stripped)
     for schema_type in _schema_types(schema):
         if schema_type == "integer":
             if hex_number is not None:
-                candidates.append(hex_number)
+                _append_unique_scalar_candidate(candidates, hex_number)
             if isinstance(relaxed_number, int):
-                candidates.append(relaxed_number)
+                _append_unique_scalar_candidate(candidates, relaxed_number)
             elif isinstance(relaxed_number, float) and relaxed_number.is_integer():
-                candidates.append(int(relaxed_number))
+                _append_unique_scalar_candidate(candidates, int(relaxed_number))
         elif schema_type == "number":
             if hex_number is not None:
-                candidates.append(hex_number)
+                _append_unique_scalar_candidate(candidates, hex_number)
             if relaxed_number is not None:
-                candidates.append(relaxed_number)
+                _append_unique_scalar_candidate(candidates, relaxed_number)
         elif schema_type == "boolean" and stripped.casefold() in {"true", "false"}:
-            candidates.append(stripped.casefold() == "true")
+            _append_unique_scalar_candidate(candidates, stripped.casefold() == "true")
         elif schema_type == "null" and stripped.casefold() in {"null", "none"}:
-            candidates.append(None)
-
-    unique: list[Any] = []
-    for candidate in candidates:
-        if candidate == value or candidate in unique:
-            continue
-        unique.append(candidate)
-    return unique
+            _append_unique_scalar_candidate(candidates, None)
+    return candidates
 
 
 def _normalize_scalar(value: Any, schema: dict[str, Any] | None) -> Any:

@@ -38,6 +38,34 @@ def test_normalize_exact_boolean_and_null_strings() -> None:
     assert normalize({"enabled": "TRUE", "value": "null"}, schema=schema) == {"enabled": True, "value": None}
 
 
+def test_normalize_const_scalar_strings() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"const": 31},
+            "enabled": {"const": True},
+            "value": {"const": None},
+        },
+    }
+
+    assert normalize({"answer": "0x1f", "enabled": "TRUE", "value": "none"}, schema=schema) == {
+        "answer": 31,
+        "enabled": True,
+        "value": None,
+    }
+
+
+def test_normalize_const_string_canonicalization() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "status": {"const": "active"},
+        },
+    }
+
+    assert normalize({"status": " ACTIVE "}, schema=schema) == {"status": "active"}
+
+
 def test_normalize_conservative_string_enum_match() -> None:
     schema = {
         "type": "object",
@@ -47,6 +75,34 @@ def test_normalize_conservative_string_enum_match() -> None:
     }
 
     assert normalize({"status": " ACTIVE "}, schema=schema) == {"status": "active"}
+
+
+def test_normalize_non_string_enum_values_from_strings() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "count": {"enum": [1, 2, 3]},
+            "enabled": {"enum": [True, False]},
+            "ratio": {"enum": [1.5]},
+        },
+    }
+
+    assert normalize({"count": "01", "enabled": "false", "ratio": "1.5"}, schema=schema) == {
+        "count": 1,
+        "enabled": False,
+        "ratio": 1.5,
+    }
+
+
+def test_normalize_treats_json_equivalent_numeric_enum_values_as_one_candidate() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "count": {"enum": [1, 1.0]},
+        },
+    }
+
+    assert normalize({"count": "1"}, schema=schema) == {"count": 1}
 
 
 def test_normalize_does_not_extract_noisy_numbers_or_boolean_synonyms() -> None:
@@ -65,6 +121,17 @@ def test_normalize_does_not_normalize_invalid_numeric_like_strings() -> None:
     schema = {"type": "object", "properties": {"n": {"type": "number"}}}
 
     assert normalize({"n": "1..2"}, schema=schema) == {"n": "1..2"}
+
+
+def test_normalize_does_not_parse_stringified_container_targets() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "payload": {"enum": [{"a": 1}]},
+        },
+    }
+
+    assert normalize({"payload": '{"a":1}'}, schema=schema) == {"payload": '{"a":1}'}
 
 
 def test_normalize_uses_dynamic_schema_branching() -> None:
@@ -107,3 +174,14 @@ def test_normalize_preserves_already_valid_values() -> None:
     value = {"n": 5, "status": "active"}
 
     assert normalize(value, schema=schema) == value
+
+
+def test_normalize_preserves_valid_union_string_values() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "n": {"type": ["string", "integer"]},
+        },
+    }
+
+    assert normalize({"n": "01"}, schema=schema) == {"n": "01"}
