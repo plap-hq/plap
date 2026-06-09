@@ -78,7 +78,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="6976c7ff1b30a1b2cb7805021b8ba4684041f136",
             ),
             reasoning_summarizer=RuntimeActorConfig(
-                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"
+                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock"
             ),
             reviewer_max_transcript_tokens=256_000,
             arbitrator_max_transcript_tokens=256_000,
@@ -181,7 +181,7 @@ def _default_runtime_model_profiles() -> dict[str, RuntimeModelProfileConfig]:
                 tokenizer_revision="a75207db63de3c320950fe6fcfa9ff60f341b7a2",
             ),
             reasoning_summarizer=RuntimeActorConfig(
-                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb"
+                model="groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock"
             ),
             reviewer_max_transcript_tokens=256_000,
             arbitrator_max_transcript_tokens=256_000,
