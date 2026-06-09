@@ -3,7 +3,7 @@ from __future__ import annotations
 from plap.llms.completions.client import Provider, Quirk
 from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.completions.providers.openai import OpenAIProvider
-from plap.llms.completions.quirks import ExtraBody, Only, RenameMessageField, RenameOutput, Set, SystemRole
+from plap.llms.completions.quirks import ExtraBody, MoveMessageField, MoveOutput, Only, Set, SystemRole
 
 OPENROUTER_OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(
@@ -106,8 +106,8 @@ def build_openrouter_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*OPENROUTER_FIELDS),
-            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
-            RenameOutput("reasoning", "reasoning_content"),
+            MoveMessageField("reasoning_content", "reasoning", role="assistant"),
+            MoveOutput("reasoning", "reasoning_content"),
         ),
         models=OPENROUTER_MODELS,
     )

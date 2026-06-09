@@ -41,12 +41,12 @@ from plap.llms.completions.quirks import (
     ExtraBody,
     ForceNamedToolChoice,
     ForceRequiredToolChoice,
+    Move,
+    MoveMessageField,
+    MoveOutput,
     Only,
     RateLimit,
     RejectResponseFormat,
-    Rename,
-    RenameMessageField,
-    RenameOutput,
     Set,
     SystemRole,
 )
@@ -402,7 +402,7 @@ def build_gmicloud_provider(*, api_key: str) -> Provider:
             SystemRole(),
             Only(*GMICLOUD_FIELDS),
             EnsureAssistantReasoningContent(),
-            Rename("max_completion_tokens", "max_tokens"),
+            Move("max_completion_tokens", "max_tokens"),
             DropIf("reasoning_effort", "none"),  # gmi does not have a real thinking disable switch
             ExtraBody({"context_length_exceeded_behavior": "error"}),
         ),
@@ -419,8 +419,8 @@ def build_groq_provider(*, api_key: str) -> Provider:
             SystemRole(),
             Only(*GROQ_FIELDS),
             DropMessageField("name"),
-            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
-            RenameOutput("reasoning", "reasoning_content"),
+            MoveMessageField("reasoning_content", "reasoning", role="assistant"),
+            MoveOutput("reasoning", "reasoning_content"),
         ),
         models=GROQ_MODELS,
     )
@@ -434,8 +434,8 @@ def build_cerebras_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*CEREBRAS_FIELDS),
-            RenameMessageField("reasoning_content", "reasoning", role="assistant"),
-            RenameOutput("reasoning", "reasoning_content"),
+            MoveMessageField("reasoning_content", "reasoning", role="assistant"),
+            MoveOutput("reasoning", "reasoning_content"),
         ),
         models=CEREBRAS_MODELS,
     )
@@ -446,7 +446,7 @@ def build_novita_provider(*, api_key: str) -> Provider:
         name="novita",
         api_key=api_key,
         base_url=NOVITA_OPENAI_BASE_URL,
-        quirks=(SystemRole(), Only(*NOVITA_FIELDS), Rename("max_completion_tokens", "max_tokens")),
+        quirks=(SystemRole(), Only(*NOVITA_FIELDS), Move("max_completion_tokens", "max_tokens")),
         models=NOVITA_MODELS,
     )
 
@@ -456,7 +456,7 @@ def build_crof_provider(*, api_key: str) -> Provider:
         name="crof",
         api_key=api_key,
         base_url=CROF_OPENAI_BASE_URL,
-        quirks=(Only(*CROF_FIELDS), Rename("max_completion_tokens", "max_tokens")),
+        quirks=(Only(*CROF_FIELDS), Move("max_completion_tokens", "max_tokens")),
         models=CROF_MODELS,
     )
 

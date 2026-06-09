@@ -57,6 +57,7 @@ def test_app_runtime_builds_router_from_provider_prefix_settings() -> None:
                 "crof",
                 "qubrid",
                 "openrouter",
+                "vercel",
             ),
         )
     )
@@ -90,6 +91,13 @@ def test_app_runtime_builds_qubrid_route_from_provider_prefix_setting() -> None:
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["qubrid/"]
+
+
+def test_app_runtime_builds_vercel_route_from_provider_prefix_setting() -> None:
+    client = _create_chat_completion_client(_settings(llm_api_keys=_provider_keys("vercel")))
+
+    assert isinstance(client, RoutingChatCompletionClient)
+    assert [route.prefix for route in client._routes] == ["vercel/"]
 
 
 def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
@@ -217,6 +225,23 @@ def test_app_runtime_validates_gmicloud_provider_prefix() -> None:
                 reviewer_model="gmicloud/openai/gpt-oss-120b",
                 arbitrator_model="gmicloud/openai/gpt-oss-120b",
                 reasoning_summarizer_model="gmicloud/openai/gpt-oss-120b",
+            )
+        },
+    )
+
+    _validate_runtime_model_profiles(settings)
+
+
+def test_app_runtime_validates_vercel_provider_prefix() -> None:
+    settings = _settings(
+        llm_api_keys=_provider_keys("vercel"),
+        runtime_model_profiles={
+            "plap/vercel": _profile_config(
+                main_model="vercel/openai/gpt-oss-20b:groq",
+                defender_model="vercel/openai/gpt-oss-20b:groq",
+                reviewer_model="vercel/deepseek/deepseek-v4-flash",
+                arbitrator_model="vercel/xiaomi/mimo-v2.5-pro:xiaomi",
+                reasoning_summarizer_model="vercel/openai/gpt-oss-120b",
             )
         },
     )

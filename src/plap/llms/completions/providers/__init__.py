@@ -25,7 +25,11 @@ from plap.llms.completions.providers.openrouter import (
     OpenRouterProvider,
     build_openrouter_provider,
 )
-
+from plap.llms.completions.providers.vercel import (
+    VERCEL_OPENAI_BASE_URL,
+    VercelProvider,
+    build_vercel_provider,
+)
 
 type ProviderBuilder = Callable[..., Provider]
 
@@ -40,6 +44,7 @@ PROVIDER_BUILDERS: dict[str, ProviderBuilder] = {
     "crof": build_crof_provider,
     "qubrid": build_qubrid_provider,
     "openrouter": build_openrouter_provider,
+    "vercel": build_vercel_provider,
 }
 
 
@@ -61,10 +66,12 @@ __all__ = [
     "GROQ_OPENAI_BASE_URL",
     "LIGHTNING_OPENAI_BASE_URL",
     "NOVITA_OPENAI_BASE_URL",
-    "QUBRID_OPENAI_BASE_URL",
     "OPENROUTER_OPENAI_BASE_URL",
-    "OpenRouterProvider",
     "PROVIDER_BUILDERS",
+    "QUBRID_OPENAI_BASE_URL",
+    "VERCEL_OPENAI_BASE_URL",
+    "OpenRouterProvider",
+    "VercelProvider",
     "build_cerebras_provider",
     "build_crof_provider",
     "build_fireworks_provider",
@@ -73,6 +80,7 @@ __all__ = [
     "build_lightning_provider",
     "build_novita_provider",
     "build_openrouter_provider",
-    "build_qubrid_provider",
     "build_providers",
+    "build_qubrid_provider",
+    "build_vercel_provider",
 ]

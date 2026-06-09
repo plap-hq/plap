@@ -51,7 +51,9 @@ from plap.llms.completions.providers import (
     LIGHTNING_OPENAI_BASE_URL,
     NOVITA_OPENAI_BASE_URL,
     OPENROUTER_OPENAI_BASE_URL,
+    VERCEL_OPENAI_BASE_URL,
     OpenRouterProvider,
+    VercelProvider,
     build_cerebras_provider,
     build_crof_provider,
     build_fireworks_provider,
@@ -61,6 +63,7 @@ from plap.llms.completions.providers import (
     build_novita_provider,
     build_openrouter_provider,
     build_qubrid_provider,
+    build_vercel_provider,
 )
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
@@ -1837,6 +1840,13 @@ def _openrouter_provider(*, client: Any | None = None) -> OpenRouterProvider:
     return provider
 
 
+def _vercel_provider(*, client: Any | None = None) -> VercelProvider:
+    provider = build_vercel_provider(api_key="vercel-key")
+    if client is not None:
+        provider._client = client
+    return provider
+
+
 def _fireworks_provider(*, client: Any | None = None) -> FireworksProvider:
     provider = build_fireworks_provider(api_key="fireworks-key")
     if client is not None:
@@ -2011,6 +2021,7 @@ def test_groq_request_quirks_skip_include_reasoning_for_unsupported_models() -> 
         pytest.param(_groq_provider, "openai/gpt-oss-20b", id="groq"),
         pytest.param(_cerebras_provider, "gpt-oss-120b", id="cerebras"),
         pytest.param(_openrouter_provider, "deepseek/deepseek-v4-flash", id="openrouter"),
+        pytest.param(_vercel_provider, "openai/gpt-oss-20b", id="vercel"),
     ],
 )
 def test_provider_request_quirks_rename_assistant_reasoning_content_for_replay(
@@ -2243,6 +2254,74 @@ def test_openrouter_lookup_rejects_unknown_base_model_even_with_suffixes() -> No
 
     with pytest.raises(ChatCompletionUnsupportedRequestError, match="unsupported openrouter model"):
         provider.lookup("unknown/model:nitro:provider1")
+
+
+def test_vercel_lookup_routes_provider_order_and_maps_reasoning_effort() -> None:
+    body = _body_for(
+        _vercel_provider(),
+        _request_for_model("openai/gpt-oss-20b:groq:deepinfra"),
+        stream=True,
+    )
+
+    assert body["model"] == "openai/gpt-oss-20b"
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_tokens"] == 128
+    assert "max_completion_tokens" not in body
+    assert "reasoning_effort" not in body
+    assert body["top_k"] == 17
+    assert body["parallel_tool_calls"] is True
+    assert body["prompt_cache_key"] == "cache-a"
+    assert body["metadata"] == {"k": "v"}
+    assert body["service_tier"] == "flex"
+    assert body["prediction"] == {"type": "content", "content": "expected"}
+    assert body["stream_options"] == {"include_usage": True}
+    assert body["extra_body"] == {
+        "reasoning": {"effort": "low"},
+        "providerOptions": {
+            "gateway": {
+                "only": ["groq", "deepinfra"],
+                "order": ["groq", "deepinfra"],
+            }
+        },
+    }
+
+
+def test_vercel_lookup_rejects_unknown_base_model_even_with_suffixes() -> None:
+    provider = _vercel_provider()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="unsupported vercel model"):
+        provider.lookup("unknown/model:groq")
+
+
+def test_vercel_lookup_rejects_empty_suffix_segments() -> None:
+    provider = _vercel_provider()
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="empty suffix segment"):
+        provider.lookup("openai/gpt-oss-20b::groq")
+
+
+async def test_vercel_client_aliases_reasoning_and_promotes_service_tier_on_complete_and_stream() -> None:
+    complete_raw = _completion_response(model="openai/gpt-oss-20b", content="ok", reasoning="because")
+    complete_raw["choices"][0]["message"]["provider_metadata"] = {"gateway": {"serviceTier": "priority"}}
+    stream_raw = [
+        _chunk(model="openai/gpt-oss-20b", content="ok", reasoning="because"),
+        _chunk(model="openai/gpt-oss-20b", finish_reason="stop"),
+    ]
+    stream_raw[0]["choices"][0]["delta"]["provider_metadata"] = {"gateway": {"serviceTier": "priority"}}
+    fake_client = _FakeOpenAIClient(
+        [complete_raw, _AsyncListStream(stream_raw)],
+        base_url=VERCEL_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_vercel_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert result.message.reasoning_content == "because"
+    assert result.service_tier == "priority"
+    assert deltas[0].reasoning_delta == "because"
+    assert deltas[0].service_tier == "priority"
+    assert deltas[1].finish_reason == "stop"
 
 
 async def test_openrouter_client_aliases_reasoning_on_complete_and_stream() -> None:

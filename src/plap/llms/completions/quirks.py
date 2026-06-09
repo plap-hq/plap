@@ -6,9 +6,9 @@ from threading import Lock
 from typing import Any
 
 from plap.llms.completions.chat import (
-    ChatToolChoiceMode,
     ChatResponseFormatType,
     ChatToolChoiceFunction,
+    ChatToolChoiceMode,
 )
 from plap.llms.completions.client import Call, Quirk
 from plap.llms.completions.errors import ChatCompletionRateLimitError, ChatCompletionUnsupportedRequestError
@@ -49,7 +49,27 @@ def _response_delta(raw: dict[str, Any]) -> dict[str, Any] | None:
     return delta if isinstance(delta, dict) else None
 
 
-def _rename_message_field(raw: dict[str, Any], old: str, new: str) -> None:
+def _nested_mapping_get(value: dict[str, Any] | None, path: tuple[str, ...]) -> Any:
+    current: Any = value
+    for segment in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def _nested_mapping_set(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    current = target
+    for segment in path[:-1]:
+        child = current.get(segment)
+        if not isinstance(child, dict):
+            child = {}
+            current[segment] = child
+        current = child
+    current[path[-1]] = value
+
+
+def _move_message_field(raw: dict[str, Any], old: str, new: str) -> None:
     message = _response_message(raw)
     if message is None or old not in message:
         return
@@ -58,7 +78,7 @@ def _rename_message_field(raw: dict[str, Any], old: str, new: str) -> None:
     message[new] = message[old]
 
 
-def _rename_delta_field(raw: dict[str, Any], old: str, new: str) -> None:
+def _move_delta_field(raw: dict[str, Any], old: str, new: str) -> None:
     delta = _response_delta(raw)
     if delta is None or old not in delta:
         return
@@ -96,15 +116,18 @@ class Only(Quirk):
         call.body = {key: value for key, value in call.body.items() if key in self._names}
 
 
-class Rename(Quirk):
-    def __init__(self, old: str, new: str) -> None:
-        self._old = old
-        self._new = new
+class Move(Quirk):
+    def __init__(self, source: str, *target_path: str) -> None:
+        if not target_path:
+            raise ValueError("Move requires at least one target path segment")
+        self._source = source
+        self._target_path = tuple(target_path)
 
     def request(self, call: Call) -> None:
-        if self._old not in call.body or self._new in call.body:
+        if self._source not in call.body:
             return
-        call.body[self._new] = call.body.pop(self._old)
+        value = call.body.pop(self._source)
+        _nested_mapping_set(call.body, self._target_path, value)
 
 
 class Drop(Quirk):
@@ -140,7 +163,7 @@ class DropMessageField(Quirk):
             message.pop(self._name, None)
 
 
-class RenameMessageField(Quirk):
+class MoveMessageField(Quirk):
     def __init__(self, old: str, new: str, *, role: str | None = None) -> None:
         self._old = old
         self._new = new
@@ -224,19 +247,41 @@ class ForceNamedToolChoice(Quirk):
         )
 
 
-class RenameOutput(Quirk):
+class MoveOutput(Quirk):
     def __init__(self, old: str, new: str) -> None:
         self._old = old
         self._new = new
 
     async def complete(self, call: Call, next_complete) -> dict[str, Any]:
         raw = await next_complete(None)
-        _rename_message_field(raw, self._old, self._new)
+        _move_message_field(raw, self._old, self._new)
         return raw
 
     async def stream(self, call: Call, next_complete, next_stream):
         async for raw in next_stream(None):
-            _rename_delta_field(raw, self._old, self._new)
+            _move_delta_field(raw, self._old, self._new)
+            yield raw
+
+
+class PromoteOutput(Quirk):
+    def __init__(self, name: str, *path: str) -> None:
+        if not path:
+            raise ValueError("PromoteOutput requires at least one path segment")
+        self._name = name
+        self._path = tuple(path)
+
+    async def complete(self, call: Call, next_complete) -> dict[str, Any]:
+        raw = await next_complete(None)
+        value = _nested_mapping_get(_response_message(raw), self._path)
+        if value is not None:
+            raw[self._name] = value
+        return raw
+
+    async def stream(self, call: Call, next_complete, next_stream):
+        async for raw in next_stream(None):
+            value = _nested_mapping_get(_response_delta(raw), self._path)
+            if value is not None:
+                raw[self._name] = value
             yield raw
 
 
@@ -304,12 +349,13 @@ __all__ = [
     "ExtraBody",
     "ForceNamedToolChoice",
     "ForceRequiredToolChoice",
+    "Move",
+    "MoveMessageField",
+    "MoveOutput",
     "Only",
+    "PromoteOutput",
     "RateLimit",
     "RejectResponseFormat",
-    "Rename",
-    "RenameMessageField",
-    "RenameOutput",
     "Set",
     "SystemRole",
 ]
