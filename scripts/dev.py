@@ -38,9 +38,10 @@ from plap.settings import Settings, _default_runtime_model_profiles  # noqa: E40
 STATE_ENV_KEYS = (
     "PLAP_DATABASE_URL",
     "PLAP_API_KEY_PEPPER",
-    "PLAP_DEBUG",
     "PLAP_DEBUG_DEBATE_SUMMARIES",
     "PLAP_DEV_LOG_FILE",
+    "PLAP_FOREIGN_LOG_LEVEL",
+    "PLAP_LOG_LEVEL",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_PROTOCOL",
     "OTEL_LOGS_EXPORTER",
@@ -129,9 +130,10 @@ def main() -> int:
         }
 
         _ensure_managed_postgres(args, managed_state, resources)
-        os.environ.setdefault("PLAP_DEBUG", "true")
         os.environ.setdefault("PLAP_DEBUG_DEBATE_SUMMARIES", "true")
         os.environ.setdefault("PLAP_DEV_LOG_FILE", str(DEFAULT_LOG_FILE))
+        os.environ.setdefault("PLAP_FOREIGN_LOG_LEVEL", "WARNING")
+        os.environ.setdefault("PLAP_LOG_LEVEL", "DEBUG")
         os.environ.setdefault("PLAP_API_KEY_PEPPER", secrets.token_hex(24))
         os.environ.setdefault("PLAP_SEALING_KEYS", json.dumps([_generate_sealing_key()]))
         _normalize_sealing_keys_env()
@@ -143,9 +145,10 @@ def main() -> int:
             {
                 "PLAP_DATABASE_URL": os.environ["PLAP_DATABASE_URL"],
                 "PLAP_API_KEY_PEPPER": os.environ["PLAP_API_KEY_PEPPER"],
-                "PLAP_DEBUG": os.environ["PLAP_DEBUG"],
                 "PLAP_DEBUG_DEBATE_SUMMARIES": os.environ["PLAP_DEBUG_DEBATE_SUMMARIES"],
                 "PLAP_DEV_LOG_FILE": os.environ["PLAP_DEV_LOG_FILE"],
+                "PLAP_FOREIGN_LOG_LEVEL": os.environ["PLAP_FOREIGN_LOG_LEVEL"],
+                "PLAP_LOG_LEVEL": os.environ["PLAP_LOG_LEVEL"],
                 "OTEL_EXPORTER_OTLP_ENDPOINT": os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"],
                 "OTEL_EXPORTER_OTLP_PROTOCOL": os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"],
                 "OTEL_LOGS_EXPORTER": os.environ["OTEL_LOGS_EXPORTER"],

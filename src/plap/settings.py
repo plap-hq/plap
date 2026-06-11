@@ -1017,14 +1017,17 @@ class Settings(BaseSettings):
     api_key_pepper: str
     database_url: str
     sealing_keys: list[str]
-    debug: bool = False
     debug_debate_summaries: bool = False
+    log_level: str = "INFO"
+    foreign_log_level: str = "WARNING"
     llm_api_keys: dict[str, str] = Field(default_factory=_default_llm_api_keys)
     tool_effect_classifier_model: str = (
-        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:google-vertex,openrouter/openai/gpt-oss-120b:novita"
+        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,"
+        "openrouter/openai/gpt-oss-120b:google-vertex,openrouter/openai/gpt-oss-120b:novita"
     )
     tool_call_effect_classifier_model: str = (
-        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,openrouter/openai/gpt-oss-120b:google-vertex,openrouter/openai/gpt-oss-120b:novita"
+        "cerebras/gpt-oss-120b,groq/openai/gpt-oss-120b,lightning/lightning-ai/gpt-oss-120b,"
+        "openrouter/openai/gpt-oss-120b:google-vertex,openrouter/openai/gpt-oss-120b:novita"
     )
     tool_effect_classifier_cache_model: str = "gpt-oss-120b"
     tool_call_effect_classifier_cache_model: str = "gpt-oss-120b"

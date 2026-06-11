@@ -9,6 +9,17 @@ import structlog
 _LOG_KWARG_NAMES = ("exc_info", "stack_info", "stacklevel")
 
 
+class _SplitLevelFilter(stdlib_logging.Filter):
+    def __init__(self, *, app_level: int, foreign_level: int) -> None:
+        super().__init__()
+        self._app_level = app_level
+        self._foreign_level = foreign_level
+
+    def filter(self, record: stdlib_logging.LogRecord) -> bool:
+        threshold = self._app_level if record.name == "plap" or record.name.startswith("plap.") else self._foreign_level
+        return record.levelno >= threshold
+
+
 class _DefaultRecordAttributesFilter(stdlib_logging.Filter):
     def filter(self, record: stdlib_logging.LogRecord) -> bool:
         if not hasattr(record, "event"):
@@ -38,8 +49,18 @@ def _render_to_log_kwargs(_logger: Any, _method_name: str, event_dict: structlog
     }
 
 
-def _logging_level(settings: Any) -> int:
-    return stdlib_logging.DEBUG if bool(getattr(settings, "debug", False)) else stdlib_logging.INFO
+def _parse_log_level(value: object, *, field_name: str) -> int:
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a logging level name or number")
+    normalized = value.strip().upper()
+    if normalized.isdigit():
+        return int(normalized)
+    level = stdlib_logging.getLevelNamesMapping().get(normalized)
+    if not isinstance(level, int):
+        raise TypeError(f"{field_name} must be a valid logging level, got {value!r}")
+    return level
 
 
 def _processors() -> list[structlog.types.Processor]:
@@ -54,7 +75,9 @@ def _processors() -> list[structlog.types.Processor]:
 
 
 def configure_logging(settings: Any, *, handlers: tuple[stdlib_logging.Handler, ...]) -> None:
-    level = _logging_level(settings)
+    app_level = _parse_log_level(getattr(settings, "log_level", "INFO"), field_name="log_level")
+    foreign_level = _parse_log_level(getattr(settings, "foreign_log_level", "WARNING"), field_name="foreign_log_level")
+    root_level = min(app_level, foreign_level)
     structlog.configure(
         cache_logger_on_first_use=False,
         logger_factory=structlog.stdlib.LoggerFactory(),
@@ -66,10 +89,11 @@ def configure_logging(settings: Any, *, handlers: tuple[stdlib_logging.Handler, 
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
         handler.close()
-    root_logger.setLevel(level)
+    root_logger.setLevel(root_level)
 
     for handler in handlers:
-        handler.setLevel(level)
+        handler.setLevel(root_level)
+        handler.addFilter(_SplitLevelFilter(app_level=app_level, foreign_level=foreign_level))
         handler.addFilter(_DefaultRecordAttributesFilter())
         root_logger.addHandler(handler)
 

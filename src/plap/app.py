@@ -486,7 +486,8 @@ def create_app(settings: Settings | None = None) -> Litestar:
         raise
     logger.info(
         "app.startup",
-        debug=resolved_settings.debug,
+        foreign_log_level=resolved_settings.foreign_log_level,
+        log_level=resolved_settings.log_level,
         mcp_servers=[server.name for server in resolved_settings.mcp_servers],
         provider_routes=sorted(
             _configured_chat_completion_prefixes(
