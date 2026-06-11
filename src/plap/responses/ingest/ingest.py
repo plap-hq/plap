@@ -17,6 +17,7 @@ from plap.responses.contracts import (
     RequestReasoningItem,
     ResponseCreateRequest,
 )
+from plap.responses.ingest import content
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
@@ -115,20 +116,8 @@ def _slice_to_last_compaction(items: list[RequestInputItem]) -> list[RequestInpu
     return items[last_index:]
 
 
-def _message_text(item: RequestMessageItem) -> str:
-    if isinstance(item.content, str):
-        return item.content
-    return " ".join(part.text for part in item.content)
-
-
-def _function_output_text(item: RequestFunctionCallOutputItem) -> str:
-    if isinstance(item.output, str):
-        return item.output
-    return " ".join(part.text for part in item.output)
-
-
 def _decode_message_item(item: RequestMessageItem) -> Message:
-    return Message(role=item.role, content=_message_text(item))
+    return content.message(item)
 
 
 def _open_compaction_item(item: RequestCompactionItem, *, keyring: SealingKeyring) -> CompactionPayload:
@@ -870,7 +859,7 @@ class _Main:
                 private_message="function_call_output has no pending function_call",
             )
         owner_state, call = owner
-        owner_state.add_output(Message(role="tool", tool_call_id=call_id, content=_function_output_text(item)))
+        owner_state.add_output(Message(role="tool", tool_call_id=call_id, content=content.tool_output(item)))
         call.close()
         if isinstance(owner_state, _Anchor):
             self.bundle.past_anchor = True
@@ -1022,7 +1011,7 @@ class _Replay:
             Message(
                 role="tool",
                 tool_call_id=call_id.upstream_tool_call_id,
-                content=_function_output_text(item),
+                content=content.tool_output(item),
             )
         )
         self._rebuild_non_main_calls(call_id.side)

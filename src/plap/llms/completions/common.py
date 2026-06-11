@@ -20,6 +20,8 @@ from plap.llms.completions.chat import (
     ChatToolCallDelta,
     ChatToolChoice,
     ChatUsage,
+    content_from_primitive,
+    content_to_wire,
 )
 from plap.llms.completions.errors import ChatCompletionProviderError
 
@@ -104,18 +106,14 @@ def _stringify_json_value(value: Any) -> str | None:
 
 
 def _message_body(message: ChatMessage) -> dict[str, Any]:
-    value: dict[str, Any] = {"role": message.role}
-    _set(value, "content", message.content)
-    _set(value, "name", message.name)
-    _set(value, "tool_call_id", message.tool_call_id)
-    _set(
-        value,
-        "tool_calls",
-        [_tool_call_body(tool_call) for tool_call in message.tool_calls] or None,
-    )
-    if message.role == "assistant":
-        _set(value, "refusal", message.refusal)
-        _set(value, "reasoning_content", message.reasoning_content)
+    value = message.to_primitive()
+    if message.content is not None:
+        value["content"] = content_to_wire(message.content)
+    if message.tool_calls:
+        value["tool_calls"] = [_tool_call_body(tool_call) for tool_call in message.tool_calls]
+    if message.role != "assistant":
+        value.pop("refusal", None)
+        value.pop("reasoning_content", None)
     return value
 
 
@@ -275,7 +273,7 @@ def completion_result_from_data(
 ) -> ChatCompletionResult:
     choice = _first(_get(response, "choices"))
     message = _get(choice, "message") or {}
-    content = _get(message, "content")
+    content = content_from_primitive(_get(message, "content"), label="message content")
     refusal = _get(message, "refusal")
     reasoning_content = _get(message, "reasoning_content")
     tool_calls = _tool_calls_from_data(_get(message, "tool_calls"))

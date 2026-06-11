@@ -7,7 +7,13 @@ from pydantic import TypeAdapter
 
 from plap.keyring import SealingKeyring
 from plap.llms.summary import SummaryDelta, SummaryDone
-from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent, SummaryTextContent
+from plap.responses.contracts import (
+    OutputRefusalContent,
+    ResponseCreateRequest,
+    ResponseMessageItem,
+    ResponseStreamEvent,
+    SummaryTextContent,
+)
 from plap.responses.ingest.models import Message, Sides, SidesUpdate
 from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
 from plap.responses.store import PreparedRequest
@@ -289,3 +295,27 @@ async def test_summary_done_does_not_write_store() -> None:
     await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("done"))
 
     assert store.replace_calls == 1
+
+
+async def test_emit_message_with_refusal_publishes_refusal_events() -> None:
+    channels = _RecordingChannels()
+    coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
+
+    await coordinator.emit(
+        ResponseMessageItem(
+            content=[OutputRefusalContent(refusal="nope", type="refusal")],
+            id="msg_refusal",
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+    )
+
+    assert _published_event_types(channels) == [
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.refusal.delta",
+        "response.refusal.done",
+        "response.content_part.done",
+        "response.output_item.done",
+    ]

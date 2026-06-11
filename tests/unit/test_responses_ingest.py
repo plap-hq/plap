@@ -3,11 +3,17 @@ from __future__ import annotations
 from itertools import count
 
 import pytest
+from pydantic import ValidationError
 
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
+from plap.llms.completions.chat import ChatContentFile, ChatContentImage, ChatContentText, ChatFile, ChatImageURL
 from plap.responses.contracts import (
+    InputFileContent,
+    InputImageContent,
     InputTextContent,
+    OutputRefusalContent,
+    OutputTextContent,
     RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
@@ -16,6 +22,7 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
+from plap.responses.ingest.content import tool_output as decode_tool_output
 from plap.responses.ingest.ingest import (
     _decode_queue,
     _DecodedCompaction,
@@ -267,8 +274,8 @@ def test_decode_queue_decodes_message_item_to_internal_message() -> None:
         [
             RequestMessageItem(
                 content=[
-                    InputTextContent(text="hello", type="input_text"),
-                    InputTextContent(text="world", type="input_text"),
+                    OutputTextContent(text="hello", type="output_text"),
+                    OutputTextContent(text="world", type="output_text"),
                 ],
                 role="assistant",
                 type="message",
@@ -277,7 +284,98 @@ def test_decode_queue_decodes_message_item_to_internal_message() -> None:
         keyring=_keyring(),
     )
 
-    assert decoded == [_DecodedMessage(message=Message(role="assistant", content="hello world"))]
+    assert decoded == [
+        _DecodedMessage(
+            message=Message(
+                role="assistant",
+                content=[
+                    ChatContentText(text="hello"),
+                    ChatContentText(text="world"),
+                ],
+            )
+        )
+    ]
+
+
+def test_request_message_item_rejects_refusal_content_for_user_role() -> None:
+    with pytest.raises(ValidationError, match="does not support content variants"):
+        RequestMessageItem(
+            content=[OutputRefusalContent(refusal="no", type="refusal")],
+            role="user",
+            type="message",
+        )
+
+
+def test_decode_queue_normalizes_assistant_refusal_to_top_level_runtime_field() -> None:
+    decoded = _decode_queue(
+        [
+            RequestMessageItem(
+                content=[
+                    OutputTextContent(text="hello", type="output_text"),
+                    OutputRefusalContent(refusal="nope", type="refusal"),
+                ],
+                role="assistant",
+                type="message",
+            )
+        ],
+        keyring=_keyring(),
+    )
+
+    assert decoded == [
+        _DecodedMessage(
+            message=Message(
+                role="assistant",
+                content=[ChatContentText(text="hello")],
+                refusal="nope",
+            )
+        )
+    ]
+
+
+def test_decode_queue_decodes_structured_message_parts_to_chat_superset() -> None:
+    decoded = _decode_queue(
+        [
+            RequestMessageItem(
+                content=[
+                    InputTextContent(text="look", type="input_text"),
+                    InputImageContent(image_url="https://example.com/image.png", detail="original", type="input_image"),
+                    InputFileContent(file_url="https://example.com/report.pdf", filename="report.pdf", detail="high", type="input_file"),
+                ],
+                role="user",
+                type="message",
+            )
+        ],
+        keyring=_keyring(),
+    )
+
+    assert decoded == [
+        _DecodedMessage(
+            message=Message(
+                role="user",
+                content=[
+                    ChatContentText(text="look"),
+                    ChatContentImage(image_url=ChatImageURL(url="https://example.com/image.png", detail="original")),
+                    ChatContentFile(file=ChatFile(file_url="https://example.com/report.pdf", filename="report.pdf", detail="high")),
+                ],
+            )
+        )
+    ]
+
+
+def test_decode_queue_decodes_structured_function_call_output_to_tool_message_content() -> None:
+    item = RequestFunctionCallOutputItem(
+        call_id="call_0",
+        output=[
+            InputTextContent(text="tool text", type="input_text"),
+            InputImageContent(image_url="https://example.com/tool.png", detail="high", type="input_image"),
+        ],
+        type="function_call_output",
+    )
+
+    assert decode_tool_output(item) == [
+        ChatContentText(text="tool text"),
+        ChatContentImage(image_url=ChatImageURL(url="https://example.com/tool.png", detail="high")),
+    ]
 
 
 def test_decode_queue_classifies_sealed_function_call() -> None:

@@ -34,7 +34,7 @@ def _shape_tool_call(value: Mapping[str, JSONValue]) -> JSONValue:
 def _shape_message(value: Mapping[str, JSONValue]) -> JSONValue:
     shaped: dict[str, JSONValue] = {"role": value["role"]}
     if "content" in value:
-        shaped["content"] = _shape_scalar(value["content"])
+        shaped["content"] = _shape_value(value["content"])
     if "name" in value:
         shaped["name"] = _shape_scalar(value["name"])
     if "refusal" in value:

@@ -58,6 +58,19 @@ def _nested_mapping_get(value: dict[str, Any] | None, path: tuple[str, ...]) -> 
     return current
 
 
+def _nested_mapping_pop(target: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    current = target
+    for segment in path[:-1]:
+        child = current.get(segment)
+        if not isinstance(child, dict):
+            return False, None
+        current = child
+    leaf = path[-1]
+    if leaf not in current:
+        return False, None
+    return True, current.pop(leaf)
+
+
 def _nested_mapping_set(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     current = target
     for segment in path[:-1]:
@@ -67,6 +80,14 @@ def _nested_mapping_set(target: dict[str, Any], path: tuple[str, ...], value: An
             current[segment] = child
         current = child
     current[path[-1]] = value
+
+
+def _path(value: str | tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if not value:
+        raise ValueError("path must contain at least one segment")
+    return value
 
 
 def _move_message_field(raw: dict[str, Any], old: str, new: str) -> None:
@@ -164,20 +185,40 @@ class DropMessageField(Quirk):
 
 
 class MoveMessageField(Quirk):
-    def __init__(self, old: str, new: str, *, role: str | None = None) -> None:
-        self._old = old
-        self._new = new
+    def __init__(
+        self,
+        source: str | tuple[str, ...],
+        target: str | tuple[str, ...],
+        *,
+        role: str | None = None,
+        content_type: str | None = None,
+    ) -> None:
+        self._source = _path(source)
+        self._target = _path(target)
         self._role = role
+        self._content_type = content_type
+
+    def _move(self, target: dict[str, Any]) -> None:
+        found, value = _nested_mapping_pop(target, self._source)
+        if not found:
+            return
+        if _nested_mapping_get(target, self._target) is None:
+            _nested_mapping_set(target, self._target, value)
 
     def request(self, call: Call) -> None:
         for message in _body_messages(call):
             if self._role is not None and message.get("role") != self._role:
                 continue
-            if self._old not in message:
+            if self._content_type is None:
+                self._move(message)
                 continue
-            if message.get(self._new) is None:
-                message[self._new] = message[self._old]
-            message.pop(self._old, None)
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != self._content_type:
+                    continue
+                self._move(part)
 
 
 class DropToolFunctionField(Quirk):

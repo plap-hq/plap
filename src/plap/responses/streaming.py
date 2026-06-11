@@ -12,6 +12,8 @@ from plap.keyring import SealingKeyring
 from plap.llms.summary import SummaryDelta, SummaryDone
 from plap.responses.contracts import (
     ConversationReference,
+    OutputRefusalContent,
+    OutputTextContent,
     ResponseCompactionItem,
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
@@ -35,6 +37,8 @@ from plap.responses.contracts import (
     ResponseReasoningSummaryPartDoneEvent,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningSummaryTextDoneEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
     ResponseStatus,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
@@ -299,38 +303,60 @@ class StreamCoordinator:
                     type="response.content_part.added",
                 )
             )
-            for annotation_index, annotation in enumerate(content_part.annotations):
+            if isinstance(content_part, OutputTextContent):
+                for annotation_index, annotation in enumerate(content_part.annotations):
+                    await self._publish(
+                        ResponseOutputTextAnnotationAddedEvent(
+                            annotation=annotation,
+                            annotation_index=annotation_index,
+                            content_index=content_index,
+                            item_id=item.id,
+                            output_index=output_index,
+                            sequence_number=0,
+                            type="response.output_text.annotation.added",
+                        )
+                    )
                 await self._publish(
-                    ResponseOutputTextAnnotationAddedEvent(
-                        annotation=annotation,
-                        annotation_index=annotation_index,
+                    ResponseTextDeltaEvent(
+                        content_index=content_index,
+                        delta=content_part.text,
+                        item_id=item.id,
+                        output_index=output_index,
+                        sequence_number=0,
+                        type="response.output_text.delta",
+                    )
+                )
+                await self._publish(
+                    ResponseTextDoneEvent(
                         content_index=content_index,
                         item_id=item.id,
                         output_index=output_index,
                         sequence_number=0,
-                        type="response.output_text.annotation.added",
+                        text=content_part.text,
+                        type="response.output_text.done",
                     )
                 )
-            await self._publish(
-                ResponseTextDeltaEvent(
-                    content_index=content_index,
-                    delta=content_part.text,
-                    item_id=item.id,
-                    output_index=output_index,
-                    sequence_number=0,
-                    type="response.output_text.delta",
+            elif isinstance(content_part, OutputRefusalContent):
+                await self._publish(
+                    ResponseRefusalDeltaEvent(
+                        content_index=content_index,
+                        delta=content_part.refusal,
+                        item_id=item.id,
+                        output_index=output_index,
+                        sequence_number=0,
+                        type="response.refusal.delta",
+                    )
                 )
-            )
-            await self._publish(
-                ResponseTextDoneEvent(
-                    content_index=content_index,
-                    item_id=item.id,
-                    output_index=output_index,
-                    sequence_number=0,
-                    text=content_part.text,
-                    type="response.output_text.done",
+                await self._publish(
+                    ResponseRefusalDoneEvent(
+                        content_index=content_index,
+                        item_id=item.id,
+                        output_index=output_index,
+                        refusal=content_part.refusal,
+                        sequence_number=0,
+                        type="response.refusal.done",
+                    )
                 )
-            )
             await self._publish(
                 ResponseContentPartDoneEvent(
                     content_index=content_index,

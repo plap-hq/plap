@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from plap.responses.contracts.base import (
     StrictModel,
@@ -13,6 +13,31 @@ from plap.responses.contracts.base import (
 class InputTextContent(StrictModel):
     text: str = Field(description="Plain text supplied as model input.")
     type: Literal["input_text"] = Field(description="Content discriminator.")
+
+
+class InputImageContent(StrictModel):
+    detail: Literal["low", "high", "auto", "original"] | None = Field(
+        default=None,
+        description="Requested image detail level.",
+    )
+    file_id: str | None = Field(default=None, description="Uploaded file ID backing the image input.")
+    image_url: str | None = Field(
+        default=None,
+        description="Image URL or base64 data URL backing the image input.",
+    )
+    type: Literal["input_image"] = Field(description="Content discriminator.")
+
+
+class InputFileContent(StrictModel):
+    detail: Literal["low", "high"] | None = Field(
+        default=None,
+        description="Requested file rendering detail level.",
+    )
+    file_data: str | None = Field(default=None, description="Base64-encoded file data.")
+    file_id: str | None = Field(default=None, description="Uploaded file ID backing the file input.")
+    file_url: str | None = Field(default=None, description="URL backing the file input.")
+    filename: str | None = Field(default=None, description="Filename associated with the file input.")
+    type: Literal["input_file"] = Field(description="Content discriminator.")
 
 
 class UrlCitationAnnotation(StrictModel):
@@ -49,6 +74,11 @@ class OutputTextContent(StrictModel):
     type: Literal["output_text"] = Field(description="Content discriminator.")
 
 
+class OutputRefusalContent(StrictModel):
+    refusal: str = Field(description="The assistant refusal text.")
+    type: Literal["refusal"] = Field(description="Content discriminator.")
+
+
 class ReasoningTextContent(StrictModel):
     text: str = Field(description="Reasoning text content.")
     type: Literal["reasoning_text"] = Field(description="Content discriminator.")
@@ -59,18 +89,18 @@ class SummaryTextContent(StrictModel):
     type: Literal["summary_text"] = Field(description="Content discriminator.")
 
 
-type MessageContentPart = Annotated[
-    InputTextContent | OutputTextContent,
+type RequestMessageContentPart = Annotated[
+    InputTextContent | InputImageContent | InputFileContent | OutputTextContent | OutputRefusalContent,
     Field(discriminator="type"),
 ]
 
-type ToolOutputContentPart = Annotated[
-    InputTextContent,
+type FunctionCallOutputContentPart = Annotated[
+    InputTextContent | InputImageContent | InputFileContent,
     Field(discriminator="type"),
 ]
 
 type ResponseContentPart = Annotated[
-    OutputTextContent | ReasoningTextContent,
+    OutputTextContent | OutputRefusalContent,
     Field(discriminator="type"),
 ]
 
@@ -78,7 +108,7 @@ type ItemStatus = Literal["in_progress", "completed", "incomplete"]
 
 
 class RequestMessageItem(StrictModel):
-    content: str | list[MessageContentPart] = Field(description="Message text or supported content blocks.")
+    content: str | list[RequestMessageContentPart] = Field(description="Message text or supported content blocks.")
     id: str | None = Field(default=None, description="Optional ID for replayed items.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,
@@ -96,9 +126,21 @@ class RequestMessageItem(StrictModel):
     def validate_content_variants(cls, value: object) -> object:
         return _reject_unsupported_type_variants(
             value,
-            allowed={"input_text", "output_text"},
+            allowed={"input_text", "input_image", "input_file", "output_text", "refusal"},
             label="message content",
         )
+
+    @model_validator(mode="after")
+    def validate_role_content_variants(self) -> RequestMessageItem:
+        if isinstance(self.content, str):
+            return self
+        part_types = {part.type for part in self.content}
+        allowed = {"output_text", "refusal"} if self.role == "assistant" else {"input_text", "input_image", "input_file"}
+        unsupported = sorted(part_types - allowed)
+        if unsupported:
+            joined = ", ".join(unsupported)
+            raise ValueError(f"message role {self.role!r} does not support content variants: {joined}")
+        return self
 
 
 class RequestItemReference(StrictModel):
@@ -124,7 +166,7 @@ class RequestFunctionCallItem(_FunctionCallItemBase):
 
 class _FunctionCallOutputItemBase(StrictModel):
     call_id: str = Field(description="Call ID this output satisfies.")
-    output: str | list[ToolOutputContentPart] = Field(description="Function result as a string or supported content blocks.")
+    output: str | list[FunctionCallOutputContentPart] = Field(description="Function result as a string or supported content blocks.")
     type: Literal["function_call_output"] = Field(description="Item discriminator.")
 
     @field_validator("output", mode="before")
@@ -132,7 +174,7 @@ class _FunctionCallOutputItemBase(StrictModel):
     def validate_output_variants(cls, value: object) -> object:
         return _reject_unsupported_type_variants(
             value,
-            allowed={"input_text"},
+            allowed={"input_text", "input_image", "input_file"},
             label="function_call_output content",
         )
 
@@ -194,7 +236,7 @@ type RequestInputItem = Annotated[
 
 
 class ResponseMessageItem(StrictModel):
-    content: list[OutputTextContent] = Field(description="Output message content blocks.")
+    content: list[ResponseContentPart] = Field(description="Output message content blocks.")
     id: str = Field(description="Unique output message item ID.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,
@@ -238,7 +280,7 @@ type ResponseOutputItem = Annotated[
 
 
 class InputItemsMessageItem(StrictModel):
-    content: str | list[MessageContentPart] = Field(description="Message text or supported content blocks.")
+    content: str | list[RequestMessageContentPart] = Field(description="Message text or supported content blocks.")
     id: str = Field(description="Input item ID.")
     phase: Literal["commentary", "final_answer"] | None = Field(
         default=None,

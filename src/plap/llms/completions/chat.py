@@ -71,6 +71,232 @@ def _optional_string(value: object, *, label: str) -> str | None:
     return value
 
 
+def _optional_literal_string(value: object, *, allowed: set[str], label: str) -> str | None:
+    text = _optional_string(value, label=label)
+    if text is None:
+        return None
+    if text not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise ValueError(f"{label} must be one of: {allowed_values}")
+    return text
+
+
+@dataclass(frozen=True)
+class ChatContentText:
+    text: str
+    type: Literal["text"] = "text"
+
+    def to_primitive(self) -> dict[str, object]:
+        return {"type": self.type, "text": self.text}
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatContentText:
+        item = _required_mapping(value, label="text content part")
+        text = _optional_string(item.get("text"), label="text content part text")
+        if text is None:
+            raise ValueError("text content part text is required")
+        return cls(text=text)
+
+
+@dataclass(frozen=True)
+class ChatImageURL:
+    url: str | None = None
+    detail: Literal["auto", "low", "high", "original"] | None = None
+    # Responses compatibility extension: input_image can refer to a stored file
+    # by ID, while generic chat-completions image_url parts do not expose one.
+    file_id: str | None = None
+
+    def to_primitive(self) -> dict[str, object]:
+        value: dict[str, object] = {}
+        if self.url is not None:
+            value["url"] = self.url
+        if self.detail is not None:
+            value["detail"] = self.detail
+        if self.file_id is not None:
+            value["file_id"] = self.file_id
+        return value
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatImageURL:
+        item = _required_mapping(value, label="image content part image_url")
+        detail = _optional_literal_string(
+            item.get("detail"),
+            allowed={"auto", "low", "high", "original"},
+            label="image content part detail",
+        )
+        return cls(
+            url=_optional_string(item.get("url"), label="image content part url"),
+            detail=detail,
+            file_id=_optional_string(item.get("file_id"), label="image content part file_id"),
+        )
+
+
+@dataclass(frozen=True)
+class ChatContentImage:
+    image_url: ChatImageURL
+    type: Literal["image_url"] = "image_url"
+
+    def to_primitive(self) -> dict[str, object]:
+        return {"type": self.type, "image_url": self.image_url.to_primitive()}
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatContentImage:
+        item = _required_mapping(value, label="image content part")
+        return cls(image_url=ChatImageURL.from_primitive(item.get("image_url")))
+
+
+@dataclass(frozen=True)
+class ChatFile:
+    file_data: str | None = None
+    file_id: str | None = None
+    filename: str | None = None
+    # Responses compatibility extension: input_file can carry a URL-backed file
+    # source, while generic chat-completions file parts usually cannot.
+    file_url: str | None = None
+    # Responses compatibility extension: input_file can carry file rendering
+    # detail, while generic chat-completions file parts usually do not.
+    detail: Literal["low", "high"] | None = None
+
+    def to_primitive(self) -> dict[str, object]:
+        value: dict[str, object] = {}
+        if self.file_data is not None:
+            value["file_data"] = self.file_data
+        if self.file_id is not None:
+            value["file_id"] = self.file_id
+        if self.filename is not None:
+            value["filename"] = self.filename
+        if self.file_url is not None:
+            value["file_url"] = self.file_url
+        if self.detail is not None:
+            value["detail"] = self.detail
+        return value
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatFile:
+        item = _required_mapping(value, label="file content part file")
+        detail = _optional_literal_string(
+            item.get("detail"),
+            allowed={"low", "high"},
+            label="file content part detail",
+        )
+        return cls(
+            file_data=_optional_string(item.get("file_data"), label="file content part file_data"),
+            file_id=_optional_string(item.get("file_id"), label="file content part file_id"),
+            filename=_optional_string(item.get("filename"), label="file content part filename"),
+            file_url=_optional_string(item.get("file_url"), label="file content part file_url"),
+            detail=detail,
+        )
+
+
+@dataclass(frozen=True)
+class ChatContentFile:
+    file: ChatFile
+    type: Literal["file"] = "file"
+
+    def to_primitive(self) -> dict[str, object]:
+        return {"type": self.type, "file": self.file.to_primitive()}
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatContentFile:
+        item = _required_mapping(value, label="file content part")
+        return cls(file=ChatFile.from_primitive(item.get("file")))
+
+
+@dataclass(frozen=True)
+class ChatInputAudio:
+    data: str
+    format: Literal["wav", "mp3"]
+
+    def to_primitive(self) -> dict[str, object]:
+        return {"data": self.data, "format": self.format}
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatInputAudio:
+        item = _required_mapping(value, label="input audio content part input_audio")
+        format_ = _optional_literal_string(
+            item.get("format"),
+            allowed={"wav", "mp3"},
+            label="input audio content part format",
+        )
+        if format_ is None:
+            raise ValueError("input audio content part format is required")
+        return cls(
+            data=_required_string(item.get("data"), label="input audio content part data"),
+            format=format_,
+        )
+
+
+@dataclass(frozen=True)
+class ChatContentInputAudio:
+    input_audio: ChatInputAudio
+    type: Literal["input_audio"] = "input_audio"
+
+    def to_primitive(self) -> dict[str, object]:
+        return {"type": self.type, "input_audio": self.input_audio.to_primitive()}
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ChatContentInputAudio:
+        item = _required_mapping(value, label="input audio content part")
+        return cls(input_audio=ChatInputAudio.from_primitive(item.get("input_audio")))
+
+
+type ChatContentPart = ChatContentText | ChatContentImage | ChatContentFile | ChatContentInputAudio
+type ChatMessageContent = str | list[ChatContentPart] | None
+
+
+def content_to_primitive(value: ChatMessageContent) -> object | None:
+    if value is None or isinstance(value, str):
+        return value
+    return [part.to_primitive() for part in value]
+
+
+def _content_part_to_wire(part: ChatContentPart) -> dict[str, object]:
+    if isinstance(part, ChatContentText):
+        return part.to_primitive()
+    if isinstance(part, ChatContentImage):
+        image_url = part.image_url.to_primitive()
+        if image_url.get("detail") == "original":
+            image_url["detail"] = "high"
+        return {"type": part.type, "image_url": image_url}
+    if isinstance(part, ChatContentFile):
+        file_value = part.file.to_primitive()
+        file_value.pop("detail", None)
+        return {"type": part.type, "file": file_value}
+    if isinstance(part, ChatContentInputAudio):
+        return part.to_primitive()
+    raise TypeError(f"unsupported content part for wire serialization: {type(part).__name__}")
+
+
+def content_to_wire(value: ChatMessageContent) -> object | None:
+    if value is None or isinstance(value, str):
+        return value
+    return [_content_part_to_wire(part) for part in value]
+
+
+def _content_part_from_primitive(value: object, *, label: str) -> ChatContentPart:
+    item = _required_mapping(value, label=label)
+    part_type = _required_string(item.get("type"), label=f"{label} type")
+    if part_type == "text":
+        return ChatContentText.from_primitive(item)
+    if part_type == "image_url":
+        return ChatContentImage.from_primitive(item)
+    if part_type == "file":
+        return ChatContentFile.from_primitive(item)
+    if part_type == "input_audio":
+        return ChatContentInputAudio.from_primitive(item)
+    raise ValueError(f"unsupported {label} type: {part_type!r}")
+
+
+def content_from_primitive(value: object, *, label: str) -> ChatMessageContent:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise TypeError(f"{label} must be a string or an array")
+    return [_content_part_from_primitive(item, label=f"{label}[{index}]") for index, item in enumerate(value)]
+
+
 @dataclass(frozen=True)
 class ChatFunctionTool:
     name: str
@@ -120,7 +346,7 @@ type ChatToolChoice = ChatToolChoiceMode | ChatToolChoiceFunction
 @dataclass(frozen=True)
 class ChatMessage:
     role: ChatRole
-    content: str | None = None
+    content: ChatMessageContent = None
     name: str | None = None
     refusal: str | None = None
     tool_calls: list[ChatToolCall] = field(default_factory=list)
@@ -130,6 +356,8 @@ class ChatMessage:
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", ChatRole(self.role))
         object.__setattr__(self, "tool_calls", list(self.tool_calls))
+        if isinstance(self.content, list):
+            object.__setattr__(self, "content", list(self.content))
 
     def is_assistant(self) -> bool:
         return self.role == ChatRole.ASSISTANT
@@ -143,7 +371,7 @@ class ChatMessage:
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {"role": self.role}
         if self.content is not None:
-            value["content"] = self.content
+            value["content"] = content_to_primitive(self.content)
         if self.name is not None:
             value["name"] = self.name
         if self.refusal is not None:
@@ -167,7 +395,7 @@ class ChatMessage:
             tool_calls = [ChatToolCall.from_primitive(call) for call in tool_calls_value]
         return cls(
             role=ChatRole(_required_string(item.get("role"), label="message role")),
-            content=_optional_string(item.get("content"), label="message content"),
+            content=content_from_primitive(item.get("content"), label="message content"),
             name=_optional_string(item.get("name"), label="message name"),
             refusal=_optional_string(item.get("refusal"), label="message refusal"),
             tool_calls=tool_calls,

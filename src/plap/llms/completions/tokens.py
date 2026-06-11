@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import msgspec
 import tiktoken
 
-from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort
+from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort, content_to_wire
 from plap.llms.completions.chat import ChatMessage as LLMChatMessage
 from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
 from plap.llms.completions.common import required_before_properties
@@ -112,10 +112,29 @@ def _response_format_value(response_format: ChatResponseFormat | None) -> dict[s
     return {"type": "json_schema", "json_schema": json_schema}
 
 
+def _projected_message_content_value(message: LLMChatMessage) -> str | None:
+    if message.content is None or isinstance(message.content, str):
+        return message.content
+    content = content_to_wire(message.content)
+    if not isinstance(content, list):
+        raise TypeError("structured chat content must render to a content-part list")
+    fragments: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            fragments.append(_json_text(part))
+            continue
+        part_type = part.get("type")
+        if part_type == "text" and isinstance(part.get("text"), str):
+            fragments.append(part["text"])
+            continue
+        fragments.append(_json_text(part))
+    return "\n\n".join(fragment for fragment in fragments if fragment)
+
+
 def _fallback_message_value(message: LLMChatMessage) -> dict[str, object]:
     value: dict[str, object] = {"role": message.role}
     if message.content is not None:
-        value["content"] = message.content
+        value["content"] = content_to_wire(message.content)
     if message.name is not None:
         value["name"] = message.name
     if message.tool_call_id is not None:
@@ -146,12 +165,13 @@ def _fallback_request_value(
     return value
 
 
-def _template_message(message: LLMChatMessage) -> dict[str, object]:
+def _template_message(message: LLMChatMessage, *, projected: bool = False) -> dict[str, object]:
+    content = _projected_message_content_value(message) if projected else content_to_wire(message.content)
     value: dict[str, object] = {
         "role": "system" if message.role == ChatRole.DEVELOPER else message.role,
     }
-    if message.content is not None:
-        value["content"] = message.content
+    if content is not None:
+        value["content"] = content
     if message.name is not None:
         value["name"] = message.name
     if message.tool_call_id is not None:
@@ -161,6 +181,10 @@ def _template_message(message: LLMChatMessage) -> dict[str, object]:
     if message.refusal is not None:
         value["refusal"] = message.refusal
     return value
+
+
+def _messages_have_structured_content(messages: Sequence[LLMChatMessage]) -> bool:
+    return any(isinstance(message.content, list) for message in messages)
 
 
 def _reasoning_value(message: LLMChatMessage) -> str | None:
@@ -174,9 +198,10 @@ def _uses_dsv4_encoding(tokenizer_config: ITokenizerConfig) -> bool:
 
 
 def _dsv4_message(message: LLMChatMessage) -> dict[str, object] | None:
+    content = _projected_message_content_value(message)
     value: dict[str, object] = {"role": message.role}
-    if message.content is not None:
-        value["content"] = message.content
+    if content is not None:
+        value["content"] = content
     elif message.refusal is not None:
         value["content"] = message.refusal
     if message.name is not None:
@@ -324,13 +349,28 @@ def _template_prompt_token_count(
     )
     if not _tokenizer_chat_template_supported(tokenizer):
         return None
-    token_ids = tokenizer.apply_chat_template(
-        [_template_message(message) for message in messages],
-        tools=_tool_definitions_value(tools) or None,
-        response_format=_response_format_value(response_format),
-        add_generation_prompt=False,
-        tokenize=True,
-    )
+    rendered_messages = [_template_message(message) for message in messages]
+    try:
+        token_ids = tokenizer.apply_chat_template(
+            rendered_messages,
+            tools=_tool_definitions_value(tools) or None,
+            response_format=_response_format_value(response_format),
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+    except Exception:
+        if not _messages_have_structured_content(messages):
+            return None
+        try:
+            token_ids = tokenizer.apply_chat_template(
+                [_template_message(message, projected=True) for message in messages],
+                tools=_tool_definitions_value(tools) or None,
+                response_format=_response_format_value(response_format),
+                add_generation_prompt=False,
+                tokenize=True,
+            )
+        except Exception:
+            return None
     count = max(1, len(token_ids))
     for message in messages:
         reasoning_text = _reasoning_value(message)

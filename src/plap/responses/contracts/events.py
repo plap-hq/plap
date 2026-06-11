@@ -121,6 +121,24 @@ class ResponseOutputTextAnnotationAddedEvent(StrictModel):
     type: Literal["response.output_text.annotation.added"] = Field(description="Stream event discriminator.")
 
 
+class ResponseRefusalDeltaEvent(_ObfuscatableDeltaEvent):
+    content_index: int = Field(description="Index within the message content array.")
+    delta: str = Field(description="Incremental refusal text chunk.")
+    item_id: str = Field(description="Message item ID receiving this refusal delta.")
+    output_index: int = Field(description="Index of the message in response.output.")
+    sequence_number: int = Field(description="Monotonic stream event sequence number.")
+    type: Literal["response.refusal.delta"] = Field(description="Stream event discriminator.")
+
+
+class ResponseRefusalDoneEvent(StrictModel):
+    content_index: int = Field(description="Index within the message content array.")
+    item_id: str = Field(description="Message item ID that owns this refusal.")
+    output_index: int = Field(description="Index of the message in response.output.")
+    refusal: str = Field(description="Completed refusal text.")
+    sequence_number: int = Field(description="Monotonic stream event sequence number.")
+    type: Literal["response.refusal.done"] = Field(description="Stream event discriminator.")
+
+
 class ResponseFunctionCallArgumentsDeltaEvent(_ObfuscatableDeltaEvent):
     delta: str = Field(description="Incremental JSON argument string chunk.")
     item_id: str = Field(description="Function call item ID receiving this delta.")
@@ -218,6 +236,8 @@ type ResponseStreamEvent = Annotated[
     | ResponseTextDeltaEvent
     | ResponseTextDoneEvent
     | ResponseOutputTextAnnotationAddedEvent
+    | ResponseRefusalDeltaEvent
+    | ResponseRefusalDoneEvent
     | ResponseFunctionCallArgumentsDeltaEvent
     | ResponseFunctionCallArgumentsDoneEvent
     | ResponseReasoningSummaryPartAddedEvent

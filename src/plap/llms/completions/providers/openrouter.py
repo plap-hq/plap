@@ -106,6 +106,7 @@ def build_openrouter_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*OPENROUTER_FIELDS),
+            MoveMessageField(("file", "file_url"), ("file", "file_data"), content_type="file"),
             MoveMessageField("reasoning_content", "reasoning", role="assistant"),
             MoveOutput("reasoning", "reasoning_content"),
         ),

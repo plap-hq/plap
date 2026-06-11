@@ -21,7 +21,12 @@ from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatContentFile,
+    ChatContentImage,
+    ChatContentText,
+    ChatFile,
     ChatFunctionTool,
+    ChatImageURL,
     ChatMessage,
     ChatPrediction,
     ChatResponseFormat,
@@ -1903,6 +1908,91 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
     assert body["stream_options"] == {"include_usage": True}
 
 
+def test_build_chat_body_serializes_structured_chat_content() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(role="user", content=[ChatContentText(text="look")]),
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentImage(image_url=ChatImageURL(url="https://example.com/image.png", detail="original", file_id="file_img_1")),
+                    ChatContentFile(
+                        file=ChatFile(
+                            file_id="file_doc_1",
+                            filename="doc.pdf",
+                            file_url="https://example.com/doc.pdf",
+                            detail="high",
+                        )
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    body = build_chat_body(request, stream=False)
+
+    assert body["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "look"}]},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": "high",
+                        "file_id": "file_img_1",
+                    },
+                },
+                {
+                    "type": "file",
+                    "file": {
+                        "file_id": "file_doc_1",
+                        "filename": "doc.pdf",
+                        "file_url": "https://example.com/doc.pdf",
+                    },
+                },
+            ],
+        },
+    ]
+
+
+def test_move_message_field_supports_nested_content_part_paths() -> None:
+    provider = _StaticProvider(
+        quirks=(quirks_module.MoveMessageField(("file", "file_url"), ("file", "file_data"), content_type="file"),),
+        models={"model-a": ()},
+    )
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentFile(file=ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf")),
+                ],
+            )
+        ],
+    )
+
+    body = _body_for(provider, request, stream=False)
+
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": "doc.pdf",
+                        "file_data": "https://example.com/doc.pdf",
+                    },
+                }
+            ],
+        }
+    ]
+
+
 def test_build_chat_body_places_required_immediately_before_properties_recursively() -> None:
     request = replace(
         _request(),
@@ -2267,6 +2357,42 @@ def test_openrouter_lookup_rejects_unknown_base_model_even_with_suffixes() -> No
         provider.lookup("unknown/model:nitro:provider1")
 
 
+def test_openrouter_request_quirks_lower_file_url_into_file_data() -> None:
+    request = ChatCompletionRequest(
+        model="openai/gpt-oss-20b",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentFile(
+                        file=ChatFile(
+                            file_url="https://example.com/report.pdf",
+                            filename="report.pdf",
+                        )
+                    )
+                ],
+            )
+        ],
+    )
+
+    body = _body_for(_openrouter_provider(), request, stream=False)
+
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": "report.pdf",
+                        "file_data": "https://example.com/report.pdf",
+                    },
+                }
+            ],
+        }
+    ]
+
+
 def test_vercel_lookup_routes_provider_order_and_maps_reasoning_effort() -> None:
     body = _body_for(
         _vercel_provider(),
@@ -2295,6 +2421,42 @@ def test_vercel_lookup_routes_provider_order_and_maps_reasoning_effort() -> None
             }
         },
     }
+
+
+def test_vercel_request_quirks_lower_file_data_into_data() -> None:
+    request = ChatCompletionRequest(
+        model="openai/gpt-oss-20b",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentFile(
+                        file=ChatFile(
+                            file_data="data:application/pdf;base64,JVBERi0xLjQK",
+                            filename="report.pdf",
+                        )
+                    )
+                ],
+            )
+        ],
+    )
+
+    body = _body_for(_vercel_provider(), request, stream=False)
+
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "file": {
+                        "data": "data:application/pdf;base64,JVBERi0xLjQK",
+                        "filename": "report.pdf",
+                    },
+                }
+            ],
+        }
+    ]
 
 
 def test_vercel_lookup_rejects_unknown_base_model_even_with_suffixes() -> None:

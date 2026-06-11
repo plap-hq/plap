@@ -14,6 +14,7 @@ from plap.keyring import SealingKeyring
 from plap.llms import ChatReasoningSummarizer, RetryLimitExceededError, SummaryDelta, SummaryDone, with_summary
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
+    ChatContentText,
     ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
@@ -29,6 +30,7 @@ from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_too
 from plap.llms.retry import stream as retry_stream
 from plap.responses.contracts import (
     FunctionTool,
+    OutputRefusalContent,
     OutputTextContent,
     ResponseFunctionCallItem,
     ResponseMessageItem,
@@ -262,23 +264,41 @@ class State:
         return shadow
 
     def _message_patch(self, message: Message) -> MessagePatch | None:
-        if message.content is None:
+        if message.content is None and message.refusal is None:
             return None
         tool_calls = list(message.tool_calls) or None
         if tool_calls is None and message.reasoning_content is None:
             return None
-        visible = Message(role="assistant", content=message.content)
+        visible = Message(role="assistant", content=message.content, refusal=message.refusal)
         return MessagePatch(
             content_hash=visible.content_hash(),
             tool_calls=tool_calls,
             reasoning_content=message.reasoning_content,
         )
 
+    def _message_output_content(self, message: Message) -> list[OutputTextContent | OutputRefusalContent] | None:
+        parts: list[OutputTextContent | OutputRefusalContent] = []
+        if isinstance(message.content, str):
+            if message.content:
+                parts.append(OutputTextContent(text=message.content, type="output_text"))
+        elif isinstance(message.content, list):
+            parts.extend(
+                OutputTextContent(text=part.text, type="output_text")
+                for part in message.content
+                if isinstance(part, ChatContentText)
+            )
+        if message.refusal is not None and not any(isinstance(part, OutputRefusalContent) for part in parts):
+            parts.append(OutputRefusalContent(refusal=message.refusal, type="refusal"))
+        return parts or None
+
     def _message_item(self, message: Message) -> ResponseMessageItem | None:
-        if not message.is_assistant() or not message.content:
+        if not message.is_assistant():
+            return None
+        content = self._message_output_content(message)
+        if content is None:
             return None
         return ResponseMessageItem(
-            content=[OutputTextContent(text=message.content, type="output_text")],
+            content=content,
             id=f"msg_{secrets.token_urlsafe(18)}",
             role="assistant",
             status="completed",
