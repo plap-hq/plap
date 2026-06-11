@@ -10,7 +10,7 @@ import tiktoken
 from plap.llms.completions.chat import ChatCompletionRequest, ChatResponseFormat, ChatRole, ChatTool, ReasoningEffort, content_to_wire
 from plap.llms.completions.chat import ChatMessage as LLMChatMessage
 from plap.llms.completions.chat import ChatToolCall as LLMChatToolCall
-from plap.llms.completions.common import required_before_properties
+from plap.llms.completions.common import required_before_properties, wire_messages
 from plap.llms.completions.encoding_dsv4 import encode_messages as encode_dsv4_messages
 
 
@@ -388,8 +388,9 @@ def _measure_prompt_surface_tokens(
     response_format: ChatResponseFormat | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> int:
+    lowered_messages = wire_messages(messages)
     dsv4_count = _dsv4_prompt_token_count(
-        messages,
+        lowered_messages,
         tokenizer_config=tokenizer_config,
         tools=tools,
         response_format=response_format,
@@ -398,7 +399,7 @@ def _measure_prompt_surface_tokens(
     if dsv4_count is not None:
         return dsv4_count
     template_count = _template_prompt_token_count(
-        messages,
+        lowered_messages,
         tokenizer_config=tokenizer_config,
         tools=tools,
         response_format=response_format,
@@ -406,7 +407,7 @@ def _measure_prompt_surface_tokens(
     if template_count is not None:
         return template_count
     return _tokenize_text_with_tokenizer_config(
-        _json_text(_fallback_request_value(messages, tools=tools, response_format=response_format)),
+        _json_text(_fallback_request_value(lowered_messages, tools=tools, response_format=response_format)),
         tokenizer_config=tokenizer_config,
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -10,10 +11,12 @@ from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatCompletionResult,
+    ChatContentText,
     ChatFinishReason,
     ChatMessage,
     ChatPrediction,
     ChatResponseFormat,
+    ChatRole,
     ChatStreamOptions,
     ChatTool,
     ChatToolCall,
@@ -117,6 +120,48 @@ def _message_body(message: ChatMessage) -> dict[str, Any]:
     return value
 
 
+def _wire_message(message: ChatMessage) -> list[ChatMessage]:
+    if message.role not in {ChatRole.SYSTEM, ChatRole.DEVELOPER} or not isinstance(message.content, list):
+        return [message]
+    lowered: list[ChatMessage] = []
+    text_parts: list[ChatContentText] = []
+    media_parts: list[object] = []
+
+    def flush_text() -> None:
+        nonlocal text_parts
+        if not text_parts:
+            return
+        lowered.append(replace(message, content=list(text_parts)))
+        text_parts = []
+
+    def flush_media() -> None:
+        nonlocal media_parts
+        if not media_parts:
+            return
+        lowered.append(ChatMessage(role="user", content=list(media_parts)))
+        media_parts = []
+
+    for part in message.content:
+        if isinstance(part, ChatContentText):
+            flush_media()
+            text_parts.append(part)
+            continue
+        flush_text()
+        media_parts.append(part)
+    flush_text()
+    flush_media()
+    if lowered:
+        return lowered
+    return [replace(message, content="")]
+
+
+def wire_messages(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+    lowered: list[ChatMessage] = []
+    for message in messages:
+        lowered.extend(_wire_message(message))
+    return lowered
+
+
 def _tool_body(tool: ChatTool) -> dict[str, Any]:
     function: dict[str, Any] = {"name": tool.function.name}
     _set(function, "parameters", required_before_properties(tool.function.parameters))
@@ -180,7 +225,7 @@ def build_chat_body(
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": request.model,
-        "messages": [_message_body(message) for message in request.messages],
+        "messages": [_message_body(message) for message in wire_messages(request.messages)],
         "stream": stream,
     }
     _set(body, "tools", [_tool_body(tool) for tool in request.tools] if request.tools else None)
@@ -490,4 +535,5 @@ __all__ = [
     "required_before_properties",
     "response_to_stream_chunks",
     "to_data",
+    "wire_messages",
 ]

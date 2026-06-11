@@ -1958,6 +1958,42 @@ def test_build_chat_body_serializes_structured_chat_content() -> None:
     ]
 
 
+def test_build_chat_body_lowers_developer_multimodal_content_into_wire_messages() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(
+                role="developer",
+                content=[
+                    ChatContentText(text="preface"),
+                    ChatContentImage(image_url=ChatImageURL(url="https://example.com/image.png", detail="original")),
+                    ChatContentText(text="suffix"),
+                ],
+                name="planner",
+            )
+        ],
+    )
+
+    body = build_chat_body(request, stream=False)
+
+    assert body["messages"] == [
+        {"role": "developer", "content": [{"type": "text", "text": "preface"}], "name": "planner"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": "high",
+                    },
+                }
+            ],
+        },
+        {"role": "developer", "content": [{"type": "text", "text": "suffix"}], "name": "planner"},
+    ]
+
+
 def test_move_message_field_supports_nested_content_part_paths() -> None:
     provider = _StaticProvider(
         quirks=(quirks_module.MoveMessageField(("file", "file_url"), ("file", "file_data"), content_type="file"),),

@@ -250,6 +250,63 @@ def test_measure_request_tokens_uses_native_template_for_structured_content_when
     ]
 
 
+def test_measure_request_tokens_lowers_developer_multimodal_content_before_template(monkeypatch) -> None:
+    captured_messages = None
+
+    class _FakeTokenizer:
+        chat_template = "fake-template"
+
+        def apply_chat_template(self, messages, *, tools, response_format, add_generation_prompt, tokenize):
+            nonlocal captured_messages
+            captured_messages = messages
+            assert tools is None
+            assert response_format is None
+            assert add_generation_prompt is False
+            assert tokenize is True
+            return [1, 2, 3]
+
+        def encode(self, text, add_special_tokens=False):
+            raise AssertionError("reasoning encoding should not run")
+
+    monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
+
+    count = measure_request_tokens(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b",
+            messages=[
+                ChatMessage(
+                    role="developer",
+                    content=[
+                        ChatContentText(text="preface"),
+                        ChatContentImage(image_url=ChatImageURL(url="https://example.com/image.png", detail="original")),
+                        ChatContentText(text="suffix"),
+                    ],
+                    name="planner",
+                )
+            ],
+        ),
+        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+    )
+
+    assert count == 3
+    assert captured_messages == [
+        {"role": "system", "content": [{"type": "text", "text": "preface"}], "name": "planner"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": "high",
+                    },
+                }
+            ],
+        },
+        {"role": "system", "content": [{"type": "text", "text": "suffix"}], "name": "planner"},
+    ]
+
+
 def test_measure_request_tokens_retries_template_with_projected_structured_content(monkeypatch) -> None:
     captured_messages = []
 
