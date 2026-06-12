@@ -32,7 +32,7 @@ from plap.llms.completions.providers._transport import (
     log_transport_error,
     timeout_error_message,
 )
-from plap.llms.completions.quirks import Only, Set, SystemRole
+from plap.llms.completions.quirks import Only, RejectMessageField, Set, SystemRole
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -176,7 +176,13 @@ def build_fireworks_provider(*, api_key: str) -> Provider:
     return FireworksProvider(
         name="fireworks",
         api_key=api_key,
-        quirks=(SystemRole(), Only(*FIREWORKS_FIELDS), Set("context_length_exceeded_behavior", "error")),
+        quirks=(
+            SystemRole(),
+            Only(*FIREWORKS_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+            Set("context_length_exceeded_behavior", "error"),
+        ),
         models=FIREWORKS_MODELS,
     )
 

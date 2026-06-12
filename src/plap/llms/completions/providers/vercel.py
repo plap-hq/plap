@@ -10,6 +10,7 @@ from plap.llms.completions.quirks import (
     MoveOutput,
     Only,
     PromoteOutput,
+    RejectMessageField,
     Set,
     SystemRole,
 )
@@ -96,6 +97,8 @@ def build_vercel_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*VERCEL_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
             MoveMessageField(("file", "file_data"), ("file", "data"), content_type="file"),
             Move("max_completion_tokens", "max_tokens"),
             Move("reasoning_effort", "extra_body", "reasoning", "effort"),

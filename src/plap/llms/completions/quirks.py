@@ -115,6 +115,26 @@ def _body_messages(call: Call) -> tuple[dict[str, Any], ...]:
     return tuple(message for message in messages if isinstance(message, dict))
 
 
+def _message_targets(
+    call: Call,
+    *,
+    role: str | None,
+    content_type: str | None,
+) -> tuple[dict[str, Any], ...]:
+    targets: list[dict[str, Any]] = []
+    for message in _body_messages(call):
+        if role is not None and message.get("role") != role:
+            continue
+        if content_type is None:
+            targets.append(message)
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        targets.extend(part for part in content if isinstance(part, dict) and part.get("type") == content_type)
+    return tuple(targets)
+
+
 def _body_tool_functions(call: Call) -> tuple[dict[str, Any], ...]:
     tools = call.body.get("tools")
     if not isinstance(tools, list):
@@ -206,19 +226,30 @@ class MoveMessageField(Quirk):
             _nested_mapping_set(target, self._target, value)
 
     def request(self, call: Call) -> None:
-        for message in _body_messages(call):
-            if self._role is not None and message.get("role") != self._role:
+        for target in _message_targets(call, role=self._role, content_type=self._content_type):
+            self._move(target)
+
+
+class RejectMessageField(Quirk):
+    def __init__(
+        self,
+        path: str | tuple[str, ...],
+        *,
+        role: str | None = None,
+        content_type: str | None = None,
+    ) -> None:
+        self._path = _path(path)
+        self._role = role
+        self._content_type = content_type
+
+    def request(self, call: Call) -> None:
+        for target in _message_targets(call, role=self._role, content_type=self._content_type):
+            if _nested_mapping_get(target, self._path) is None:
                 continue
-            if self._content_type is None:
-                self._move(message)
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict) or part.get("type") != self._content_type:
-                    continue
-                self._move(part)
+            label = ".".join(self._path)
+            raise ChatCompletionUnsupportedRequestError(
+                f"message field {label!r} is not supported for model {call.request.model!r}"
+            )
 
 
 class DropToolFunctionField(Quirk):
@@ -396,6 +427,7 @@ __all__ = [
     "Only",
     "PromoteOutput",
     "RateLimit",
+    "RejectMessageField",
     "RejectResponseFormat",
     "Set",
     "SystemRole",

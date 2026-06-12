@@ -46,6 +46,7 @@ from plap.llms.completions.quirks import (
     MoveOutput,
     Only,
     RateLimit,
+    RejectMessageField,
     RejectResponseFormat,
     Set,
     SystemRole,
@@ -386,7 +387,12 @@ def build_lightning_provider(*, api_key: str) -> Provider:
         name="lightning",
         api_key=api_key,
         base_url=LIGHTNING_OPENAI_BASE_URL,
-        quirks=(SystemRole(), Only(*LIGHTNING_FIELDS)),
+        quirks=(
+            SystemRole(),
+            Only(*LIGHTNING_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+        ),
         models=LIGHTNING_MODELS,
     )
 
@@ -399,6 +405,8 @@ def build_gmicloud_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*GMICLOUD_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
             EnsureAssistantReasoningContent(),
             Move("max_completion_tokens", "max_tokens"),
             DropIf("reasoning_effort", "none"),  # gmi does not have a real thinking disable switch
@@ -416,6 +424,8 @@ def build_groq_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*GROQ_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
             DropMessageField("name"),
             MoveMessageField("reasoning_content", "reasoning", role="assistant"),
             MoveOutput("reasoning", "reasoning_content"),
@@ -432,6 +442,8 @@ def build_cerebras_provider(*, api_key: str) -> Provider:
         quirks=(
             SystemRole(),
             Only(*CEREBRAS_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
             MoveMessageField("reasoning_content", "reasoning", role="assistant"),
             MoveOutput("reasoning", "reasoning_content"),
         ),
@@ -444,7 +456,13 @@ def build_novita_provider(*, api_key: str) -> Provider:
         name="novita",
         api_key=api_key,
         base_url=NOVITA_OPENAI_BASE_URL,
-        quirks=(SystemRole(), Only(*NOVITA_FIELDS), Move("max_completion_tokens", "max_tokens")),
+        quirks=(
+            SystemRole(),
+            Only(*NOVITA_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+            Move("max_completion_tokens", "max_tokens"),
+        ),
         models=NOVITA_MODELS,
     )
 
@@ -454,7 +472,12 @@ def build_crof_provider(*, api_key: str) -> Provider:
         name="crof",
         api_key=api_key,
         base_url=CROF_OPENAI_BASE_URL,
-        quirks=(Only(*CROF_FIELDS), Move("max_completion_tokens", "max_tokens")),
+        quirks=(
+            Only(*CROF_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+            Move("max_completion_tokens", "max_tokens"),
+        ),
         models=CROF_MODELS,
     )
 
@@ -464,7 +487,12 @@ def build_qubrid_provider(*, api_key: str) -> Provider:
         name="qubrid",
         api_key=api_key,
         base_url=QUBRID_OPENAI_BASE_URL,
-        quirks=(SystemRole(), Only(*QUBRID_FIELDS)),
+        quirks=(
+            SystemRole(),
+            Only(*QUBRID_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+        ),
         models=QUBRID_MODELS,
     )
 

@@ -2029,6 +2029,27 @@ def test_move_message_field_supports_nested_content_part_paths() -> None:
     ]
 
 
+def test_reject_message_field_supports_nested_content_part_paths() -> None:
+    provider = _StaticProvider(
+        quirks=(quirks_module.RejectMessageField(("file", "file_id"), content_type="file"),),
+        models={"model-a": ()},
+    )
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentFile(file=ChatFile(file_id="file_doc_1", filename="doc.pdf")),
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match=r"message field 'file\.file_id'"):
+        _body_for(provider, request, stream=False)
+
+
 def test_build_chat_body_places_required_immediately_before_properties_recursively() -> None:
     request = replace(
         _request(),
@@ -2427,6 +2448,93 @@ def test_openrouter_request_quirks_lower_file_url_into_file_data() -> None:
             ],
         }
     ]
+
+
+def test_openrouter_request_quirks_allow_file_id() -> None:
+    request = ChatCompletionRequest(
+        model="openai/gpt-oss-20b",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    ChatContentFile(
+                        file=ChatFile(
+                            file_id="file_doc_1",
+                            filename="report.pdf",
+                        )
+                    )
+                ],
+            )
+        ],
+    )
+
+    body = _body_for(_openrouter_provider(), request, stream=False)
+
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "file": {
+                        "file_id": "file_doc_1",
+                        "filename": "report.pdf",
+                    },
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider_factory", "model", "file"),
+    [
+        pytest.param(
+            _lightning_provider,
+            "lightning-ai/gpt-oss-20b",
+            ChatFile(file_id="file_doc_1", filename="doc.pdf"),
+            id="lightning-file-id",
+        ),
+        pytest.param(
+            _lightning_provider,
+            "lightning-ai/gpt-oss-20b",
+            ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf"),
+            id="lightning-file-url",
+        ),
+        pytest.param(
+            _fireworks_provider,
+            "accounts/fireworks/models/gpt-oss-20b",
+            ChatFile(file_id="file_doc_1", filename="doc.pdf"),
+            id="fireworks-file-id",
+        ),
+        pytest.param(
+            _fireworks_provider,
+            "accounts/fireworks/models/gpt-oss-20b",
+            ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf"),
+            id="fireworks-file-url",
+        ),
+        pytest.param(
+            _vercel_provider,
+            "openai/gpt-oss-20b",
+            ChatFile(file_id="file_doc_1", filename="doc.pdf"),
+            id="vercel-file-id",
+        ),
+        pytest.param(
+            _vercel_provider,
+            "openai/gpt-oss-20b",
+            ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf"),
+            id="vercel-file-url",
+        ),
+    ],
+)
+def test_request_quirks_reject_file_references_except_openrouter(provider_factory, model: str, file: ChatFile) -> None:
+    request = ChatCompletionRequest(
+        model=model,
+        messages=[ChatMessage(role="user", content=[ChatContentFile(file=file)])],
+    )
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match=r"message field 'file\.(file_id|file_url)'"):
+        _body_for(provider_factory(), request, stream=False)
 
 
 def test_vercel_lookup_routes_provider_order_and_maps_reasoning_effort() -> None:
