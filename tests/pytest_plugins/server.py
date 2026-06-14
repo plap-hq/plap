@@ -165,3 +165,6 @@ class _StaticChatCompletionClient(IChatCompletionClient):
             choice_index=0,
             finish_reason="stop",
         )
+
+    async def aclose(self) -> None:
+        return None

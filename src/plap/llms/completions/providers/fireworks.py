@@ -18,7 +18,7 @@ from fireworks.client.error import (
 )
 
 from plap.llms.completions.client import Call, Provider, Quirk
-from plap.llms.completions.common import close_stream_object, to_data
+from plap.llms.completions.common import close_any_object, close_stream_object, to_data
 from plap.llms.completions.errors import (
     ChatCompletionAuthenticationError,
     ChatCompletionContextLengthExceededError,
@@ -136,6 +136,9 @@ class FireworksProvider(Provider):
                     await close_stream_object(stream)
 
         return run()
+
+    async def aclose(self) -> None:
+        await close_any_object(self._client)
 
 
 FIREWORKS_FIELDS = (

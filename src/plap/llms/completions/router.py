@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import random
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
@@ -14,7 +13,7 @@ from plap.llms.completions.chat import (
     ChatCompletionResult,
     IChatCompletionClient,
 )
-from plap.llms.completions.common import has_output
+from plap.llms.completions.common import close_stream_object, has_output
 from plap.llms.completions.errors import (
     ChatCompletionProviderError,
     ChatCompletionTimeoutError,
@@ -154,27 +153,6 @@ def _log_router_fallback_exhausted(
     )
 
 
-async def _close_async_iterator(iterator: AsyncIterator[ChatCompletionDelta]) -> None:
-    aclose = getattr(iterator, "aclose", None)
-    if callable(aclose):
-        try:
-            result = aclose()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
-        return
-
-    close = getattr(iterator, "close", None)
-    if callable(close):
-        try:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
-
-
 async def _next_stream_delta(
     iterator: AsyncIterator[ChatCompletionDelta],
     *,
@@ -190,7 +168,7 @@ async def _next_stream_delta(
     except StopAsyncIteration:
         return None
     except TimeoutError as exc:
-        await _close_async_iterator(iterator)
+        await close_stream_object(iterator)
         raise ChatCompletionTimeoutError(
             f"stream for model {attempt_model!r} produced no {timeout_label} within {timeout_seconds} seconds"
         ) from exc
@@ -214,10 +192,10 @@ async def _first_output_delta(
                 if has_output(delta):
                     return delta
     except StopAsyncIteration:
-        await _close_async_iterator(iterator)
+        await close_stream_object(iterator)
         raise ChatCompletionProviderError(f"stream for model {attempt_model!r} ended before first output delta") from None
     except TimeoutError as exc:
-        await _close_async_iterator(iterator)
+        await close_stream_object(iterator)
         raise ChatCompletionTimeoutError(
             f"stream for model {attempt_model!r} produced no first output delta within {timeout_seconds} seconds"
         ) from exc
@@ -416,6 +394,16 @@ class RoutingChatCompletionClient(IChatCompletionClient):
 
         raise ChatCompletionUnsupportedRequestError(f"No chat completion route configured for model {model!r}")
 
+    async def aclose(self) -> None:
+        seen: set[int] = set()
+        for route in self._routes:
+            client = route.client
+            client_id = id(client)
+            if client_id in seen:
+                continue
+            seen.add(client_id)
+            await client.aclose()
+
 
 class UnavailableChatCompletionClient(IChatCompletionClient):
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
@@ -430,3 +418,6 @@ class UnavailableChatCompletionClient(IChatCompletionClient):
             yield  # pragma: no cover
 
         return raise_unsupported()
+
+    async def aclose(self) -> None:
+        return None

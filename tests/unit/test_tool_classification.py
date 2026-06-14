@@ -879,6 +879,9 @@ class _FakeChatClient(IChatCompletionClient):
         self.requests.append(request)
         return _stream_classifier_message(self.message, request=request, result_id=f"chat_{len(self.requests)}")
 
+    async def aclose(self) -> None:
+        return None
+
 
 class _SequenceChatClient(IChatCompletionClient):
     def __init__(self, messages: list[ChatMessage | str]) -> None:
@@ -902,6 +905,9 @@ class _SequenceChatClient(IChatCompletionClient):
             request=request,
             result_id=f"chat_{len(self.requests)}",
         )
+
+    async def aclose(self) -> None:
+        return None
 
 
 @dataclass(slots=True)

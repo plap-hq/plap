@@ -323,6 +323,22 @@ class _FakeOpenAIClient:
     def __init__(self, results: list[Any], *, base_url: str = "https://example.com/v1") -> None:
         self.chat = type("Chat", (), {"completions": _FakeOpenAICompletions(results)})()
         self.base_url = base_url
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _CloseRecorder:
+    def __init__(self) -> None:
+        self.aclose_calls = 0
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class _FakeFireworksCompletions:
@@ -369,13 +385,20 @@ class _FakeFireworksClient:
             "Chat", (), {"completions": _FakeFireworksCompletions(complete_result=complete_result, stream_result=stream_result)}
         )()
         self.base_url = base_url
-        self._client_v1 = type("FireworksClientV1", (), {"request_timeout": timeout, "base_url": base_url})()
+        self._client_v1 = _CloseRecorder()
+        self._client_v1.request_timeout = timeout
+        self._client_v1.base_url = base_url
+        self.aclose_calls = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
 
 
 class _StubChatClient(IChatCompletionClient):
     def __init__(self, *, complete_result: Any = None, stream_result: list[Any] | None = None) -> None:
         self.complete_requests: list[ChatCompletionRequest] = []
         self.stream_requests: list[ChatCompletionRequest] = []
+        self.close_calls = 0
         self._complete_result = complete_result
         self._stream_result = list(stream_result or [])
 
@@ -396,6 +419,9 @@ class _StubChatClient(IChatCompletionClient):
 
         return run()
 
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
 
 class _StaticProvider(Provider):
     def __init__(
@@ -408,6 +434,7 @@ class _StaticProvider(Provider):
     ) -> None:
         super().__init__(name="static", quirks=quirks, models=models)
         self.complete_calls: list[Call] = []
+        self.close_calls = 0
         self.stream_calls: list[Call] = []
         self._complete_raw = complete_raw or _completion_response(model="model-a", content="ok")
         self._stream_raw = list(
@@ -430,6 +457,9 @@ class _StaticProvider(Provider):
                 yield item
 
         return run()
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 def _body_for(provider, request: ChatCompletionRequest, *, stream: bool) -> dict[str, Any]:
@@ -736,6 +766,9 @@ class _RetryStreamClient(IChatCompletionClient):
                 yield item
 
         return run()
+
+    async def aclose(self) -> None:
+        return None
 
 
 async def test_retry_stream_retries_with_tool_stub_and_next_request() -> None:
@@ -2808,6 +2841,38 @@ async def test_openai_provider_defaults_sdk_retries_to_zero() -> None:
     await provider._client.close()
 
 
+async def test_chat_completion_client_aclose_forwards_to_provider() -> None:
+    provider = _StaticProvider(models={"model-a": ()})
+    client = ChatCompletionClient(provider)
+
+    await client.aclose()
+
+    assert provider.close_calls == 1
+
+
+async def test_openai_provider_aclose_closes_sdk_client() -> None:
+    fake_client = _FakeOpenAIClient([], base_url=LIGHTNING_OPENAI_BASE_URL)
+    provider = _lightning_provider(client=fake_client)
+
+    await provider.aclose()
+
+    assert fake_client.close_calls == 1
+
+
+async def test_fireworks_provider_aclose_closes_only_outer_sdk_client() -> None:
+    fake_client = _FakeFireworksClient(
+        complete_result=_completion_response(model="accounts/fireworks/models/gpt-oss-20b", content="ok"),
+        stream_result=[],
+    )
+    provider = _fireworks_provider(client=fake_client)
+
+    await provider.aclose()
+
+    assert fake_client.aclose_calls == 1
+    assert fake_client._client_v1.aclose_calls == 0
+    assert fake_client._client_v1.close_calls == 0
+
+
 def test_context_length_classifier_matches_structured_codes_and_messages() -> None:
     assert is_context_length_exceeded_error({"error": {"type": "prompt-too-long"}})
     assert is_context_length_exceeded_error({"detail": "Requested 128001 tokens, but the model's maximum context length is 128000 tokens."})
@@ -3006,6 +3071,36 @@ async def test_router_complete_retries_transient_errors_before_fallback(monkeypa
     assert len(delays) == 2
     assert 0.25 <= delays[0] <= 0.5
     assert 0.5 <= delays[1] <= 1.0
+
+
+async def test_router_aclose_closes_shared_child_once() -> None:
+    shared = _StubChatClient()
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=shared),
+            ModelRoute(prefix="gmicloud/", client=shared),
+        ]
+    )
+
+    await router.aclose()
+
+    assert shared.close_calls == 1
+
+
+async def test_router_aclose_closes_distinct_children_even_same_class() -> None:
+    first = _StubChatClient()
+    second = _StubChatClient()
+    router = RoutingChatCompletionClient(
+        [
+            ModelRoute(prefix="crof/", client=first),
+            ModelRoute(prefix="gmicloud/", client=second),
+        ]
+    )
+
+    await router.aclose()
+
+    assert first.close_calls == 1
+    assert second.close_calls == 1
 
 
 async def test_router_complete_does_not_retry_current_attempt_for_invalid_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3282,6 +3377,9 @@ async def test_router_stream_times_out_between_deltas_without_fallback(monkeypat
 
             return run()
 
+        async def aclose(self) -> None:
+            return None
+
     primary = SlowSecondDeltaClient()
     fallback = _StubChatClient(
         stream_result=[
@@ -3331,6 +3429,9 @@ async def test_router_stream_falls_back_after_first_delta_timeout(monkeypatch: p
                 yield _delta(request.model, content_delta="late")
 
             return run()
+
+        async def aclose(self) -> None:
+            return None
 
     primary = SlowClient()
     fallback = _StubChatClient(

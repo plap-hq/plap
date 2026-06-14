@@ -71,6 +71,9 @@ class Provider:
     def stream(self, call: Call) -> AsyncIterator[dict[str, Any]]:
         raise NotImplementedError
 
+    async def aclose(self) -> None:
+        return None
+
 
 def _build_call(request: ChatCompletionRequest, *, stream: bool) -> Call:
     return Call(request=request, body=build_chat_body(request, stream=stream))
@@ -171,6 +174,9 @@ class ChatCompletionClient(IChatCompletionClient):
                 raise_incomplete_stream_error()
 
         return run()
+
+    async def aclose(self) -> None:
+        await self._provider.aclose()
 
 
 __all__ = [

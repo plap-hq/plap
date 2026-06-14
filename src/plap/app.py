@@ -193,6 +193,10 @@ async def _shutdown_database(app: Litestar) -> None:
     await app.state.database.dispose_all()
 
 
+async def _shutdown_chat_completion_client(app: Litestar) -> None:
+    await app.state.chat_completion_client.aclose()
+
+
 def _create_chat_completion_client(
     settings: Settings,
     *,
@@ -533,6 +537,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
             ValidationException: handle_validation_exception,
             Exception: handle_unexpected_exception,
         },
-        on_shutdown=[_shutdown_database, shutdown_telemetry],
+        on_shutdown=[_shutdown_chat_completion_client, _shutdown_database, shutdown_telemetry],
         state=state,
     )

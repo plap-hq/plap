@@ -136,6 +136,9 @@ class _StreamingChatClient(IChatCompletionClient):
                 content_delta=delta,
             )
 
+    async def aclose(self) -> None:
+        return None
+
 
 def test_summary_chunker_waits_on_rule_lists_without_paragraph_breaks() -> None:
     buffer = "\n".join(

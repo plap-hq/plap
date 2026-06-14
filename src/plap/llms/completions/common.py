@@ -503,30 +503,34 @@ def raise_incomplete_stream_error() -> None:
     raise ChatCompletionProviderError("stream ended without finish_reason and without inferable output")
 
 
-async def close_stream_object(stream: Any) -> None:
-    aclose = getattr(stream, "aclose", None)
+async def close_any_object(value: Any) -> None:
+    if value is None:
+        return
+    aclose = getattr(value, "aclose", None)
     if callable(aclose):
-        try:
-            result = aclose()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
+        result = aclose()
+        if inspect.isawaitable(result):
+            await result
         return
 
-    close = getattr(stream, "close", None)
+    close = getattr(value, "close", None)
     if callable(close):
-        try:
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
+async def close_stream_object(stream: Any) -> None:
+    try:
+        await close_any_object(stream)
+    except Exception:
+        return
 
 
 __all__ = [
     "StreamState",
     "build_chat_body",
+    "close_any_object",
     "close_stream_object",
     "completion_result_from_data",
     "delta_from_data",

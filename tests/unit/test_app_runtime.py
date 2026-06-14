@@ -7,6 +7,7 @@ from plap.app import (
     _create_mcp_tool_providers,
     _create_tool_call_classifier,
     _create_tool_classifier,
+    _shutdown_chat_completion_client,
     _validate_runtime_model_profiles,
     _validate_runtime_profile_tokenizers,
 )
@@ -98,6 +99,29 @@ def test_app_runtime_builds_vercel_route_from_provider_prefix_setting() -> None:
 
     assert isinstance(client, RoutingChatCompletionClient)
     assert [route.prefix for route in client._routes] == ["vercel/"]
+
+
+async def test_app_runtime_shutdown_closes_chat_completion_client() -> None:
+    class ClosingClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    client = ClosingClient()
+    app = type("App", (), {"state": type("State", (), {"chat_completion_client": client})()})()
+
+    await _shutdown_chat_completion_client(app)
+
+    assert client.close_calls == 1
+
+
+async def test_app_runtime_shutdown_accepts_unavailable_chat_completion_client() -> None:
+    client = UnavailableChatCompletionClient()
+    app = type("App", (), {"state": type("State", (), {"chat_completion_client": client})()})()
+
+    await _shutdown_chat_completion_client(app)
 
 
 def test_runtime_actor_config_rejects_tokenizer_revision_without_repo() -> None:
