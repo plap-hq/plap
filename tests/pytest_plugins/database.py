@@ -51,7 +51,7 @@ async def _reset_database_schema(database_url: str) -> None:
 
 
 def _run_migrations(database_url: str) -> None:
-    config = Config("alembic.ini")
+    config = Config(toml_file="pyproject.toml")
     config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(config, "head")
 

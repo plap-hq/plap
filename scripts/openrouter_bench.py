@@ -5,15 +5,11 @@ import argparse
 import asyncio
 import os
 import statistics
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
 from plap.llms.completions.chat import ChatCompletionRequest, ChatMessage, ChatStreamOptions  # noqa: E402
 from plap.llms.completions.client import ChatCompletionClient  # noqa: E402
@@ -169,10 +165,7 @@ def _print_failures(failures: list[TrialFailure]) -> None:
     print("Failures")
     for failure in failures:
         phase = "warmup" if failure.warmup else "measured"
-        print(
-            f"- {failure.model} round={failure.round_index} phase={phase} "
-            f"{failure.error_type}: {failure.error_message}"
-        )
+        print(f"- {failure.model} round={failure.round_index} phase={phase} {failure.error_type}: {failure.error_message}")
 
 
 def _parse_args() -> argparse.Namespace:

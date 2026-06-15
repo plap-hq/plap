@@ -63,7 +63,6 @@ packages = ["src/plap"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-pythonpath = ["src"]
 anyio_mode = "auto"
 filterwarnings = [
   "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
@@ -88,6 +87,9 @@ select = ["E", "F", "I", "UP", "B"]
 extend-select = ["RUF", "C4", "SIM", "RET", "PIE", "PERF", "TRY", "PTH", "PLW", "PLC", "PLR1714", "N"]
 ignore = ["E731", "PLW0108", "TRY003"]
 
+[tool.alembic]
+script_location = "%(here)s/migrations"
+
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
@@ -95,6 +97,9 @@ exclude-newer = "7d"
 
 [tool.pixi.dependencies]
 python = "3.14.*"
+
+[tool.pixi.pypi-dependencies]
+plap = { path = ".", editable = true }
 
 [tool.pixi.pypi-options.dependency-overrides]
 ruff = ">=0.15.11,<0.16"
@@ -104,9 +109,9 @@ default = ["dev"]
 
 [tool.pixi.tasks]
 dev = "python scripts/dev.py"
-db-current = "alembic current"
-db-history = "alembic history"
-db-upgrade = "alembic upgrade head"
+db-current = "alembic -c pyproject.toml current"
+db-history = "alembic -c pyproject.toml history"
+db-upgrade = "alembic -c pyproject.toml upgrade head"
 format = "ruff format ."
 format-check = "ruff format --check ."
 lint = "ruff check ."

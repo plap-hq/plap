@@ -12,7 +12,6 @@ import shlex
 import signal
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -25,9 +24,6 @@ from sqlalchemy import select
 from testcontainers.core.container import DockerContainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
 from plap.auth import APIKeyManager, normalize_email  # noqa: E402
 from plap.llms.completions.providers import PROVIDER_BUILDERS  # noqa: E402
@@ -103,7 +99,6 @@ class EphemeralResources:
 
 
 def main() -> int:
-    _ensure_subprocess_pythonpath()
     args = _parse_args()
     state_file = args.state_file.resolve()
     resources = EphemeralResources(state_file=state_file)
@@ -159,7 +154,7 @@ def main() -> int:
         )
 
         if not args.skip_db_upgrade:
-            _run_checked(["alembic", "upgrade", "head"], cwd=REPO_ROOT)
+            _run_checked(["alembic", "-c", "pyproject.toml", "upgrade", "head"], cwd=REPO_ROOT)
 
         settings = Settings()
         dev_model = _resolve_dev_model(settings)
@@ -690,15 +685,6 @@ def _remove_state_file(path: Path | None) -> None:
 
 def _run_checked(command: list[str], *, cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True, env=os.environ.copy())
-
-
-def _ensure_subprocess_pythonpath() -> None:
-    current = os.environ.get("PYTHONPATH", "")
-    paths = [path for path in current.split(os.pathsep) if path]
-    for required in (str(SRC_ROOT), str(REPO_ROOT)):
-        if required not in paths:
-            paths.insert(0, required)
-    os.environ["PYTHONPATH"] = os.pathsep.join(paths)
 
 
 if __name__ == "__main__":

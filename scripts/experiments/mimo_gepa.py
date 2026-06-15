@@ -11,7 +11,6 @@ import os
 import random
 import re
 import statistics
-import sys
 import threading
 import warnings
 from collections import defaultdict
@@ -22,9 +21,6 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
 import duckdb  # noqa: E402
 import gepa.optimize_anything as oa  # noqa: E402

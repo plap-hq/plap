@@ -234,6 +234,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/42/2b/fef67d616931055bf3d6764885990a3ac647d68734a2d6a9e1d13de437a2/yarl-1.23.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/31/dc/cc50210e11e465c975462439a492516a73300ab8caa8f5e0902544fd748b/zstandard-0.25.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: ./
       osx-64:
       - conda: https://conda.anaconda.org/conda-forge/osx-64/bzip2-1.0.8-h500dc9f_9.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.4.22-hbd8a1cb_0.conda
@@ -451,6 +452,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/39/54/bc2b45559f86543d163b6e294417a107bb87557609007c007ad889afec18/yarl-1.23.0-cp314-cp314-macosx_10_15_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3d/5c/f8923b595b55fe49e30612987ad8bf053aef555c14f05bb659dd5dbe3e8a/zstandard-0.25.0-cp314-cp314-macosx_10_13_x86_64.whl
+      - pypi: ./
       osx-arm64:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/bzip2-1.0.8-hd037594_9.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.4.22-hbd8a1cb_0.conda
@@ -667,6 +669,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/24/f9/e8242b68362bffe6fb536c8db5076861466fc780f0f1b479fc4ffbebb128/yarl-1.23.0-cp314-cp314-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/8d/09/d0a2a14fc3439c5f874042dca72a79c70a532090b7ba0003be73fee37ae2/zstandard-0.25.0-cp314-cp314-macosx_11_0_arm64.whl
+      - pypi: ./
       win-64:
       - conda: https://conda.anaconda.org/conda-forge/win-64/bzip2-1.0.8-h0ad9c76_9.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.4.22-h4c7d964_0.conda
@@ -890,6 +893,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a9/5b/9b92f54c784c26e2a422e55a8d2607ab15b7ea3349e28359282f84f01d43/yarl-1.23.0-cp314-cp314-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/3a/43/241f9615bcf8ba8903b3f0432da069e857fc4fd1783bd26183db53c4804b/zstandard-0.25.0-cp314-cp314-win_amd64.whl
+      - pypi: ./
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -4802,6 +4806,48 @@ packages:
   - trove-classifiers>=2024.10.12 ; extra == 'tests'
   - defusedxml ; extra == 'xmp'
   requires_python: '>=3.10'
+- pypi: ./
+  name: plap
+  version: 0.1.0
+  sha256: 912998cf58b32be4d8ab888769d51dcaf126c15a9f9ea37a042023fffc968ce4
+  requires_dist:
+  - advanced-alchemy>=1.9.3,<2
+  - alembic>=1.18.4,<2
+  - anyio>=4.13.0,<5
+  - apache-burr[start]>=0.42.0,<0.43
+  - asyncpg>=0.31.0,<0.32
+  - blake3>=1.0.8,<2
+  - cachetools>=7.0.6,<8
+  - cashews>=7.5.0,<8
+  - cryptography>=47.0.0,<48
+  - fastmcp>=3.2.4,<4
+  - fireworks-ai>=0.19.20,<0.20
+  - hydra-core>=1.3.2,<2
+  - jsonpatch>=1.33,<2
+  - jsonschema-rs>=0.46.5,<0.47
+  - litestar>=2.21.1,<3
+  - msgspec>=0.21.1,<0.22
+  - omegaconf>=2.3.0,<3
+  - openai>=2.32.0,<3
+  - opentelemetry-api>=1.42.1,<2
+  - opentelemetry-exporter-otlp-proto-http>=1.42.1,<2
+  - opentelemetry-instrumentation-aiohttp-client>=0.63b1,<0.64
+  - opentelemetry-instrumentation-asgi>=0.63b1,<0.64
+  - opentelemetry-instrumentation-httpx>=0.63b1,<0.64
+  - opentelemetry-instrumentation-logging>=0.63b1,<0.64
+  - opentelemetry-instrumentation-sqlalchemy>=0.63b1,<0.64
+  - opentelemetry-sdk>=1.42.1,<2
+  - pydantic>=2.13.3,<3
+  - pydantic-settings>=2.14.0,<3
+  - pynacl>=1.6.2,<2
+  - sqlalchemy>=2.0.49,<3
+  - structlog>=25.5.0,<26
+  - tenacity>=9.1.4,<10
+  - tiktoken>=0.12.0,<0.13
+  - transformers>=5.8.0,<6
+  - uvicorn[standard]>=0.46.0,<0.47
+  - zstandard>=0.25.0,<0.26
+  requires_python: '>=3.14,<3.15'
 - pypi: https://files.pythonhosted.org/packages/75/a6/a0a304dc33b49145b21f4808d763822111e67d1c3a32b524a1baf947b6e1/platformdirs-4.9.6-py3-none-any.whl
   name: platformdirs
   version: 4.9.6
