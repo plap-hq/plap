@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff check
+        entry: pixi run --locked ruff check --fix
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: Ruff format
+        entry: pixi run --locked ruff format
+        language: system
+        types_or: [python, pyi]
