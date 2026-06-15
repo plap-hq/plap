@@ -4858,7 +4858,7 @@ packages:
 - pypi: ./
   name: plap
   version: 0.1.0
-  sha256: 064b34aab8d6298de5194d8eaa0bee5a5894bd388e7fc1209bc89dbecd770732
+  sha256: 6979f0a2d28080f2b5a790dbf0eeed8389b4e5d73fea137ed63495b6aef5e129
   requires_dist:
   - advanced-alchemy>=1.9.3,<2
   - alembic>=1.18.4,<2

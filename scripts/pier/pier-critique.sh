@@ -2,30 +2,30 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
+repo_root="$(cd -- "$script_dir/../.." && pwd)"
 state_file="$repo_root/.dev/dev.env"
 default_agent="mini-swe-agent"
 default_model="openai/plap-ai/wisp"
-default_prompt="$repo_root/scripts/critique.md"
+default_prompt="$script_dir/critique.md"
 custom_environment_import_path="scripts.pier:PlapPierDockerEnvironment"
-custom_pi_agent_import_path="scripts.pier_pi:PiAgent"
+custom_pi_agent_import_path="scripts.pier.pier_pi:PiAgent"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/pier-critique.sh JOB_DIR [PIER_CRITIQUE_ARGS...]
+Usage: scripts/pier/pier-critique.sh JOB_DIR [PIER_CRITIQUE_ARGS...]
 
 Run `pier critique run` against a local job using local plap as the critique model.
 
 Defaults applied by this wrapper:
   --agent mini-swe-agent
   --model openai/plap-ai/wisp
-  --prompt scripts/critique.md
+  --prompt scripts/pier/critique.md
   --environment-import-path scripts.pier:PlapPierDockerEnvironment
 
 Examples:
-  ./scripts/pier-critique.sh jobs/2026-06-05__12-59-06
-  ./scripts/pier-critique.sh jobs/2026-06-05__12-59-06 --trial-name some_trial
-  ./scripts/pier-critique.sh jobs/2026-06-05__12-59-06 --agent opencode --model openai/plap-ai/wisp
+  ./scripts/pier/pier-critique.sh jobs/2026-06-05__12-59-06
+  ./scripts/pier/pier-critique.sh jobs/2026-06-05__12-59-06 --trial-name some_trial
+  ./scripts/pier/pier-critique.sh jobs/2026-06-05__12-59-06 --agent opencode --model openai/plap-ai/wisp
 EOF
 }
 

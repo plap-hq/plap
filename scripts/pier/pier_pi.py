@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import shlex
-from datetime import datetime, timezone
-from pathlib import PurePosixPath
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any, ClassVar
 
 from pier.agents.installed.base import BaseInstalledAgent, with_prompt_template
 from pier.agents.network import allowlist_from_urls
@@ -13,7 +12,6 @@ from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.install import AgentInstallSpec, InstallStep
 from pier.models.agent.network import NetworkAllowlist
-from pier.models.trial.paths import EnvironmentPaths
 from pier.models.trajectories import (
     Agent,
     FinalMetrics,
@@ -24,13 +22,13 @@ from pier.models.trajectories import (
     ToolCall,
     Trajectory,
 )
+from pier.models.trial.paths import EnvironmentPaths
 from pier.utils.trajectory_metrics import (
     extra_with_context_metrics,
     peak_context_tokens_from_steps,
     populate_context_from_final_metrics,
 )
 from pier.utils.trajectory_utils import format_trajectory_json
-
 
 _PI_MODELS_CONFIG_PATH = Path(__file__).with_name("models.json")
 
@@ -45,7 +43,7 @@ class PiAgent(BaseInstalledAgent):
     SUPPORTS_ATIF: bool = True
 
     _OUTPUT_FILENAME = "pi-output.jsonl"
-    _DEFAULT_PROVIDER_DOMAINS: dict[str, list[str]] = {
+    _DEFAULT_PROVIDER_DOMAINS: ClassVar[dict[str, list[str]]] = {
         "anthropic": ["api.anthropic.com"],
         "deepseek": ["api.deepseek.com"],
         "google": [".googleapis.com"],
@@ -215,8 +213,8 @@ class PiAgent(BaseInstalledAgent):
         if not output_path.exists():
             return []
         events: list[dict[str, Any]] = []
-        for line in output_path.read_text().splitlines():
-            line = line.strip()
+        for raw_line in output_path.read_text().splitlines():
+            line = raw_line.strip()
             if not line:
                 continue
             try:
@@ -510,7 +508,7 @@ class PiAgent(BaseInstalledAgent):
         if not isinstance(timestamp_ms, int | float):
             return None
         try:
-            return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+            return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()
         except (OSError, ValueError, OverflowError):
             return None
 

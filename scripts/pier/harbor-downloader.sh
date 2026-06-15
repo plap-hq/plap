@@ -3,16 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/harbor-downloader.sh DATASET_REF OUTPUT_DIR [--overwrite]
+Usage: scripts/pier/harbor-downloader.sh DATASET_REF OUTPUT_DIR [--overwrite]
 
 Download a Harbor dataset into OUTPUT_DIR using Harbor export mode.
 
 Examples:
-  ./scripts/harbor-downloader.sh "swe-bench/swe-bench-verified" datasets
-  ./scripts/harbor-downloader.sh "scale-ai/swe-bench-pro" datasets --overwrite
+  ./scripts/pier/harbor-downloader.sh "swe-bench/swe-bench-verified" datasets
+  ./scripts/pier/harbor-downloader.sh "scale-ai/swe-bench-pro" datasets --overwrite
 
 After download, inspect OUTPUT_DIR and run:
-  ./scripts/pier.sh -p <downloaded-dataset-dir>
+  ./scripts/pier/pier.sh -p <downloaded-dataset-dir>
 EOF
 }
 
@@ -55,4 +55,4 @@ done
 
 printf 'Downloading Harbor dataset %s into %s\n' "$dataset_ref" "$output_dir" >&2
 uvx --from harbor harbor datasets download "$dataset_ref" -o "$output_dir" --export "${overwrite_args[@]}"
-printf 'Download finished. Inspect %s and run ./scripts/pier.sh -p <downloaded-dataset-dir>\n' "$output_dir" >&2
+printf 'Download finished. Inspect %s and run ./scripts/pier/pier.sh -p <downloaded-dataset-dir>\n' "$output_dir" >&2

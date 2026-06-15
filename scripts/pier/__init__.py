@@ -8,9 +8,7 @@ from pier.environments.docker.docker import DockerEnvironment
 
 
 def _write_host_gateway_compose_file(path: Path, *, services: tuple[str, ...]) -> Path:
-    compose = {
-        "services": {service: {"extra_hosts": ["host.docker.internal:host-gateway"]} for service in services}
-    }
+    compose = {"services": {service: {"extra_hosts": ["host.docker.internal:host-gateway"]} for service in services}}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(compose, indent=2))
     return path
