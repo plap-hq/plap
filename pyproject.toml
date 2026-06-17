@@ -31,6 +31,7 @@ dependencies = [
   "opentelemetry-instrumentation-logging>=0.63b1,<0.64",
   "opentelemetry-instrumentation-sqlalchemy>=0.63b1,<0.64",
   "opentelemetry-sdk>=1.42.1,<2",
+  "pluggy>=1.6.0,<2",
   "py-nickel>=1.17.0,<2", # this currently requires PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1, waiting for https://github.com/nickel-lang/nickel/pull/2620
   "pydantic>=2.13.3,<3",
   "pydantic-settings>=2.14.0,<3",
