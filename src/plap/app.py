@@ -4,14 +4,17 @@ from collections.abc import Iterable
 from typing import Any
 
 import structlog
+import svcs
 from cachetools import LRUCache
 from litestar import Litestar, Request, Response
 from litestar.channels import ChannelsPlugin
 from litestar.channels.backends.memory import MemoryChannelsBackend
 from litestar.datastructures import State
+from litestar.di import Provide
 from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
 
 from plap.auth import APIKeyManager
+from plap.auth.dependencies import provide_request_api_key_manager, provide_request_auth_context
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
@@ -29,6 +32,7 @@ from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import configure_logging
 from plap.persistence import Database
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
+from plap.responses.store import ResponseStore
 from plap.settings import MCPServerConfig, Settings, get_settings
 from plap.telemetry import build_telemetry, emit_access_log, request_context_middleware, shutdown_telemetry
 from plap.tools import (
@@ -459,6 +463,19 @@ def _has_configured_chat_completion_route(
         return False
 
 
+def provide_svcs(request: Request[Any, Any, Any]) -> svcs.Container:
+    registry: svcs.Registry = request.app.state.svcs_registry
+    container = svcs.Container(registry)
+    request.state.svcs_container = container
+    return container
+
+
+async def cleanup_svcs(request: Request[Any, Any, Any], _response: Any) -> None:
+    container: svcs.Container | None = getattr(request.state, "svcs_container", None)
+    if container is not None:
+        await container.aclose()
+
+
 def create_app(settings: Settings | None = None) -> Litestar:
     resolved_settings = settings or get_settings()
     telemetry = build_telemetry()
@@ -501,14 +518,33 @@ def create_app(settings: Settings | None = None) -> Litestar:
         ),
         runtime_models=sorted(resolved_settings.runtime_model_profiles),
     )
+    database = Database(resolved_settings.database_url)
+
+    registry = svcs.Registry()
+    registry.register_value(Settings, resolved_settings)
+    registry.register_value(Database, database)
+    registry.register_value(IChatCompletionClient, chat_completion_client)
+    registry.register_value(SealingKeyring, SealingKeyring.from_encoded(resolved_settings.sealing_keys))
+    registry.register_value(IToolClassifier, tool_classifier)
+    registry.register_value(IToolCallClassifier, tool_call_classifier)
+    registry.register_value(
+        tuple[IMCPToolProvider, ...],
+        mcp_tool_providers,
+    )
+    registry.register_factory(
+        ResponseStore,
+        lambda svcs_container: ResponseStore(svcs_container.get(Database)),
+    )
+
     state = State(
         {
             "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
             "chat_completion_client": chat_completion_client,
-            "database": Database(resolved_settings.database_url),
+            "database": database,
             "runtime_model_profiles": resolved_settings.runtime_model_profiles,
             "sealing_keyring": SealingKeyring.from_encoded(resolved_settings.sealing_keys),
             "settings": resolved_settings,
+            "svcs_registry": registry,
             "tool_call_classifier": tool_call_classifier,
             "tool_call_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_call_policy_l1_maxsize),
             "tool_classifier": tool_classifier,
@@ -519,7 +555,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
 
     return Litestar(
         route_handlers=RESPONSE_ROUTE_HANDLERS,
-        before_send=[emit_access_log],
+        before_send=[emit_access_log, cleanup_svcs],
         logging_config=None,
         middleware=[request_context_middleware],
         plugins=[
@@ -530,6 +566,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
                 create_ws_route_handlers=False,
             ),
         ],
+        dependencies={
+            "svcs": Provide(provide_svcs, use_cache=True, sync_to_thread=False),
+            "api_key_manager": Provide(provide_request_api_key_manager, use_cache=True, sync_to_thread=False),
+            "auth_context": Provide(provide_request_auth_context),
+        },
         exception_handlers={
             HTTPException: handle_http_exception,
             NotAuthorizedException: handle_auth_exception,
@@ -537,6 +578,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
             ValidationException: handle_validation_exception,
             Exception: handle_unexpected_exception,
         },
-        on_shutdown=[_shutdown_chat_completion_client, _shutdown_database, shutdown_telemetry],
+        on_shutdown=[
+            _shutdown_chat_completion_client,
+            _shutdown_database,
+            shutdown_telemetry,
+            lambda app: app.state.svcs_registry.close(),
+        ],
         state=state,
     )

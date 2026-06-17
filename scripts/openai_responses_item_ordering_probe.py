@@ -9,7 +9,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
@@ -130,16 +129,15 @@ async def _run_probe(*, api_key: str, model: str, max_case_attempts: int, max_to
             max_tool_attempts=max_tool_attempts,
         )
         scenarios = [answer_scenario, *tool_scenarios]
-        scenario_reports: list[JSONObject] = []
-        for scenario in scenarios:
-            scenario_reports.append(
-                await _probe_scenario(
-                    client,
-                    model=model,
-                    max_case_attempts=max_case_attempts,
-                    scenario=scenario,
-                )
+        scenario_reports = [
+            await _probe_scenario(
+                client,
+                model=model,
+                max_case_attempts=max_case_attempts,
+                scenario=scenario,
             )
+            for scenario in scenarios
+        ]
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "max_case_attempts": max_case_attempts,
@@ -308,7 +306,9 @@ async def _build_tool_scenarios(
                 request_kwargs=request_kwargs,
                 baseline_response_id=getattr(third, "id", None),
                 baseline_output_digest=third_digest,
-                notes="Manual replay of two full tool subchains before the third response, focused on the second chain boundary and onward.",
+                notes=(
+                    "Manual replay of two full tool subchains before the third response, focused on the second chain boundary and onward."
+                ),
             ),
         ]
     raise RuntimeError(f"could not build a usable two-step tool chain after {max_tool_attempts} attempts: {last_error}")
@@ -398,14 +398,20 @@ async def _probe_scenario(
 
 def _insertion_variants(scenario: Scenario) -> list[InsertionVariant]:
     variants = [
-        InsertionVariant(name="fabricated_assistant_commentary", items=[_message(role="assistant", content="fabricated assistant commentary")]),
+        InsertionVariant(
+            name="fabricated_assistant_commentary",
+            items=[_message(role="assistant", content="fabricated assistant commentary")],
+        ),
         InsertionVariant(
             name="fabricated_assistant_final_answer",
             items=[_message(role="assistant", content="fabricated assistant final", phase="final_answer")],
         ),
         InsertionVariant(name="fabricated_user", items=[_message(role="user", content="fabricated user")]),
         InsertionVariant(name="fabricated_tool_call", items=[_fabricated_tool_call(9001)]),
-        InsertionVariant(name="fabricated_tool_output", items=[_fabricated_tool_output("call_fake_probe_output_only", "fabricated tool output only")]),
+        InsertionVariant(
+            name="fabricated_tool_output",
+            items=[_fabricated_tool_output("call_fake_probe_output_only", "fabricated tool output only")],
+        ),
         InsertionVariant(
             name="fabricated_tool_call_pair",
             items=[
@@ -426,7 +432,7 @@ def _insertion_variants(scenario: Scenario) -> list[InsertionVariant]:
         seen_bases.add(base)
     adjacent_pairs = _adjacent_pairs(labeled_items, start_index=scenario.replay_start_index)
     for left_label, left_item, right_label, right_item in adjacent_pairs:
-        if { _item_label(left_item), _item_label(right_item) } <= {"R", "M", "F", "FO"}:
+        if {_item_label(left_item), _item_label(right_item)} <= {"R", "M", "F", "FO"}:
             variants.append(
                 InsertionVariant(
                     name=f"duplicate_real_pair_{left_label}_{right_label}",
@@ -718,7 +724,7 @@ def _message(*, role: str, content: str, phase: str | None = None) -> JSONObject
 def _edited_output_message(
     item: JSONObject,
     *,
-    phase: str | None | object = ..., 
+    phase: str | None | object = ...,
     remove_phase: bool = False,
     status: str | None = None,
     text: str | None = None,
@@ -792,7 +798,7 @@ def _has_reasoning(items: list[JSONObject]) -> bool:
 def _output_items(response: object) -> list[JSONObject]:
     raw_output = getattr(response, "output", None)
     if not isinstance(raw_output, list):
-        raise RuntimeError(f"response.output is not a list: {type(raw_output).__name__}")
+        raise TypeError(f"response.output is not a list: {type(raw_output).__name__}")
     return [_dump_item(item) for item in raw_output]
 
 
@@ -804,7 +810,7 @@ def _dump_item(item: object) -> JSONObject:
     else:
         value = item
     if not isinstance(value, dict):
-        raise RuntimeError(f"response item is not a JSON object: {value!r}")
+        raise TypeError(f"response item is not a JSON object: {value!r}")
     return deepcopy(value)
 
 

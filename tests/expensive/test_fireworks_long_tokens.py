@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from plap.llms.completions.client import ChatCompletionClient
 from plap.llms.completions.chat import ChatCompletionRequest, ChatMessage
+from plap.llms.completions.client import ChatCompletionClient
 from plap.llms.completions.errors import ChatCompletionProviderError
 from plap.llms.completions.providers import build_fireworks_provider
 

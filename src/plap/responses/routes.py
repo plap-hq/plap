@@ -7,15 +7,18 @@ from functools import partial
 import anyio
 import msgspec
 import structlog
+import svcs
 from anyio.abc import TaskStatus
 from litestar import Request, delete, get, post, websocket
 from litestar.channels import ChannelsPlugin, Subscriber
 from litestar.connection import WebSocket
+from litestar.di import Provide
 from litestar.response import ServerSentEvent
 from opentelemetry import trace
 from pydantic import TypeAdapter, ValidationError
 
 from plap.auth import AuthContext
+from plap.auth.dependencies import provide_socket_auth_context
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import IChatCompletionClient
@@ -36,7 +39,6 @@ from plap.responses.contracts import (
     ResponseStreamEvent,
     ServiceTier,
 )
-from plap.responses.dependencies import HTTP_ROUTE_DEPENDENCIES, WEBSOCKET_ROUTE_DEPENDENCIES
 from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import Ingested
 from plap.responses.projection import ResponseProjection
@@ -45,8 +47,6 @@ from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import RuntimeSelector, Settings
 from plap.telemetry import record_scope_context
-from plap.tools import IToolCallPolicyResolver, IToolPolicyResolver
-from plap.tools.mcp import IMCPToolProvider
 
 logger = structlog.stdlib.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -95,12 +95,13 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
 
 async def _prepare_create(
     *,
-    auth_context: AuthContext,
+    svcs: svcs.Container,
     request: ResponseCreateRequest,
-    response_store: ResponseStore,
-    sealing_keyring: SealingKeyring,
     channels: ChannelsPlugin,
 ) -> tuple[PreparedRequest, Ingested, StreamCoordinator]:
+    auth_context = svcs.get(AuthContext)
+    sealing_keyring = svcs.get(SealingKeyring)
+    response_store = svcs.get(ResponseStore)
     with tracer.start_as_current_span("response.prepare") as span:
         prepared = await response_store.prepare_request(auth_context, request)
         ingested = await ingest_response_request(
@@ -196,24 +197,19 @@ async def _run_stream(
     prepared: PreparedRequest,
     ingested: Ingested,
     coordinator: StreamCoordinator,
-    sealing_keyring: SealingKeyring,
-    settings: Settings,
-    chat_completion_client: IChatCompletionClient,
-    tool_policy_resolver: IToolPolicyResolver,
-    tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_providers: tuple[IMCPToolProvider, ...],
+    svcs: svcs.Container,
 ) -> None:
     try:
         await run_response(
             prepared=prepared,
             ingested=ingested,
             coordinator=coordinator,
-            sealing_keyring=sealing_keyring,
-            settings=settings,
-            chat_completion_client=chat_completion_client,
-            tool_policy_resolver=tool_policy_resolver,
-            tool_call_policy_resolver=tool_call_policy_resolver,
-            mcp_tool_providers=mcp_tool_providers,
+            sealing_keyring=svcs.get(SealingKeyring),
+            settings=svcs.get(Settings),
+            chat_completion_client=svcs.get(IChatCompletionClient),
+            tool_policy_resolver=None,
+            tool_call_policy_resolver=None,
+            mcp_tool_providers=(),
         )
     except anyio.get_cancelled_exc_class():
         return
@@ -225,25 +221,16 @@ async def _sse_response_payload(
     *,
     http_request: Request[object, object, object],
     request: ResponseCreateRequest,
-    auth_context: AuthContext,
+    svcs: svcs.Container,
     channels: ChannelsPlugin,
-    response_store: ResponseStore,
-    sealing_keyring: SealingKeyring,
-    settings: Settings,
-    chat_completion_client: IChatCompletionClient,
-    tool_policy_resolver: IToolPolicyResolver,
-    tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> AsyncIterator[str]:
     projection = ResponseProjection.from_create_request(request, transport="stream")
     projection.validate_create_request(request)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_watch_http_disconnect, http_request, task_group.cancel_scope)
         prepared, ingested, coordinator = await _prepare_create(
-            auth_context=auth_context,
+            svcs=svcs,
             request=request,
-            response_store=response_store,
-            sealing_keyring=sealing_keyring,
             channels=channels,
         )
         _record_request_scope_context(http_request, prepared, coordinator)
@@ -256,12 +243,7 @@ async def _sse_response_payload(
                         prepared=prepared,
                         ingested=ingested,
                         coordinator=coordinator,
-                        sealing_keyring=sealing_keyring,
-                        settings=settings,
-                        chat_completion_client=chat_completion_client,
-                        tool_policy_resolver=tool_policy_resolver,
-                        tool_call_policy_resolver=tool_call_policy_resolver,
-                        mcp_tool_providers=mcp_tool_providers,
+                        svcs=svcs,
                     ),
                 )
                 async for payload in _iter_projected_payloads(subscriber, projection=projection):
@@ -273,19 +255,12 @@ async def _sse_response_payload(
     yield "[DONE]"
 
 
-@post("/v1/responses", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
+@post("/v1/responses", status_code=200)
 async def create_response(
     request: Request[object, object, object],
     data: ResponseCreateRequest,
-    auth_context: AuthContext,
+    svcs: svcs.Container,
     channels: ChannelsPlugin,
-    response_store: ResponseStore,
-    sealing_keyring: SealingKeyring,
-    settings: Settings,
-    chat_completion_client: IChatCompletionClient,
-    tool_policy_resolver: IToolPolicyResolver,
-    tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> object:
     projection = ResponseProjection.from_create_request(data, transport="stream" if data.stream else "snapshot")
     projection.validate_create_request(data)
@@ -294,15 +269,8 @@ async def create_response(
             _sse_response_payload(
                 http_request=request,
                 request=data,
-                auth_context=auth_context,
+                svcs=svcs,
                 channels=channels,
-                response_store=response_store,
-                sealing_keyring=sealing_keyring,
-                settings=settings,
-                chat_completion_client=chat_completion_client,
-                tool_policy_resolver=tool_policy_resolver,
-                tool_call_policy_resolver=tool_call_policy_resolver,
-                mcp_tool_providers=mcp_tool_providers,
             ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
@@ -310,10 +278,8 @@ async def create_response(
     async with anyio.create_task_group() as task_group:
         watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
         prepared, ingested, coordinator = await _prepare_create(
-            auth_context=auth_context,
+            svcs=svcs,
             request=data,
-            response_store=response_store,
-            sealing_keyring=sealing_keyring,
             channels=channels,
         )
         _record_request_scope_context(request, prepared, coordinator)
@@ -322,38 +288,36 @@ async def create_response(
                 prepared=prepared,
                 ingested=ingested,
                 coordinator=coordinator,
-                sealing_keyring=sealing_keyring,
-                settings=settings,
-                chat_completion_client=chat_completion_client,
-                tool_policy_resolver=tool_policy_resolver,
-                tool_call_policy_resolver=tool_call_policy_resolver,
-                mcp_tool_providers=mcp_tool_providers,
+                sealing_keyring=svcs.get(SealingKeyring),
+                settings=svcs.get(Settings),
+                chat_completion_client=svcs.get(IChatCompletionClient),
+                tool_policy_resolver=None,
+                tool_call_policy_resolver=None,
+                mcp_tool_providers=(),
             )
             response = projection.response(coordinator.current_response())
         watcher_scope.cancel()
     return response
 
 
-@get("/v1/models", dependencies=HTTP_ROUTE_DEPENDENCIES)
+@get("/v1/models")
 async def list_models(
-    auth_context: AuthContext,
-    settings: Settings,
+    svcs: svcs.Container,
 ) -> ModelListObject:
-    _ = auth_context
+    settings = svcs.get(Settings)
     return ModelListObject(
         data=[profile.to_model_object(model=model) for model, profile in sorted(settings.runtime_model_profiles.items())]
     )
 
 
-@get("/v1/model/info", dependencies=HTTP_ROUTE_DEPENDENCIES)
+@get("/v1/model/info")
 async def model_info(
     model: str,
-    auth_context: AuthContext,
-    settings: Settings,
+    svcs: svcs.Container,
     service_tier: ServiceTier | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> ModelInfoListObject:
-    _ = auth_context
+    settings = svcs.get(Settings)
     profile = settings.resolve_runtime_model_profile(
         model,
         selector=RuntimeSelector(
@@ -364,17 +328,18 @@ async def model_info(
     return ModelInfoListObject(data=[profile.model_info.to_contract(model=model)])
 
 
-@get("/v1/responses/{response_id:str}", dependencies=HTTP_ROUTE_DEPENDENCIES)
+@get("/v1/responses/{response_id:str}")
 async def retrieve_response(
     response_id: str,
-    auth_context: AuthContext,
-    response_store: ResponseStore,
+    svcs: svcs.Container,
     include: list[str] | None = None,
     include_obfuscation: bool | None = None,
     starting_after: int | None = None,
     stream: bool | None = None,
 ) -> ResponseObject:
     _ = starting_after, stream
+    auth_context = svcs.get(AuthContext)
+    response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         response = await response_store.get_response(auth_context, response_id)
         if response is None:
@@ -386,13 +351,13 @@ async def retrieve_response(
 @delete(
     "/v1/responses/{response_id:str}",
     status_code=200,
-    dependencies=HTTP_ROUTE_DEPENDENCIES,
 )
 async def delete_response(
     response_id: str,
-    auth_context: AuthContext,
-    response_store: ResponseStore,
+    svcs: svcs.Container,
 ) -> ResponseDeleted:
+    auth_context = svcs.get(AuthContext)
+    response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         deleted = await response_store.delete_response(auth_context, response_id)
         if not deleted:
@@ -400,28 +365,28 @@ async def delete_response(
         return ResponseDeleted(deleted=True, id=response_id)
 
 
-@post("/v1/responses/compact", status_code=200, dependencies=HTTP_ROUTE_DEPENDENCIES)
+@post("/v1/responses/compact", status_code=200)
 async def compact_response(
     data: CompactRequest,
-    auth_context: AuthContext,
+    svcs: svcs.Container,
 ) -> CompactedResponseObject:
-    _ = data, auth_context
+    _ = data, svcs
     raise _not_implemented_error(action="compact")
 
 
 @get(
     "/v1/responses/{response_id:str}/input_items",
-    dependencies=HTTP_ROUTE_DEPENDENCIES,
 )
 async def list_input_items(
     response_id: str,
-    auth_context: AuthContext,
-    response_store: ResponseStore,
+    svcs: svcs.Container,
     after: str | None = None,
     include: list[str] | None = None,
     limit: int | None = None,
     order: str | None = None,
 ) -> InputItemsPage:
+    auth_context = svcs.get(AuthContext)
+    response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         page = await response_store.list_input_items(
             auth_context,
@@ -434,25 +399,22 @@ async def list_input_items(
         return projection.input_items_page(page)
 
 
-@websocket("/v1/responses", dependencies=WEBSOCKET_ROUTE_DEPENDENCIES)
+@websocket("/v1/responses", dependencies={"auth_context": Provide(provide_socket_auth_context)})
 async def responses_socket(
     socket: WebSocket,
     auth_context: AuthContext,
-    settings: Settings,
     channels: ChannelsPlugin,
-    response_store: ResponseStore,
-    sealing_keyring: SealingKeyring,
-    chat_completion_client: IChatCompletionClient,
-    tool_policy_resolver: IToolPolicyResolver,
-    tool_call_policy_resolver: IToolCallPolicyResolver,
-    mcp_tool_providers: tuple[IMCPToolProvider, ...],
 ) -> None:
+    registry: svcs.Registry = socket.app.state.svcs_registry
+    ws_container = svcs.Container(registry)
+
     await socket.accept()
 
     while True:
         try:
             payload = await socket.receive_json()
         except Exception:
+            await ws_container.aclose()
             return
 
         try:
@@ -480,10 +442,8 @@ async def responses_socket(
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
                 prepared, ingested, coordinator = await _prepare_create(
-                    auth_context=auth_context,
+                    svcs=ws_container,
                     request=client_event.response,
-                    response_store=response_store,
-                    sealing_keyring=sealing_keyring,
                     channels=channels,
                 )
                 span.set_attribute("plap.response.id", coordinator.response_id)
@@ -496,12 +456,7 @@ async def responses_socket(
                                 prepared=prepared,
                                 ingested=ingested,
                                 coordinator=coordinator,
-                                sealing_keyring=sealing_keyring,
-                                settings=settings,
-                                chat_completion_client=chat_completion_client,
-                                tool_policy_resolver=tool_policy_resolver,
-                                tool_call_policy_resolver=tool_call_policy_resolver,
-                                mcp_tool_providers=mcp_tool_providers,
+                                svcs=ws_container,
                             ),
                         )
                         async for payload in _iter_projected_payloads(subscriber, projection=projection):

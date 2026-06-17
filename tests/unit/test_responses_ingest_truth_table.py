@@ -600,7 +600,8 @@ from hidden main anchors or resolved patches that declare main-side
 - Raw: `R(p->M[up_0]) M F FO FF FFO`
   Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FO,FFO] post=[]`
   Outcome: Accept
-  Notes: Satisfying the declared strict call releases the anchor, but fabricated fallback may still attach until a later assistant supersedes it.
+  Notes: Satisfying the declared strict call releases the anchor, but fabricated fallback may still
+  attach until a later assistant supersedes it.
 
 - Raw: `R(p->M[up_0]) M F FO post FF FFO`
   Normalized:
@@ -765,7 +766,18 @@ from plap.responses.contracts import (
     SummaryTextContent,
 )
 from plap.responses.ingest.ingest import ingest_response_request
-from plap.responses.ingest.models import CallID, GuardedPatch, MAIN_SIDE, Message, MessagePatch, ReasoningPayload, Side, Sides, SidesUpdate, ToolCall
+from plap.responses.ingest.models import (
+    MAIN_SIDE,
+    CallID,
+    GuardedPatch,
+    Message,
+    MessagePatch,
+    ReasoningPayload,
+    Side,
+    Sides,
+    SidesUpdate,
+    ToolCall,
+)
 from plap.responses.ingest.sealing import (
     open_reasoning_payload,
     seal_call_id,
@@ -828,8 +840,7 @@ def _sides_update(
 ) -> SidesUpdate:
     current_sides = Sides() if current is None else current
     normalized_patches = {
-        side: _guarded_patch(side, current_sides.get(side), patch)
-        for side, patch in ({} if patches is None else patches).items()
+        side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
     }
     return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
 
@@ -2893,10 +2904,12 @@ REJECT_CASES.append(
                         machine=[{"op": "add", "path": "/retro_2", "value": True}],
                         sides=_sides_update(
                             current=Sides(
-                                messages={MAIN_SIDE: [
-                                    Message.from_primitive(_assistant_value("m1", "up_0")),
-                                    Message.from_primitive(_tool_value("up_0", "fo_0")),
-                                ]}
+                                messages={
+                                    MAIN_SIDE: [
+                                        Message.from_primitive(_assistant_value("m1", "up_0")),
+                                        Message.from_primitive(_tool_value("up_0", "fo_0")),
+                                    ]
+                                }
                             )
                         ),
                     )

@@ -4,17 +4,18 @@ from collections.abc import Sequence
 from uuid import uuid4
 
 import pytest
+import svcs
 
 from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.completions.chat import IChatCompletionClient
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.ingest.models import Ingested, Sides
 from plap.responses.routes import _prepare_create, _run_stream
-from plap.responses.store import PreparedRequest
+from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 from plap.settings import Settings
-from plap.tools import StaticToolCallPolicyResolver, StaticToolPolicyResolver
 
 
 class _RecordingChannels:
@@ -98,15 +99,43 @@ def _plap_error() -> PlapError:
     )
 
 
+def _svcs() -> svcs.Container:
+    registry = svcs.Registry()
+    registry.register_value(AuthContext, _auth_context())
+    registry.register_value(SealingKeyring, _keyring())
+    registry.register_value(Settings, _settings())
+    registry.register_value(IChatCompletionClient, object())
+    store = _RecordingStore(_prepared())
+    registry.register_value(_RecordingStore, store)
+
+    class FakeResponseStore:
+        def __init__(self, inner: _RecordingStore) -> None:
+            self._inner = inner
+
+        async def prepare_request(self, auth_context, request):
+            return await self._inner.prepare_request(auth_context, request)
+
+        async def begin_response(self, prepared, response):
+            await self._inner.begin_response(prepared, response)
+
+    registry.register_value(FakeResponseStore, FakeResponseStore(store))
+    registry.register_value(ResponseStore, FakeResponseStore(store))
+
+    return svcs.Container(registry)
+
+
 async def test_prepare_create_prepares_and_stops_before_created() -> None:
     request = _request()
     store = _RecordingStore(_prepared(request))
+    registry = svcs.Registry()
+    registry.register_value(AuthContext, _auth_context())
+    registry.register_value(SealingKeyring, _keyring())
+    registry.register_value(ResponseStore, store)
+    container = svcs.Container(registry)
 
     prepared, ingested, coordinator = await _prepare_create(
-        auth_context=_auth_context(),
+        svcs=container,
         request=request,
-        response_store=store,
-        sealing_keyring=_keyring(),
         channels=_RecordingChannels(),
     )
 
@@ -131,14 +160,15 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("plap.responses.routes.run_response", _boom)
 
+    registry = svcs.Registry()
+    registry.register_value(SealingKeyring, _keyring())
+    registry.register_value(Settings, _settings())
+    registry.register_value(IChatCompletionClient, object())
+    container = svcs.Container(registry)
+
     await _run_stream(
         prepared=_prepared(),
         ingested=Ingested(machine={}, sides=Sides(), last_side=None, last_reasoning_id=None, current_compaction_id=None),
         coordinator=_coordinator(),
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=object(),
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
+        svcs=container,
     )
