@@ -68,16 +68,7 @@ package plap
   model_info!: #ModelInfoConfig
   default_reasoning_effort?: #ReasoningEffort
   main!: #FieldConfig
-  compactor!: #FieldConfig
-  defender!: #FieldConfig
-  reviewer!: #FieldConfig
-  arbitrator!: #FieldConfig
   reasoning_summarizer!: #FieldConfig
-  reviewer_max_transcript_tokens!: int
-  arbitrator_max_transcript_tokens!: int
-  compact_threshold?: int
-  compact_max_rounds!: int
-  debate_max_rounds?: int | *2
   reasoning_to_output?: number | *1.0
   overrides?: { [string]: { [string]: _ } }
 }
