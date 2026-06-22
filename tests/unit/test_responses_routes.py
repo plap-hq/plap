@@ -7,15 +7,15 @@ import pytest
 import svcs
 
 from plap.auth import AuthContext
+from plap.bus import EventBus
+from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import IChatCompletionClient
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.ingest.models import Ingested, Sides
 from plap.responses.routes import _prepare_create, _run_stream
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
-from plap.settings import Settings
 
 
 class _RecordingChannels:
@@ -56,6 +56,25 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
+def _loaded() -> CueBox:
+    return CueBox(
+        {
+            "plap": CueBox(
+                {
+                    "config": CueBox(
+                        {
+                            "sides": {"main": 0},
+                        },
+                        frozen_box=True,
+                    )
+                },
+                frozen_box=True,
+            )
+        },
+        frozen_box=True,
+    )
+
+
 def _request() -> ResponseCreateRequest:
     return ResponseCreateRequest(model="plap/test", input="hello")
 
@@ -78,10 +97,6 @@ def _coordinator() -> StreamCoordinator:
     return StreamCoordinator(request=_request(), channels=_RecordingChannels())
 
 
-def _settings() -> Settings:
-    return Settings(api_key_pepper="pepper", database_url="postgres://example", sealing_keys=["key"])
-
-
 def _plap_error() -> PlapError:
     return PlapError(
         public=PublicError(
@@ -102,9 +117,8 @@ def _plap_error() -> PlapError:
 def _svcs() -> svcs.Container:
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
+    registry.register_value(CueBox, _loaded())
     registry.register_value(SealingKeyring, _keyring())
-    registry.register_value(Settings, _settings())
-    registry.register_value(IChatCompletionClient, object())
     store = _RecordingStore(_prepared())
     registry.register_value(_RecordingStore, store)
 
@@ -129,12 +143,14 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     store = _RecordingStore(_prepared(request))
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
+    registry.register_value(CueBox, _loaded())
     registry.register_value(SealingKeyring, _keyring())
     registry.register_value(ResponseStore, store)
     container = svcs.Container(registry)
 
     prepared, ingested, coordinator = await _prepare_create(
         svcs=container,
+        auth_context=_auth_context(),
         request=request,
         channels=_RecordingChannels(),
     )
@@ -154,16 +170,18 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
 
 
 async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _boom(**kwargs) -> None:
-        _ = kwargs
+    bus = EventBus()
+
+    @bus.listen("response.start")
+    async def _boom(*, next, state) -> None:
+        _ = next, state
         raise _plap_error()
 
-    monkeypatch.setattr("plap.responses.routes.run_response", _boom)
+    monkeypatch.setattr("plap.responses.routes.bus", bus)
 
     registry = svcs.Registry()
+    registry.register_value(CueBox, _loaded())
     registry.register_value(SealingKeyring, _keyring())
-    registry.register_value(Settings, _settings())
-    registry.register_value(IChatCompletionClient, object())
     container = svcs.Container(registry)
 
     await _run_stream(

@@ -63,10 +63,9 @@ async def test_async_openai_client_models_list(openai_client: AsyncOpenAI) -> No
     models = await openai_client.models.list()
 
     assert models.object == "list"
-    assert len(models.data) == 1
-    assert models.data[0].id == "plap/test"
-    assert models.data[0].object == "model"
-    assert models.data[0].owned_by == "plap"
+    assert [model.id for model in models.data] == ["plap-ai/wisp", "plap-ai/wisp-mini"]
+    assert all(model.object == "model" for model in models.data)
+    assert all(model.owned_by == "plap" for model in models.data)
 
 
 async def test_async_openai_client_unsupported_methods(
@@ -91,11 +90,10 @@ async def test_async_openai_client_unsupported_methods(
 
 
 async def test_async_openai_client_compact_method(openai_client: AsyncOpenAI) -> None:
-    compacted = await openai_client.responses.compact(model="plap/test", input="compact me")
+    with pytest.raises(APIStatusError) as not_implemented:
+        await openai_client.responses.compact(model="plap/test", input="compact me")
 
-    assert compacted.object == "response.compaction"
-    assert compacted.id.startswith("cmpresp_")
-    assert compacted.output[0].type == "compaction"
+    assert not_implemented.value.status_code == 501
 
 
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:

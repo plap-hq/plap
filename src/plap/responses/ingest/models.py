@@ -247,10 +247,7 @@ class Sides:
         return self.messages.items()
 
     def to_primitive(self) -> dict[str, object]:
-        return {
-            side: [message.to_primitive() for message in self.messages[side]]
-            for side in sorted(self.messages)
-        }
+        return {side: [message.to_primitive() for message in self.messages[side]] for side in sorted(self.messages)}
 
     def shape(self, side: Side) -> JSONValue:
         messages = self.get(side)
@@ -322,10 +319,7 @@ class SidesUpdate:
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
             "main": [message.to_primitive() for message in self.main],
-            "patches": {
-                side: guarded.to_primitive()
-                for side, guarded in sorted(self.patches.items())
-            },
+            "patches": {side: guarded.to_primitive() for side, guarded in sorted(self.patches.items())},
         }
         return value
 

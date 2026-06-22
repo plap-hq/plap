@@ -145,9 +145,9 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
     return payload
 
 
-def _open_call_id_or_none(value: str, *, keyring: SealingKeyring) -> CallID | None:
+def _open_call_id_or_none(value: str, *, keyring: SealingKeyring, side_codes: dict[str, int]) -> CallID | None:
     try:
-        return open_call_id(value, keyring=keyring)
+        return open_call_id(value, keyring=keyring, side_codes=side_codes)
     except PlapError:
         return None
 
@@ -200,7 +200,7 @@ type _DecodedInput = (
 )
 
 
-def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring) -> _DecodedInput:
+def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring, side_codes: dict[str, int]) -> _DecodedInput:
     if isinstance(item, RequestCompactionItem):
         return _DecodedCompaction(payload=_open_compaction_item(item, keyring=keyring))
     if isinstance(item, RequestReasoningItem):
@@ -208,20 +208,20 @@ def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring) -> _Decoded
     if isinstance(item, RequestMessageItem):
         return _DecodedMessage(message=_decode_message_item(item))
     if isinstance(item, RequestFunctionCallItem):
-        call_id = _open_call_id_or_none(item.call_id, keyring=keyring)
+        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, side_codes=side_codes)
         if call_id is None:
             return _DecodedFabricatedFunctionCall(item=item)
         return _DecodedSealedFunctionCall(item=item, call_id=call_id)
     if isinstance(item, RequestFunctionCallOutputItem):
-        call_id = _open_call_id_or_none(item.call_id, keyring=keyring)
+        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, side_codes=side_codes)
         if call_id is None:
             return _DecodedFabricatedFunctionCallOutput(item=item)
         return _DecodedSealedFunctionCallOutput(item=item, call_id=call_id)
     raise TypeError(f"unsupported request input item: {type(item).__name__}")
 
 
-def _decode_queue(items: list[RequestInputItem], *, keyring: SealingKeyring) -> list[_DecodedInput]:
-    return [_decode_item(item, keyring=keyring) for item in items]
+def _decode_queue(items: list[RequestInputItem], *, keyring: SealingKeyring, side_codes: dict[str, int]) -> list[_DecodedInput]:
+    return [_decode_item(item, keyring=keyring, side_codes=side_codes) for item in items]
 
 
 def _apply_machine_patch(machine: dict[str, JSONValue], patch: JSONPatch) -> dict[str, JSONValue]:
@@ -1071,8 +1071,9 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
+    side_codes: dict[str, int],
 ) -> Ingested:
     input_items = _normalize_input_items(request)
     replay_items = _slice_to_last_compaction(input_items)
-    decoded_items = _decode_queue(replay_items, keyring=keyring)
+    decoded_items = _decode_queue(replay_items, keyring=keyring, side_codes=side_codes)
     return _replay_decoded_queue(decoded_items)

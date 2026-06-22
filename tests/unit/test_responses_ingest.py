@@ -24,7 +24,9 @@ from plap.responses.contracts import (
 )
 from plap.responses.ingest.content import tool_output as decode_tool_output
 from plap.responses.ingest.ingest import (
-    _decode_queue,
+    _decode_queue as _decode_queue_impl,
+)
+from plap.responses.ingest.ingest import (
     _DecodedCompaction,
     _DecodedFabricatedFunctionCall,
     _DecodedFabricatedFunctionCallOutput,
@@ -35,7 +37,9 @@ from plap.responses.ingest.ingest import (
     _last_compaction_index,
     _normalize_input_items,
     _slice_to_last_compaction,
-    ingest_response_request,
+)
+from plap.responses.ingest.ingest import (
+    ingest_response_request as _ingest_response_request_impl,
 )
 from plap.responses.ingest.models import (
     MAIN_SIDE,
@@ -51,10 +55,18 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import (
-    _pack_call_id,
-    _unpack_call_id,
-    open_call_id,
-    seal_call_id,
+    _pack_call_id as _pack_call_id_impl,
+)
+from plap.responses.ingest.sealing import (
+    _unpack_call_id as _unpack_call_id_impl,
+)
+from plap.responses.ingest.sealing import (
+    open_call_id as _open_call_id_impl,
+)
+from plap.responses.ingest.sealing import (
+    seal_call_id as _seal_call_id_impl,
+)
+from plap.responses.ingest.sealing import (
     seal_compaction_payload,
     seal_reasoning_payload,
 )
@@ -70,6 +82,39 @@ def _message(label: str) -> RequestMessageItem:
 
 def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
+
+
+def _side_codes() -> dict[str, int]:
+    return {
+        MAIN_SIDE: 0,
+        "defender": 1,
+        "reviewer": 2,
+        "arbitrator": 3,
+    }
+
+
+def _decode_queue(items, *, keyring: SealingKeyring):
+    return _decode_queue_impl(items, keyring=keyring, side_codes=_side_codes())
+
+
+async def ingest_response_request(request: ResponseCreateRequest, *, keyring: SealingKeyring):
+    return await _ingest_response_request_impl(request, keyring=keyring, side_codes=_side_codes())
+
+
+def _pack_call_id(value: CallID) -> bytes:
+    return _pack_call_id_impl(value, side_codes=_side_codes())
+
+
+def _unpack_call_id(value: bytes) -> CallID:
+    return _unpack_call_id_impl(value, side_codes=_side_codes())
+
+
+def seal_call_id(value: CallID, *, keyring: SealingKeyring) -> str:
+    return _seal_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
+
+
+def open_call_id(value: str, *, keyring: SealingKeyring) -> CallID:
+    return _open_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
 
 
 _REASONING_PAYLOAD_COUNTER = count()
@@ -118,8 +163,7 @@ def _sides_update(
 ) -> SidesUpdate:
     current_sides = Sides() if current is None else current
     normalized_patches = {
-        side: _guarded_patch(side, current_sides.get(side), patch)
-        for side, patch in ({} if patches is None else patches).items()
+        side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
     }
     return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
 
@@ -690,26 +734,32 @@ def test_guarded_patch_from_primitive_requires_patch_key() -> None:
 
 def test_sides_shape_ignores_textual_leaves() -> None:
     first = Sides(
-        messages={MAIN_SIDE: [
-            Message(
-                role="assistant",
-                content="hello",
-                tool_calls=[ToolCall(id="call_0", name="read_file", arguments='{"path":"README.md"}')],
-                reasoning_content="because",
-            ),
-            Message(role="tool", tool_call_id="call_0", content="first output"),
-        ], "reviewer": [Message(role="assistant", content="review one")]},
+        messages={
+            MAIN_SIDE: [
+                Message(
+                    role="assistant",
+                    content="hello",
+                    tool_calls=[ToolCall(id="call_0", name="read_file", arguments='{"path":"README.md"}')],
+                    reasoning_content="because",
+                ),
+                Message(role="tool", tool_call_id="call_0", content="first output"),
+            ],
+            "reviewer": [Message(role="assistant", content="review one")],
+        },
     )
     second = Sides(
-        messages={MAIN_SIDE: [
-            Message(
-                role="assistant",
-                content="goodbye",
-                tool_calls=[ToolCall(id="call_0", name="list_files", arguments='{"path":"docs"}')],
-                reasoning_content="therefore",
-            ),
-            Message(role="tool", tool_call_id="call_0", content="second output"),
-        ], "reviewer": [Message(role="assistant", content="review two")]},
+        messages={
+            MAIN_SIDE: [
+                Message(
+                    role="assistant",
+                    content="goodbye",
+                    tool_calls=[ToolCall(id="call_0", name="list_files", arguments='{"path":"docs"}')],
+                    reasoning_content="therefore",
+                ),
+                Message(role="tool", tool_call_id="call_0", content="second output"),
+            ],
+            "reviewer": [Message(role="assistant", content="review two")],
+        },
     )
 
     assert first.shape(MAIN_SIDE) == second.shape(MAIN_SIDE)
@@ -717,16 +767,20 @@ def test_sides_shape_ignores_textual_leaves() -> None:
 
 def test_sides_shape_preserves_tool_call_edges() -> None:
     first = Sides(
-        messages={MAIN_SIDE: [
-            Message(role="assistant", tool_calls=[ToolCall(id="call_0", name="read_file", arguments="{}")]),
-            Message(role="tool", tool_call_id="call_0", content="output"),
-        ]}
+        messages={
+            MAIN_SIDE: [
+                Message(role="assistant", tool_calls=[ToolCall(id="call_0", name="read_file", arguments="{}")]),
+                Message(role="tool", tool_call_id="call_0", content="output"),
+            ]
+        }
     )
     second = Sides(
-        messages={MAIN_SIDE: [
-            Message(role="assistant", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
-            Message(role="tool", tool_call_id="call_1", content="output"),
-        ]}
+        messages={
+            MAIN_SIDE: [
+                Message(role="assistant", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                Message(role="tool", tool_call_id="call_1", content="output"),
+            ]
+        }
     )
 
     assert first.shape(MAIN_SIDE) != second.shape(MAIN_SIDE)
@@ -1566,8 +1620,6 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
 
     assert exc_info.value.private is not None
     assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
-
-
 
 
 async def test_ingest_response_request_rejects_main_message_patch_until_supported() -> None:

@@ -45,10 +45,7 @@ def _shape_message(value: Mapping[str, JSONValue]) -> JSONValue:
         tool_calls = value["tool_calls"]
         if not isinstance(tool_calls, list):
             raise TypeError("message tool_calls must be an array")
-        shaped["tool_calls"] = [
-            _shape_tool_call(call) if isinstance(call, Mapping) else _shape_scalar(call)
-            for call in tool_calls
-        ]
+        shaped["tool_calls"] = [_shape_tool_call(call) if isinstance(call, Mapping) else _shape_scalar(call) for call in tool_calls]
     if "reasoning_content" in value:
         shaped["reasoning_content"] = _shape_scalar(value["reasoning_content"])
     return shaped

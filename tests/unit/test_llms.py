@@ -82,7 +82,6 @@ from plap.llms.retry import (
 )
 from plap.llms.retry import complete as retry_complete
 from plap.llms.retry import stream as retry_stream
-from plap.settings import Settings
 
 
 class _RecorderLogger:
@@ -144,16 +143,6 @@ def _capture_fireworks_provider_logs(monkeypatch: pytest.MonkeyPatch) -> list[di
     events: list[dict[str, object]] = []
     monkeypatch.setattr(fireworks_provider_module, "logger", _RecorderLogger(events))
     return events
-
-
-def _settings(**overrides: object) -> Settings:
-    values: dict[str, object] = {
-        "api_key_pepper": "pepper",
-        "database_url": "postgresql+asyncpg://example/test",
-        "sealing_keys": ["a" * 43],
-    }
-    values.update(overrides)
-    return Settings(**values)
 
 
 def _request() -> ChatCompletionRequest:

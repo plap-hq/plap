@@ -32,19 +32,8 @@ from plap.llms.completions.providers import (
     build_novita_provider,
 )
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
-from plap.settings import Settings
 
 pytestmark = pytest.mark.money
-
-
-def _settings(**overrides: object) -> Settings:
-    values: dict[str, object] = {
-        "api_key_pepper": "pepper",
-        "database_url": "postgresql+asyncpg://example/test",
-        "sealing_keys": ["a" * 43],
-    }
-    values.update(overrides)
-    return Settings(**values)
 
 
 def _lightning_client(api_key: str) -> IChatCompletionClient:
@@ -704,8 +693,4 @@ def _message_has_output(message: ChatMessage) -> bool:
 
 
 def _delta_has_output(delta: ChatCompletionDelta) -> bool:
-    return bool(
-        (delta.content_delta or "").strip()
-        or (delta.reasoning_delta or "").strip()
-        or delta.tool_call_delta
-    )
+    return bool((delta.content_delta or "").strip() or (delta.reasoning_delta or "").strip() or delta.tool_call_delta)

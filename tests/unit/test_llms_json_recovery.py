@@ -21,8 +21,7 @@ def _valid_multiline_import_command() -> str:
     return json.dumps(
         {
             "command": (
-                "x\nimport type { Registry, EntitySnapshot } from y\n"
-                "rollback: (registry: Registry, snapshot: EntitySnapshot) => void;"
+                "x\nimport type { Registry, EntitySnapshot } from y\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"
             )
         }
     )
@@ -45,8 +44,7 @@ def _invalid_multiline_command() -> str:
 
 def _invalid_multiline_import_command() -> str:
     return (
-        '{"command":"x\nimport type { Registry, EntitySnapshot } from y\n'
-        'rollback: (registry: Registry, snapshot: EntitySnapshot) => void;"'
+        '{"command":"x\nimport type { Registry, EntitySnapshot } from y\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"'
     )
 
 
@@ -98,7 +96,7 @@ def _missing_comma_command() -> str:
 
 
 def _unquoted_value_command() -> str:
-    return '{command: printf_ok}'
+    return "{command: printf_ok}"
 
 
 def _broken_inner_quotes_command() -> str:
@@ -119,10 +117,7 @@ def test_llms_json_package_reexports_strict_and_recovery_helpers() -> None:
         (_valid_multiline_command(), "x\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"),
         (
             _valid_multiline_import_command(),
-            (
-                "x\nimport type { Registry, EntitySnapshot } from y\n"
-                "rollback: (registry: Registry, snapshot: EntitySnapshot) => void;"
-            ),
+            ("x\nimport type { Registry, EntitySnapshot } from y\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"),
         ),
         (
             _valid_heredoc_command(),
@@ -134,10 +129,7 @@ def test_llms_json_package_reexports_strict_and_recovery_helpers() -> None:
         (_invalid_multiline_command(), "x\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"),
         (
             _invalid_multiline_import_command(),
-            (
-                "x\nimport type { Registry, EntitySnapshot } from y\n"
-                "rollback: (registry: Registry, snapshot: EntitySnapshot) => void;"
-            ),
+            ("x\nimport type { Registry, EntitySnapshot } from y\nrollback: (registry: Registry, snapshot: EntitySnapshot) => void;"),
         ),
         (
             _invalid_heredoc_command(),
@@ -345,7 +337,6 @@ def test_recover_handles_schema_guided_label_before_implicit_root_object() -> No
     assert result.value == {"name": "John", "age": 30}
 
 
-
 def test_recover_handles_schema_guided_root_all_of_object() -> None:
     schema = {
         "allOf": [
@@ -413,7 +404,7 @@ def test_recover_handles_schema_guided_nested_ref_and_pattern_properties() -> No
         },
     }
 
-    result = recover('{ env: { env_FOO: one, env_BAR: two } }', partial=False, schema=schema)
+    result = recover("{ env: { env_FOO: one, env_BAR: two } }", partial=False, schema=schema)
 
     assert result.outcome == Outcome.COMPLETE
     assert result.value == {"env": {"env_FOO": "one", "env_BAR": "two"}}
@@ -638,9 +629,9 @@ def test_recover_matches_useful_outputguard_commentary_extraction_cases(raw: str
         ('Para 1.\n\nPara 2.\n\n{"deep": "value"}\n\nPara 3.', {"deep": "value"}),
         ('OK here goes: {"x": 99}', {"x": 99}),
         ('{"solo": true}\n---\nfooter', {"solo": True}),
-        ('The output is: {name: \'Alice\', age: 30} and that\'s it.', {"name": "Alice", "age": 30}),
+        ("The output is: {name: 'Alice', age: 30} and that's it.", {"name": "Alice", "age": 30}),
         (
-            '```json\n{name: \'Alice\', age: 30,}\n```\nLet me know!',
+            "```json\n{name: 'Alice', age: 30,}\n```\nLet me know!",
             {"name": "Alice", "age": 30},
         ),
     ],
@@ -667,11 +658,11 @@ def test_recover_matches_more_useful_upstream_commentary_and_combined_cases(raw:
 @pytest.mark.parametrize(
     ("raw", "partial", "expected_outcome", "expected"),
     [
-        ('[1,2,3', True, Outcome.INCOMPLETE, [1, 2, 3]),
-        ('[1,2,', True, Outcome.INCOMPLETE, [1, 2]),
+        ("[1,2,3", True, Outcome.INCOMPLETE, [1, 2, 3]),
+        ("[1,2,", True, Outcome.INCOMPLETE, [1, 2]),
         ('"I am text', True, Outcome.INCOMPLETE, "I am text"),
         ('{// comment\n"a": 1}', True, Outcome.COMPLETE, {"a": 1}),
-        ('{/* incomplete comment', True, Outcome.INCOMPLETE, {}),
+        ("{/* incomplete comment", True, Outcome.INCOMPLETE, {}),
         ("'hello'", True, Outcome.COMPLETE, "hello"),
     ],
 )
@@ -754,7 +745,7 @@ def test_recover_matches_useful_outputguard_style_cases(raw: str, expected: dict
         ('{"a":1} and {"b":2} are both valid', {"a": 1}),
         ('Response:\n{"items": [{"id": 1}]}\nEnd.', {"items": [{"id": 1}]}),
         ("Here: {a: 'value', b: 42,}\nDone", {"a": "value", "b": 42}),
-        ('Sure!\n{items: [1, 2, 3,], total: 3}', {"items": [1, 2, 3], "total": 3}),
+        ("Sure!\n{items: [1, 2, 3,], total: 3}", {"items": [1, 2, 3], "total": 3}),
         ("{name: 'A', age: 1, // person\n}", {"name": "A", "age": 1}),
     ],
 )
@@ -789,7 +780,7 @@ def test_recover_preserves_useful_valid_outputguard_style_json(raw: str, expecte
 def test_recover_includes_bakeoff_syntax_cases_where_repairjson_beat_outputguard() -> None:
     cases = [
         ('{"command":"a" "other":"b"}', {"command": "a", "other": "b"}),
-        ('{command: printf_ok}', {"command": "printf_ok"}),
+        ("{command: printf_ok}", {"command": "printf_ok"}),
     ]
 
     for raw, expected in cases:
@@ -909,12 +900,12 @@ def test_recover_is_stable_on_repeated_recursive_schema_inputs() -> None:
     }
     cases = [
         (
-            '{ root: { value: one, child: { value: two, child: { value: three } } }',
+            "{ root: { value: one, child: { value: two, child: { value: three } } }",
             recursive_object_schema,
             {"root": {"value": "one", "child": {"value": "two", "child": {"value": "three"}}}},
         ),
         (
-            '{ items: [ name: a, children: [ name: b, children: [ name: c ] ] ] }',
+            "{ items: [ name: a, children: [ name: b, children: [ name: c ] ] ] }",
             recursive_array_schema,
             {"items": [{"name": "a", "children": [{"name": "b", "children": [{"name": "c"}]}]}]},
         ),

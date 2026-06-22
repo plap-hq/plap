@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import importlib
+import sys
+from functools import partial
+from importlib.metadata import EntryPoint, entry_points
 from typing import Any
 
+import anyio
 import structlog
 import svcs
-from cachetools import LRUCache
 from litestar import Litestar, Request, Response
 from litestar.channels import ChannelsPlugin
 from litestar.channels.backends.memory import MemoryChannelsBackend
@@ -14,37 +17,15 @@ from litestar.di import Provide
 from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
 
 from plap.auth import APIKeyManager
-from plap.auth.dependencies import provide_request_api_key_manager, provide_request_auth_context
-from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.auth.dependencies import auth_middleware, provide_request_auth_context
+from plap.bus import bus
+from plap.config import CueBox, load
+from plap.errors import PlapError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ChatCompletionRequest, ChatFunctionTool, ChatTool, IChatCompletionClient
-from plap.llms.completions.chat import ChatMessage as LLMChatMessage
-from plap.llms.completions.client import ChatCompletionClient, Provider
-from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
-from plap.llms.completions.providers import build_providers
-from plap.llms.completions.router import (
-    ModelRoute,
-    RoutingChatCompletionClient,
-    UnavailableChatCompletionClient,
-    _model_attempts,
-)
-from plap.llms.completions.tokens import measure_request_tokens
 from plap.logging import configure_logging
 from plap.persistence import Database
-from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.store import ResponseStore
-from plap.settings import MCPServerConfig, Settings, get_settings
 from plap.telemetry import build_telemetry, emit_access_log, request_context_middleware, shutdown_telemetry
-from plap.tools import (
-    IToolCallClassifier,
-    IToolClassifier,
-    LLMToolCallClassifier,
-    LLMToolClassifier,
-)
-from plap.tools.mcp import (
-    IMCPToolProvider,
-    MCPToolProvider,
-)
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -76,22 +57,14 @@ def _error_response(
     headers: dict[str, str] | None = None,
 ) -> Response[dict[str, Any]]:
     return Response(
-        _error_body(
-            message=message,
-            error_type=error_type,
-            code=code,
-            param=param,
-        ),
+        _error_body(message=message, error_type=error_type, code=code, param=param),
         headers=headers,
         media_type="application/json",
         status_code=status_code,
     )
 
 
-def handle_plap_error(
-    request: Request[Any, Any, Any],
-    exc: PlapError,
-) -> Response[dict[str, Any]]:
+def handle_plap_error(request: Request[Any, Any, Any], exc: PlapError) -> Response[dict[str, Any]]:
     public = exc.public or PublicError(
         status_code=500,
         type="server_error",
@@ -135,10 +108,7 @@ def handle_validation_exception(
     )
 
 
-def handle_auth_exception(
-    request: Request[Any, Any, Any],
-    exc: NotAuthorizedException,
-) -> Response[dict[str, Any]]:
+def handle_auth_exception(request: Request[Any, Any, Any], exc: NotAuthorizedException) -> Response[dict[str, Any]]:
     logger.warning(
         "response.auth_failed",
         exc_info=exc,
@@ -155,10 +125,7 @@ def handle_auth_exception(
     )
 
 
-def handle_http_exception(
-    request: Request[Any, Any, Any],
-    exc: HTTPException,
-) -> Response[dict[str, Any]]:
+def handle_http_exception(request: Request[Any, Any, Any], exc: HTTPException) -> Response[dict[str, Any]]:
     logger.warning(
         "response.http_failed",
         exc_info=exc,
@@ -174,10 +141,7 @@ def handle_http_exception(
     )
 
 
-def handle_unexpected_exception(
-    request: Request[Any, Any, Any],
-    exc: Exception,
-) -> Response[dict[str, Any]]:
+def handle_unexpected_exception(request: Request[Any, Any, Any], exc: Exception) -> Response[dict[str, Any]]:
     logger.error(
         "response.unhandled_failed",
         exc_info=exc,
@@ -193,274 +157,52 @@ def handle_unexpected_exception(
     )
 
 
-async def _shutdown_database(app: Litestar) -> None:
-    await app.state.database.dispose_all()
+def _plugins() -> dict[str, EntryPoint]:
+    discovered: dict[str, EntryPoint] = {}
+    for entrypoint in entry_points().select(group="plap.plugin"):
+        if entrypoint.name in discovered:
+            raise RuntimeError(f"duplicate plugin entrypoint: {entrypoint.name!r}")
+        discovered[entrypoint.name] = entrypoint
+    return discovered
 
 
-async def _shutdown_chat_completion_client(app: Litestar) -> None:
-    await app.state.chat_completion_client.aclose()
+def _import_plugin(entrypoint: EntryPoint) -> object:
+    module_name = entrypoint.module
+    module = sys.modules.get(module_name)
+    if module is None:
+        return importlib.import_module(module_name)
+    return importlib.reload(module)
 
 
-def _create_chat_completion_client(
-    settings: Settings,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> IChatCompletionClient:
-    routes = list(_chat_completion_routes(settings, providers=providers))
-    if not routes:
-        return UnavailableChatCompletionClient()
-    return RoutingChatCompletionClient(routes)
+@bus.emit("config.collect")
+async def _collect_config(paths: tuple[str, ...]) -> tuple[str, ...]:
+    return paths
 
 
-def _chat_completion_routes(
-    settings: Settings,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> Iterable[ModelRoute]:
-    for prefix, provider in _configured_chat_completion_providers(settings, providers=providers).items():
-        yield ModelRoute(prefix=prefix, client=ChatCompletionClient(provider))
+@bus.emit("routes.collect")
+async def _collect_routes(routes: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+    _ = loaded
+    return routes
 
 
-def _create_tool_classifier(
-    settings: Settings,
-    chat_completion_client: IChatCompletionClient,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> IToolClassifier:
-    classifier_model = settings.tool_effect_classifier_model
-    classifier_cache_model = settings.tool_effect_classifier_cache_model
-    if not _has_configured_chat_completion_route(
-        settings,
-        classifier_model,
-        providers=providers,
-    ):
-        raise PlapError(
-            public=None,
-            private=PrivateError(
-                event="app.startup_invalid",
-                reason="tool_effect_classifier_route_unconfigured",
-                message=f"tool effect classifier model does not match any configured LLM route: {classifier_model!r}",
-                level=ErrorLevel.ERROR,
-                context={"model": classifier_model},
-            ),
-        )
-    return LLMToolClassifier(
-        client=chat_completion_client,
-        classifier_model=classifier_model,
-        classifier_cache_model=classifier_cache_model,
-        max_concurrency=settings.tool_classifier_max_concurrency,
-    )
+@bus.emit("svcs.collect")
+async def _collect_svcs(registry: svcs.Registry, loaded: CueBox) -> None:
+    _ = registry, loaded
 
 
-def _create_tool_call_classifier(
-    settings: Settings,
-    chat_completion_client: IChatCompletionClient,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> IToolCallClassifier:
-    classifier_model = settings.tool_call_effect_classifier_model
-    classifier_cache_model = settings.tool_call_effect_classifier_cache_model
-    if not _has_configured_chat_completion_route(
-        settings,
-        classifier_model,
-        providers=providers,
-    ):
-        raise PlapError(
-            public=None,
-            private=PrivateError(
-                event="app.startup_invalid",
-                reason="tool_call_classifier_route_unconfigured",
-                message=f"tool call classifier model does not match any configured LLM route: {classifier_model!r}",
-                level=ErrorLevel.ERROR,
-                context={"model": classifier_model},
-            ),
-        )
-    return LLMToolCallClassifier(
-        client=chat_completion_client,
-        classifier_model=classifier_model,
-        classifier_cache_model=classifier_cache_model,
-        max_concurrency=settings.tool_classifier_max_concurrency,
-    )
+@bus.emit("shutdown.collect")
+async def _collect_shutdown(hooks: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+    _ = loaded
+    return hooks
 
 
-def _create_mcp_tool_providers(settings: Settings) -> tuple[IMCPToolProvider, ...]:
-    return tuple(_create_mcp_tool_provider(server) for server in settings.mcp_servers)
-
-
-def _create_mcp_tool_provider(server: MCPServerConfig) -> IMCPToolProvider:
-    try:
-        transport = server.mcp_config()
-    except (TypeError, ValueError) as exc:
-        raise PlapError(
-            public=None,
-            private=PrivateError(
-                event="app.startup_invalid",
-                reason="mcp_transport_invalid",
-                message=f"invalid MCP server config for {server.name!r}: {exc}",
-                level=ErrorLevel.ERROR,
-                context={"server_name": server.name},
-            ),
-        ) from exc
-    return MCPToolProvider(server.name, transport, tools=server.tools)
-
-
-def _validate_runtime_model_profiles(
-    settings: Settings,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> None:
-    for name, profile in settings.runtime_model_profiles.items():
-        for model in profile.all_models():
-            if not _has_configured_chat_completion_route(settings, model, providers=providers):
-                raise PlapError(
-                    public=None,
-                    private=PrivateError(
-                        event="app.startup_invalid",
-                        reason="runtime_profile_route_unconfigured",
-                        message=f"runtime model profile references an unconfigured LLM route: {name!r} -> {model!r}",
-                        level=ErrorLevel.ERROR,
-                        context={"model": model, "runtime_model_profile": name},
-                    ),
-                )
-
-
-def _runtime_profile_actors(settings: Settings) -> Iterable[tuple[str, str, object]]:
-    for profile_name, profile in settings.runtime_model_profiles.items():
-        yield profile_name, "main", profile.main
-        yield profile_name, "compactor", profile.compactor
-        yield profile_name, "defender", profile.defender
-        yield profile_name, "reviewer", profile.reviewer
-        yield profile_name, "arbitrator", profile.arbitrator
-        yield profile_name, "reasoning_summarizer", profile.reasoning_summarizer
-
-
-def _validate_runtime_profile_tokenizers(settings: Settings) -> None:
-    validated: set[tuple[str, str | None, bool]] = set()
-    probe_request = ChatCompletionRequest(
-        model="tokenizer-probe",
-        messages=[
-            LLMChatMessage(role="developer", content="Tokenization probe."),
-            LLMChatMessage(role="user", content="hello"),
-        ],
-        tools=[
-            ChatTool(
-                function=ChatFunctionTool(
-                    name="probe_tool",
-                    description="Probe tool",
-                    parameters={
-                        "type": "object",
-                        "properties": {"value": {"type": "string"}},
-                    },
-                )
-            )
-        ],
-    )
-    for profile_name, actor_name, actor_config in _runtime_profile_actors(settings):
-        if actor_config.tokenizer_hf_repo is None:
-            continue
-        tokenizer_key = (
-            actor_config.tokenizer_hf_repo,
-            actor_config.tokenizer_revision,
-            actor_config.tokenizer_trust_remote_code,
-        )
-        if tokenizer_key in validated:
-            continue
-        try:
-            measure_request_tokens(probe_request, tokenizer_config=actor_config)
-        except Exception as exc:
-            raise PlapError(
-                public=None,
-                private=PrivateError(
-                    event="app.startup_invalid",
-                    reason="runtime_profile_tokenizer_invalid",
-                    message=(
-                        "runtime model profile tokenizer validation failed: "
-                        f"{profile_name!r}.{actor_name} -> {actor_config.tokenizer_hf_repo!r}"
-                    ),
-                    level=ErrorLevel.ERROR,
-                    cause=exc,
-                    context={
-                        "actor": actor_name,
-                        "runtime_model_profile": profile_name,
-                        "tokenizer_hf_repo": actor_config.tokenizer_hf_repo,
-                        "tokenizer_revision": actor_config.tokenizer_revision,
-                        "tokenizer_trust_remote_code": actor_config.tokenizer_trust_remote_code,
-                    },
-                ),
-            ) from exc
-        validated.add(tokenizer_key)
-
-
-def _configured_chat_completion_providers(
-    settings: Settings,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> dict[str, Provider]:
-    if providers is not None:
-        return providers
-    return build_providers(settings)
-
-
-def _configured_chat_completion_prefixes(
-    settings: Settings,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> Iterable[str]:
-    yield from _configured_chat_completion_providers(settings, providers=providers)
-
-
-def _configured_chat_completion_provider(
-    settings: Settings,
-    model: str,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> tuple[str, Provider] | None:
-    best: tuple[str, Provider] | None = None
-    for prefix, provider in _configured_chat_completion_providers(settings, providers=providers).items():
-        if not model.startswith(prefix):
-            continue
-        if best is None or len(prefix) > len(best[0]):
-            best = (prefix, provider)
-    return best
-
-
-def _has_configured_chat_completion_route_entry(
-    settings: Settings,
-    model: str,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> bool:
-    configured = _configured_chat_completion_provider(settings, model, providers=providers)
-    if configured is None:
-        return False
-    prefix, provider = configured
-    provider_model = model.removeprefix(prefix)
-    if not provider_model:
-        return False
-    try:
-        provider.lookup(provider_model)
-    except ChatCompletionUnsupportedRequestError:
-        return False
-    return True
-
-
-def _has_configured_chat_completion_route(
-    settings: Settings,
-    model: str,
-    *,
-    providers: dict[str, Provider] | None = None,
-) -> bool:
-    try:
-        return all(
-            _has_configured_chat_completion_route_entry(
-                settings,
-                attempt,
-                providers=providers,
-            )
-            for attempt in _model_attempts(model)
-        )
-    except ChatCompletionUnsupportedRequestError:
-        return False
+def _sealing_keys(config: CueBox) -> list[str]:
+    raw = config.sealing_keys
+    if isinstance(raw, list):
+        return [str(value) for value in raw if str(value).strip()]
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    raise TypeError(f"config.sealing_keys must be a string or list, got {type(raw).__name__}")
 
 
 def provide_svcs(request: Request[Any, Any, Any]) -> svcs.Container:
@@ -470,94 +212,107 @@ def provide_svcs(request: Request[Any, Any, Any]) -> svcs.Container:
     return container
 
 
-async def cleanup_svcs(request: Request[Any, Any, Any], _response: Any) -> None:
-    container: svcs.Container | None = getattr(request.state, "svcs_container", None)
-    if container is not None:
+async def cleanup_svcs(message: Any, scope: dict[str, Any]) -> None:
+    scope_type = scope.get("type")
+    if scope_type == "http":
+        if message.get("type") != "http.response.body" or bool(message.get("more_body", False)):
+            return
+    elif scope_type == "websocket":
+        if message.get("type") != "websocket.close":
+            return
+    else:
+        return
+
+    state = scope.get("state")
+    if not isinstance(state, dict):
+        return
+    container = state.get("svcs_container")
+    if isinstance(container, svcs.Container):
         await container.aclose()
 
 
-def create_app(settings: Settings | None = None) -> Litestar:
-    resolved_settings = settings or get_settings()
+async def _shutdown_database(app: Litestar) -> None:
+    await app.state.database.dispose_all()
+
+
+async def _shutdown_svcs_registry(app: Litestar) -> None:
+    await app.state.svcs_registry.aclose()
+
+
+def create_app() -> Litestar:
+    discovered = _plugins()
+    if "core" not in discovered:
+        raise RuntimeError("missing required plugin entrypoint 'core'")
+
+    # Clear any listeners left from prior imports so the bus reflects only the
+    # bootstrap plugin set.
+    bus.reset()
+    _import_plugin(discovered["core"])
+
+    core_paths = anyio.run(partial(_collect_config, paths=()))
+    loaded = load(*core_paths)
+    if "plap" not in loaded:
+        raise RuntimeError("config load did not produce package 'plap'")
+    config = loaded.plap.config
+
+    plugin_names = list(config.plugins)
+    if "core" not in plugin_names:
+        raise RuntimeError("config.plugins must include 'core'")
+
+    # Boostrap only imported core so we could read the plugin allowlist. Rebuild
+    # the bus from the canonical config order for the final config load.
+    bus.reset()
+    for name in plugin_names:
+        entrypoint = discovered.get(name)
+        if entrypoint is None:
+            raise RuntimeError(f"config requested unknown plugin: {name!r}")
+        _import_plugin(entrypoint)
+
+    final_paths = anyio.run(partial(_collect_config, paths=()))
+    loaded = load(*final_paths)
+    if "plap" not in loaded:
+        raise RuntimeError("config load did not produce package 'plap'")
+    config = loaded.plap.config
+
     telemetry = build_telemetry()
-    configure_logging(resolved_settings, handlers=(telemetry.log_handler,))
-    providers = _configured_chat_completion_providers(resolved_settings)
-    try:
-        chat_completion_client = _create_chat_completion_client(
-            resolved_settings,
-            providers=providers,
-        )
-        tool_classifier = _create_tool_classifier(
-            resolved_settings,
-            chat_completion_client,
-            providers=providers,
-        )
-        tool_call_classifier = _create_tool_call_classifier(
-            resolved_settings,
-            chat_completion_client,
-            providers=providers,
-        )
-        mcp_tool_providers = _create_mcp_tool_providers(resolved_settings)
-        _validate_runtime_model_profiles(
-            resolved_settings,
-            providers=providers,
-        )
-        _validate_runtime_profile_tokenizers(resolved_settings)
-    except PlapError as exc:
-        exc.log(logger)
-        raise
+    configure_logging(config, handlers=(telemetry.log_handler,))
+
     logger.info(
         "app.startup",
-        foreign_log_level=resolved_settings.foreign_log_level,
-        log_level=resolved_settings.log_level,
-        mcp_servers=[server.name for server in resolved_settings.mcp_servers],
-        provider_routes=sorted(
-            _configured_chat_completion_prefixes(
-                resolved_settings,
-                providers=providers,
-            )
-        ),
-        runtime_models=sorted(resolved_settings.runtime_model_profiles),
+        foreign_log_level=config.foreign_log_level,
+        log_level=config.log_level,
+        plugins=plugin_names,
     )
-    database = Database(resolved_settings.database_url)
+
+    database = Database(config.database_url)
+    keyring = SealingKeyring.from_encoded(_sealing_keys(config))
+    api_key_manager = APIKeyManager(pepper=config.api_key_pepper)
 
     registry = svcs.Registry()
-    registry.register_value(Settings, resolved_settings)
+    registry.register_value(CueBox, loaded)
     registry.register_value(Database, database)
-    registry.register_value(IChatCompletionClient, chat_completion_client)
-    registry.register_value(SealingKeyring, SealingKeyring.from_encoded(resolved_settings.sealing_keys))
-    registry.register_value(IToolClassifier, tool_classifier)
-    registry.register_value(IToolCallClassifier, tool_call_classifier)
-    registry.register_value(
-        tuple[IMCPToolProvider, ...],
-        mcp_tool_providers,
-    )
-    registry.register_factory(
-        ResponseStore,
-        lambda svcs_container: ResponseStore(svcs_container.get(Database)),
-    )
+    registry.register_value(SealingKeyring, keyring)
+    registry.register_factory(ResponseStore, lambda svcs_container: ResponseStore(svcs_container.get(Database)))
+    anyio.run(partial(_collect_svcs, registry=registry, loaded=loaded))
+
+    routes = anyio.run(partial(_collect_routes, routes=(), loaded=loaded))
+    shutdown_hooks = anyio.run(partial(_collect_shutdown, hooks=(), loaded=loaded))
 
     state = State(
         {
-            "api_key_manager": APIKeyManager(pepper=resolved_settings.api_key_pepper),
-            "chat_completion_client": chat_completion_client,
+            "api_key_manager": api_key_manager,
+            "config": loaded,
             "database": database,
-            "runtime_model_profiles": resolved_settings.runtime_model_profiles,
-            "sealing_keyring": SealingKeyring.from_encoded(resolved_settings.sealing_keys),
-            "settings": resolved_settings,
+            "sealing_keyring": keyring,
             "svcs_registry": registry,
-            "tool_call_classifier": tool_call_classifier,
-            "tool_call_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_call_policy_l1_maxsize),
-            "tool_classifier": tool_classifier,
-            "tool_policy_l1_cache": LRUCache(maxsize=resolved_settings.tool_policy_l1_maxsize),
-            "mcp_tool_providers": mcp_tool_providers,
         }
     )
 
     return Litestar(
-        route_handlers=RESPONSE_ROUTE_HANDLERS,
+        route_handlers=routes,
         before_send=[emit_access_log, cleanup_svcs],
         logging_config=None,
-        middleware=[request_context_middleware],
+        middleware=[request_context_middleware, auth_middleware],
         plugins=[
             telemetry.plugin,
             ChannelsPlugin(
@@ -568,8 +323,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
         ],
         dependencies={
             "svcs": Provide(provide_svcs, use_cache=True, sync_to_thread=False),
-            "api_key_manager": Provide(provide_request_api_key_manager, use_cache=True, sync_to_thread=False),
-            "auth_context": Provide(provide_request_auth_context),
+            "auth_context": Provide(provide_request_auth_context, use_cache=True, sync_to_thread=False),
         },
         exception_handlers={
             HTTPException: handle_http_exception,
@@ -579,10 +333,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
             Exception: handle_unexpected_exception,
         },
         on_shutdown=[
-            _shutdown_chat_completion_client,
+            *shutdown_hooks,
             _shutdown_database,
             shutdown_telemetry,
-            lambda app: app.state.svcs_registry.close(),
+            _shutdown_svcs_registry,
         ],
         state=state,
     )

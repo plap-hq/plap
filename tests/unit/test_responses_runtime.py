@@ -2,26 +2,28 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import partial
+from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
 
 import anyio
 import pytest
+import svcs
+from box import Box
 from pydantic import TypeAdapter
 
+from plap.config import CueBox
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage
+from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
+from plap.plugins.core.turn import UsageLedger, run_turn
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
 from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
-from plap.responses.runner import State, UsageLedger
-from plap.responses.runtime import run_response
+from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
-from plap.settings import PublicUsageConfig, Settings
-from plap.tools import StaticToolCallPolicyResolver, StaticToolPolicyResolver
 
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
 
@@ -76,6 +78,10 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
+def _side_codes() -> dict[str, int]:
+    return {MAIN_SIDE: 0}
+
+
 def _request(**updates: object) -> ResponseCreateRequest:
     return ResponseCreateRequest(model="plap-ai/wisp-mini", input="hello", **updates)
 
@@ -104,8 +110,87 @@ def _ingested() -> Ingested:
     )
 
 
-def _settings() -> Settings:
-    return Settings(api_key_pepper="pepper", database_url="postgres://example", sealing_keys=["key"])
+class _Config(Box):
+    def resolve(self, request: dict[str, object] | None = None, /, **kwargs: object) -> _Config:
+        _ = request, kwargs
+        return self
+
+
+def _config() -> _Config:
+    return _Config(
+        {
+            "display_name": "Test Model",
+            "model_info": {
+                "display_name": "Test Model",
+                "description": "test",
+                "mode": "responses",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "max_input_tokens": 8192,
+                "max_output_tokens": 2048,
+                "supported_parameters": [],
+                "pricing": {"input_per_token": 0.0, "output_per_token": 0.0},
+                "provider": "plap",
+                "deprecated": False,
+            },
+            "main": {
+                "model": "test-model",
+                "max_completion_tokens": None,
+                "tokenizer_hf_repo": None,
+                "tokenizer_revision": None,
+                "tokenizer_trust_remote_code": False,
+                "reasoning_effort": None,
+                "service_tier": None,
+                "public_usage": {
+                    "uncached_input_to_output": 0.25,
+                    "cached_input_to_output": 0.05,
+                    "output_to_output": 1.0,
+                },
+                "sampling": {
+                    "temperature": None,
+                    "top_p": None,
+                    "top_logprobs": None,
+                },
+            },
+            "reasoning_summarizer": {
+                "model": "test-summarizer",
+                "max_completion_tokens": None,
+                "tokenizer_hf_repo": None,
+                "tokenizer_revision": None,
+                "tokenizer_trust_remote_code": False,
+                "reasoning_effort": None,
+                "service_tier": None,
+                "public_usage": {
+                    "uncached_input_to_output": 0.25,
+                    "cached_input_to_output": 0.05,
+                    "output_to_output": 1.0,
+                },
+                "sampling": {
+                    "temperature": None,
+                    "top_p": None,
+                    "top_logprobs": None,
+                },
+            },
+            "reasoning_to_output": 1.0,
+        },
+        frozen_box=True,
+    )
+
+
+def _loaded(config: _Config | None = None) -> object:
+    return SimpleNamespace(plap=SimpleNamespace(config=config or _config()))
+
+
+def _public_usage(**updates: object) -> Box:
+    return Box(
+        {
+            "uncached_input_to_output": 0.25,
+            "cached_input_to_output": 0.05,
+            "output_to_output": 1.0,
+            **updates,
+        },
+        frozen_box=True,
+    )
 
 
 def _coordinator(
@@ -131,10 +216,34 @@ def _last_output_item(coordinator: StreamCoordinator):
     return coordinator.current_response().output[-1]
 
 
-def _state(store: _RecordingStore | None = None, channels: _RecordingChannels | None = None) -> State:
+def _svcs(*, client: object | None = None, config: _Config | None = None) -> svcs.Container:
+    registry = svcs.Registry()
+    registry.register_value(SealingKeyring, _keyring())
+    registry.register_value(CueBox, _loaded(config))
+    registry.register_value(IChatCompletionClient, client if client is not None else object())
+    return svcs.Container(registry)
+
+
+def _state(
+    store: _RecordingStore | None = None,
+    channels: _RecordingChannels | None = None,
+    *,
+    request: ResponseCreateRequest | None = None,
+    client: object | None = None,
+    config: _Config | None = None,
+    ingested: Ingested | None = None,
+) -> State:
     actual_store = store or _RecordingStore()
     actual_channels = channels or _RecordingChannels()
-    return State.from_ingested(_coordinator(actual_store, actual_channels), _keyring(), _ingested())
+    actual_request = request or _request()
+    return State.from_ingested(
+        ingested=ingested or _ingested(),
+        prepared=_prepared(actual_request),
+        svcs=_svcs(client=client, config=config),
+        coordinator=_coordinator(actual_store, actual_channels, actual_request),
+        sealing_keyring=_keyring(),
+        side_codes=_side_codes(),
+    )
 
 
 def _usage(
@@ -210,7 +319,7 @@ class _FakeReasoningSummarizer:
 
 def test_usage_ledger_returns_none_without_input_anchor() -> None:
     ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
-    ledger.record_output(PublicUsageConfig(), _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5))
+    ledger.record_output(_public_usage(), _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5))
 
     assert ledger.to_response_usage() is None
 
@@ -220,7 +329,7 @@ def test_usage_ledger_scales_single_visible_usage() -> None:
     usage = _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5)
 
     ledger.set_input_anchor(usage)
-    ledger.record_output(PublicUsageConfig(), usage)
+    ledger.record_output(_public_usage(), usage)
 
     response_usage = ledger.to_response_usage()
     assert response_usage is not None
@@ -237,9 +346,9 @@ def test_usage_ledger_hidden_usage_is_squashed_into_reasoning_tokens() -> None:
     hidden_usage = _usage(input_tokens=80, output_tokens=15)
     output_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=2, reasoning_tokens=1)
 
-    ledger.record_hidden(PublicUsageConfig(), hidden_usage)
+    ledger.record_hidden(_public_usage(), hidden_usage)
     ledger.set_input_anchor(output_usage)
-    ledger.record_output(PublicUsageConfig(), output_usage)
+    ledger.record_output(_public_usage(), output_usage)
 
     response_usage = ledger.to_response_usage()
     assert response_usage is not None
@@ -256,7 +365,7 @@ def test_usage_ledger_promoted_hidden_output_keeps_hidden_debit_and_visible_floo
     hidden_usage = _usage(input_tokens=20, output_tokens=9, reasoning_tokens=3)
     input_anchor = _usage(input_tokens=4, output_tokens=0, cached_tokens=1)
 
-    hidden_index = ledger.record_hidden(PublicUsageConfig(), hidden_usage)
+    hidden_index = ledger.record_hidden(_public_usage(), hidden_usage)
     assert hidden_index == 0
     assert ledger.remaining() == 86
 
@@ -274,7 +383,7 @@ def test_usage_ledger_promoted_hidden_output_keeps_hidden_debit_and_visible_floo
 
 
 def test_usage_ledger_clamps_output_tokens_to_visible_floor_for_discounted_visible_actor() -> None:
-    cheap_output = PublicUsageConfig(output_to_output=0.5)
+    cheap_output = _public_usage(output_to_output=0.5)
     usage = _usage(input_tokens=10, output_tokens=20, reasoning_tokens=5)
     ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
 
@@ -302,7 +411,7 @@ def test_usage_ledger_rejects_duplicate_input_anchor() -> None:
 
 def test_usage_ledger_rejects_duplicate_hidden_output_promotion() -> None:
     ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
-    hidden_index = ledger.record_hidden(PublicUsageConfig(), _usage(input_tokens=10, output_tokens=4))
+    hidden_index = ledger.record_hidden(_public_usage(), _usage(input_tokens=10, output_tokens=4))
     assert hidden_index == 0
 
     ledger.promote_hidden_to_output(hidden_index)
@@ -315,7 +424,6 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
     channels = _RecordingChannels()
     store = _RecordingStore()
     request = _request()
-    coordinator = _coordinator(store, channels, request)
     client = _StubChatClient(
         [
             _delta(content_delta="hel"),
@@ -326,9 +434,11 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
             ),
         ]
     )
-
-    await run_response(
-        prepared=_prepared(request),
+    state = _state(
+        store,
+        channels,
+        request=request,
+        client=client,
         ingested=Ingested(
             machine={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
@@ -336,21 +446,16 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
             last_reasoning_id=None,
             current_compaction_id=None,
         ),
-        coordinator=coordinator,
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=client,
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
     )
+
+    await run_turn(state=state)
 
     assert store.begin_calls == 1
     assert store.cancel_calls == 0
     assert store.fail_calls == 0
     assert store.replace_calls == 0
     assert store.finish_calls == 1
-    response = coordinator.current_response()
+    response = state.coordinator.current_response()
     assert response.status == "completed"
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseMessageItem)
@@ -362,21 +467,11 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
 async def test_run_response_cancellation_before_created_is_noop() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    coordinator = _coordinator(store, channels)
+    state = _state(store, channels, client=object())
 
     with anyio.CancelScope() as cancel_scope:
         cancel_scope.cancel()
-        await run_response(
-            prepared=_prepared(),
-            ingested=_ingested(),
-            coordinator=coordinator,
-            sealing_keyring=_keyring(),
-            settings=_settings(),
-            chat_completion_client=object(),
-            tool_policy_resolver=StaticToolPolicyResolver(),
-            tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-            mcp_tool_providers=(),
-        )
+        await run_turn(state=state)
 
     assert store.begin_calls == 0
     assert store.cancel_calls == 0
@@ -387,29 +482,21 @@ async def test_run_response_cancellation_before_created_is_noop() -> None:
 async def test_run_response_cancellation_after_created_persists_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    coordinator = _coordinator(store, channels)
+    state = _state(store, channels, client=object())
     body_started = anyio.Event()
 
-    async def _block(**kwargs) -> None:
+    async def _block(**kwargs):
         _ = kwargs
         body_started.set()
         await anyio.sleep(10)
 
-    monkeypatch.setattr("plap.responses.runtime.execute", _block)
+    monkeypatch.setattr("plap.plugins.core.turn.stream_response_turn", _block)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(
             partial(
-                run_response,
-                prepared=_prepared(),
-                ingested=_ingested(),
-                coordinator=coordinator,
-                sealing_keyring=_keyring(),
-                settings=_settings(),
-                chat_completion_client=object(),
-                tool_policy_resolver=StaticToolPolicyResolver(),
-                tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-                mcp_tool_providers=(),
+                run_turn,
+                state=state,
             ),
         )
         await body_started.wait()
@@ -418,7 +505,7 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
     assert store.begin_calls == 1
     assert store.cancel_calls == 1
     assert store.fail_calls == 0
-    assert coordinator.current_response().status == "cancelled"
+    assert state.coordinator.current_response().status == "cancelled"
     assert _published_event_types(channels) == [
         "response.created",
         "response.in_progress",
@@ -433,7 +520,6 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
         max_output_tokens=20,
         tools=[{"type": "function", "name": "good", "parameters": {"type": "object"}}],
     )
-    coordinator = _coordinator(store, channels, request)
     client = _StubChatClient(
         [
             _delta(
@@ -450,24 +536,15 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
             )
         ],
     )
+    state = _state(store, channels, request=request, client=client)
 
-    await run_response(
-        prepared=_prepared(request),
-        ingested=_ingested(),
-        coordinator=coordinator,
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=client,
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
-    )
+    await run_turn(state=state)
 
     assert len(client.requests) == 2
     assert client.requests[0].max_completion_tokens == 20
     assert client.requests[1].max_completion_tokens == 6
 
-    response = coordinator.current_response()
+    response = state.coordinator.current_response()
     assert response.status == "completed"
     assert response.usage is not None
     assert response.usage.input_tokens == 20
@@ -488,7 +565,6 @@ async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.
     channels = _RecordingChannels()
     store = _RecordingStore()
     request = _request(reasoning={"summary": "concise"})
-    coordinator = _coordinator(store, channels, request)
     client = _StubChatClient(
         [
             _delta(content_delta="he", reasoning_delta="private "),
@@ -500,22 +576,13 @@ async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.
             ),
         ]
     )
-    monkeypatch.setattr("plap.responses.runner.ChatReasoningSummarizer", _FakeReasoningSummarizer)
+    state = _state(store, channels, request=request, client=client)
+    monkeypatch.setattr("plap.plugins.core.turn.ChatReasoningSummarizer", _FakeReasoningSummarizer)
 
-    await run_response(
-        prepared=_prepared(request),
-        ingested=_ingested(),
-        coordinator=coordinator,
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=client,
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
-    )
+    await run_turn(state=state)
 
     assert store.replace_calls == 2
-    response = coordinator.current_response()
+    response = state.coordinator.current_response()
     assert response.status == "completed"
     assert isinstance(response.output[0], ResponseReasoningItem)
     assert response.output[0].summary[0].text == "summary part"
@@ -531,7 +598,6 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
         max_output_tokens=10,
         tools=[{"type": "function", "name": "good", "parameters": {"type": "object"}}],
     )
-    coordinator = _coordinator(store, channels, request)
     client = _StubChatClient(
         [
             _delta(
@@ -541,20 +607,11 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
             )
         ]
     )
+    state = _state(store, channels, request=request, client=client)
 
-    await run_response(
-        prepared=_prepared(request),
-        ingested=_ingested(),
-        coordinator=coordinator,
-        sealing_keyring=_keyring(),
-        settings=_settings(),
-        chat_completion_client=client,
-        tool_policy_resolver=StaticToolPolicyResolver(),
-        tool_call_policy_resolver=StaticToolCallPolicyResolver(),
-        mcp_tool_providers=(),
-    )
+    await run_turn(state=state)
 
-    response = coordinator.current_response()
+    response = state.coordinator.current_response()
     assert response.status == "incomplete"
     assert response.incomplete_details is not None
     assert response.incomplete_details.reason == "max_output_tokens"
@@ -579,7 +636,7 @@ async def test_state_flush_persists_stubbed_open_tail_calls() -> None:
 
     await state.flush()
 
-    item = _last_output_item(state._coordinator)
+    item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.sides.main[0].is_assistant()
@@ -599,7 +656,7 @@ async def test_state_flush_preserves_explicit_empty_side() -> None:
 
     await state.flush()
 
-    item = _last_output_item(state._coordinator)
+    item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert "reviewer" in payload.sides.patches
@@ -623,7 +680,7 @@ async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> No
 
     await state.finalize()
 
-    response = state._coordinator.current_response()
+    response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert isinstance(reasoning_payload.sides.main[0], MessagePatch)
@@ -648,7 +705,7 @@ async def test_state_finalize_keeps_closed_assistant_with_user_tail_hidden() -> 
 
     await state.finalize()
 
-    response = state._coordinator.current_response()
+    response = state.coordinator.current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -672,7 +729,7 @@ async def test_state_compaction_finishes_empty_reasoning_then_rebases() -> None:
 
     await state.compaction(created_by="runtime")
 
-    response = state._coordinator.current_response()
+    response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert reasoning_payload.machine == []

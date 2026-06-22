@@ -22,32 +22,38 @@ def _check_no_next(fn: Callable) -> tuple[str, ...]:
     return params
 
 
-def _run(handlers: list, kwargs: dict[str, Any]) -> ...:
-    """Build and run the handler chain, returning a coroutine."""
-    idx = -1
-
-    async def next() -> None:
-        nonlocal idx
-        idx += 1
-        if idx >= len(handlers):
-            return
-        h = handlers[idx]
-        resolved = {k: kwargs[k] for k in h.params if k in kwargs}
-        if "next" in h.params:
-            await h.fn(**resolved, next=next)
-        else:
-            await h.fn(**resolved)
-            await next()
-
-    return next()
-
-
 class _Handler:
     __slots__ = ("fn", "params")
 
     def __init__(self, fn: Callable, params: tuple[str, ...]) -> None:
         self.fn = fn
         self.params = params
+
+
+def _run(handlers: list[_Handler], kwargs: dict[str, Any], terminal: _Handler | None = None):
+    """Build and run the handler chain, returning a coroutine."""
+
+    async def dispatch(index: int, current: dict[str, Any]):
+        if index >= len(handlers):
+            if terminal is None:
+                return None
+            resolved = {key: current[key] for key in terminal.params if key in current}
+            return await terminal.fn(**resolved)
+
+        handler = handlers[index]
+        resolved = {key: current[key] for key in handler.params if key in current}
+
+        async def next(**overrides: Any):
+            downstream = current if not overrides else {**current, **overrides}
+            return await dispatch(index + 1, downstream)
+
+        if "next" in handler.params:
+            return await handler.fn(**resolved, next=next)
+
+        await handler.fn(**resolved)
+        return await next()
+
+    return dispatch(0, kwargs)
 
 
 class _Emit:
@@ -60,10 +66,10 @@ class _Emit:
     def __call__(self, fn: object = None, **kwargs: Any) -> Any:
         if fn is not None and callable(fn):
             params = _check_no_next(fn)
-            self._handlers[self._name].append(_Handler(fn, params))
+            terminal = _Handler(fn, params)
 
-            async def dispatch(**d: Any) -> None:
-                await _run(list(self._handlers[self._name]), d)
+            async def dispatch(**d: Any):
+                return await _run(list(self._handlers[self._name]), d, terminal)
 
             return dispatch
         if not kwargs:
@@ -110,6 +116,9 @@ class EventBus:
             return fn
 
         return decorate
+
+    def reset(self) -> None:
+        self._handlers.clear()
 
 
 bus = EventBus()

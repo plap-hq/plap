@@ -122,14 +122,12 @@ def _starts_with_schema_key(text: str, schema: dict[str, Any] | None, *, specifi
                 key = text[start:index]
                 index = _skip_ignorable(text, index + 1)
                 return (
-                        index < len(text)
-                        and text[index] == ":"
-                        and bool(key)
-                        and (
-                            _schema_accepts_specific_key(schema, None, (), key)
-                            if specific_only
-                            else _schema_accepts_key(schema, None, (), key)
-                        )
+                    index < len(text)
+                    and text[index] == ":"
+                    and bool(key)
+                    and (
+                        _schema_accepts_specific_key(schema, None, (), key) if specific_only else _schema_accepts_key(schema, None, (), key)
+                    )
                 )
             index += 1
         return False
@@ -138,8 +136,10 @@ def _starts_with_schema_key(text: str, schema: dict[str, Any] | None, *, specifi
         return False
     key = match.group(0)
     index = _skip_ignorable(text, match.end())
-    return index < len(text) and text[index] == ":" and (
-        _schema_accepts_specific_key(schema, None, (), key) if specific_only else _schema_accepts_key(schema, None, (), key)
+    return (
+        index < len(text)
+        and text[index] == ":"
+        and (_schema_accepts_specific_key(schema, None, (), key) if specific_only else _schema_accepts_key(schema, None, (), key))
     )
 
 
@@ -439,7 +439,7 @@ class _Parser:
         next_quote = self._find_next_unescaped_quote(quote, self._index)
         if next_quote is None:
             return False
-        between = self._text[self._index:next_quote]
+        between = self._text[self._index : next_quote]
         if not between.strip():
             return False
         if between != between.strip():
@@ -505,9 +505,7 @@ class _Parser:
                     return _decode_relaxed_string("".join(parts))
                 if not saw_nonclosing_quote and self._should_capture_string_expression(quote, start_index):
                     self._index = start_index
-                    return _parity_normalize_quoted_expression(
-                        self._capture_greedy_value(path, object_value=object_value)
-                    )
+                    return _parity_normalize_quoted_expression(self._capture_greedy_value(path, object_value=object_value))
                 saw_nonclosing_quote = True
                 parts.append(char)
                 continue
@@ -535,7 +533,7 @@ class _Parser:
         if not saw_digit:
             self._index = start
             return None
-        return self._text[start:self._index]
+        return self._text[start : self._index]
 
     def _capture_greedy_value(self, path: tuple[str | int, ...], *, object_value: bool) -> str:
         start = self._index
@@ -574,16 +572,16 @@ class _Parser:
                 if char in "]}":
                     break
             self._index += 1
-        return self._text[start:self._index].strip()
+        return self._text[start : self._index].strip()
 
     def _capture_number_token(self) -> str:
         start = self._index
         while self._index < len(self._text):
             char = self._text[self._index]
-            if char.isspace() or char in ',]}"\'[{()':
+            if char.isspace() or char in ",]}\"'[{()":
                 break
             self._index += 1
-        return self._text[start:self._index]
+        return self._text[start : self._index]
 
     def _parse_number_or_token(self, path: tuple[str | int, ...], *, object_value: bool) -> Any:
         char = self._peek()
@@ -789,10 +787,14 @@ def recover(text: str, *, partial: bool, schema: dict[str, Any] | None = None) -
         if not has_container and not _schema_expects_object(schema, ()) and not _is_simple_top_level_token(prepared):
             return Result(outcome=Outcome.REJECTED, value=None)
         specific_root_keys = _schema_has_specific_root_keys(schema)
-        if not has_container and _schema_expects_object(schema, ()) and not _starts_with_schema_key(
-            prepared,
-            schema,
-            specific_only=specific_root_keys,
+        if (
+            not has_container
+            and _schema_expects_object(schema, ())
+            and not _starts_with_schema_key(
+                prepared,
+                schema,
+                specific_only=specific_root_keys,
+            )
         ):
             prepared = _trim_to_first_schema_key(prepared, schema)
             if not _starts_with_schema_key(prepared, schema, specific_only=specific_root_keys):

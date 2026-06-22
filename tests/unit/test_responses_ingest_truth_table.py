@@ -765,7 +765,7 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
-from plap.responses.ingest.ingest import ingest_response_request
+from plap.responses.ingest.ingest import ingest_response_request as _ingest_response_request_impl
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
@@ -780,8 +780,10 @@ from plap.responses.ingest.models import (
 )
 from plap.responses.ingest.sealing import (
     open_reasoning_payload,
-    seal_call_id,
     seal_reasoning_payload,
+)
+from plap.responses.ingest.sealing import (
+    seal_call_id as _seal_call_id_impl,
 )
 
 
@@ -806,6 +808,23 @@ class _DiscardCase:
 
 def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
+
+
+def _side_codes() -> dict[str, int]:
+    return {
+        MAIN_SIDE: 0,
+        "defender": 1,
+        "reviewer": 2,
+        "arbitrator": 3,
+    }
+
+
+async def ingest_response_request(request: ResponseCreateRequest, *, keyring: SealingKeyring):
+    return await _ingest_response_request_impl(request, keyring=keyring, side_codes=_side_codes())
+
+
+def seal_call_id(value: CallID, *, keyring: SealingKeyring) -> str:
+    return _seal_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
 
 
 _REASONING_PAYLOAD_COUNTER = count()

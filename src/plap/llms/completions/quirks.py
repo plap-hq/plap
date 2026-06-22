@@ -247,9 +247,7 @@ class RejectMessageField(Quirk):
             if _nested_mapping_get(target, self._path) is None:
                 continue
             label = ".".join(self._path)
-            raise ChatCompletionUnsupportedRequestError(
-                f"message field {label!r} is not supported for model {call.request.model!r}"
-            )
+            raise ChatCompletionUnsupportedRequestError(f"message field {label!r} is not supported for model {call.request.model!r}")
 
 
 class DropToolFunctionField(Quirk):

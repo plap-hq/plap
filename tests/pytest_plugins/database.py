@@ -15,17 +15,16 @@ from testcontainers.postgres import PostgresContainer
 
 from plap.auth import APIKeyManager, IssuedAPIKey, normalize_email
 from plap.persistence import create_database_engine, create_session_maker
-from plap.persistence.models import (
-    Organization,
-    OrganizationMembership,
-    SSOProvider,
-    User,
-    UserEmail,
-    UserIdentity,
-)
-from plap.settings import RuntimeActorConfig, RuntimeModelInfoConfig, RuntimeModelPricingConfig, RuntimeModelProfileConfig, Settings
+from plap.persistence.models import Organization, OrganizationMembership, SSOProvider, User, UserEmail, UserIdentity
 
 POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
+
+
+@dataclass(frozen=True, slots=True)
+class TestConfig:
+    api_key_pepper: str
+    database_url: str
+    sealing_keys: list[str]
 
 
 def _to_asyncpg_url(url: str) -> str:
@@ -82,58 +81,10 @@ def _ensure_postgres_image() -> None:
 
 
 @pytest.fixture(scope="session")
-def test_settings(postgres_container: PostgresContainer) -> Settings:
-    return Settings(
+def test_config(postgres_container: PostgresContainer) -> TestConfig:
+    return TestConfig(
         api_key_pepper="test-pepper",
         database_url=_to_asyncpg_url(postgres_container.get_connection_url()),
-        llm_api_keys={
-            "cerebras": "test-cerebras-key",
-            "crof": "test-crof-key",
-            "groq": "test-groq-key",
-            "lightning": "test-lightning-key",
-            "openrouter": "test-openrouter-key",
-        },
-        mcp_servers=[],
-        runtime_model_profiles={
-            "plap/test": RuntimeModelProfileConfig(
-                display_name="Test Model",
-                model_info=RuntimeModelInfoConfig(
-                    display_name="Test Model",
-                    description="Test synthetic profile.",
-                    mode="responses",
-                    input_modalities=["text"],
-                    output_modalities=["text"],
-                    max_input_tokens=8192,
-                    max_output_tokens=2048,
-                    supported_parameters=[
-                        "context_management",
-                        "tools",
-                        "tool_choice",
-                        "parallel_tool_calls",
-                        "response_format",
-                        "max_output_tokens",
-                        "reasoning_effort",
-                        "service_tier",
-                        "stream",
-                        "temperature",
-                        "top_p",
-                        "top_logprobs",
-                    ],
-                    pricing=RuntimeModelPricingConfig(input_per_token=0.0, output_per_token=0.0),
-                    provider="plap",
-                    deprecated=False,
-                ),
-                main=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                compactor=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                defender=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                reviewer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                arbitrator=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                reasoning_summarizer=RuntimeActorConfig(model="crof/qwen3.5-9b"),
-                reviewer_max_transcript_tokens=0,
-                arbitrator_max_transcript_tokens=0,
-                debate_max_rounds=0,
-            )
-        },
         sealing_keys=["a" * 43],
     )
 
@@ -143,18 +94,18 @@ def database_schema(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("money") is not None:
         return
 
-    test_settings: Settings = request.getfixturevalue("test_settings")
+    test_config: TestConfig = request.getfixturevalue("test_config")
 
     async def reset_and_migrate() -> None:
-        await _reset_database_schema(test_settings.database_url)
-        await anyio.to_thread.run_sync(_run_migrations, test_settings.database_url)
+        await _reset_database_schema(test_config.database_url)
+        await anyio.to_thread.run_sync(_run_migrations, test_config.database_url)
 
     anyio.run(reset_and_migrate)
 
 
 @pytest.fixture
-async def db_session_maker(test_settings: Settings):
-    engine = create_database_engine(test_settings.database_url)
+async def db_session_maker(test_config: TestConfig):
+    engine = create_database_engine(test_config.database_url)
     try:
         yield create_session_maker(engine)
     finally:
@@ -162,18 +113,12 @@ async def db_session_maker(test_settings: Settings):
 
 
 @pytest.fixture
-async def seeded_auth_data(
-    db_session_maker,
-    test_settings: Settings,
-) -> SeededAuthData:
-    manager = APIKeyManager(pepper=test_settings.api_key_pepper)
+async def seeded_auth_data(db_session_maker, test_config: TestConfig) -> SeededAuthData:
+    manager = APIKeyManager(pepper=test_config.api_key_pepper)
 
     async with db_session_maker() as session:
         user = User(display_name="Integration Test User")
-        organization = Organization(
-            slug=f"acme-{uuid4().hex[:8]}",
-            name="Acme Test Org",
-        )
+        organization = Organization(slug=f"acme-{uuid4().hex[:8]}", name="Acme Test Org")
         session.add_all([user, organization])
         await session.flush()
 
@@ -184,12 +129,7 @@ async def seeded_auth_data(
             is_primary=True,
             is_verified=True,
         )
-        membership = OrganizationMembership(
-            organization_id=organization.id,
-            user_id=user.id,
-            role="owner",
-            status="active",
-        )
+        membership = OrganizationMembership(organization_id=organization.id, user_id=user.id, role="owner", status="active")
         sso_provider = SSOProvider(
             organization_id=organization.id,
             slug="okta-main",
@@ -218,10 +158,7 @@ async def seeded_auth_data(
         session.add(identity)
 
         issued_key: IssuedAPIKey = await manager.issue_key(
-            session,
-            user_id=user.id,
-            organization_id=organization.id,
-            name="integration key",
+            session, user_id=user.id, organization_id=organization.id, name="integration key"
         )
         await session.commit()
 

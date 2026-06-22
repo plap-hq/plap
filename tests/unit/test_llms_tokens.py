@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import transformers
 
@@ -19,7 +20,18 @@ from plap.llms.completions.chat import (
     ChatToolCall,
 )
 from plap.llms.completions.tokens import measure_prompt_tokens, measure_request_tokens
-from plap.settings import RuntimeActorConfig
+
+
+def _tokenizer_config(**kw: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        **{
+            "model": "unknown",
+            "tokenizer_hf_repo": None,
+            "tokenizer_revision": None,
+            "tokenizer_trust_remote_code": False,
+            **kw,
+        }
+    )
 
 
 def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
@@ -42,7 +54,7 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
                 reasoning_content="kept thinking",
             )
         ],
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b"),
     )
 
     assert len(captured_payloads) == 1
@@ -162,7 +174,7 @@ def test_measure_request_tokens_uses_hf_chat_template_when_available(monkeypatch
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 5
@@ -228,7 +240,7 @@ def test_measure_request_tokens_uses_native_template_for_structured_content_when
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 3
@@ -285,7 +297,7 @@ def test_measure_request_tokens_lowers_developer_multimodal_content_before_templ
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 3
@@ -354,7 +366,7 @@ def test_measure_request_tokens_retries_template_with_projected_structured_conte
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 2
@@ -407,7 +419,7 @@ def test_measure_request_tokens_falls_back_to_json_when_projected_template_still
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == len(captured_payloads[0])
@@ -455,13 +467,11 @@ def test_measure_request_tokens_keeps_invalid_template_tool_arguments_raw(monkey
             model="crof/qwen3.5-9b",
             messages=[
                 ChatMessage(
-                    role="assistant",
-                    content="answer",
-                    tool_calls=[ChatToolCall(id="call_1", name="search", arguments="{'query':'cats'}")],
+                    role="assistant", content="answer", tool_calls=[ChatToolCall(id="call_1", name="search", arguments="{'query':'cats'}")]
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b", tokenizer_hf_repo="fake/repo"),
     )
 
     assert count == 1
@@ -500,11 +510,7 @@ def test_hf_tokenizer_uses_direct_fast_loader_for_step3p5(monkeypatch) -> None:
         classmethod(fake_auto_from_pretrained),
     )
 
-    tokenizer = tokens_module._hf_tokenizer(
-        "stepfun-ai/Step-3.5-Flash",
-        "ab446a3de5e171ea341227e24bb1f090e1b771f7",
-        False,
-    )
+    tokenizer = tokens_module._hf_tokenizer("stepfun-ai/Step-3.5-Flash", "ab446a3de5e171ea341227e24bb1f090e1b771f7", False)
 
     assert isinstance(tokenizer, _FakeTokenizer)
     assert calls == [("stepfun-ai/Step-3.5-Flash", "ab446a3de5e171ea341227e24bb1f090e1b771f7")]
@@ -558,7 +564,7 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_flash(monkeypatch) -> None
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 4
@@ -645,7 +651,7 @@ def test_measure_request_tokens_keeps_dsv4_path_for_structured_user_content(monk
                 ),
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 2
@@ -678,7 +684,7 @@ def test_measure_prompt_tokens_keeps_invalid_fallback_tool_arguments_raw(monkeyp
                 tool_calls=[ChatToolCall(id="tool_call_1", name="search", arguments="{'b':2,'a':1}")],
             )
         ],
-        tokenizer_config=RuntimeActorConfig(model="crof/qwen3.5-9b"),
+        tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b"),
     )
 
     assert len(captured_payloads) == 1
@@ -718,11 +724,9 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkey
 
     count = measure_request_tokens(
         ChatCompletionRequest(
-            model="deepseek/deepseek-v4-pro",
-            messages=[ChatMessage(role="user", content="hello")],
-            reasoning_effort="xhigh",
+            model="deepseek/deepseek-v4-pro", messages=[ChatMessage(role="user", content="hello")], reasoning_effort="xhigh"
         ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
     )
 
     assert count == 1
@@ -755,7 +759,7 @@ def test_measure_prompt_tokens_keeps_dsv4_thinking_for_tool_history_without_requ
             ChatMessage(role="tool", content="cats found", tool_call_id="call_1"),
             ChatMessage(role="user", content="thanks"),
         ],
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1
@@ -813,7 +817,7 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_tools(monkeypa
                 )
             ],
         ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1
@@ -869,7 +873,7 @@ def test_measure_request_tokens_injects_system_for_user_only_dsv4_response_forma
                 strict=True,
             ),
         ),
-        tokenizer_config=RuntimeActorConfig(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
+        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-flash", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Flash"),
     )
 
     assert count == 1

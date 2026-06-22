@@ -2,8 +2,9 @@ import base64
 
 import pytest
 
+from plap.app import _sealing_keys
+from plap.config import CueBox
 from plap.keyring import SealingKeyError, SealingKeyring, associated_data, derive_key
-from plap.settings import Settings
 
 
 def test_sealing_keyring_decodes_base64url_roots_and_preserves_order() -> None:
@@ -43,18 +44,18 @@ def test_sealing_derivation_is_stable_and_purpose_separated() -> None:
     ]
 
 
-def test_settings_splits_comma_separated_sealing_keys() -> None:
+def test_sealing_keys_splits_comma_separated_string() -> None:
     first = _encoded(b"a" * 32)
     second = _encoded(b"b" * 32)
 
-    settings = Settings(
-        api_key_pepper="pepper",
-        database_url="postgresql+asyncpg://example/test",
-        mcp_servers=[],
-        sealing_keys=f"{first}, {second}",
+    config = CueBox(
+        {
+            "sealing_keys": f"{first}, {second}",
+        },
+        frozen_box=True,
     )
 
-    assert settings.sealing_keys == [first, second]
+    assert _sealing_keys(config) == [first, second]
 
 
 def _encoded(value: bytes) -> str:

@@ -450,9 +450,7 @@ class StreamCoordinator:
         await self._publish(ResponseCreatedEvent(response=response, sequence_number=0, type="response.created"))
 
     async def in_progress(self) -> None:
-        await self._publish(
-            ResponseInProgressEvent(response=self.current_response(), sequence_number=0, type="response.in_progress")
-        )
+        await self._publish(ResponseInProgressEvent(response=self.current_response(), sequence_number=0, type="response.in_progress"))
 
     async def emit(self, item: ResponseOutputItem) -> None:
         output_index = await self._append_item(item)

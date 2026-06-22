@@ -12,8 +12,7 @@ _SAFE_CHARS = st.characters(blacklist_categories=("Cs",))
 _JSON_SCALARS = st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False, allow_infinity=False) | st.text(_SAFE_CHARS)
 _JSON_VALUES = st.recursive(
     _JSON_SCALARS,
-    lambda children: st.lists(children, max_size=5)
-    | st.dictionaries(st.text(_SAFE_CHARS, max_size=12), children, max_size=5),
+    lambda children: st.lists(children, max_size=5) | st.dictionaries(st.text(_SAFE_CHARS, max_size=12), children, max_size=5),
     max_leaves=20,
 )
 _SCHEMAS = st.sampled_from(

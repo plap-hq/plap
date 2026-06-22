@@ -79,12 +79,9 @@ Sealed call ids
 
 - `side_code_be_u16` is the side code as an unsigned 16-bit big-endian integer.
 
-- Side codes:
-  - `main = 0`
-  - `defender = 1`
-  - `reviewer = 2`
-  - `arbitrator = 3`
-- Other `u16` values are currently unassigned.
+ - Side codes come from `config.sides` in the loaded CUE config.
+ - Only configured sides may be encoded or decoded.
+ - Other `u16` values are unassigned.
 
 - `encoded_upstream_tool_call_id` decodes to the required, non-empty UTF-8
   `upstream_tool_call_id`.
@@ -116,7 +113,7 @@ Call-id encryption
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -129,7 +126,7 @@ from nacl.secret import Aead
 
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring, associated_data, purpose_label
-from plap.responses.ingest.models import MAIN_SIDE, CallID, CompactionPayload, ReasoningPayload, Side
+from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload, Side
 
 COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
@@ -149,10 +146,6 @@ _PACKED_META_RESERVED_MASK = 0xF8
 _PACKED_META_UNUSED_MASK = 0x07
 _BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _BASE64URL_BY_CHAR = {char: index for index, char in enumerate(_BASE64URL_ALPHABET)}
-_SIDE_CODES: dict[Side, int] = {MAIN_SIDE: 0, "defender": 1, "reviewer": 2, "arbitrator": 3}
-_SIDES = {code: side for side, code in _SIDE_CODES.items()}
-if len(_SIDES) != len(_SIDE_CODES):
-    raise RuntimeError("_SIDE_CODES values must be unique")
 
 
 def _tool_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
@@ -385,6 +378,20 @@ _CODECS: dict[int, _Codec] = {
 _CODEC_PREFERENCE: tuple[_Codec, ...] = (_CODECS[2], _CODECS[1], _CODECS[0])
 
 
+def _side_code(side_codes: Mapping[Side, int], side: Side) -> int:
+    side_code = side_codes.get(side)
+    if side_code is None or not 0 <= side_code <= 0xFFFF:
+        raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
+    return side_code
+
+
+def _side_name(side_codes: Mapping[Side, int], code: int) -> Side:
+    for side, side_code in side_codes.items():
+        if side_code == code:
+            return side
+    raise _tool_replay_error(reason="invalid_function_call_id_side", private_message="invalid function call id side")
+
+
 def _decode_encoded_upstream_id(header: int, value: bytes) -> str:
     codec = header & _CALL_ID_CODEC_MASK
     try:
@@ -449,14 +456,10 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
         raise _reasoning_replay_error(reason="reasoning_payload_invalid", private_message=str(exc), cause=exc) from exc
 
 
-def _pack_call_id(value: CallID) -> bytes:
-    if value.side not in _SIDE_CODES:
-        raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
+def _pack_call_id(value: CallID, *, side_codes: Mapping[Side, int]) -> bytes:
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
-    side_code = _SIDE_CODES[value.side]
-    if not 0 <= side_code <= 0xFFFF:
-        raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
+    side_code = _side_code(side_codes, value.side)
     for codec in _CODEC_PREFERENCE:
         if not codec.matches(value.upstream_tool_call_id):
             continue
@@ -472,7 +475,7 @@ def _pack_call_id(value: CallID) -> bytes:
     raise RuntimeError("at least one call id codec must match")
 
 
-def _unpack_call_id(value: bytes) -> CallID:
+def _unpack_call_id(value: bytes, *, side_codes: Mapping[Side, int]) -> CallID:
     min_length = CALL_ID_HEADER_BYTES + 1
     if len(value) < min_length:
         raise _tool_replay_error(reason="function_call_id_plaintext_too_short", private_message="function call id plaintext is too short")
@@ -486,14 +489,8 @@ def _unpack_call_id(value: bytes) -> CallID:
             private_message="function call id reserved bits must be zero",
         )
     side_code = int.from_bytes(value[1:CALL_ID_HEADER_BYTES], byteorder="big")
-    try:
-        side = _SIDES[side_code]
-    except KeyError as exc:
-        raise _tool_replay_error(
-            reason="invalid_function_call_id_side", private_message="invalid function call id side", cause=exc
-        ) from exc
     return CallID(
-        side=side,
+        side=_side_name(side_codes, side_code),
         upstream_tool_call_id=_decode_encoded_upstream_id(header, value[CALL_ID_HEADER_BYTES:]),
     )
 
@@ -572,8 +569,9 @@ def seal_call_id(
     value: CallID,
     *,
     keyring: SealingKeyring,
+    side_codes: Mapping[Side, int],
 ) -> str:
-    plaintext = _pack_call_id(value)
+    plaintext = _pack_call_id(value, side_codes=side_codes)
     ciphertext = AESSIV(keyring.active(CALL_ID_PURPOSE)).encrypt(
         plaintext,
         associated_data(CALL_ID_PURPOSE),
@@ -585,6 +583,7 @@ def open_call_id(
     value: str,
     *,
     keyring: SealingKeyring,
+    side_codes: Mapping[Side, int],
 ) -> CallID:
     if not value.startswith(CALL_ID_PREFIX):
         raise _tool_replay_error(reason="sealed_function_call_id_prefix_invalid", private_message="invalid sealed function call id prefix")
@@ -600,7 +599,7 @@ def open_call_id(
                 payload,
                 associated_data(CALL_ID_PURPOSE),
             )
-            return _unpack_call_id(plaintext)
+            return _unpack_call_id(plaintext, side_codes=side_codes)
         except (InvalidTag, PlapError) as exc:
             last_error = exc
     raise _tool_replay_error(

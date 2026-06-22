@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from functools import partial
+from typing import Any
 
 import anyio
 import msgspec
@@ -19,16 +20,20 @@ from pydantic import TypeAdapter, ValidationError
 
 from plap.auth import AuthContext
 from plap.auth.dependencies import provide_socket_auth_context
+from plap.bus import bus
+from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import IChatCompletionClient
 from plap.logging import bound_context
 from plap.responses.contracts import (
     CompactedResponseObject,
     CompactRequest,
     InputItemsPage,
     ModelInfoListObject,
+    ModelInfoObject,
+    ModelInfoPricingObject,
     ModelListObject,
+    ModelObject,
     ReasoningEffort,
     ResponseCompletedEvent,
     ResponseCreateClientEvent,
@@ -42,10 +47,9 @@ from plap.responses.contracts import (
 from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import Ingested
 from plap.responses.projection import ResponseProjection
-from plap.responses.runtime import run_response
+from plap.responses.state import State
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
-from plap.settings import RuntimeSelector, Settings
 from plap.telemetry import record_scope_context
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -93,13 +97,18 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
     )
 
 
+def _side_codes(svcs: svcs.Container) -> dict[str, int]:
+    raw = svcs.get(CueBox).plap.config.sides
+    return {str(side): int(code) for side, code in raw.items()}
+
+
 async def _prepare_create(
     *,
     svcs: svcs.Container,
+    auth_context: AuthContext,
     request: ResponseCreateRequest,
     channels: ChannelsPlugin,
 ) -> tuple[PreparedRequest, Ingested, StreamCoordinator]:
-    auth_context = svcs.get(AuthContext)
     sealing_keyring = svcs.get(SealingKeyring)
     response_store = svcs.get(ResponseStore)
     with tracer.start_as_current_span("response.prepare") as span:
@@ -107,6 +116,7 @@ async def _prepare_create(
         ingested = await ingest_response_request(
             prepared.execution_request,
             keyring=sealing_keyring,
+            side_codes=_side_codes(svcs),
         )
         coordinator = StreamCoordinator(
             request=prepared.response_request,
@@ -140,6 +150,79 @@ def _record_request_scope_context(
         request.scope,
         conversation_id=prepared.conversation_id,
         response_id=coordinator.response_id,
+    )
+
+
+def _config(svcs: svcs.Container) -> CueBox:
+    loaded = svcs.get(CueBox)
+    return loaded.plap.config
+
+
+def _model_names(config: CueBox) -> list[str]:
+    models = config.overlays.get("model", {})
+    if not isinstance(models, dict):
+        return []
+    return sorted(name for name, branch in models.items() if isinstance(name, str) and isinstance(branch, dict))
+
+
+def _resolved_model_config(
+    config: CueBox,
+    *,
+    model: str,
+    service_tier: ServiceTier | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+) -> CueBox:
+    request: dict[str, object] = {"model": model}
+    if reasoning_effort is not None:
+        request["reasoning_effort"] = reasoning_effort
+    if service_tier is not None:
+        request["service_tier"] = service_tier
+    return config.resolve(request)
+
+
+def _model_object(config: CueBox, *, model: str) -> ModelObject:
+    return ModelObject(
+        id=model,
+        created=0,
+        owned_by=str(config.model_info.provider),
+    )
+
+
+def _model_info_object(config: CueBox, *, model: str) -> ModelInfoObject:
+    info = config.model_info
+    return ModelInfoObject(
+        id=model,
+        display_name=str(info.display_name),
+        description=str(info.description),
+        mode=str(info.mode),
+        input_modalities=[str(value) for value in info.input_modalities],
+        output_modalities=[str(value) for value in info.output_modalities],
+        max_input_tokens=int(info.max_input_tokens),
+        max_output_tokens=int(info.max_output_tokens),
+        supported_parameters=[str(value) for value in info.supported_parameters],
+        pricing=ModelInfoPricingObject(
+            input_per_token=float(info.pricing.input_per_token),
+            output_per_token=float(info.pricing.output_per_token),
+        ),
+        provider=str(info.provider),
+        deprecated=bool(info.deprecated),
+    )
+
+
+def _response_state(
+    *,
+    svcs: svcs.Container,
+    prepared: PreparedRequest,
+    ingested: Ingested,
+    coordinator: StreamCoordinator,
+) -> State:
+    return State.from_ingested(
+        ingested=ingested,
+        prepared=prepared,
+        svcs=svcs,
+        coordinator=coordinator,
+        sealing_keyring=svcs.get(SealingKeyring),
+        side_codes=_side_codes(svcs),
     )
 
 
@@ -200,16 +283,9 @@ async def _run_stream(
     svcs: svcs.Container,
 ) -> None:
     try:
-        await run_response(
-            prepared=prepared,
-            ingested=ingested,
-            coordinator=coordinator,
-            sealing_keyring=svcs.get(SealingKeyring),
-            settings=svcs.get(Settings),
-            chat_completion_client=svcs.get(IChatCompletionClient),
-            tool_policy_resolver=None,
-            tool_call_policy_resolver=None,
-            mcp_tool_providers=(),
+        await bus.emit(
+            "response.start",
+            state=_response_state(svcs=svcs, prepared=prepared, ingested=ingested, coordinator=coordinator),
         )
     except anyio.get_cancelled_exc_class():
         return
@@ -220,16 +296,18 @@ async def _run_stream(
 async def _sse_response_payload(
     *,
     http_request: Request[object, object, object],
+    auth_context: AuthContext,
     request: ResponseCreateRequest,
     svcs: svcs.Container,
-    channels: ChannelsPlugin,
 ) -> AsyncIterator[str]:
+    channels = http_request.app.plugins.get(ChannelsPlugin)
     projection = ResponseProjection.from_create_request(request, transport="stream")
     projection.validate_create_request(request)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_watch_http_disconnect, http_request, task_group.cancel_scope)
         prepared, ingested, coordinator = await _prepare_create(
             svcs=svcs,
+            auth_context=auth_context,
             request=request,
             channels=channels,
         )
@@ -259,8 +337,8 @@ async def _sse_response_payload(
 async def create_response(
     request: Request[object, object, object],
     data: ResponseCreateRequest,
-    svcs: svcs.Container,
-    channels: ChannelsPlugin,
+    svcs: Any,
+    auth_context: AuthContext,
 ) -> object:
     projection = ResponseProjection.from_create_request(data, transport="stream" if data.stream else "snapshot")
     projection.validate_create_request(data)
@@ -268,32 +346,27 @@ async def create_response(
         return ServerSentEvent(
             _sse_response_payload(
                 http_request=request,
+                auth_context=auth_context,
                 request=data,
                 svcs=svcs,
-                channels=channels,
             ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
     response: object
+    channels = request.app.plugins.get(ChannelsPlugin)
     async with anyio.create_task_group() as task_group:
         watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
         prepared, ingested, coordinator = await _prepare_create(
             svcs=svcs,
+            auth_context=auth_context,
             request=data,
             channels=channels,
         )
         _record_request_scope_context(request, prepared, coordinator)
         with _response_context(prepared, coordinator):
-            await run_response(
-                prepared=prepared,
-                ingested=ingested,
-                coordinator=coordinator,
-                sealing_keyring=svcs.get(SealingKeyring),
-                settings=svcs.get(Settings),
-                chat_completion_client=svcs.get(IChatCompletionClient),
-                tool_policy_resolver=None,
-                tool_call_policy_resolver=None,
-                mcp_tool_providers=(),
+            await bus.emit(
+                "response.start",
+                state=_response_state(svcs=svcs, prepared=prepared, ingested=ingested, coordinator=coordinator),
             )
             response = projection.response(coordinator.current_response())
         watcher_scope.cancel()
@@ -302,43 +375,40 @@ async def create_response(
 
 @get("/v1/models")
 async def list_models(
-    svcs: svcs.Container,
+    svcs: Any,
 ) -> ModelListObject:
-    settings = svcs.get(Settings)
-    return ModelListObject(
-        data=[profile.to_model_object(model=model) for model, profile in sorted(settings.runtime_model_profiles.items())]
-    )
+    config = _config(svcs)
+    return ModelListObject(data=[_model_object(_resolved_model_config(config, model=model), model=model) for model in _model_names(config)])
 
 
 @get("/v1/model/info")
 async def model_info(
     model: str,
-    svcs: svcs.Container,
+    svcs: Any,
     service_tier: ServiceTier | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> ModelInfoListObject:
-    settings = svcs.get(Settings)
-    profile = settings.resolve_runtime_model_profile(
-        model,
-        selector=RuntimeSelector(
-            service_tier=service_tier,
-            reasoning_effort=reasoning_effort,
-        ),
+    config = _config(svcs)
+    resolved = _resolved_model_config(
+        config,
+        model=model,
+        service_tier=service_tier,
+        reasoning_effort=reasoning_effort,
     )
-    return ModelInfoListObject(data=[profile.model_info.to_contract(model=model)])
+    return ModelInfoListObject(data=[_model_info_object(resolved, model=model)])
 
 
 @get("/v1/responses/{response_id:str}")
 async def retrieve_response(
     response_id: str,
-    svcs: svcs.Container,
+    svcs: Any,
+    auth_context: AuthContext,
     include: list[str] | None = None,
     include_obfuscation: bool | None = None,
     starting_after: int | None = None,
     stream: bool | None = None,
 ) -> ResponseObject:
     _ = starting_after, stream
-    auth_context = svcs.get(AuthContext)
     response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         response = await response_store.get_response(auth_context, response_id)
@@ -354,9 +424,9 @@ async def retrieve_response(
 )
 async def delete_response(
     response_id: str,
-    svcs: svcs.Container,
+    svcs: Any,
+    auth_context: AuthContext,
 ) -> ResponseDeleted:
-    auth_context = svcs.get(AuthContext)
     response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         deleted = await response_store.delete_response(auth_context, response_id)
@@ -368,7 +438,7 @@ async def delete_response(
 @post("/v1/responses/compact", status_code=200)
 async def compact_response(
     data: CompactRequest,
-    svcs: svcs.Container,
+    svcs: Any,
 ) -> CompactedResponseObject:
     _ = data, svcs
     raise _not_implemented_error(action="compact")
@@ -379,13 +449,13 @@ async def compact_response(
 )
 async def list_input_items(
     response_id: str,
-    svcs: svcs.Container,
+    svcs: Any,
+    auth_context: AuthContext,
     after: str | None = None,
     include: list[str] | None = None,
     limit: int | None = None,
     order: str | None = None,
 ) -> InputItemsPage:
-    auth_context = svcs.get(AuthContext)
     response_store = svcs.get(ResponseStore)
     with bound_context(response_id=response_id):
         page = await response_store.list_input_items(
@@ -399,12 +469,12 @@ async def list_input_items(
         return projection.input_items_page(page)
 
 
-@websocket("/v1/responses", dependencies={"auth_context": Provide(provide_socket_auth_context)})
+@websocket("/v1/responses", dependencies={"auth_context": Provide(provide_socket_auth_context, sync_to_thread=False)})
 async def responses_socket(
     socket: WebSocket,
     auth_context: AuthContext,
-    channels: ChannelsPlugin,
 ) -> None:
+    channels = socket.app.plugins.get(ChannelsPlugin)
     registry: svcs.Registry = socket.app.state.svcs_registry
     ws_container = svcs.Container(registry)
 
@@ -443,6 +513,7 @@ async def responses_socket(
                 task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
                 prepared, ingested, coordinator = await _prepare_create(
                     svcs=ws_container,
+                    auth_context=auth_context,
                     request=client_event.response,
                     channels=channels,
                 )

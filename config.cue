@@ -1,13 +1,33 @@
 package plap
 
 config: #Config & {
+  database_url: "${PLAP_DATABASE_URL}"
+  api_key_pepper: "${PLAP_API_KEY_PEPPER}"
+  sealing_keys: "${PLAP_SEALING_KEYS}"
+  plugins: ["core"]
+  log_level: *"INFO" | "${PLAP_LOG_LEVEL}"
+  foreign_log_level: *"WARNING" | "${PLAP_FOREIGN_LOG_LEVEL}"
+
+  llm_api_keys: {
+    lightning: "${LIGHTNING_API_KEY}"
+    cerebras: "${CEREBRAS_API_KEY}"
+    groq: "${GROQ_API_KEY}"
+    gmicloud: "${GMICLOUD_API_KEY}"
+    novita: "${NOVITA_API_KEY}"
+    fireworks: "${FIREWORKS_API_KEY}"
+    crof: "${CROF_API_KEY}"
+    qubrid: "${QUBRID_API_KEY}"
+    openrouter: "${OPENROUTER_API_KEY}"
+    vercel: "${VERCEL_API_KEY}"
+  }
+
   display_name: *"plap-ai" | string
   model_info: #ModelInfoConfig & {
     display_name: *"plap-ai" | string
     description: *"plap responses model" | string
     mode: *"responses" | string
-    input_modalities: [...string | *"text"]
-    output_modalities: [...string | *"text"]
+    input_modalities: ["text"]
+    output_modalities: ["text"]
     max_input_tokens: *1000000 | int
     max_output_tokens: *1000000 | int
     supported_parameters: [
@@ -40,8 +60,11 @@ config: #Config & {
     model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
   }
   reasoning_to_output: *1.0 | number
+  sides: {
+    main: 0
+  }
 
-  overrides: {
+  overlays: {
     "reasoning_effort": {
       "minimal": { main: reasoning_effort: "none" }
       "low": { main: reasoning_effort: "low" }

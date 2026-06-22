@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -19,7 +20,7 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     IChatCompletionClient,
 )
-from plap.settings import Settings
+from tests.pytest_plugins.database import TestConfig
 
 
 def _find_free_port() -> int:
@@ -34,30 +35,45 @@ class LiveServer:
     websocket_base_url: str
 
 
+@contextmanager
+def _with_test_env(test_config: TestConfig):
+    updates = {
+        "PLAP_API_KEY_PEPPER": test_config.api_key_pepper,
+        "PLAP_DATABASE_URL": test_config.database_url,
+        "PLAP_SEALING_KEYS": ",".join(test_config.sealing_keys),
+    }
+    saved = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _build_test_app(
-    settings: Settings,
+    test_config: TestConfig,
     *,
     chat_completion_client: IChatCompletionClient | None = None,
-    tool_classifier: object | None = None,
 ):
-    app = create_app(settings)
-    app.state.chat_completion_client = chat_completion_client or _StaticChatCompletionClient()
-    if tool_classifier is not None:
-        app.state.tool_classifier = tool_classifier
+    with _with_test_env(test_config):
+        app = create_app()
+    app.state.svcs_registry.register_value(IChatCompletionClient, chat_completion_client or _StaticChatCompletionClient())
     return app
 
 
 @pytest.fixture
-def test_app_factory(test_settings: Settings):
+def test_app_factory(test_config: TestConfig):
     def build(
         *,
         chat_completion_client: IChatCompletionClient | None = None,
-        tool_classifier: object | None = None,
     ):
         return _build_test_app(
-            test_settings,
+            test_config,
             chat_completion_client=chat_completion_client,
-            tool_classifier=tool_classifier,
         )
 
     return build
@@ -69,23 +85,19 @@ def test_app(test_app_factory):
 
 
 @pytest.fixture
-def live_server_factory(test_settings: Settings):
+def live_server_factory(test_config: TestConfig):
     @contextmanager
     def build(
         *,
         chat_completion_client: IChatCompletionClient | None = None,
-        tool_classifier: object | None = None,
     ):
         port = _find_free_port()
+        app = _build_test_app(
+            test_config,
+            chat_completion_client=chat_completion_client,
+        )
 
-        def app_factory():
-            return _build_test_app(
-                test_settings,
-                chat_completion_client=chat_completion_client,
-                tool_classifier=tool_classifier,
-            )
-
-        config = uvicorn.Config(app_factory, host="127.0.0.1", port=port, log_level="warning", factory=True)
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
         server = uvicorn.Server(config)
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()

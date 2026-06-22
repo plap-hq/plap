@@ -38,6 +38,7 @@ class RetryToolSchemaError(RetryError):
 type RetryValidator = Callable[[ChatCompletionResult, ChatCompletionRequest], Awaitable[str | None]]
 type NextRequest = Callable[[Snapshot], ChatCompletionRequest | None]
 
+
 def _tool_stubs(message: ChatMessage) -> tuple[ChatMessage, ...]:
     return tuple(
         ChatMessage(
