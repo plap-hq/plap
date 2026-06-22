@@ -4,7 +4,6 @@ config: #Config & {
   database_url: "${PLAP_DATABASE_URL}"
   api_key_pepper: "${PLAP_API_KEY_PEPPER}"
   sealing_keys: "${PLAP_SEALING_KEYS}"
-  plugins: ["core"]
   log_level: *"INFO" | "${PLAP_LOG_LEVEL}"
   foreign_log_level: *"WARNING" | "${PLAP_FOREIGN_LOG_LEVEL}"
 

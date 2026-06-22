@@ -9,7 +9,6 @@ from litestar.channels import ChannelsPlugin
 
 from plap.errors import PublicError
 from plap.keyring import SealingKeyring
-from plap.llms.summary import SummaryDelta, SummaryDone
 from plap.responses.contracts import (
     ConversationReference,
     OutputRefusalContent,
@@ -49,6 +48,7 @@ from plap.responses.ingest.models import CompactionPayload, ReasoningPayload, Si
 from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import seal_compaction_payload, seal_reasoning_payload
 from plap.responses.store import PreparedRequest, ResponseStore
+from plap.responses.summary import SummaryDelta, SummaryDone
 
 
 def channel_name(response_id: str) -> str:

@@ -8,7 +8,7 @@ from plap.bus import bus
 from plap.config import CueBox
 from plap.llms.completions.chat import IChatCompletionClient
 from plap.plugins.core.client import build_chat_completion_client
-from plap.plugins.core.turn import run_turn
+from plap.plugins.core.loop import run_response
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 from plap.responses.state import State
 
@@ -16,7 +16,7 @@ from plap.responses.state import State
 @bus.listen("config.collect")
 async def collect(paths: tuple[str, ...], *, next):
     here = Path(__file__).resolve()
-    return await next(paths=(*paths, str(here.parents[4] / "config.cue"), str(here.parents[4] / "schema.cue")))
+    return await next(paths=(*paths, str(here.parents[4] / "config.cue"), str(here.parent / "schema.cue")))
 
 
 @bus.listen("routes.collect")
@@ -34,5 +34,5 @@ async def collect_svcs(registry: svcs.Registry, loaded: CueBox, *, next):
 
 @bus.listen("response.start")
 async def start_response(state: State, *, next) -> None:
-    await run_turn(state=state)
+    await run_response(state=state)
     return await next()

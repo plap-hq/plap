@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tomllib
 from functools import partial
 from importlib.metadata import EntryPoint, entry_points
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -28,6 +30,8 @@ from plap.responses.store import ResponseStore
 from plap.telemetry import build_telemetry, emit_access_log, request_context_middleware, shutdown_telemetry
 
 logger = structlog.stdlib.get_logger(__name__)
+_ROOT = Path(__file__).resolve().parents[2]
+_PLUGIN_MANIFEST = _ROOT / "plugins.toml"
 
 
 def _error_body(
@@ -168,32 +172,31 @@ def _plugins() -> dict[str, EntryPoint]:
 
 def _import_plugin(entrypoint: EntryPoint) -> object:
     module_name = entrypoint.module
-    module = sys.modules.get(module_name)
-    if module is None:
-        return importlib.import_module(module_name)
-    return importlib.reload(module)
+    if module_name in sys.modules:
+        stale = [name for name in sys.modules if name == module_name or name.startswith(f"{module_name}.")]
+        for name in stale:
+            sys.modules.pop(name, None)
+    return importlib.import_module(module_name)
 
 
-@bus.emit("config.collect")
-async def _collect_config(paths: tuple[str, ...]) -> tuple[str, ...]:
-    return paths
-
-
-@bus.emit("routes.collect")
-async def _collect_routes(routes: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
-    _ = loaded
-    return routes
-
-
-@bus.emit("svcs.collect")
-async def _collect_svcs(registry: svcs.Registry, loaded: CueBox) -> None:
-    _ = registry, loaded
-
-
-@bus.emit("shutdown.collect")
-async def _collect_shutdown(hooks: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
-    _ = loaded
-    return hooks
+def _plugin_names() -> list[str]:
+    if not _PLUGIN_MANIFEST.is_file():
+        raise RuntimeError(f"missing plugin manifest: {_PLUGIN_MANIFEST}")
+    with _PLUGIN_MANIFEST.open("rb") as file:
+        data = tomllib.load(file)
+    raw = data.get("plugins")
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("plugins.toml must define a non-empty 'plugins' array")
+    plugin_names: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("plugins.toml plugins entries must be non-empty strings")
+        if value in plugin_names:
+            raise RuntimeError(f"duplicate plugin in manifest: {value!r}")
+        plugin_names.append(value)
+    if "core" not in plugin_names:
+        raise RuntimeError("plugins.toml must include 'core'")
+    return plugin_names
 
 
 def _sealing_keys(config: CueBox) -> list[str]:
@@ -241,35 +244,37 @@ async def _shutdown_svcs_registry(app: Litestar) -> None:
 
 def create_app() -> Litestar:
     discovered = _plugins()
-    if "core" not in discovered:
-        raise RuntimeError("missing required plugin entrypoint 'core'")
-
-    # Clear any listeners left from prior imports so the bus reflects only the
-    # bootstrap plugin set.
-    bus.reset()
-    _import_plugin(discovered["core"])
-
-    core_paths = anyio.run(partial(_collect_config, paths=()))
-    loaded = load(*core_paths)
-    if "plap" not in loaded:
-        raise RuntimeError("config load did not produce package 'plap'")
-    config = loaded.plap.config
-
-    plugin_names = list(config.plugins)
-    if "core" not in plugin_names:
-        raise RuntimeError("config.plugins must include 'core'")
-
-    # Boostrap only imported core so we could read the plugin allowlist. Rebuild
-    # the bus from the canonical config order for the final config load.
-    bus.reset()
+    plugin_names = _plugin_names()
     for name in plugin_names:
-        entrypoint = discovered.get(name)
-        if entrypoint is None:
-            raise RuntimeError(f"config requested unknown plugin: {name!r}")
+        if name not in discovered:
+            raise RuntimeError(f"plugin manifest requested unknown plugin: {name!r}")
+
+    bus.reset()
+
+    @bus.emit("config.collect")
+    async def collect_config(paths: tuple[str, ...]) -> tuple[str, ...]:
+        return paths
+
+    @bus.emit("routes.collect")
+    async def collect_routes(routes: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+        _ = loaded
+        return routes
+
+    @bus.emit("svcs.collect")
+    async def collect_svcs(registry: svcs.Registry, loaded: CueBox) -> None:
+        _ = registry, loaded
+
+    @bus.emit("shutdown.collect")
+    async def collect_shutdown(hooks: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+        _ = loaded
+        return hooks
+
+    for name in plugin_names:
+        entrypoint = discovered[name]
         _import_plugin(entrypoint)
 
-    final_paths = anyio.run(partial(_collect_config, paths=()))
-    loaded = load(*final_paths)
+    config_paths = anyio.run(partial(collect_config, paths=()))
+    loaded = load(*config_paths)
     if "plap" not in loaded:
         raise RuntimeError("config load did not produce package 'plap'")
     config = loaded.plap.config
@@ -293,10 +298,10 @@ def create_app() -> Litestar:
     registry.register_value(Database, database)
     registry.register_value(SealingKeyring, keyring)
     registry.register_factory(ResponseStore, lambda svcs_container: ResponseStore(svcs_container.get(Database)))
-    anyio.run(partial(_collect_svcs, registry=registry, loaded=loaded))
+    anyio.run(partial(collect_svcs, registry=registry, loaded=loaded))
 
-    routes = anyio.run(partial(_collect_routes, routes=(), loaded=loaded))
-    shutdown_hooks = anyio.run(partial(_collect_shutdown, hooks=(), loaded=loaded))
+    routes = anyio.run(partial(collect_routes, routes=(), loaded=loaded))
+    shutdown_hooks = anyio.run(partial(collect_shutdown, hooks=(), loaded=loaded))
 
     state = State(
         {

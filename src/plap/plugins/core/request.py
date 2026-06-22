@@ -107,7 +107,7 @@ def _tool_choice(state: State) -> str | ChatToolChoiceFunction | None:
     return ChatToolChoiceFunction(name=tool_choice.name)
 
 
-def build_turn_config_request(state: State) -> dict[str, object]:
+def build_config_request(state: State) -> dict[str, object]:
     request = {"model": state.prepared.response_request.model}
     reasoning = state.prepared.response_request.reasoning
     if reasoning is not None and reasoning.effort is not None:
@@ -117,7 +117,7 @@ def build_turn_config_request(state: State) -> dict[str, object]:
     return request
 
 
-def build_response_turn_request(state: State, config: CueBox) -> ChatCompletionRequest:
+def build_response_request(state: State, config: CueBox) -> ChatCompletionRequest:
     request = state.prepared.execution_request
     main = config.main
     sampling = main.sampling

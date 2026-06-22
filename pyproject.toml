@@ -63,6 +63,7 @@ packages = ["src/plap"]
 
 [project.entry-points."plap.plugin"]
 core = "plap.plugins.core"
+summary = "plap.plugins.summary"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

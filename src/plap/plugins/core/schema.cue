@@ -67,7 +67,6 @@ package plap
   database_url!: string
   api_key_pepper!: string
   sealing_keys!: string
-  plugins: [...string]
   log_level: *"INFO" | string
   foreign_log_level: *"WARNING" | string
   llm_api_keys: { [string]: string }
@@ -76,7 +75,6 @@ package plap
   model_info!: #ModelInfoConfig
   default_reasoning_effort: *null | #ReasoningEffort
   main!: #FieldConfig
-  reasoning_summarizer!: #FieldConfig
   reasoning_to_output: *1.0 | number
   sides!: {
     main: 0

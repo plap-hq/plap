@@ -6,7 +6,6 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 
 from plap.keyring import SealingKeyring
-from plap.llms.summary import SummaryDelta, SummaryDone
 from plap.responses.contracts import (
     OutputRefusalContent,
     ResponseCreateRequest,
@@ -18,6 +17,7 @@ from plap.responses.ingest.models import Message, Sides, SidesUpdate
 from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
+from plap.responses.summary import SummaryDelta, SummaryDone
 
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
 

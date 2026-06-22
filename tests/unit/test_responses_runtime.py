@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from collections.abc import Sequence
 from functools import partial
 from types import SimpleNamespace
@@ -12,11 +13,12 @@ import svcs
 from box import Box
 from pydantic import TypeAdapter
 
+from plap.bus import bus
 from plap.config import CueBox
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
-from plap.plugins.core.turn import UsageLedger, run_turn
+from plap.plugins.core.loop import UsageLedger, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
@@ -26,6 +28,15 @@ from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
+
+
+def _reload_summary_handlers():
+    bus.reset()
+    core_module = importlib.import_module("plap.plugins.core.loop")
+    summary_module = importlib.import_module("plap.plugins.summary")
+    core_module = importlib.reload(core_module)
+    importlib.reload(summary_module)
+    return core_module.run_response
 
 
 class _RecordingChannels:
@@ -448,7 +459,7 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
         ),
     )
 
-    await run_turn(state=state)
+    await run_response(state=state)
 
     assert store.begin_calls == 1
     assert store.cancel_calls == 0
@@ -471,7 +482,7 @@ async def test_run_response_cancellation_before_created_is_noop() -> None:
 
     with anyio.CancelScope() as cancel_scope:
         cancel_scope.cancel()
-        await run_turn(state=state)
+        await run_response(state=state)
 
     assert store.begin_calls == 0
     assert store.cancel_calls == 0
@@ -490,12 +501,12 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
         body_started.set()
         await anyio.sleep(10)
 
-    monkeypatch.setattr("plap.plugins.core.turn.stream_response_turn", _block)
+    monkeypatch.setattr("plap.plugins.core.loop.stream_response", _block)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(
             partial(
-                run_turn,
+                run_response,
                 state=state,
             ),
         )
@@ -538,7 +549,7 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
     )
     state = _state(store, channels, request=request, client=client)
 
-    await run_turn(state=state)
+    await run_response(state=state)
 
     assert len(client.requests) == 2
     assert client.requests[0].max_completion_tokens == 20
@@ -577,9 +588,10 @@ async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.
         ]
     )
     state = _state(store, channels, request=request, client=client)
-    monkeypatch.setattr("plap.plugins.core.turn.ChatReasoningSummarizer", _FakeReasoningSummarizer)
+    run_response_with_summary = _reload_summary_handlers()
+    monkeypatch.setattr("plap.plugins.summary.ChatReasoningSummarizer", _FakeReasoningSummarizer)
 
-    await run_turn(state=state)
+    await run_response_with_summary(state=state)
 
     assert store.replace_calls == 2
     response = state.coordinator.current_response()
@@ -609,7 +621,7 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
     )
     state = _state(store, channels, request=request, client=client)
 
-    await run_turn(state=state)
+    await run_response(state=state)
 
     response = state.coordinator.current_response()
     assert response.status == "incomplete"

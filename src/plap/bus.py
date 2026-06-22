@@ -30,30 +30,32 @@ class _Handler:
         self.params = params
 
 
-def _run(handlers: list[_Handler], kwargs: dict[str, Any], terminal: _Handler | None = None):
-    """Build and run the handler chain, returning a coroutine."""
+def _run(handlers: list[_Handler], kwargs: dict[str, Any]):
+    """Build and run the handler chain, returning a coroutine.
+
+    The last registered handler runs first (outermost).  The first registered
+    handler runs last (innermost).  This gives natural onion dispatch when
+    bootstrap registers the terminal body first and plugins register wrappers
+    later.
+    """
 
     async def dispatch(index: int, current: dict[str, Any]):
-        if index >= len(handlers):
-            if terminal is None:
-                return None
-            resolved = {key: current[key] for key in terminal.params if key in current}
-            return await terminal.fn(**resolved)
+        if index < 0:
+            return None
 
         handler = handlers[index]
         resolved = {key: current[key] for key in handler.params if key in current}
 
         async def next(**overrides: Any):
             downstream = current if not overrides else {**current, **overrides}
-            return await dispatch(index + 1, downstream)
+            return await dispatch(index - 1, downstream)
 
         if "next" in handler.params:
             return await handler.fn(**resolved, next=next)
 
-        await handler.fn(**resolved)
-        return await next()
+        return await handler.fn(**resolved)
 
-    return dispatch(0, kwargs)
+    return dispatch(len(handlers) - 1, kwargs)
 
 
 class _Emit:
@@ -66,14 +68,12 @@ class _Emit:
     def __call__(self, fn: object = None, **kwargs: Any) -> Any:
         if fn is not None and callable(fn):
             params = _check_no_next(fn)
-            terminal = _Handler(fn, params)
+            self._handlers[self._name].append(_Handler(fn, params))
 
             async def dispatch(**d: Any):
-                return await _run(list(self._handlers[self._name]), d, terminal)
+                return await _run(list(self._handlers[self._name]), d)
 
             return dispatch
-        if not kwargs:
-            return _run(list(self._handlers.get(self._name, [])), {})
         return _run(list(self._handlers.get(self._name, [])), kwargs)
 
     def __await__(self) -> Any:

@@ -9,24 +9,20 @@ from opentelemetry import trace
 from plap.bus import bus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
-from plap.llms import ChatReasoningSummarizer, RetryLimitExceededError, SummaryDelta, SummaryDone, with_summary
+from plap.llms import RetryLimitExceededError
 from plap.llms.completions.chat import ChatCompletionRequest, ChatFinishReason, IChatCompletionClient
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.core.ledger import UsageLedger
-from plap.plugins.core.request import build_response_turn_request as _build_response_turn_request
-from plap.plugins.core.request import build_turn_config_request as _build_turn_config_request
+from plap.plugins.core.request import build_config_request as _build_config_request
+from plap.plugins.core.request import build_response_request as _build_response_request
 from plap.responses.state import State
+from plap.responses.summary import SummaryDelta, SummaryDone
 
 logger = structlog.stdlib.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
-
-def _summary_mode(state: State) -> str | None:
-    reasoning = state.prepared.execution_request.reasoning
-    if reasoning is None:
-        return None
-    return reasoning.summary or reasoning.generate_summary
+SUMMARY_HARD_FLUSH_CHARS = 800
 
 
 def _retry_limit_error() -> PlapError:
@@ -66,20 +62,19 @@ class StreamResult:
 
 
 @bus.emit("response.config.resolve")
-async def resolve_response_config(state: State, request: dict[str, object]) -> CueBox:
+async def resolve_config(state: State, request: dict[str, object]) -> CueBox:
     loaded = state.svcs.get(CueBox)
     return loaded.plap.config.resolve(request)
 
 
 @bus.emit("response.turn.request.build")
-async def build_response_turn_request(state: State, config: CueBox) -> ChatCompletionRequest:
-    return _build_response_turn_request(state, config)
+async def build_request(state: State, config: CueBox) -> ChatCompletionRequest:
+    return _build_response_request(state, config)
 
 
 @bus.emit("response.turn.stream")
-async def stream_response_turn(state: State, config: CueBox, request: ChatCompletionRequest) -> StreamResult:
+async def stream_response(state: State, config: CueBox, request: ChatCompletionRequest) -> StreamResult:
     main = config.main
-    summary_mode = _summary_mode(state)
     ledger = UsageLedger(
         budget=state.prepared.execution_request.max_output_tokens,
         reasoning_to_output=config.reasoning_to_output,
@@ -94,7 +89,6 @@ async def stream_response_turn(state: State, config: CueBox, request: ChatComple
         "response.runtime.turn",
         continuation_side="main",
         main_model=request.model,
-        reasoning_summary_mode=summary_mode,
         tool_count=len(request.tools),
     )
 
@@ -148,31 +142,27 @@ async def stream_response_turn(state: State, config: CueBox, request: ChatComple
         validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
     )
 
+    summary_send, summary_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
+
+    async def run_summary():
+        await bus.emit("response.summary", state=state, source=summary_receive)
+
     try:
-        if summary_mode is None:
-            async for snapshot in source:
-                latest_snapshot = snapshot
-                state.main = list(snapshot.messages)
-        else:
-            summarizer = ChatReasoningSummarizer(
-                client=chat_completion_client,
-                model=config.reasoning_summarizer.model,
-                prompt_cache_key=state.prepared.execution_request.prompt_cache_key,
-                reasoning_effort=config.reasoning_summarizer.reasoning_effort,
-                service_tier=config.reasoning_summarizer.service_tier,
-            )
-            async with with_summary(source, mode=summary_mode, summarizer=summarizer) as items:
-                async for item in items:
-                    if isinstance(item, SummaryDelta):
-                        await state.ensure_reasoning()
-                        await state.coordinator.summary_delta(item)
-                        continue
-                    if isinstance(item, SummaryDone):
-                        await state.coordinator.summary_done(item)
-                        await state.flush()
-                        continue
-                    latest_snapshot = item
-                    state.main = list(item.messages)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_summary)
+            try:
+                async for snapshot in source:
+                    latest_snapshot = snapshot
+                    state.main = list(snapshot.messages)
+
+                    delta = snapshot.delta
+                    if delta is not None and delta.reasoning_delta is not None:
+                        await summary_send.send(SummaryDelta(text=delta.reasoning_delta, index=0))
+                    if delta is None or (delta is not None and (delta.tool_call_delta is not None or delta.finish_reason is not None)):
+                        await summary_send.send(SummaryDone(index=0))
+            finally:
+                await summary_send.aclose()
+
     except RetryLimitExceededError:
         if latest_snapshot is not None:
             state.main = list(latest_snapshot.messages)
@@ -195,13 +185,13 @@ async def stream_response_turn(state: State, config: CueBox, request: ChatComple
 
 
 @bus.emit("response.turn.finalize")
-async def finalize_response_turn(state: State, config: CueBox, result: StreamResult) -> None:
+async def finalize_response(state: State, config: CueBox, result: StreamResult) -> None:
     _ = config, result
     await state.finalize()
 
 
 @bus.emit("response.turn.terminal")
-async def terminalize_response_turn(state: State, config: CueBox, result: StreamResult) -> None:
+async def terminalize_response(state: State, config: CueBox, result: StreamResult) -> None:
     if result.error is not None:
         raise result.error
 
@@ -234,7 +224,7 @@ async def terminalize_response_turn(state: State, config: CueBox, result: Stream
 
 
 @bus.emit("response.turn.run")
-async def run_turn(state: State) -> None:
+async def run_response(state: State) -> None:
     with tracer.start_as_current_span("response.execute") as span:
         span.set_attribute("plap.response.id", state.coordinator.response_id)
         span.set_attribute("plap.response.model", state.prepared.response_request.model)
@@ -242,16 +232,16 @@ async def run_turn(state: State) -> None:
             span.set_attribute("plap.response.conversation_id", state.prepared.conversation_id)
         created = False
         try:
-            config = await resolve_response_config(state=state, request=_build_turn_config_request(state))
-            request = await build_response_turn_request(state=state, config=config)
+            config = await resolve_config(state=state, request=_build_config_request(state))
+            request = await build_request(state=state, config=config)
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
                 await state.coordinator.created()
             created = True
             await state.coordinator.in_progress()
-            result = await stream_response_turn(state=state, config=config, request=request)
-            await finalize_response_turn(state=state, config=config, result=result)
-            await terminalize_response_turn(state=state, config=config, result=result)
+            result = await stream_response(state=state, config=config, request=request)
+            await finalize_response(state=state, config=config, result=result)
+            await terminalize_response(state=state, config=config, result=result)
         except anyio.get_cancelled_exc_class():
             if created:
                 with anyio.CancelScope(shield=True):
@@ -281,3 +271,36 @@ async def run_turn(state: State) -> None:
             with anyio.CancelScope(shield=True):
                 await state.coordinator.fail(public)
             raise
+
+
+@bus.emit("response.summary")
+async def default_summary(
+    state: State,
+    source: anyio.abc.ObjectReceiveStream[SummaryDelta | SummaryDone],
+) -> None:
+    index = 0
+    open_part = False
+    accumulated = 0
+    async for item in source:
+        if isinstance(item, SummaryDelta):
+            if not open_part:
+                await state.ensure_reasoning()
+                open_part = True
+            await state.coordinator.summary_delta(SummaryDelta(text=item.text, index=index))
+            accumulated += len(item.text)
+            if accumulated >= SUMMARY_HARD_FLUSH_CHARS:
+                await state.coordinator.summary_done(SummaryDone(index=index))
+                await state.flush()
+                index += 1
+                open_part = False
+                accumulated = 0
+        elif isinstance(item, SummaryDone):
+            if open_part:
+                await state.coordinator.summary_done(SummaryDone(index=index))
+                await state.flush()
+                index += 1
+                open_part = False
+                accumulated = 0
+    if open_part:
+        await state.coordinator.summary_done(SummaryDone(index=index))
+        await state.flush()
