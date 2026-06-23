@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from plap.bus import bus
 from plap.config import CueBox
+from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
@@ -111,11 +112,11 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
     )
 
 
-def _ingested() -> Ingested:
+def _ingested(*, last_side: str | None = None) -> Ingested:
     return Ingested(
         machine={},
         sides=Sides(),
-        last_side=None,
+        last_side=last_side,
         last_reasoning_id=None,
         current_compaction_id=None,
     )
@@ -475,6 +476,12 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
     assert response.usage.input_tokens == 7
 
 
+def test_state_from_ingested_preserves_last_side() -> None:
+    state = _state(ingested=_ingested(last_side="reviewer"))
+
+    assert state.last_side == "reviewer"
+
+
 async def test_run_response_cancellation_before_created_is_noop() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
@@ -493,7 +500,7 @@ async def test_run_response_cancellation_before_created_is_noop() -> None:
 async def test_run_response_cancellation_after_created_persists_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    state = _state(store, channels, client=object())
+    state = _state(store, channels, client=object(), ingested=_ingested(last_side=MAIN_SIDE))
     body_started = anyio.Event()
 
     async def _block(**kwargs):
@@ -524,6 +531,38 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
     ]
 
 
+@pytest.mark.parametrize(
+    ("last_side", "status_code", "code"),
+    [
+        (None, 500, "internal_error"),
+        ("reviewer", 500, "internal_error"),
+    ],
+)
+async def test_run_response_fails_when_core_has_no_default_handler_for_last_side(
+    last_side: str | None,
+    status_code: int,
+    code: str,
+) -> None:
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    state = _state(store, channels, client=object(), ingested=_ingested(last_side=last_side))
+
+    with pytest.raises(PlapError) as exc_info:
+        await run_response(state=state)
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.status_code == status_code
+    assert exc_info.value.public.code == code
+    assert store.begin_calls == 1
+    assert store.fail_calls == 1
+    assert state.coordinator.current_response().status == "failed"
+    assert _published_event_types(channels) == [
+        "response.created",
+        "response.in_progress",
+        "error",
+    ]
+
+
 async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_first_attempt() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
@@ -547,7 +586,7 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
             )
         ],
     )
-    state = _state(store, channels, request=request, client=client)
+    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
 
     await run_response(state=state)
 
@@ -587,7 +626,7 @@ async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.
             ),
         ]
     )
-    state = _state(store, channels, request=request, client=client)
+    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
     run_response_with_summary = _reload_summary_handlers()
     monkeypatch.setattr("plap.plugins.summary.ChatReasoningSummarizer", _FakeReasoningSummarizer)
 
@@ -619,7 +658,7 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
             )
         ]
     )
-    state = _state(store, channels, request=request, client=client)
+    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
 
     await run_response(state=state)
 

@@ -14,8 +14,8 @@ from plap.llms.completions.chat import ChatCompletionRequest, ChatFinishReason, 
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.core.ledger import UsageLedger
-from plap.plugins.core.request import build_config_request as _build_config_request
-from plap.plugins.core.request import build_response_request as _build_response_request
+from plap.plugins.core.request import build_config_request, build_response_request
+from plap.responses.ingest.models import MAIN_SIDE
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
 
@@ -51,6 +51,38 @@ def _unexpected_public_error() -> PublicError:
     )
 
 
+def _unsupported_continuation_error(state: State) -> PlapError:
+    if state.last_side is None:
+        return PlapError(
+            public=_unexpected_public_error(),
+            private=PrivateError(
+                event="response.continuation_side_missing",
+                reason="continuation_side_missing",
+                message="responses execution cannot continue because replay did not select a continuation side",
+                level=ErrorLevel.WARNING,
+            ),
+        )
+    return PlapError(
+        public=_unexpected_public_error(),
+        private=PrivateError(
+            event="response.continuation_side_unsupported",
+            reason="continuation_side_unsupported",
+            message=f"responses execution has no handler for continuation side {state.last_side!r}",
+            level=ErrorLevel.WARNING,
+            context={"side": state.last_side},
+        ),
+    )
+
+
+def _require_continued(
+    state: State,
+    continued: StreamResult | None,
+) -> StreamResult:
+    if continued is None:
+        raise _unsupported_continuation_error(state)
+    return continued
+
+
 @dataclass(slots=True)
 class StreamResult:
     ledger: UsageLedger
@@ -61,18 +93,18 @@ class StreamResult:
     error: PlapError | None = None
 
 
-@bus.emit("response.config.resolve")
+@bus.emit("response.config")
 async def resolve_config(state: State, request: dict[str, object]) -> CueBox:
     loaded = state.svcs.get(CueBox)
     return loaded.plap.config.resolve(request)
 
 
-@bus.emit("response.turn.request.build")
-async def build_request(state: State, config: CueBox) -> ChatCompletionRequest:
-    return _build_response_request(state, config)
+@bus.emit("response.request")
+async def response_request(state: State, config: CueBox) -> ChatCompletionRequest:
+    return build_response_request(state, config)
 
 
-@bus.emit("response.turn.stream")
+@bus.emit("response.stream")
 async def stream_response(state: State, config: CueBox, request: ChatCompletionRequest) -> StreamResult:
     main = config.main
     ledger = UsageLedger(
@@ -184,14 +216,14 @@ async def stream_response(state: State, config: CueBox, request: ChatCompletionR
     )
 
 
-@bus.emit("response.turn.finalize")
+@bus.emit("response.finalize")
 async def finalize_response(state: State, config: CueBox, result: StreamResult) -> None:
     _ = config, result
     await state.finalize()
 
 
-@bus.emit("response.turn.terminal")
-async def terminalize_response(state: State, config: CueBox, result: StreamResult) -> None:
+@bus.emit("response.finish")
+async def finish_response(state: State, config: CueBox, result: StreamResult) -> None:
     if result.error is not None:
         raise result.error
 
@@ -223,7 +255,15 @@ async def terminalize_response(state: State, config: CueBox, result: StreamResul
     raise RuntimeError("response stream ended without an accepted final result")
 
 
-@bus.emit("response.turn.run")
+@bus.emit("response.continue")
+async def continue_response(state: State, config: CueBox) -> StreamResult | None:
+    if state.last_side != MAIN_SIDE:
+        return None
+    request = await response_request(state=state, config=config)
+    return await stream_response(state=state, config=config, request=request)
+
+
+@bus.emit("response.run")
 async def run_response(state: State) -> None:
     with tracer.start_as_current_span("response.execute") as span:
         span.set_attribute("plap.response.id", state.coordinator.response_id)
@@ -232,16 +272,15 @@ async def run_response(state: State) -> None:
             span.set_attribute("plap.response.conversation_id", state.prepared.conversation_id)
         created = False
         try:
-            config = await resolve_config(state=state, request=_build_config_request(state))
-            request = await build_request(state=state, config=config)
+            config = await resolve_config(state=state, request=build_config_request(state))
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
                 await state.coordinator.created()
             created = True
             await state.coordinator.in_progress()
-            result = await stream_response(state=state, config=config, request=request)
+            result = _require_continued(state, await continue_response(state=state, config=config))
             await finalize_response(state=state, config=config, result=result)
-            await terminalize_response(state=state, config=config, result=result)
+            await finish_response(state=state, config=config, result=result)
         except anyio.get_cancelled_exc_class():
             if created:
                 with anyio.CancelScope(shield=True):

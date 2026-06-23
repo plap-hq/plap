@@ -17,7 +17,18 @@ from plap.responses.contracts import (
     ResponseFunctionCallItem,
     ResponseMessageItem,
 )
-from plap.responses.ingest.models import MAIN_SIDE, CallID, GuardedPatch, Ingested, Message, MessagePatch, Sides, SidesUpdate, split_tail
+from plap.responses.ingest.models import (
+    MAIN_SIDE,
+    CallID,
+    GuardedPatch,
+    Ingested,
+    Message,
+    MessagePatch,
+    Side,
+    Sides,
+    SidesUpdate,
+    split_tail,
+)
 from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
 from plap.responses.ingest.sealing import seal_call_id
 from plap.responses.store import PreparedRequest
@@ -51,6 +62,7 @@ class State:
     _base_sides: Sides
     _reasoning_id: str | None
 
+    last_side: Side | None
     machine: Machine
     sides: Sides
     main: list[Message]
@@ -77,6 +89,7 @@ class State:
             _base_machine=base_machine,
             _base_sides=base_sides,
             _reasoning_id=None,
+            last_side=ingested.last_side,
             machine=base_machine.model_copy(deep=True),
             sides=deepcopy(base_sides),
             main=[],
