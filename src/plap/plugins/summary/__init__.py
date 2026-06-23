@@ -27,28 +27,29 @@ async def collect(paths: tuple[str, ...], *, next):
 @bus.listen("response.summary")
 async def wrap_summary(
     state: State,
+    config: CueBox,
     source: AsyncIterator[SummaryDelta | SummaryDone],
     *,
     next,
 ) -> None:
     mode = _summary_mode(state)
     if mode is None:
-        return await next(state=state, source=source)
+        return await next(state=state, config=config, source=source)
 
-    config = state.svcs.get(CueBox).plap.config
     summarizer = ChatReasoningSummarizer(
         client=await state.svcs.aget(IChatCompletionClient),
-        model=config.reasoning_summarizer.model,
+        model=config.summary.model,
+        max_completion_tokens=config.summary.max_completion_tokens,
         prompt_cache_key=state.prepared.execution_request.prompt_cache_key,
-        reasoning_effort=config.reasoning_summarizer.reasoning_effort,
-        service_tier=config.reasoning_summarizer.service_tier,
+        reasoning_effort=config.summary.reasoning_effort,
+        service_tier=config.summary.service_tier,
     )
 
     downstream_send, downstream_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_run_summarizer, mode, summarizer, source, downstream_send)
         try:
-            return await next(state=state, source=downstream_receive)
+            return await next(state=state, config=config, source=downstream_receive)
         finally:
             task_group.cancel_scope.cancel()
 
@@ -108,10 +109,10 @@ async def _emit_summary_fragment(
         if not text:
             continue
         full += text
-        await send.send(SummaryDelta(text=text, index=0))
+        await send.send(SummaryDelta(text=text))
 
     if not full:
         return prior_summary
 
-    await send.send(SummaryDone(index=0))
+    await send.send(SummaryDone())
     return _append_summary(prior_summary, full)

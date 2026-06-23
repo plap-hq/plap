@@ -3,7 +3,7 @@ from __future__ import annotations
 from plap.llms.completions.client import Provider, Quirk
 from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
 from plap.llms.completions.providers.openai import OpenAIProvider
-from plap.llms.completions.quirks import ExtraBody, MoveMessageField, MoveOutput, Only, Set, SystemRole
+from plap.llms.completions.quirks import ExtraBody, ExtraBodyIf, MoveMessageField, MoveOutput, Only, Set, SystemRole
 
 OPENROUTER_OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_SPECIAL_MODEL_SUFFIXES = frozenset(
@@ -47,6 +47,7 @@ OPENROUTER_FIELDS = (
 )
 OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (),
+    "google/gemma-4-31b-it": (ExtraBodyIf("reasoning_effort", (None, "none"), {"reasoning": {"enabled": True}}, negate=True),),
     "meta-llama/llama-3.1-8b-instruct": (),
     "meta-llama/llama-3.3-70b-instruct": (),
     "openai/gpt-oss-20b": (),

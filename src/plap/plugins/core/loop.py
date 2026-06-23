@@ -10,8 +10,8 @@ from plap.bus import bus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms import RetryLimitExceededError
-from plap.llms.completions.chat import ChatCompletionRequest, ChatFinishReason, IChatCompletionClient
-from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
+from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatFinishReason, IChatCompletionClient
+from plap.llms.retry import RetryValidator, retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.core.request import build_config_request, build_response_request
@@ -74,22 +74,36 @@ def _unsupported_continuation_error(state: State) -> PlapError:
     )
 
 
-def _require_continued(
-    state: State,
-    continued: StreamResult | None,
-) -> StreamResult:
-    if continued is None:
-        raise _unsupported_continuation_error(state)
-    return continued
+def _accepted_result(latest_snapshot: object | None, hidden_results_accounted: int) -> ChatCompletionResult | None:
+    if latest_snapshot is None:
+        return None
+    accepted_results = list(latest_snapshot.results[hidden_results_accounted:])
+    if not accepted_results:
+        return None
+    return accepted_results[-1]
+
+
+def _last_service_tier(latest_snapshot: object | None) -> str | None:
+    if latest_snapshot is None or not latest_snapshot.results:
+        return None
+    return latest_snapshot.results[-1].service_tier
+
+
+def _should_loop(state: State, result: StreamResult) -> bool:
+    side = state.last_side
+    accepted = result.accepted
+    if side is None or accepted is None or accepted.finish_reason != ChatFinishReason.TOOL_CALLS:
+        return False
+    return not state.open_calls(side)
 
 
 @dataclass(slots=True)
 class StreamResult:
     ledger: UsageLedger
-    latest_snapshot: object | None
-    hidden_results_accounted: int
-    input_anchor_seen: bool
+    pricing: object
+    accepted: ChatCompletionResult | None
     budget_exhausted: bool
+    last_service_tier: str | None
     error: PlapError | None = None
 
 
@@ -104,17 +118,28 @@ async def response_request(state: State, config: CueBox) -> ChatCompletionReques
     return build_response_request(state, config)
 
 
+@bus.emit("response.validate")
+async def response_validate(
+    state: State,
+    config: CueBox,
+    validators: tuple[RetryValidator, ...],
+) -> tuple[RetryValidator, ...]:
+    _ = state, config
+    return validators
+
+
 @bus.emit("response.stream")
-async def stream_response(state: State, config: CueBox, request: ChatCompletionRequest) -> StreamResult:
+async def stream_response(
+    state: State,
+    config: CueBox,
+    request: ChatCompletionRequest,
+    ledger: UsageLedger,
+) -> StreamResult:
     main = config.main
-    ledger = UsageLedger(
-        budget=state.prepared.execution_request.max_output_tokens,
-        reasoning_to_output=config.reasoning_to_output,
-    )
     hidden_results_accounted = 0
-    input_anchor_seen = False
     budget_exhausted = False
     latest_snapshot = None
+    prefix = list(state.main)
     chat_completion_client = await state.svcs.aget(IChatCompletionClient)
 
     logger.info(
@@ -125,16 +150,13 @@ async def stream_response(state: State, config: CueBox, request: ChatCompletionR
     )
 
     def next_request(history):
-        nonlocal hidden_results_accounted, input_anchor_seen, budget_exhausted
+        nonlocal hidden_results_accounted, budget_exhausted
         for result in history.results[hidden_results_accounted:]:
-            if not input_anchor_seen:
-                ledger.set_input_anchor(result.usage)
-                input_anchor_seen = True
-            ledger.record_hidden(main.public_usage, result.usage)
+            ledger.hide(main.public_usage, result.usage)
             hidden_results_accounted += 1
         attempt_index = hidden_results_accounted + 1
-        attempt_budget = ledger.budget_cap_for(main.public_usage)
-        attempt_cap = ledger.completion_cap_for(main.public_usage, main)
+        attempt_budget = ledger.cap(main.public_usage, None)
+        attempt_cap = ledger.cap(main.public_usage, main.max_completion_tokens)
         if attempt_cap == 0:
             budget_exhausted = True
             logger.info(
@@ -168,16 +190,22 @@ async def stream_response(state: State, config: CueBox, request: ChatCompletionR
         )
         return attempt_request
 
+    validators = await response_validate(
+        state=state,
+        config=config,
+        validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
+    )
+
     source = retry_stream(
         chat_completion_client,
         next_request=next_request,
-        validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
+        validators=validators,
     )
 
     summary_send, summary_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
 
     async def run_summary():
-        await bus.emit("response.summary", state=state, source=summary_receive)
+        await bus.emit("response.summary", state=state, config=config, source=summary_receive)
 
     try:
         async with anyio.create_task_group() as tg:
@@ -185,34 +213,34 @@ async def stream_response(state: State, config: CueBox, request: ChatCompletionR
             try:
                 async for snapshot in source:
                     latest_snapshot = snapshot
-                    state.main = list(snapshot.messages)
+                    state.main = [*prefix, *snapshot.messages]
 
                     delta = snapshot.delta
                     if delta is not None and delta.reasoning_delta is not None:
-                        await summary_send.send(SummaryDelta(text=delta.reasoning_delta, index=0))
+                        await summary_send.send(SummaryDelta(text=delta.reasoning_delta))
                     if delta is None or (delta is not None and (delta.tool_call_delta is not None or delta.finish_reason is not None)):
-                        await summary_send.send(SummaryDone(index=0))
+                        await summary_send.send(SummaryDone())
             finally:
                 await summary_send.aclose()
 
     except RetryLimitExceededError:
         if latest_snapshot is not None:
-            state.main = list(latest_snapshot.messages)
+            state.main = [*prefix, *latest_snapshot.messages]
         return StreamResult(
             ledger=ledger,
-            latest_snapshot=latest_snapshot,
-            hidden_results_accounted=hidden_results_accounted,
-            input_anchor_seen=input_anchor_seen,
+            pricing=main.public_usage,
+            accepted=_accepted_result(latest_snapshot, hidden_results_accounted),
             budget_exhausted=budget_exhausted,
+            last_service_tier=_last_service_tier(latest_snapshot),
             error=_retry_limit_error(),
         )
 
     return StreamResult(
         ledger=ledger,
-        latest_snapshot=latest_snapshot,
-        hidden_results_accounted=hidden_results_accounted,
-        input_anchor_seen=input_anchor_seen,
+        pricing=main.public_usage,
+        accepted=_accepted_result(latest_snapshot, hidden_results_accounted),
         budget_exhausted=budget_exhausted,
+        last_service_tier=_last_service_tier(latest_snapshot),
     )
 
 
@@ -227,40 +255,29 @@ async def finish_response(state: State, config: CueBox, result: StreamResult) ->
     if result.error is not None:
         raise result.error
 
-    if result.latest_snapshot is None:
-        if result.budget_exhausted:
-            await state.coordinator.incomplete(usage=result.ledger.to_response_usage())
+    accepted = result.accepted
+    if accepted is not None:
+        result.ledger.show(result.pricing, accepted.usage)
+        usage = result.ledger.usage()
+        if accepted.finish_reason == ChatFinishReason.LENGTH:
+            await state.coordinator.incomplete(service_tier=accepted.service_tier, usage=usage)
             return
-        raise RuntimeError("response stream produced no snapshots")
-
-    accepted_results = list(result.latest_snapshot.results[result.hidden_results_accounted :])
-    if accepted_results:
-        final_result = accepted_results[-1]
-        if not result.input_anchor_seen:
-            result.ledger.set_input_anchor(final_result.usage)
-            result.input_anchor_seen = True
-        result.ledger.record_output(config.main.public_usage, final_result.usage)
-        usage = result.ledger.to_response_usage()
-        if final_result.finish_reason == ChatFinishReason.LENGTH:
-            await state.coordinator.incomplete(service_tier=final_result.service_tier, usage=usage)
-            return
-        await state.coordinator.completed(service_tier=final_result.service_tier, usage=usage)
+        await state.coordinator.completed(service_tier=accepted.service_tier, usage=usage)
         return
 
     if result.budget_exhausted:
-        service_tier = result.latest_snapshot.results[-1].service_tier if result.latest_snapshot.results else None
-        await state.coordinator.incomplete(service_tier=service_tier, usage=result.ledger.to_response_usage())
+        await state.coordinator.incomplete(service_tier=result.last_service_tier, usage=result.ledger.usage())
         return
 
     raise RuntimeError("response stream ended without an accepted final result")
 
 
-@bus.emit("response.continue")
-async def continue_response(state: State, config: CueBox) -> StreamResult | None:
+@bus.emit("response.loop")
+async def loop_response(state: State, config: CueBox, ledger: UsageLedger) -> StreamResult:
     if state.last_side != MAIN_SIDE:
-        return None
+        raise _unsupported_continuation_error(state)
     request = await response_request(state=state, config=config)
-    return await stream_response(state=state, config=config, request=request)
+    return await stream_response(state=state, config=config, request=request, ledger=ledger)
 
 
 @bus.emit("response.run")
@@ -273,12 +290,20 @@ async def run_response(state: State) -> None:
         created = False
         try:
             config = await resolve_config(state=state, request=build_config_request(state))
+            ledger = UsageLedger(
+                budget=state.prepared.execution_request.max_output_tokens,
+                reasoning_to_output=config.reasoning_to_output,
+            )
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
                 await state.coordinator.created()
             created = True
             await state.coordinator.in_progress()
-            result = _require_continued(state, await continue_response(state=state, config=config))
+            while True:
+                result = await loop_response(state=state, config=config, ledger=ledger)
+                if not _should_loop(state, result):
+                    break
+                result.ledger.hide(result.pricing, result.accepted.usage if result.accepted is not None else None)
             await finalize_response(state=state, config=config, result=result)
             await finish_response(state=state, config=config, result=result)
         except anyio.get_cancelled_exc_class():
@@ -315,9 +340,10 @@ async def run_response(state: State) -> None:
 @bus.emit("response.summary")
 async def default_summary(
     state: State,
+    config: CueBox,
     source: anyio.abc.ObjectReceiveStream[SummaryDelta | SummaryDone],
 ) -> None:
-    index = 0
+    _ = config
     open_part = False
     accumulated = 0
     async for item in source:
@@ -325,21 +351,19 @@ async def default_summary(
             if not open_part:
                 await state.ensure_reasoning()
                 open_part = True
-            await state.coordinator.summary_delta(SummaryDelta(text=item.text, index=index))
+            await state.coordinator.summary_delta(SummaryDelta(text=item.text))
             accumulated += len(item.text)
             if accumulated >= SUMMARY_HARD_FLUSH_CHARS:
-                await state.coordinator.summary_done(SummaryDone(index=index))
+                await state.coordinator.summary_done(SummaryDone())
                 await state.flush()
-                index += 1
                 open_part = False
                 accumulated = 0
         elif isinstance(item, SummaryDone):
             if open_part:
-                await state.coordinator.summary_done(SummaryDone(index=index))
+                await state.coordinator.summary_done(SummaryDone())
                 await state.flush()
-                index += 1
                 open_part = False
                 accumulated = 0
     if open_part:
-        await state.coordinator.summary_done(SummaryDone(index=index))
+        await state.coordinator.summary_done(SummaryDone())
         await state.flush()

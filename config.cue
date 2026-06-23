@@ -25,7 +25,7 @@ config: #Config & {
     display_name: *"plap-ai" | string
     description: *"plap responses model" | string
     mode: *"responses" | string
-    input_modalities: ["text"]
+    input_modalities: *["text"] | [...string]
     output_modalities: ["text"]
     max_input_tokens: *1000000 | int
     max_output_tokens: *1000000 | int
@@ -49,42 +49,102 @@ config: #Config & {
     provider: *"plap" | string
     deprecated: *false | bool
   }
-  default_reasoning_effort: *"medium" | #ReasoningEffort
-  main: #FieldConfig & {
-    model: *"crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro" | string
-    max_completion_tokens: *131072 | int
-    reasoning_effort: *"medium" | #ReasoningEffort
-  }
-  reasoning_summarizer: #FieldConfig & {
-    model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
-  }
   reasoning_to_output: *1.0 | number
   sides: {
     main: 0
   }
 
   overlays: {
-    "reasoning_effort": {
-      "minimal": { main: reasoning_effort: "none" }
-      "low": { main: reasoning_effort: "low" }
-      "medium": { main: reasoning_effort: "medium" }
-      "high": { main: reasoning_effort: "high" }
-      "xhigh": { main: reasoning_effort: "xhigh" }
-    }
     "model": {
       "plap-ai/wisp": {
         display_name: "Wisp"
         model_info: display_name: "Wisp"
-        model_info: description: "General-purpose high-efficiency model optimized for balanced performance."
-        main: model: "crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
-        main: max_completion_tokens: 131072
+        model_info: description: "It's bigger."
+        model_info: input_modalities: ["text", "image"]
+        main: #FieldConfig & {
+          model: *"crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,openrouter/xiaomi/mimo-v2.5-pro:novita,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro" | string
+          max_completion_tokens: *131072 | int
+          reasoning_effort: *"medium" | #ReasoningEffort
+        }
+        summary: #FieldConfig & {
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
+          max_completion_tokens: *768 | int
+          reasoning_effort: *"low" | #ReasoningEffort
+        }
+        vision: #FieldConfig & {
+          model: *"openrouter/google/gemma-4-31b-it:wandb,openrouter/google/gemma-4-31b-it:venice,openrouter/google/gemma-4-31b-it:parasail" | string
+          max_completion_tokens: *8192 | int
+          reasoning_effort: *"medium" | #ReasoningEffort
+        }
+        overlays: {
+          "reasoning_effort": {
+            "minimal": {
+              main: reasoning_effort: "none"
+              vision: reasoning_effort: "none"
+            }
+            "low": {
+              main: reasoning_effort: "low"
+              vision: reasoning_effort: "medium"
+            }
+            "medium": {
+              main: reasoning_effort: "medium"
+              vision: reasoning_effort: "medium"
+            }
+            "high": {
+              main: reasoning_effort: "high"
+              vision: reasoning_effort: "medium"
+            }
+            "xhigh": {
+              main: reasoning_effort: "high"
+              vision: reasoning_effort: "medium"
+            }
+          }
+        }
       }
       "plap-ai/wisp-mini": {
         display_name: "Wisp Mini"
         model_info: display_name: "Wisp Mini"
-        model_info: description: "General-purpose plap responses model for text and tool use."
-        main: model: "qubrid/deepseek-ai/DeepSeek-V4-Flash,openrouter/deepseek/deepseek-v4-flash:novita,openrouter/deepseek/deepseek-v4-flash:atlas-cloud"
-        main: max_completion_tokens: 393216
+        model_info: description: "It's smaller."
+        model_info: input_modalities: ["text", "image"]
+        main: #FieldConfig & {
+          model: *"openrouter/deepseek/deepseek-v4-flash:gmicloud,openrouter/deepseek/deepseek-v4-flash:baidu,openrouter/deepseek/deepseek-v4-flash:wafer,openrouter/deepseek/deepseek-v4-flash:novita" | string
+          max_completion_tokens: *393216 | int
+          reasoning_effort: *"high" | #ReasoningEffort
+        }
+        summary: #FieldConfig & {
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
+          max_completion_tokens: *768 | int
+          reasoning_effort: *"low" | #ReasoningEffort
+        }
+        vision: #FieldConfig & {
+          model: *"openrouter/google/gemma-4-31b-it:wandb,openrouter/google/gemma-4-31b-it:venice,openrouter/google/gemma-4-31b-it:parasail" | string
+          max_completion_tokens: *8192 | int
+          reasoning_effort: *"medium" | #ReasoningEffort
+        }
+        overlays: {
+          "reasoning_effort": {
+            "minimal": {
+              main: reasoning_effort: "none"
+              vision: reasoning_effort: "none"
+            }
+            "low": {
+              main: reasoning_effort: "high"
+              vision: reasoning_effort: "medium"
+            }
+            "medium": {
+              main: reasoning_effort: "high"
+              vision: reasoning_effort: "medium"
+            }
+            "high": {
+              main: reasoning_effort: "high"
+              vision: reasoning_effort: "medium"
+            }
+            "xhigh": {
+              main: reasoning_effort: "xhigh"
+              vision: reasoning_effort: "medium"
+            }
+          }
+        }
       }
     }
   }

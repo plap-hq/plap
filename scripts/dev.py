@@ -16,20 +16,26 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
+import anyio
 import docker
+from alembic import command
+from alembic.config import Config
 from docker.errors import DockerException, ImageNotFound
 from sqlalchemy import select
 from testcontainers.core.container import DockerContainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+from plap.app import _import_plugin, _plugin_names, _plugins  # noqa: E402
 from plap.auth import APIKeyManager, normalize_email  # noqa: E402
+from plap.bus import bus  # noqa: E402
+from plap.config import CueBox, load  # noqa: E402
 from plap.llms.completions.providers import PROVIDER_BUILDERS  # noqa: E402
 from plap.persistence.db import create_database_engine, create_session_maker  # noqa: E402
 from plap.persistence.models import Organization, OrganizationMembership, User, UserEmail  # noqa: E402
-from plap.settings import Settings, _default_runtime_model_profiles  # noqa: E402
 
 STATE_ENV_KEYS = (
     "PLAP_DATABASE_URL",
@@ -154,11 +160,17 @@ def main() -> int:
         )
 
         if not args.skip_db_upgrade:
-            _run_checked(["alembic", "-c", "pyproject.toml", "upgrade", "head"], cwd=REPO_ROOT)
+            _run_migrations(os.environ["PLAP_DATABASE_URL"])
 
-        settings = Settings()
-        dev_model = _resolve_dev_model(settings)
-        api_key = asyncio.run(_ensure_dev_api_key(settings, managed_state))
+        config = _load_dev_config()
+        dev_model = _resolve_dev_model(config)
+        api_key = asyncio.run(
+            _ensure_dev_api_key(
+                database_url=os.environ["PLAP_DATABASE_URL"],
+                api_key_pepper=os.environ["PLAP_API_KEY_PEPPER"],
+                managed_state=managed_state,
+            )
+        )
         managed_state["PLAP_DEV_API_KEY"] = api_key
         client_host = _client_host(args.host)
         managed_state["PLAP_DEV_BASE_URL"] = f"http://{client_host}:{args.port}/v1"
@@ -237,41 +249,77 @@ def _normalize_sealing_keys_env() -> None:
         parsed = [parsed]
     if not isinstance(parsed, list) or not all(isinstance(part, str) and part for part in parsed):
         raise SystemExit("PLAP_SEALING_KEYS must be a JSON array of non-empty strings or a comma-separated string.")
-    os.environ["PLAP_SEALING_KEYS"] = json.dumps(parsed)
+    os.environ["PLAP_SEALING_KEYS"] = ",".join(parsed)
 
 
 def _populate_provider_aliases() -> None:
     for target, source in PROVIDER_ENV_ALIASES.items():
         if not os.environ.get(target) and os.environ.get(source):
             os.environ[target] = os.environ[source]
+        if not os.environ.get(source) and os.environ.get(target):
+            os.environ[source] = os.environ[target]
 
 
 def _require_provider_keys() -> None:
-    missing = [name for name in _required_provider_env_vars() if not os.environ.get(name)]
+    missing = [name for name in _required_provider_env_vars(_load_dev_config()) if not os.environ.get(name)]
     if missing:
         missing_list = ", ".join(missing)
         raise SystemExit(
-            "Missing required provider env vars for the current default runtime profiles and tool classifiers: "
+            "Missing required provider env vars for the configured runtime models: "
             f"{missing_list}. Put them in your shell or repo .env before running this script."
         )
 
 
-def _required_provider_env_vars() -> list[str]:
-    models = {
-        os.environ.get("PLAP_TOOL_EFFECT_CLASSIFIER_MODEL") or Settings.model_fields["tool_effect_classifier_model"].default,
-        os.environ.get("PLAP_TOOL_CALL_EFFECT_CLASSIFIER_MODEL") or Settings.model_fields["tool_call_effect_classifier_model"].default,
-    }
-    for profile in _default_runtime_model_profiles().values():
-        models.update(profile.all_models())
-
+def _required_provider_env_vars(config: CueBox) -> list[str]:
+    models = _configured_models(config)
     required: set[str] = set()
     for model in models:
         for attempt in _route_model_attempts(model):
             for prefix, env_var in ROUTE_ENV_VARS.items():
                 if attempt.startswith(prefix):
-                    required.add(env_var)
+                    required.add(PROVIDER_ENV_ALIASES[env_var])
                     break
     return sorted(required)
+
+
+def _configured_models(config: CueBox) -> set[str]:
+    models: set[str] = set()
+    branches = config.overlays.get("model", {})
+    if not isinstance(branches, dict):
+        return models
+    for branch in branches.values():
+        if not isinstance(branch, dict):
+            continue
+        for field in ("main", "summary", "vision"):
+            config_field = branch.get(field)
+            if not isinstance(config_field, dict):
+                continue
+            model = config_field.get("model")
+            if isinstance(model, str) and model:
+                models.add(model)
+    return models
+
+
+def _load_dev_config() -> CueBox:
+    discovered = _plugins()
+    plugin_names = _plugin_names()
+
+    bus.reset()
+
+    @bus.emit("config.collect")
+    async def collect_config(paths: tuple[str, ...]) -> tuple[str, ...]:
+        return paths
+
+    for name in plugin_names:
+        if name not in discovered:
+            raise SystemExit(f"plugin manifest requested unknown plugin: {name!r}")
+        _import_plugin(discovered[name])
+
+    config_paths = anyio.run(partial(collect_config, paths=()))
+    loaded = load(*config_paths)
+    if "plap" not in loaded:
+        raise SystemExit("config load did not produce package 'plap'")
+    return loaded.plap.config
 
 
 def _route_model_attempts(model: str) -> list[str]:
@@ -489,12 +537,14 @@ async def _wait_for_database(database_url: str, *, timeout_seconds: float = 30.0
 
 
 async def _ensure_dev_api_key(
-    settings: Settings,
+    *,
+    database_url: str,
+    api_key_pepper: str,
     managed_state: dict[str, str],
 ) -> str:
-    engine = create_database_engine(settings.database_url)
+    engine = create_database_engine(database_url)
     session_maker = create_session_maker(engine)
-    manager = APIKeyManager(pepper=settings.api_key_pepper)
+    manager = APIKeyManager(pepper=api_key_pepper)
     email_address = managed_state.get("PLAP_DEV_USER_EMAIL", DEFAULT_DEV_EMAIL)
     organization_slug = managed_state.get("PLAP_DEV_ORG_SLUG", DEFAULT_DEV_ORG_SLUG)
     try:
@@ -569,10 +619,19 @@ async def _ensure_membership(session, *, user_id, organization_id) -> None:
     await session.flush()
 
 
-def _resolve_dev_model(settings: Settings) -> str:
-    if DEFAULT_MODEL in settings.runtime_model_profiles:
+def _resolve_dev_model(config: CueBox) -> str:
+    model_names = sorted(str(name) for name in config.overlays.get("model", {}) if isinstance(name, str))
+    if DEFAULT_MODEL in model_names:
         return DEFAULT_MODEL
-    return next(iter(settings.runtime_model_profiles))
+    if model_names:
+        return model_names[0]
+    raise SystemExit("no configured response models were found in config overlays")
+
+
+def _run_migrations(database_url: str) -> None:
+    config = Config(toml_file="pyproject.toml")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
 
 
 def _write_state_file(path: Path, values: dict[str, str]) -> None:
@@ -681,10 +740,6 @@ def _remove_state_file(path: Path | None) -> None:
         path.unlink()
     if path.parent.exists() and not any(path.parent.iterdir()):
         path.parent.rmdir()
-
-
-def _run_checked(command: list[str], *, cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True, env=os.environ.copy())
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from plap.llms.completions.chat import (
     ChatToolChoiceFunction,
 )
 from plap.responses.contracts import FunctionTool, ToolChoiceFunction
+from plap.responses.ingest.models import MAIN_SIDE
 from plap.responses.state import State
 
 DEVELOPER_PROMPT_TEMPLATE = "You are {model_name}, an AI assistant."
@@ -144,7 +145,7 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
     ]
     return ChatCompletionRequest(
         model=main.model,
-        messages=[*instructions, *state.sides.get("main", [])],
+        messages=[*instructions, *state.history(MAIN_SIDE)],
         tools=tools,
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,

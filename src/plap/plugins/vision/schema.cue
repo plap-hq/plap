@@ -1,11 +1,11 @@
 package plap
 
 #Config: {
-  summary?: #FieldConfig
+  vision?: #FieldConfig
   overlays: {
     model?: {
       [string]: {
-        summary!: #FieldConfig
+        vision!: #FieldConfig
         [string]: _
       }
     }

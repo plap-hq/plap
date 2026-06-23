@@ -152,7 +152,7 @@ def _format_number(value: float) -> str:
 def _print_table(rows: list[tuple[str, ...]]) -> None:
     widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
     for row_index, row in enumerate(rows):
-        line = "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row, strict=False))
+        line = "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
         print(line)
         if row_index == 0:
             print("  ".join("-" * width for width in widths))

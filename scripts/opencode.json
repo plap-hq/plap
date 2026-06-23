@@ -8,6 +8,10 @@
         "plap-ai/wisp": {
           "name": "Wisp",
           "reasoning": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
           "options": {
             "reasoningSummary": "auto",
             "include": [
@@ -60,6 +64,10 @@
         "plap-ai/wisp-mini": {
           "name": "Wisp Mini",
           "reasoning": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
           "options": {
             "reasoningSummary": "auto",
             "include": [

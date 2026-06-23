@@ -258,6 +258,14 @@ class State:
             self._split_tail(messages, label=f"{side} side")
         return self.machine.model_copy(deep=True), deepcopy(self.sides), deepcopy(self.main)
 
+    def history(self, side: Side) -> list[Message]:
+        if side == MAIN_SIDE:
+            return [*(self.sides.get(MAIN_SIDE, []) or []), *self.main]
+        return list(self.sides.get(side, []) or [])
+
+    def open_calls(self, side: Side) -> list[ChatToolCall]:
+        return self._split_tail(self.history(side), label=f"{side} history")[4]
+
     async def flush(self) -> None:
         machine, sides, main = self._shadow_snapshot()
         machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=deepcopy(main))

@@ -144,8 +144,8 @@ class _Draft:
     lineage: _Lineage
     machine: JSONPatch
     sides: SidesUpdate
-    completed_summaries: dict[int, SummaryTextContent] = field(default_factory=dict)
-    pending_summary_text: dict[int, str] = field(default_factory=dict)
+    summary_parts: list[SummaryTextContent] = field(default_factory=list)
+    summary_pending: str = ""
 
 
 class StreamCoordinator:
@@ -251,11 +251,8 @@ class StreamCoordinator:
             raise TypeError("active output item is not a reasoning item")
         return item
 
-    def _ordered_summaries(self, draft: _Draft) -> list[SummaryTextContent]:
-        return [draft.completed_summaries[index] for index in sorted(draft.completed_summaries)]
-
     def _assert_no_pending_summary(self, draft: _Draft) -> None:
-        if draft.pending_summary_text:
+        if draft.summary_pending:
             raise RuntimeError("cannot finish reasoning item while summary text is still pending")
 
     def _reasoning_item(
@@ -287,7 +284,7 @@ class StreamCoordinator:
             lineage=draft.lineage,
             machine=draft.machine,
             sides=draft.sides,
-            summary=self._ordered_summaries(draft),
+            summary=list(draft.summary_parts),
             status=status,
         )
 
@@ -499,26 +496,26 @@ class StreamCoordinator:
     async def summary_delta(self, update: SummaryDelta) -> None:
         draft = self._active_draft()
         item = self._active_reasoning_item()
-        if update.index not in draft.pending_summary_text:
-            draft.pending_summary_text[update.index] = ""
+        summary_index = len(draft.summary_parts)
+        if not draft.summary_pending:
             await self._publish(
                 ResponseReasoningSummaryPartAddedEvent(
                     item_id=item.id,
                     output_index=draft.output_index,
                     part=SummaryTextContent(text="", type="summary_text"),
                     sequence_number=0,
-                    summary_index=update.index,
+                    summary_index=summary_index,
                     type="response.reasoning_summary_part.added",
                 )
             )
-        draft.pending_summary_text[update.index] += update.text
+        draft.summary_pending += update.text
         await self._publish(
             ResponseReasoningSummaryTextDeltaEvent(
                 delta=update.text,
                 item_id=item.id,
                 output_index=draft.output_index,
                 sequence_number=0,
-                summary_index=update.index,
+                summary_index=summary_index,
                 type="response.reasoning_summary_text.delta",
             )
         )
@@ -526,16 +523,18 @@ class StreamCoordinator:
     async def summary_done(self, update: SummaryDone) -> None:
         draft = self._active_draft()
         item = self._active_reasoning_item()
-        summary_text = draft.pending_summary_text.pop(update.index)
+        summary_index = len(draft.summary_parts)
+        summary_text = draft.summary_pending
+        draft.summary_pending = ""
         summary_part = SummaryTextContent(text=summary_text, type="summary_text")
-        draft.completed_summaries[update.index] = summary_part
+        draft.summary_parts.append(summary_part)
         self._items[draft.output_index] = self._draft_item(draft=draft, status="in_progress")
         await self._publish(
             ResponseReasoningSummaryTextDoneEvent(
                 item_id=item.id,
                 output_index=draft.output_index,
                 sequence_number=0,
-                summary_index=update.index,
+                summary_index=summary_index,
                 text=summary_text,
                 type="response.reasoning_summary_text.done",
             )
@@ -546,7 +545,7 @@ class StreamCoordinator:
                 output_index=draft.output_index,
                 part=summary_part,
                 sequence_number=0,
-                summary_index=update.index,
+                summary_index=summary_index,
                 type="response.reasoning_summary_part.done",
             )
         )

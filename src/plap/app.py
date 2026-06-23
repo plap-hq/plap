@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import tomllib
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import anyio.from_thread
 import structlog
 import svcs
 from litestar import Litestar, Request, Response
@@ -242,6 +244,16 @@ async def _shutdown_svcs_registry(app: Litestar) -> None:
     await app.state.svcs_registry.aclose()
 
 
+def _run_sync(fn, /, **kwargs):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return anyio.run(partial(fn, **kwargs))
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        return portal.call(partial(fn, **kwargs))
+
+
 def create_app() -> Litestar:
     discovered = _plugins()
     plugin_names = _plugin_names()
@@ -273,7 +285,7 @@ def create_app() -> Litestar:
         entrypoint = discovered[name]
         _import_plugin(entrypoint)
 
-    config_paths = anyio.run(partial(collect_config, paths=()))
+    config_paths = _run_sync(collect_config, paths=())
     loaded = load(*config_paths)
     if "plap" not in loaded:
         raise RuntimeError("config load did not produce package 'plap'")
@@ -298,10 +310,10 @@ def create_app() -> Litestar:
     registry.register_value(Database, database)
     registry.register_value(SealingKeyring, keyring)
     registry.register_factory(ResponseStore, lambda svcs_container: ResponseStore(svcs_container.get(Database)))
-    anyio.run(partial(collect_svcs, registry=registry, loaded=loaded))
+    _run_sync(collect_svcs, registry=registry, loaded=loaded)
 
-    routes = anyio.run(partial(collect_routes, routes=(), loaded=loaded))
-    shutdown_hooks = anyio.run(partial(collect_shutdown, hooks=(), loaded=loaded))
+    routes = _run_sync(collect_routes, routes=(), loaded=loaded)
+    shutdown_hooks = _run_sync(collect_shutdown, hooks=(), loaded=loaded)
 
     state = State(
         {

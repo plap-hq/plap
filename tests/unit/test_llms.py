@@ -2508,6 +2508,24 @@ def test_openrouter_request_quirks_allow_file_id() -> None:
     ]
 
 
+def test_openrouter_gemma_request_quirks_enable_reasoning_when_set() -> None:
+    request = _request_for_model("google/gemma-4-31b-it")
+
+    body = _body_for(_openrouter_provider(), request, stream=False)
+
+    assert body["reasoning_effort"] == "low"
+    assert body["extra_body"] == {"reasoning": {"enabled": True}}
+
+
+def test_openrouter_gemma_request_quirks_skip_reasoning_enable_for_none() -> None:
+    request = replace(_request_for_model("google/gemma-4-31b-it"), reasoning_effort="none")
+
+    body = _body_for(_openrouter_provider(), request, stream=False)
+
+    assert body["reasoning_effort"] == "none"
+    assert "extra_body" not in body
+
+
 @pytest.mark.parametrize(
     ("provider_factory", "model", "file"),
     [

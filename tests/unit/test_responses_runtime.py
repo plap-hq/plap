@@ -164,9 +164,9 @@ def _config() -> _Config:
                     "top_logprobs": None,
                 },
             },
-            "reasoning_summarizer": {
+            "summary": {
                 "model": "test-summarizer",
-                "max_completion_tokens": None,
+                "max_completion_tokens": 768,
                 "tokenizer_hf_repo": None,
                 "tokenizer_revision": None,
                 "tokenizer_trust_remote_code": False,
@@ -329,21 +329,27 @@ class _FakeReasoningSummarizer:
         yield "summary part"
 
 
-def test_usage_ledger_returns_none_without_input_anchor() -> None:
+def test_usage_ledger_returns_none_without_charges() -> None:
     ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
-    ledger.record_output(_public_usage(), _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5))
 
-    assert ledger.to_response_usage() is None
+    assert ledger.usage() is None
+
+
+def test_usage_ledger_cap_respects_budget_and_limit() -> None:
+    ledger = UsageLedger(budget=20, reasoning_to_output=1.0)
+
+    assert ledger.cap(_public_usage(output_to_output=2.0), None) == 10
+    assert ledger.cap(_public_usage(output_to_output=2.0), 7) == 7
+    assert ledger.cap(None, 7) == 7
 
 
 def test_usage_ledger_scales_single_visible_usage() -> None:
     ledger = UsageLedger(budget=20, reasoning_to_output=1.5)
     usage = _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5)
 
-    ledger.set_input_anchor(usage)
-    ledger.record_output(_public_usage(), usage)
+    ledger.show(_public_usage(), usage)
 
-    response_usage = ledger.to_response_usage()
+    response_usage = ledger.usage()
     assert response_usage is not None
     assert response_usage.input_tokens == 10
     assert response_usage.input_tokens_details.cached_tokens == 1
@@ -358,40 +364,36 @@ def test_usage_ledger_hidden_usage_is_squashed_into_reasoning_tokens() -> None:
     hidden_usage = _usage(input_tokens=80, output_tokens=15)
     output_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=2, reasoning_tokens=1)
 
-    ledger.record_hidden(_public_usage(), hidden_usage)
-    ledger.set_input_anchor(output_usage)
-    ledger.record_output(_public_usage(), output_usage)
+    ledger.hide(_public_usage(), hidden_usage)
+    ledger.show(_public_usage(), output_usage)
 
-    response_usage = ledger.to_response_usage()
+    response_usage = ledger.usage()
     assert response_usage is not None
-    assert response_usage.input_tokens == 10
-    assert response_usage.input_tokens_details.cached_tokens == 2
+    assert response_usage.input_tokens == 80
+    assert response_usage.input_tokens_details.cached_tokens == 0
     assert response_usage.output_tokens == 40
     assert response_usage.output_tokens_details.reasoning_tokens == 36
-    assert response_usage.total_tokens == 50
+    assert response_usage.total_tokens == 120
     assert ledger.remaining() == 60
 
 
-def test_usage_ledger_promoted_hidden_output_keeps_hidden_debit_and_visible_floor() -> None:
+def test_usage_ledger_hidden_then_visible_keeps_hidden_debit() -> None:
     ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
     hidden_usage = _usage(input_tokens=20, output_tokens=9, reasoning_tokens=3)
-    input_anchor = _usage(input_tokens=4, output_tokens=0, cached_tokens=1)
+    output_usage = _usage(input_tokens=4, output_tokens=2, cached_tokens=1)
 
-    hidden_index = ledger.record_hidden(_public_usage(), hidden_usage)
-    assert hidden_index == 0
+    ledger.hide(_public_usage(), hidden_usage)
     assert ledger.remaining() == 86
 
-    ledger.set_input_anchor(input_anchor)
-    ledger.promote_hidden_to_output(hidden_index)
+    ledger.show(_public_usage(), output_usage)
 
-    response_usage = ledger.to_response_usage()
+    response_usage = ledger.usage()
     assert response_usage is not None
-    assert response_usage.input_tokens == 4
-    assert response_usage.input_tokens_details.cached_tokens == 1
-    assert response_usage.output_tokens == 14
-    assert response_usage.output_tokens_details.reasoning_tokens == 8
-    assert response_usage.total_tokens == 18
-    assert ledger.remaining() == 86
+    assert response_usage.input_tokens == 20
+    assert response_usage.output_tokens == 16
+    assert response_usage.output_tokens_details.reasoning_tokens == 14
+    assert response_usage.total_tokens == 36
+    assert ledger.remaining() == 84
 
 
 def test_usage_ledger_clamps_output_tokens_to_visible_floor_for_discounted_visible_actor() -> None:
@@ -399,37 +401,15 @@ def test_usage_ledger_clamps_output_tokens_to_visible_floor_for_discounted_visib
     usage = _usage(input_tokens=10, output_tokens=20, reasoning_tokens=5)
     ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
 
-    ledger.set_input_anchor(usage)
-    ledger.record_output(cheap_output, usage)
+    ledger.show(cheap_output, usage)
 
-    response_usage = ledger.to_response_usage()
+    response_usage = ledger.usage()
     assert response_usage is not None
     assert response_usage.input_tokens == 10
     assert response_usage.output_tokens == 15
     assert response_usage.output_tokens_details.reasoning_tokens == 0
     assert response_usage.total_tokens == 25
     assert ledger.remaining() == 90
-
-
-def test_usage_ledger_rejects_duplicate_input_anchor() -> None:
-    ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
-    usage = _usage(input_tokens=10, output_tokens=1)
-
-    ledger.set_input_anchor(usage)
-
-    with pytest.raises(ValueError, match="input usage anchor is already set"):
-        ledger.set_input_anchor(usage)
-
-
-def test_usage_ledger_rejects_duplicate_hidden_output_promotion() -> None:
-    ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
-    hidden_index = ledger.record_hidden(_public_usage(), _usage(input_tokens=10, output_tokens=4))
-    assert hidden_index == 0
-
-    ledger.promote_hidden_to_output(hidden_index)
-
-    with pytest.raises(ValueError, match="hidden usage is already visible output"):
-        ledger.promote_hidden_to_output(hidden_index)
 
 
 async def test_run_response_completes_simple_turn_without_midstream_flushes() -> None:

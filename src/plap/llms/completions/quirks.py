@@ -271,6 +271,26 @@ class ExtraBody(Quirk):
         call.body["extra_body"] = dict(self._value)
 
 
+class ExtraBodyIf(Quirk):
+    def __init__(self, name: str, values: tuple[Any, ...], extra_body: dict[str, Any], *, negate: bool = False) -> None:
+        self._name = name
+        self._values = values
+        self._extra_body = extra_body
+        self._negate = negate
+
+    def request(self, call: Call) -> None:
+        matched = call.body.get(self._name) in self._values
+        if self._negate:
+            matched = not matched
+        if not matched:
+            return
+        current = call.body.get("extra_body")
+        if isinstance(current, dict):
+            call.body["extra_body"] = _merge_dicts(current, self._extra_body)
+            return
+        call.body["extra_body"] = dict(self._extra_body)
+
+
 class DropIf(Quirk):
     def __init__(self, name: str, value: Any) -> None:
         self._name = name
@@ -417,6 +437,7 @@ __all__ = [
     "DropToolFunctionField",
     "EnsureAssistantReasoningContent",
     "ExtraBody",
+    "ExtraBodyIf",
     "ForceNamedToolChoice",
     "ForceRequiredToolChoice",
     "Move",

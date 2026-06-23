@@ -79,12 +79,14 @@ class ChatReasoningSummarizer(IReasoningSummarizer):
         *,
         client: IChatCompletionClient,
         model: str,
+        max_completion_tokens: int | None,
         prompt_cache_key: str | None,
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
     ) -> None:
         self._client = client
         self._model = model
+        self._max_completion_tokens = max_completion_tokens
         self._prompt_cache_key = prompt_cache_key
         self._reasoning_effort = reasoning_effort
         self._service_tier = service_tier
@@ -98,6 +100,7 @@ class ChatReasoningSummarizer(IReasoningSummarizer):
     ) -> AsyncIterator[str]:
         request = _summary_request(
             model=self._model,
+            max_completion_tokens=self._max_completion_tokens,
             prompt_cache_key=self._prompt_cache_key,
             reasoning_effort=self._reasoning_effort,
             service_tier=self._service_tier,
@@ -113,12 +116,6 @@ def _summary_mode(state) -> str | None:
     if reasoning is None:
         return None
     return reasoning.summary or reasoning.generate_summary
-
-
-def _summary_tokens(mode: SummaryMode) -> int:
-    if mode == "detailed":
-        return 768
-    return 512
 
 
 def _summary_message(
@@ -140,6 +137,7 @@ def _summary_message(
 def _summary_request(
     *,
     model: str,
+    max_completion_tokens: int | None,
     prompt_cache_key: str | None,
     reasoning_effort: ReasoningEffort | None,
     service_tier: ServiceTier | None,
@@ -149,7 +147,7 @@ def _summary_request(
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=model,
-        max_completion_tokens=_summary_tokens(mode),
+        max_completion_tokens=max_completion_tokens,
         messages=[
             ChatMessage(role="developer", content=SUMMARY_PROMPT),
             ChatMessage(

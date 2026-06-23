@@ -2,6 +2,8 @@ import anyio
 import pytest
 from openai import APIStatusError, AsyncOpenAI, AuthenticationError
 
+MODEL = "plap-ai/wisp"
+
 
 @pytest.fixture
 async def openai_client(live_server, seeded_auth_data):
@@ -18,7 +20,7 @@ async def openai_client(live_server, seeded_auth_data):
 async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> None:
     with anyio.fail_after(5):
         created = await openai_client.responses.create(
-            model="plap/test",
+            model=MODEL,
             input="hello world",
             context_management=[{"type": "compaction", "compact_threshold": 128}],
             tool_choice="auto",
@@ -39,7 +41,7 @@ async def test_async_openai_client_http_methods(openai_client: AsyncOpenAI) -> N
 
 async def test_async_openai_client_stateful_methods(openai_client: AsyncOpenAI) -> None:
     with anyio.fail_after(5):
-        created = await openai_client.responses.create(model="plap/test", input="hello stateful")
+        created = await openai_client.responses.create(model=MODEL, input="hello stateful")
     retrieved = await openai_client.responses.retrieve(created.id)
     input_items = await openai_client.responses.input_items.list(created.id)
     await openai_client.responses.delete(created.id)
@@ -77,7 +79,7 @@ async def test_async_openai_client_unsupported_methods(
         await openai_client.responses.input_items.list("resp_missing")
     with pytest.raises(APIStatusError) as token_count:
         await openai_client.responses.input_tokens.count(
-            model="plap/test",
+            model=MODEL,
             input="count these tokens",
         )
     with pytest.raises(APIStatusError) as deleted:
@@ -91,14 +93,14 @@ async def test_async_openai_client_unsupported_methods(
 
 async def test_async_openai_client_compact_method(openai_client: AsyncOpenAI) -> None:
     with pytest.raises(APIStatusError) as not_implemented:
-        await openai_client.responses.compact(model="plap/test", input="compact me")
+        await openai_client.responses.compact(model=MODEL, input="compact me")
 
     assert not_implemented.value.status_code == 501
 
 
 async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> None:
     stream = await openai_client.responses.create(
-        model="plap/test",
+        model=MODEL,
         input="hello stream",
         stream=True,
     )
@@ -120,7 +122,7 @@ async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None
             {
                 "type": "response.create",
                 "response": {
-                    "model": "plap/test",
+                    "model": MODEL,
                     "input": "hello websocket",
                 },
             }
@@ -151,6 +153,6 @@ async def test_async_openai_client_rejects_invalid_api_key(live_server) -> None:
 
     try:
         with pytest.raises(AuthenticationError):
-            await client.responses.create(model="plap/test", input="hello")
+            await client.responses.create(model=MODEL, input="hello")
     finally:
         await client.close()

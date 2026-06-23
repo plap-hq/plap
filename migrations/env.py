@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from logging.config import fileConfig
+from pathlib import Path
 
 import anyio
 from alembic import context
@@ -13,7 +14,7 @@ from plap.persistence.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+if config.config_file_name is not None and Path(config.config_file_name).is_file():
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

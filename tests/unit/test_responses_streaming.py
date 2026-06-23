@@ -170,8 +170,8 @@ async def test_reasoning_item_lineage_stays_stable_across_replace_and_finish() -
     )
     replaced = _open_reasoning_item(_last_output_item(coordinator))
 
-    await coordinator.summary_delta(SummaryDelta(index=0, text="summary part"))
-    await coordinator.summary_done(SummaryDone(index=0))
+    await coordinator.summary_delta(SummaryDelta(text="summary part"))
+    await coordinator.summary_done(SummaryDone())
     await coordinator.finish_reasoning(
         machine=[],
         sides=_reasoning_sides("draft final"),
@@ -209,8 +209,8 @@ async def test_reasoning_summary_deltas_publish_expected_event_types() -> None:
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
     await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
-    await coordinator.summary_delta(SummaryDelta(index=0, text="part"))
-    await coordinator.summary_done(SummaryDone(index=0))
+    await coordinator.summary_delta(SummaryDelta(text="part"))
+    await coordinator.summary_done(SummaryDone())
 
     assert _published_event_types(channels) == [
         "response.output_item.added",
@@ -226,7 +226,7 @@ async def test_finish_reasoning_rejects_pending_summary_text() -> None:
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
     await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
-    await coordinator.summary_delta(SummaryDelta(index=0, text="part"))
+    await coordinator.summary_delta(SummaryDelta(text="part"))
 
     try:
         await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("draft final"))
@@ -259,8 +259,8 @@ async def test_cancelled_flushes_active_reasoning_item_without_completing_chain(
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
     reasoning_id = await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
-    await coordinator.summary_delta(SummaryDelta(index=0, text="part"))
-    await coordinator.summary_done(SummaryDone(index=0))
+    await coordinator.summary_delta(SummaryDelta(text="part"))
+    await coordinator.summary_done(SummaryDone())
     await coordinator.cancelled()
 
     response = coordinator.current_response()
@@ -287,8 +287,8 @@ async def test_summary_done_does_not_write_store() -> None:
     await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
     assert store.append_calls == 1
 
-    await coordinator.summary_delta(SummaryDelta(index=0, text="part"))
-    await coordinator.summary_done(SummaryDone(index=0))
+    await coordinator.summary_delta(SummaryDelta(text="part"))
+    await coordinator.summary_done(SummaryDone())
 
     assert store.replace_calls == 0
 

@@ -73,8 +73,7 @@ package plap
 
   display_name!: string
   model_info!: #ModelInfoConfig
-  default_reasoning_effort: *null | #ReasoningEffort
-  main!: #FieldConfig
+  main?: #FieldConfig
   reasoning_to_output: *1.0 | number
   sides!: {
     main: 0
@@ -86,4 +85,12 @@ package plap
     }
   }
   overlays: *{} | { [string]: { [string]: _ } }
+  overlays: {
+    model?: {
+      [string]: {
+        main!: #FieldConfig
+        [string]: _
+      }
+    }
+  }
 }

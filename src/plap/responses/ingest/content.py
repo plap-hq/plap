@@ -64,6 +64,12 @@ def _assistant_message_content(value: str | list[object]) -> tuple[str | list[Ch
             continue
         raise TypeError(f"unsupported assistant message content part: {type(part).__name__}")
     refusal = "\n".join(refusals) if refusals else None
+    # Replay normalisation: a single text part is a degenerate list form.
+    # Without this, content_hash() would differ between the runtime string
+    # and the replayed list, breaking MessagePatch resolution on every
+    # continuation and poisoning provider prompt caches with structural noise.
+    if len(parts) == 1 and isinstance(parts[0], ChatContentText):
+        return parts[0].text, refusal
     return parts, refusal
 
 

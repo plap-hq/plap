@@ -22,6 +22,7 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     SummaryTextContent,
 )
+from plap.responses.ingest.content import message as decode_message
 from plap.responses.ingest.content import tool_output as decode_tool_output
 from plap.responses.ingest.ingest import (
     _decode_queue as _decode_queue_impl,
@@ -369,7 +370,7 @@ def test_decode_queue_normalizes_assistant_refusal_to_top_level_runtime_field() 
         _DecodedMessage(
             message=Message(
                 role="assistant",
-                content=[ChatContentText(text="hello")],
+                content="hello",
                 refusal="nope",
             )
         )
@@ -1776,3 +1777,12 @@ async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> N
 
     assert exc_info.value.private is not None
     assert exc_info.value.private.reason == "reasoning_side_patch_invalid"
+
+
+def test_assistant_message_content_roundtrip_normalizes_single_text_part() -> None:
+    item = RequestMessageItem(role="assistant", content=[OutputTextContent(text="hello world", type="output_text")], type="message")
+    decoded = decode_message(item)
+
+    assert isinstance(decoded.content, str)
+    assert decoded.content == "hello world"
+    assert decoded.refusal is None
