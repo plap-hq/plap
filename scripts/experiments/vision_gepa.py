@@ -108,6 +108,7 @@ SEED: dict[str, str] = {
 @dataclass(frozen=True, slots=True)
 class MMMUExample:
     id: str
+    subject: str
     question: str
     options: list[str]
     answer: str
@@ -140,7 +141,7 @@ def _load_mmmu_pro_hard(
     split: str = "test",
     max_examples: int | None = None,
 ) -> list[MMMUExample]:
-    cache_key = hashlib.sha256(f"standard (10 options):{split}:{max_examples}".encode()).hexdigest()[:16]
+    cache_key = hashlib.sha256(f"standard (10 options):hard:v2:{split}:{max_examples}".encode()).hexdigest()[:16]
     cache_dir = REPO_ROOT / ".dev" / "vision-gepa"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"dataset_cache_{cache_key}.pkl"
@@ -167,6 +168,7 @@ def _load_mmmu_pro_hard(
         rows.append(
             MMMUExample(
                 id=str(row["id"]),
+                subject=str(row["subject"]),
                 question=str(row["question"]),
                 options=ast.literal_eval(str(row["options"])),
                 answer=str(row["answer"]).strip().upper(),
@@ -184,6 +186,48 @@ def _load_mmmu_pro_hard(
 def _pil_to_data_uri(data: bytes) -> str:
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def _grouped_subject_split(
+    examples: list[MMMUExample],
+    *,
+    val_fraction: float,
+    seed: int,
+) -> tuple[list[MMMUExample], list[MMMUExample]]:
+    if not examples or val_fraction <= 0:
+        return list(examples), []
+
+    by_subject: dict[str, list[MMMUExample]] = {}
+    for example in examples:
+        by_subject.setdefault(example.subject, []).append(example)
+
+    subjects = list(by_subject)
+    rng = random.Random(seed)
+    rng.shuffle(subjects)
+
+    target_val_examples = max(1, round(len(examples) * val_fraction))
+    val_subjects: set[str] = set()
+    val_subject_order: list[str] = []
+    val_examples_count = 0
+    for subject in subjects:
+        if val_examples_count >= target_val_examples and val_subjects:
+            break
+        val_subjects.add(subject)
+        val_subject_order.append(subject)
+        val_examples_count += len(by_subject[subject])
+
+    while len(val_subjects) > 1:
+        train = [example for example in examples if example.subject not in val_subjects]
+        if train:
+            break
+        last_subject = val_subject_order.pop()
+        val_subjects.remove(last_subject)
+
+    train = [example for example in examples if example.subject not in val_subjects]
+    val = [example for example in examples if example.subject in val_subjects]
+    rng.shuffle(train)
+    rng.shuffle(val)
+    return train, val
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +365,15 @@ def _append_jsonl(path: Path, *, lock: threading.Lock, record: dict[str, Any]) -
         handle.write("\n")
 
 
+def _candidate_prompt_lengths(candidate: dict[str, str]) -> dict[str, int]:
+    return {name: len(value) for name, value in candidate.items()}
+
+
+def _candidate_prompt_length_score(candidate: dict[str, str]) -> tuple[int, float]:
+    total_length = sum(_candidate_prompt_lengths(candidate).values())
+    return total_length, 1.0 / max(total_length, 1)
+
+
 async def _stream_complete(client: IChatCompletionClient, request: ChatCompletionRequest) -> ChatCompletionResult:
     accumulator = Accumulator(tools=tuple(request.tools))
     result: ChatCompletionResult | None = None
@@ -366,6 +419,13 @@ async def _evaluate_one(
     vision_model: str,
     vision_reasoning_effort: ReasoningEffort | None,
 ) -> tuple[float, dict[str, Any]]:
+    candidate_lengths = _candidate_prompt_lengths(candidate)
+    total_prompt_length, prompt_length_score = _candidate_prompt_length_score(candidate)
+    anti_overfit_instruction = (
+        "Do not optimize by hardcoding MMMU-Pro specific wording, answer-letter conventions, subject-specific heuristics, "
+        "or specific examples. Prefer generic image-inspection, transcription, and iterative clarification behavior "
+        "that transfers across domains."
+    )
     content = _build_user_content(example.question, example.options, example.images)
     raw_main = ChatCompletionRequest(
         model=main_model,
@@ -400,7 +460,17 @@ async def _evaluate_one(
     try:
         main_result = await _stream_complete(main_client, main_request)
     except Exception as exc:
-        return 0.0, {"error": f"main model call failed: {exc}", "transcript": transcript, "scores": {"efficiency": 1.0}}
+        return 0.0, {
+            "error": f"main model call failed: {exc}",
+            "transcript": transcript,
+            "anti_overfit_instruction": anti_overfit_instruction,
+            "candidate_component_lengths": candidate_lengths,
+            "total_prompt_length": total_prompt_length,
+            "scores": {
+                "efficiency": 1.0,
+                "prompt_compactness": prompt_length_score,
+            },
+        }
 
     while True:
         tool_calls = main_result.message.tool_calls
@@ -525,7 +595,13 @@ async def _evaluate_one(
                 "got": raw_answer,
                 "turns": total_turns,
                 "transcript": transcript,
-                "scores": {"efficiency": 1.0 / total_turns},
+                "anti_overfit_instruction": anti_overfit_instruction,
+                "candidate_component_lengths": candidate_lengths,
+                "total_prompt_length": total_prompt_length,
+                "scores": {
+                    "efficiency": 1.0 / total_turns,
+                    "prompt_compactness": prompt_length_score,
+                },
             }
             return score, side_info
 
@@ -548,7 +624,13 @@ async def _evaluate_one(
             return 0.0, {
                 "error": f"main model continuation call failed: {exc}",
                 "transcript": transcript,
-                "scores": {"efficiency": 1.0 / max(total_turns, 1)},
+                "anti_overfit_instruction": anti_overfit_instruction,
+                "candidate_component_lengths": candidate_lengths,
+                "total_prompt_length": total_prompt_length,
+                "scores": {
+                    "efficiency": 1.0 / max(total_turns, 1),
+                    "prompt_compactness": prompt_length_score,
+                },
             }
 
     side_info = {
@@ -557,7 +639,13 @@ async def _evaluate_one(
         "turns": total_turns,
         "error": error,
         "transcript": transcript,
-        "scores": {"efficiency": 1.0 / max(total_turns, 1)},
+        "anti_overfit_instruction": anti_overfit_instruction,
+        "candidate_component_lengths": candidate_lengths,
+        "total_prompt_length": total_prompt_length,
+        "scores": {
+            "efficiency": 1.0 / max(total_turns, 1),
+            "prompt_compactness": prompt_length_score,
+        },
     }
     return 0.0, side_info
 
@@ -731,7 +819,7 @@ def _run_gepa(
             run_dir=str(run_dir.resolve()),
             seed=seed,
             max_metric_calls=max_metric_calls,
-            candidate_selection_strategy="top_k_pareto",
+            candidate_selection_strategy="pareto",
             parallel=True,
             max_workers=50,
             cache_evaluation=True,
@@ -756,25 +844,20 @@ def _run_gepa(
         valset=val,
         config=cfg,
         objective=(
-            "Optimize 3 parameters (vision_prompt, tool_description, "
-            "prompt_description) for a vision tool-calling "
-            "pipeline on MMMU-Pro standard (10 options) Hard. "
-            "The main model receives question text with <image N> references "
-            "plus formatted options; images are replaced with text IDs. "
-            "The model must call the vision tool and reference image ids in the prompt, then answer. "
-            "Accuracy = correct answer letter (A-J)."
+            "Optimize 3 parameters (vision_prompt, tool_description, prompt_description) for a generic image-inspection "
+            "tool used inside a multimodal question-answering system. Improve image-grounded usefulness, iterative clarification, "
+            "and transfer across domains while avoiding benchmark-specific tricks or memorized phrasing."
         ),
         background=(
             "Parameters:\n"
-            "- vision_prompt: developer prompt for the vision model NOT the main model the main model does not see this\n"
-            "- tool_description: description of the vision tool shown to main model\n"
-            "- prompt_description: description of the prompt parameter\n\n"
-            "Transcript in side_info contains full conversation. "
-            "Vision model calls nested under role=vision_model. "
-            "Multi-objective: primary score = accuracy (1.0 correct, 0.0 wrong). "
-            "Secondary: side_info.scores.efficiency = 1/turns, where turns = "
-            "number of model calls. Fewer turns = higher efficiency. "
-            "Both objectives are higher-is-better."
+            "- vision_prompt: developer prompt for the vision model; keep it general and image-grounded\n"
+            "- tool_description: description of the vision tool shown to the main model\n"
+            "- prompt_description: description of the prompt parameter the main model sends to the vision tool\n\n"
+            "The benchmark adapter uses MMMU-Pro standard-format academic/technical multiple-choice questions, "
+            "but the optimized fields should not hardcode multiple-choice wording, answer-letter conventions, "
+            "subject-specific heuristics, or specific examples. "
+            "Optimize generic image reading, transcription, interpretation, and iterative follow-up behavior. "
+            "side_info includes full transcripts, turns, anti-overfit guidance, and a prompt-compactness objective."
         ),
     )
 
@@ -817,13 +900,22 @@ def main() -> int:
     args = _parse_args()
     logger.info("loading dataset")
     examples = _load_mmmu_pro_hard(max_examples=args.max_examples)
-    rng = random.Random(args.seed)
-    rng.shuffle(examples)
-
-    split = int(len(examples) * (1 - args.val_split)) if not args.no_val else len(examples)
-    train = examples[:split]
-    val = examples[split:] if not args.no_val else []
+    if args.no_val:
+        train = list(examples)
+        val = []
+    else:
+        train, val = _grouped_subject_split(
+            examples,
+            val_fraction=args.val_split,
+            seed=args.seed,
+        )
     logger.info("dataset", total=len(examples), train=len(train), val=len(val))
+    if val:
+        logger.info(
+            "dataset.grouped_split",
+            train_subjects=sorted({example.subject for example in train}),
+            val_subjects=sorted({example.subject for example in val}),
+        )
 
     main_str = _resolve_model_name(args.main_model)
     vision_str = _resolve_model_name(args.vision_model)
