@@ -23,6 +23,9 @@ package plap
 #SamplingConfig: {
   temperature: *null | #FloatTransform
   top_p: *null | #FloatTransform
+  top_k: *null | #IntTransform
+  frequency_penalty: *null | #FloatTransform
+  presence_penalty: *null | #FloatTransform
   top_logprobs: *null | #IntTransform
 }
 

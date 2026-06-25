@@ -19,7 +19,7 @@ from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
-from plap.plugins.core.loop import UsageLedger, run_response
+from plap.plugins.core.loop import UsageLedger, response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
@@ -161,6 +161,9 @@ def _config() -> _Config:
                 "sampling": {
                     "temperature": None,
                     "top_p": None,
+                    "top_k": None,
+                    "frequency_penalty": None,
+                    "presence_penalty": None,
                     "top_logprobs": None,
                 },
             },
@@ -180,6 +183,9 @@ def _config() -> _Config:
                 "sampling": {
                     "temperature": None,
                     "top_p": None,
+                    "top_k": None,
+                    "frequency_penalty": None,
+                    "presence_penalty": None,
                     "top_logprobs": None,
                 },
             },
@@ -317,6 +323,50 @@ class _StubChatClient:
                 yield delta
 
         return _iterator()
+
+
+@pytest.mark.anyio
+async def test_response_request_applies_internal_sampling_config() -> None:
+    request = _request()
+    config_data = _config().to_dict()
+    config_data["main"]["sampling"] = {
+        "temperature": None,
+        "top_p": None,
+        "top_k": {
+            "disabled": False,
+            "fixed": None,
+            "default": 17,
+            "min_value": None,
+            "max_value": None,
+        },
+        "frequency_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": 0.25,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "presence_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": -0.5,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "top_logprobs": None,
+    }
+    config = _Config(config_data, frozen_box=True)
+    state = _state(request=request, config=config)
+
+    built = await response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+
+    assert built.top_k == 17
+    assert built.frequency_penalty == 0.25
+    assert built.presence_penalty == -0.5
 
 
 class _FakeReasoningSummarizer:
