@@ -47,7 +47,15 @@ from plap.llms.completions.providers import build_providers
 from plap.llms.completions.providers.openai import OpenAIProvider
 from plap.llms.completions.quirks import Drop, ExtraBodyIf, MoveOutput, SystemRole
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
-from plap.plugins.vision import VISION_PROMPT, VISION_TOOL_NAME, _image_id, _rewrite_request, _tool_output_text, _vision_content
+from plap.plugins.vision import (
+    VISION_PROMPT,
+    VISION_TOOL,
+    VISION_TOOL_NAME,
+    _image_id,
+    _rewrite_request,
+    _tool_output_text,
+    _vision_content,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _DIRECT_INSTRUCTION = "Answer with the option letter from the given choices directly."
@@ -74,29 +82,22 @@ def _make_reflection_lm_with_reasoning(model_name: str, *, reasoning_effort: str
 
 
 # ---------------------------------------------------------------------------
-# Tunable seed candidate (4 parameters)
+# Tunable seed candidate (3 parameters)
 # ---------------------------------------------------------------------------
+
+VISION_TOOL_DESCRIPTION = VISION_TOOL.function.description or ""
+VISION_TOOL_PROMPT_DESCRIPTION = str(VISION_TOOL.function.parameters["properties"]["prompt"]["description"])
 
 # SEED: dict[str, str] = {
 #     "vision_prompt": VISION_PROMPT,
-#     "tool_description": (
-#         "Inspect one or more stable image ids from the conversation. "
-#         "Use ids like image-XXXX-XXXX-XXXX-XXXX and provide a prompt describing what to inspect."
-#     ),
-#     "ids_description": (
-#         "Image ids to inspect."
-#     ),
-#     "prompt_description": "Question for the selected images.",
+#     "tool_description": VISION_TOOL_DESCRIPTION,
+#     "prompt_description": VISION_TOOL_PROMPT_DESCRIPTION,
 # }
 
 SEED: dict[str, str] = {
     "vision_prompt": VISION_PROMPT,
-    "tool_description": (
-        "Inspect one or more stable image ids from the conversation. "
-        "Use ids like image-XXXX-XXXX-XXXX-XXXX and provide a prompt describing what to inspect."
-    ),
-    "ids_description": ("Image ids to inspect."),
-    "prompt_description": "Question for the selected images.",
+    "tool_description": VISION_TOOL_DESCRIPTION,
+    "prompt_description": VISION_TOOL_PROMPT_DESCRIPTION,
 }
 
 # ---------------------------------------------------------------------------
@@ -190,30 +191,36 @@ def _pil_to_data_uri(data: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_tool(tool_desc: str, ids_desc: str, prompt_desc: str) -> ChatTool:
+def _build_tool(tool_desc: str, prompt_desc: str) -> ChatTool:
     return ChatTool(
         function=ChatFunctionTool(
-            name="images",
+            name=VISION_TOOL_NAME,
             description=tool_desc,
             parameters={
                 "type": "object",
                 "properties": {
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": ids_desc,
-                    },
                     "prompt": {
                         "type": "string",
                         "description": prompt_desc,
                     },
                 },
-                "required": ["ids", "prompt"],
+                "required": ["prompt"],
                 "additionalProperties": False,
             },
             strict=True,
         )
     )
+
+
+def _referenced_image_ids(text: str) -> list[str]:
+    seen: set[str] = set()
+    ids: list[str] = []
+    for image_id in re.findall(r"\bimage-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}\b", text):
+        if image_id in seen:
+            continue
+        seen.add(image_id)
+        ids.append(image_id)
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -380,14 +387,11 @@ async def _evaluate_one(
     # 2. Apply the vision plugin's rewrite: image → text id, inject VISION_TOOL
     rewritten = _rewrite_request(raw_main)
     # Replace with the tuned tool description from this candidate
-    tuned_tool = _build_tool(
-        candidate["tool_description"],
-        candidate["ids_description"],
-        candidate["prompt_description"],
-    )
+    tuned_tool = _build_tool(candidate["tool_description"], candidate["prompt_description"])
     main_request = replace(rewritten, tools=[tuned_tool])
 
     messages = list(main_request.messages)
+    vision_messages = [ChatMessage(role="user", content=_vision_content(correct_ids, chat_images))]
     raw_answer: str | None = None
     total_turns = 1
     error: str | None = None
@@ -416,22 +420,23 @@ async def _evaluate_one(
                 try:
                     args = json.loads(call.arguments)
                 except json.JSONDecodeError as err:
-                    raise RuntimeError(f"images tool call {call.id} has invalid JSON arguments: {call.arguments}") from err
-                requested_ids: list[str] = args["ids"]
+                    raise RuntimeError(f"vision tool call {call.id} has invalid JSON arguments: {call.arguments}") from err
                 prompt = args["prompt"]
 
+                requested_ids = _referenced_image_ids(prompt)
+                if not requested_ids:
+                    error = "vision tool prompt must reference one or more known image ids"
+                    break
                 unknown = [iid for iid in requested_ids if iid not in correct_ids]
                 if unknown:
                     error = f"model requested unknown ids: {unknown}, available: {correct_ids}"
                     break
 
-                selected_images = [chat_images[correct_ids.index(iid)] for iid in requested_ids]
-                interleaved = _vision_content(requested_ids, selected_images)
                 vision_request = ChatCompletionRequest(
                     model=vision_model,
                     messages=[
                         ChatMessage(role="developer", content=candidate["vision_prompt"]),
-                        ChatMessage(role="user", content=interleaved),
+                        *vision_messages,
                         ChatMessage(role="user", content=prompt),
                     ],
                     max_completion_tokens=8192,
@@ -463,7 +468,7 @@ async def _evaluate_one(
                             "role": "vision_model",
                             "messages": [
                                 {"role": "developer", "content": candidate["vision_prompt"]},
-                                {"role": "user", "content": _serialize(interleaved)},
+                                *[{"role": message.role, "content": _serialize(message.content)} for message in vision_messages],
                                 {"role": "user", "content": prompt},
                                 *([] if assistant_message is None else [assistant_message]),
                             ],
@@ -479,12 +484,15 @@ async def _evaluate_one(
                 )
                 tool_outputs.append(tool_output)
                 transcript.append({"role": "tool", "tool_call_id": call.id, "content": vision_output_text})
+                prior_vision_messages = list(vision_messages)
+                vision_messages.append(ChatMessage(role="user", content=prompt))
+                vision_messages.append(ChatMessage(role="assistant", content=vision_output_text))
                 transcript.append(
                     {
                         "role": "vision_model",
                         "messages": [
                             {"role": "developer", "content": candidate["vision_prompt"]},
-                            {"role": "user", "content": _serialize(interleaved)},
+                            *[{"role": message.role, "content": _serialize(message.content)} for message in prior_vision_messages],
                             {"role": "user", "content": prompt},
                             {
                                 "role": "assistant",
@@ -748,19 +756,18 @@ def _run_gepa(
         valset=val,
         config=cfg,
         objective=(
-            "Optimize 4 parameters (vision_prompt, tool_description, "
-            "ids_description, prompt_description) for a vision tool-calling "
+            "Optimize 3 parameters (vision_prompt, tool_description, "
+            "prompt_description) for a vision tool-calling "
             "pipeline on MMMU-Pro standard (10 options) Hard. "
             "The main model receives question text with <image N> references "
             "plus formatted options; images are replaced with text IDs. "
-            "The model must call the images tool to inspect them, then answer. "
+            "The model must call the vision tool and reference image ids in the prompt, then answer. "
             "Accuracy = correct answer letter (A-J)."
         ),
         background=(
             "Parameters:\n"
             "- vision_prompt: developer prompt for the vision model NOT the main model the main model does not see this\n"
-            "- tool_description: description of the images tool shown to main model\n"
-            "- ids_description: description of the ids parameter\n"
+            "- tool_description: description of the vision tool shown to main model\n"
             "- prompt_description: description of the prompt parameter\n\n"
             "Transcript in side_info contains full conversation. "
             "Vision model calls nested under role=vision_model. "
