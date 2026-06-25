@@ -48,8 +48,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "datasets>=5.0.0,<6",
   "duckdb>=1.5.3,<2",
-  "gepa>=0.1.1,<0.2",
+  "gepa[full]>=0.1.1,<0.2",
   "httpx>=0.28.1,<0.29",
   "hypothesis>=6.155.1,<7",
   "pre-commit>=4.6.0,<5",

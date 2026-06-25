@@ -67,12 +67,12 @@ config: #Config & {
           reasoning_effort: *"medium" | #ReasoningEffort
         }
         summary: #FieldConfig & {
-          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/google/gemma-4-31b-it:wandb,openrouter/google/gemma-4-31b-it:venice,openrouter/google/gemma-4-31b-it:parasail" | string
+          model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
         }
@@ -112,12 +112,12 @@ config: #Config & {
           reasoning_effort: *"high" | #ReasoningEffort
         }
         summary: #FieldConfig & {
-          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:wandb,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/google/gemma-4-31b-it:wandb,openrouter/google/gemma-4-31b-it:venice,openrouter/google/gemma-4-31b-it:parasail" | string
+          model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
         }

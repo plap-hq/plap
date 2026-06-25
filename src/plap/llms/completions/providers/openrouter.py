@@ -52,6 +52,7 @@ OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "meta-llama/llama-3.3-70b-instruct": (),
     "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
+    "qwen/qwen3.5-9b": (ExtraBodyIf("reasoning_effort", (None, "none"), {"reasoning": {"enabled": True}}, negate=True),),
     "stepfun/step-3.5-flash": (),
     "xiaomi/mimo-v2.5-pro": (),
 }

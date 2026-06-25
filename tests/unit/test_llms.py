@@ -2508,8 +2508,9 @@ def test_openrouter_request_quirks_allow_file_id() -> None:
     ]
 
 
-def test_openrouter_gemma_request_quirks_enable_reasoning_when_set() -> None:
-    request = _request_for_model("google/gemma-4-31b-it")
+@pytest.mark.parametrize("model", ["google/gemma-4-31b-it", "qwen/qwen3.5-9b"])
+def test_openrouter_reasoning_enable_request_quirks_when_set(model: str) -> None:
+    request = _request_for_model(model)
 
     body = _body_for(_openrouter_provider(), request, stream=False)
 
@@ -2517,8 +2518,9 @@ def test_openrouter_gemma_request_quirks_enable_reasoning_when_set() -> None:
     assert body["extra_body"] == {"reasoning": {"enabled": True}}
 
 
-def test_openrouter_gemma_request_quirks_skip_reasoning_enable_for_none() -> None:
-    request = replace(_request_for_model("google/gemma-4-31b-it"), reasoning_effort="none")
+@pytest.mark.parametrize("model", ["google/gemma-4-31b-it", "qwen/qwen3.5-9b"])
+def test_openrouter_reasoning_enable_request_quirks_skip_for_none(model: str) -> None:
+    request = replace(_request_for_model(model), reasoning_effort="none")
 
     body = _body_for(_openrouter_provider(), request, stream=False)
 
