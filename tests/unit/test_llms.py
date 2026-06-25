@@ -1893,7 +1893,7 @@ def _fireworks_provider(*, client: Any | None = None) -> FireworksProvider:
 
 
 def test_build_chat_body_preserves_full_request_shape() -> None:
-    body = build_chat_body(_request(), stream=True)
+    body = build_chat_body(replace(_request(), min_p=0.05, repetition_penalty=1.2), stream=True)
 
     assert body["model"] == "model-a"
     assert body["messages"][0] == {"role": "developer", "content": "be precise"}
@@ -1921,7 +1921,12 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
         },
     }
     assert body["max_completion_tokens"] == 128
+    assert body["min_p"] == 0.05
     assert body["top_k"] == 17
+    assert body["frequency_penalty"] == 0.1
+    assert body["presence_penalty"] == 0.2
+    assert body["repetition_penalty"] == 1.2
+    assert body["seed"] == 7
     assert body["reasoning_effort"] == "low"
     assert body["prompt_cache_key"] == "cache-a"
     assert body["metadata"] == {"k": "v"}
@@ -2526,6 +2531,15 @@ def test_openrouter_reasoning_enable_request_quirks_skip_for_none(model: str) ->
 
     assert body["reasoning_effort"] == "none"
     assert "extra_body" not in body
+
+
+def test_openrouter_request_quirks_keep_min_p_and_repetition_penalty() -> None:
+    request = replace(_request_for_model("qwen/qwen3.5-9b"), min_p=0.05, repetition_penalty=1.2)
+
+    body = _body_for(_openrouter_provider(), request, stream=False)
+
+    assert body["min_p"] == 0.05
+    assert body["repetition_penalty"] == 1.2
 
 
 @pytest.mark.parametrize(

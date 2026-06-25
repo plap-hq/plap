@@ -25,6 +25,8 @@ from plap.llms.json import decode_json_object_or_none
 from plap.llms.retry import RetryValidator, retry_message
 from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.core.loop import StreamResult
+from plap.plugins.core.request import apply_float_transform, apply_int_transform
+from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.ingest.models import MAIN_SIDE, Message
 from plap.responses.state import State
 
@@ -216,7 +218,14 @@ def _vision_content(ids: list[str], images: list[ChatContentImage]) -> list[Chat
     return content
 
 
-def _vision_request(config: CueBox, ids: list[str], prompt: str, images: list[ChatContentImage]) -> ChatCompletionRequest:
+def _vision_request(
+    config: CueBox,
+    request: ResponseCreateRequest,
+    ids: list[str],
+    prompt: str,
+    images: list[ChatContentImage],
+) -> ChatCompletionRequest:
+    sampling = config.vision.sampling
     return ChatCompletionRequest(
         model=config.vision.model,
         messages=[
@@ -225,6 +234,14 @@ def _vision_request(config: CueBox, ids: list[str], prompt: str, images: list[Ch
             ChatMessage(role="user", content=prompt),
         ],
         max_completion_tokens=config.vision.max_completion_tokens,
+        temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
+        top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
+        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
+        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
+        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
+        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
+        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
+        seed=apply_int_transform(None, sampling.seed),
         reasoning_effort=config.vision.reasoning_effort,
         service_tier=config.vision.service_tier,
     )
@@ -246,7 +263,7 @@ async def _vision_tool_output(
     if not selected:
         raise RuntimeError("images tool execution reached an empty image selection")
     client = await state.svcs.aget(IChatCompletionClient)
-    result = await client.complete(_vision_request(config, ids, prompt, selected))
+    result = await client.complete(_vision_request(config, state.prepared.execution_request, ids, prompt, selected))
     ledger.hide(config.vision.public_usage, result.usage)
     return _tool_output_text(result)
 

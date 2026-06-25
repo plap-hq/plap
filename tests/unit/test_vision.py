@@ -177,9 +177,12 @@ def _config() -> _Config:
                 "sampling": {
                     "temperature": None,
                     "top_p": None,
+                    "min_p": None,
                     "top_k": None,
                     "frequency_penalty": None,
                     "presence_penalty": None,
+                    "repetition_penalty": None,
+                    "seed": None,
                     "top_logprobs": None,
                 },
             },
@@ -188,6 +191,17 @@ def _config() -> _Config:
                 "max_completion_tokens": 8192,
                 "reasoning_effort": None,
                 "service_tier": None,
+                "sampling": {
+                    "temperature": None,
+                    "top_p": None,
+                    "min_p": None,
+                    "top_k": None,
+                    "frequency_penalty": None,
+                    "presence_penalty": None,
+                    "repetition_penalty": None,
+                    "seed": None,
+                    "top_logprobs": None,
+                },
                 "public_usage": {
                     "uncached_input_to_output": 0.25,
                     "cached_input_to_output": 0.05,
@@ -227,6 +241,7 @@ def _state(
     *,
     request: ResponseCreateRequest | None = None,
     ingested: Ingested | None = None,
+    config: Box | None = None,
 ) -> tuple[State, _RecordingStore, _RecordingChannels]:
     actual_request = request or _request()
     store = _RecordingStore()
@@ -234,7 +249,7 @@ def _state(
     state = State.from_ingested(
         ingested=ingested or _ingested(),
         prepared=_prepared(actual_request),
-        svcs=_svcs(client, _config()),
+        svcs=_svcs(client, config or _config()),
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
         side_codes={MAIN_SIDE: 0},
@@ -359,6 +374,108 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
     final_message = next(item for item in output if isinstance(item, ResponseMessageItem))
     assert _message_text(final_message) == "final answer"
+
+
+@pytest.mark.anyio
+async def test_internal_images_tool_applies_vision_sampling_config() -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    request = _request(temperature=0.4, top_p=0.9)
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_images", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            ),
+            _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
+        ],
+        completes=[_complete("vision output", usage=_usage(input_tokens=6, output_tokens=2))],
+    )
+    config_data = _config().to_dict()
+    config_data["vision"]["sampling"] = {
+        "temperature": {
+            "disabled": False,
+            "fixed": None,
+            "default": None,
+            "scale": 0.5,
+            "offset": 0.1,
+            "min_value": None,
+            "max_value": None,
+        },
+        "top_p": {
+            "disabled": False,
+            "fixed": None,
+            "default": None,
+            "scale": 1.0,
+            "offset": -0.2,
+            "min_value": None,
+            "max_value": None,
+        },
+        "min_p": {
+            "disabled": False,
+            "fixed": None,
+            "default": 0.05,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "top_k": {
+            "disabled": False,
+            "fixed": None,
+            "default": 23,
+            "min_value": None,
+            "max_value": None,
+        },
+        "frequency_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": 0.4,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "presence_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": -0.2,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "repetition_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": 1.2,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "seed": {
+            "disabled": False,
+            "fixed": None,
+            "default": 99,
+            "min_value": None,
+            "max_value": None,
+        },
+        "top_logprobs": None,
+    }
+    state, _, _ = _state(client, request=request, config=_Config(config_data, frozen_box=True))
+
+    await core.run_response(state=state)
+
+    vision_request = client.complete_requests[0]
+    assert vision_request.temperature == pytest.approx(0.3)
+    assert vision_request.top_p == pytest.approx(0.7)
+    assert vision_request.min_p == pytest.approx(0.05)
+    assert vision_request.top_k == 23
+    assert vision_request.frequency_penalty == 0.4
+    assert vision_request.presence_penalty == -0.2
+    assert vision_request.repetition_penalty == pytest.approx(1.2)
+    assert vision_request.seed == 99
 
 
 @pytest.mark.anyio

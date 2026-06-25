@@ -17,7 +17,7 @@ from plap.responses.state import State
 DEVELOPER_PROMPT_TEMPLATE = "You are {model_name}, an AI assistant."
 
 
-def _apply_float_transform(
+def apply_float_transform(
     value: float | None,
     config: object | None,
     *,
@@ -50,7 +50,7 @@ def _apply_float_transform(
     return resolved
 
 
-def _apply_int_transform(
+def apply_int_transform(
     value: int | None,
     config: object | None,
     *,
@@ -122,7 +122,7 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
     request = state.prepared.execution_request
     main = config.main
     sampling = main.sampling
-    top_logprobs = _apply_int_transform(request.top_logprobs, sampling.top_logprobs, minimum=0, maximum=20)
+    top_logprobs = apply_int_transform(request.top_logprobs, sampling.top_logprobs, minimum=0, maximum=20)
     instructions = [
         ChatMessage(
             role="developer",
@@ -150,13 +150,16 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,
         response_format=_response_format(state),
-        temperature=_apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
-        top_p=_apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
-        top_k=_apply_int_transform(None, sampling.top_k, minimum=0),
-        frequency_penalty=_apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
-        presence_penalty=_apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
+        temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
+        top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
+        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
+        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
+        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
+        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
+        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
         logprobs=True if top_logprobs is not None else None,
         top_logprobs=top_logprobs,
+        seed=apply_int_transform(None, sampling.seed),
         reasoning_effort=main.reasoning_effort,
         stream_options=ChatStreamOptions(include_usage=True),
         user=request.user,
@@ -164,3 +167,11 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
         metadata=request.metadata,
         service_tier=main.service_tier,
     )
+
+
+__all__ = [
+    "apply_float_transform",
+    "apply_int_transform",
+    "build_config_request",
+    "build_response_request",
+]

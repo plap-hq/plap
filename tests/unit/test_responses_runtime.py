@@ -161,9 +161,12 @@ def _config() -> _Config:
                 "sampling": {
                     "temperature": None,
                     "top_p": None,
+                    "min_p": None,
                     "top_k": None,
                     "frequency_penalty": None,
                     "presence_penalty": None,
+                    "repetition_penalty": None,
+                    "seed": None,
                     "top_logprobs": None,
                 },
             },
@@ -183,9 +186,12 @@ def _config() -> _Config:
                 "sampling": {
                     "temperature": None,
                     "top_p": None,
+                    "min_p": None,
                     "top_k": None,
                     "frequency_penalty": None,
                     "presence_penalty": None,
+                    "repetition_penalty": None,
+                    "seed": None,
                     "top_logprobs": None,
                 },
             },
@@ -332,6 +338,15 @@ async def test_response_request_applies_internal_sampling_config() -> None:
     config_data["main"]["sampling"] = {
         "temperature": None,
         "top_p": None,
+        "min_p": {
+            "disabled": False,
+            "fixed": None,
+            "default": 0.15,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
         "top_k": {
             "disabled": False,
             "fixed": None,
@@ -357,6 +372,22 @@ async def test_response_request_applies_internal_sampling_config() -> None:
             "min_value": None,
             "max_value": None,
         },
+        "repetition_penalty": {
+            "disabled": False,
+            "fixed": None,
+            "default": 1.1,
+            "scale": 1.0,
+            "offset": 0.0,
+            "min_value": None,
+            "max_value": None,
+        },
+        "seed": {
+            "disabled": False,
+            "fixed": None,
+            "default": 11,
+            "min_value": None,
+            "max_value": None,
+        },
         "top_logprobs": None,
     }
     config = _Config(config_data, frozen_box=True)
@@ -364,9 +395,12 @@ async def test_response_request_applies_internal_sampling_config() -> None:
 
     built = await response_request(state=state, config=state.svcs.get(CueBox).plap.config)
 
+    assert built.min_p == 0.15
     assert built.top_k == 17
     assert built.frequency_penalty == 0.25
     assert built.presence_penalty == -0.5
+    assert built.repetition_penalty == 1.1
+    assert built.seed == 11
 
 
 class _FakeReasoningSummarizer:
