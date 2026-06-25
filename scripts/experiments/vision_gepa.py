@@ -45,7 +45,7 @@ from plap.llms.completions.chat import (
 from plap.llms.completions.client import ChatCompletionClient
 from plap.llms.completions.providers import build_providers
 from plap.llms.completions.providers.openai import OpenAIProvider
-from plap.llms.completions.quirks import Drop, MoveOutput, SystemRole
+from plap.llms.completions.quirks import Drop, ExtraBodyIf, MoveOutput, SystemRole
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
 from plap.plugins.vision import VISION_PROMPT, VISION_TOOL_NAME, _image_id, _rewrite_request, _tool_output_text, _vision_content
 
@@ -436,7 +436,11 @@ async def _evaluate_one(
                     ],
                     max_completion_tokens=8192,
                     reasoning_effort=vision_reasoning_effort,
-                    temperature=0,
+                    temperature=0.7,
+                    top_p=0.95,
+                    top_k=20,
+                    repetition_penalty=1.15,
+                    presence_penalty=1.5,
                 )
                 vision_result = None
                 try:
@@ -676,12 +680,12 @@ def _build_local_openai_client(*, base_url: str, api_key: str, model: str) -> Ch
         ),
         models={
             model: (
-                # ExtraBodyIf(
-                #     "reasoning_effort",
-                #     (None, "none"),
-                #     {"reasoning": {"enabled": True}},
-                #     negate=True,
-                # ),
+                ExtraBodyIf(
+                    "reasoning_effort",
+                    (None, "none"),
+                    {"reasoning": {"enabled": True}},
+                    negate=True,
+                ),
                 Drop("reasoning_effort"),
             )
         },

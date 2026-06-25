@@ -75,6 +75,13 @@ config: #Config & {
           model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
+          sampling: {
+            temperature: fixed: 0.7
+            top_p: fixed: 0.95
+            top_k: fixed: 20
+            repetition_penalty: fixed: 1.15
+            presence_penalty: fixed: 1.5
+          }
         }
         overlays: {
           "reasoning_effort": {
@@ -120,6 +127,13 @@ config: #Config & {
           model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
+          sampling: {
+            temperature: fixed: 0.7
+            top_p: fixed: 0.95
+            top_k: fixed: 20
+            repetition_penalty: fixed: 1.15
+            presence_penalty: fixed: 1.5
+          }
         }
         overlays: {
           "reasoning_effort": {
