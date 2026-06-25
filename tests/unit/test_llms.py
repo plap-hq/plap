@@ -52,6 +52,7 @@ from plap.llms.completions.errors import (
 from plap.llms.completions.providers import (
     CEREBRAS_OPENAI_BASE_URL,
     CROF_OPENAI_BASE_URL,
+    GMICLOUD_OPENAI_BASE_URL,
     GROQ_OPENAI_BASE_URL,
     LIGHTNING_OPENAI_BASE_URL,
     NOVITA_OPENAI_BASE_URL,
@@ -2540,6 +2541,40 @@ def test_openrouter_request_quirks_keep_min_p_and_repetition_penalty() -> None:
 
     assert body["min_p"] == 0.05
     assert body["repetition_penalty"] == 1.2
+    assert body["extra_body"] == {"reasoning": {"enabled": True}}
+
+
+async def test_openrouter_client_moves_sdk_unsupported_sampling_params_into_extra_body() -> None:
+    fake_client = _FakeOpenAIClient([_completion_response(model="qwen/qwen3.5-9b", content="ok")], base_url=OPENROUTER_OPENAI_BASE_URL)
+    client = ChatCompletionClient(_openrouter_provider(client=fake_client))
+
+    await client.complete(replace(_request_for_model("qwen/qwen3.5-9b"), top_k=17, min_p=0.05, repetition_penalty=1.2))
+
+    assert fake_client.chat.completions.calls[0]["extra_body"] == {
+        "reasoning": {"enabled": True},
+        "top_k": 17,
+        "min_p": 0.05,
+        "repetition_penalty": 1.2,
+    }
+    assert "top_k" not in fake_client.chat.completions.calls[0]
+    assert "min_p" not in fake_client.chat.completions.calls[0]
+    assert "repetition_penalty" not in fake_client.chat.completions.calls[0]
+
+
+async def test_gmicloud_client_moves_sdk_unsupported_top_k_into_extra_body() -> None:
+    fake_client = _FakeOpenAIClient(
+        [_completion_response(model="XiaomiMiMo/MiMo-V2.5-Pro", content="ok")],
+        base_url=GMICLOUD_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_gmicloud_provider(client=fake_client))
+
+    await client.complete(replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), top_k=17))
+
+    assert fake_client.chat.completions.calls[0]["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "top_k": 17,
+    }
+    assert "top_k" not in fake_client.chat.completions.calls[0]
 
 
 @pytest.mark.parametrize(

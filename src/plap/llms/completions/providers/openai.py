@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,6 +15,7 @@ from openai import (
     BadRequestError,
     RateLimitError,
 )
+from openai.resources.chat.completions.completions import AsyncCompletions
 
 from plap.llms.completions.client import Call, Provider, Quirk
 from plap.llms.completions.common import close_any_object, close_stream_object, to_data
@@ -53,6 +55,26 @@ from plap.llms.completions.quirks import (
 )
 
 logger = structlog.stdlib.get_logger(__name__)
+OPENAI_SDK_TOP_LEVEL_FIELDS = frozenset(
+    name
+    for name in inspect.signature(AsyncCompletions.create).parameters
+    if name not in {"self", "extra_headers", "extra_query", "extra_body", "timeout"}
+)
+
+
+def _normalize_openai_sdk_body(body: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    extra_body = dict(body.get("extra_body")) if isinstance(body.get("extra_body"), dict) else {}
+    for key, value in body.items():
+        if key == "extra_body":
+            continue
+        if key in OPENAI_SDK_TOP_LEVEL_FIELDS:
+            normalized[key] = value
+            continue
+        extra_body[key] = value
+    if extra_body:
+        normalized["extra_body"] = extra_body
+    return normalized
 
 
 def _openai_context_length_exceeded_error(exc: BadRequestError) -> ChatCompletionContextLengthExceededError | None:
@@ -128,7 +150,7 @@ class OpenAIProvider(Provider):
 
     async def complete(self, call: Call) -> dict[str, Any]:
         try:
-            response = await self._client.chat.completions.create(**call.body)
+            response = await self._client.chat.completions.create(**_normalize_openai_sdk_body(call.body))
         except Exception as exc:
             _log_transport_error(provider=self.name, client=self._client, call=call, exc=exc, streaming=False)
             raise normalize_openai_error(exc) from exc
@@ -138,7 +160,7 @@ class OpenAIProvider(Provider):
         async def run() -> AsyncIterator[dict[str, Any]]:
             stream: Any | None = None
             try:
-                stream = await self._client.chat.completions.create(**call.body)
+                stream = await self._client.chat.completions.create(**_normalize_openai_sdk_body(call.body))
                 async for chunk in stream:
                     yield to_data(chunk)
             except Exception as exc:
@@ -507,6 +529,7 @@ __all__ = [
     "GROQ_OPENAI_BASE_URL",
     "LIGHTNING_OPENAI_BASE_URL",
     "NOVITA_OPENAI_BASE_URL",
+    "OPENAI_SDK_TOP_LEVEL_FIELDS",
     "QUBRID_OPENAI_BASE_URL",
     "OpenAIProvider",
     "build_cerebras_provider",
