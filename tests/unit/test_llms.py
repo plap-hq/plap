@@ -58,6 +58,7 @@ from plap.llms.completions.providers import (
     NOVITA_OPENAI_BASE_URL,
     OPENROUTER_OPENAI_BASE_URL,
     VERCEL_OPENAI_BASE_URL,
+    WANDB_OPENAI_BASE_URL,
     OpenRouterProvider,
     VercelProvider,
     build_cerebras_provider,
@@ -68,8 +69,10 @@ from plap.llms.completions.providers import (
     build_lightning_provider,
     build_novita_provider,
     build_openrouter_provider,
+    build_providers,
     build_qubrid_provider,
     build_vercel_provider,
+    build_wandb_provider,
 )
 from plap.llms.completions.providers.fireworks import FireworksProvider
 from plap.llms.completions.providers.openai import OpenAIProvider
@@ -1872,6 +1875,13 @@ def _qubrid_provider(*, client: Any | None = None) -> OpenAIProvider:
     return provider
 
 
+def _wandb_provider(*, client: Any | None = None) -> OpenAIProvider:
+    provider = build_wandb_provider(api_key="wandb-key")
+    if client is not None:
+        provider._client = client
+    return provider
+
+
 def _openrouter_provider(*, client: Any | None = None) -> OpenRouterProvider:
     provider = build_openrouter_provider(api_key="openrouter-key")
     if client is not None:
@@ -1891,6 +1901,15 @@ def _fireworks_provider(*, client: Any | None = None) -> FireworksProvider:
     if client is not None:
         provider._client = client
     return provider
+
+
+def test_build_providers_includes_wandb_route_when_api_key_is_configured() -> None:
+    settings = type("_Settings", (), {"llm_api_keys": {"wandb": "wandb-key"}})()
+
+    providers = build_providers(settings)
+
+    assert set(providers) == {"wandb/"}
+    assert isinstance(providers["wandb/"], OpenAIProvider)
 
 
 def test_build_chat_body_preserves_full_request_shape() -> None:
@@ -2156,6 +2175,61 @@ def test_lightning_provider_accepts_nemotron_models() -> None:
     assert provider.lookup("lightning-ai/nvidia-nemotron-3-nano-omni-30b-a3b") == ()
 
 
+def test_wandb_request_quirks_keep_supported_fields_and_map_role() -> None:
+    body = _body_for(_wandb_provider(), _request_for_model("openai/gpt-oss-20b"), stream=True)
+
+    assert body["messages"][0] == {"role": "system", "content": "be precise"}
+    assert body["max_completion_tokens"] == 128
+    assert body["reasoning_effort"] == "low"
+    assert body["top_k"] == 17
+    assert body["parallel_tool_calls"] is True
+    assert body["logit_bias"] == {"1": -10}
+    assert body["prompt_cache_key"] == "cache-a"
+    assert body["service_tier"] == "flex"
+    assert body["prediction"] == {"type": "content", "content": "expected"}
+    assert "extra_body" not in body
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort", "enable_thinking"),
+    [
+        pytest.param("deepseek-ai/DeepSeek-V4-Flash", "low", True, id="deepseek-enable"),
+        pytest.param("google/gemma-4-31B-it", "none", False, id="gemma-disable"),
+        pytest.param(
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+            "none",
+            False,
+            id="nemotron-disable",
+        ),
+    ],
+)
+def test_wandb_reasoning_toggle_quirks_preserve_reasoning_effort_and_set_enable_thinking(
+    model: str,
+    reasoning_effort: str,
+    enable_thinking: bool,
+) -> None:
+    body = _body_for(
+        _wandb_provider(),
+        replace(_request_for_model(model), reasoning_effort=reasoning_effort),
+        stream=True,
+    )
+
+    assert body["reasoning_effort"] == reasoning_effort
+    assert body["extra_body"] == {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+
+
+def test_wandb_provider_accepts_supported_models() -> None:
+    provider = _wandb_provider()
+
+    assert provider.lookup("openai/gpt-oss-20b") == ()
+    assert provider.lookup("openai/gpt-oss-120b") == ()
+    assert provider.lookup("ibm-granite/granite-4.1-8b") == ()
+    assert provider.lookup("JetBrains/Mellum2-12B-A2.5B-Instruct") == ()
+    assert provider.lookup("deepseek-ai/DeepSeek-V4-Flash")
+    assert provider.lookup("google/gemma-4-31B-it")
+    assert provider.lookup("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8")
+
+
 def test_cerebras_request_quirks_preserve_supported_fields_and_glm_thinking() -> None:
     body = _body_for(_cerebras_provider(), _request_for_model("zai-glm-4.7"), stream=True)
 
@@ -2208,6 +2282,7 @@ def test_groq_request_quirks_skip_include_reasoning_for_unsupported_models() -> 
         pytest.param(_cerebras_provider, "gpt-oss-120b", id="cerebras"),
         pytest.param(_openrouter_provider, "deepseek/deepseek-v4-flash", id="openrouter"),
         pytest.param(_vercel_provider, "openai/gpt-oss-20b", id="vercel"),
+        pytest.param(_wandb_provider, "openai/gpt-oss-20b", id="wandb"),
     ],
 )
 def test_provider_request_quirks_rename_assistant_reasoning_content_for_replay(
@@ -2616,6 +2691,18 @@ async def test_gmicloud_client_moves_sdk_unsupported_top_k_into_extra_body() -> 
             ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf"),
             id="vercel-file-url",
         ),
+        pytest.param(
+            _wandb_provider,
+            "openai/gpt-oss-20b",
+            ChatFile(file_id="file_doc_1", filename="doc.pdf"),
+            id="wandb-file-id",
+        ),
+        pytest.param(
+            _wandb_provider,
+            "openai/gpt-oss-20b",
+            ChatFile(file_url="https://example.com/doc.pdf", filename="doc.pdf"),
+            id="wandb-file-url",
+        ),
     ],
 )
 def test_request_quirks_reject_file_references_except_openrouter(provider_factory, model: str, file: ChatFile) -> None:
@@ -2729,6 +2816,29 @@ async def test_vercel_client_aliases_reasoning_and_promotes_service_tier_on_comp
     assert result.service_tier == "priority"
     assert deltas[0].reasoning_delta == "because"
     assert deltas[0].service_tier == "priority"
+    assert deltas[1].finish_reason == "stop"
+
+
+async def test_wandb_client_aliases_reasoning_on_complete_and_stream() -> None:
+    fake_client = _FakeOpenAIClient(
+        [
+            _completion_response(model="openai/gpt-oss-20b", content="ok", reasoning="because"),
+            _AsyncListStream(
+                [
+                    _chunk(model="openai/gpt-oss-20b", content="ok", reasoning="because"),
+                    _chunk(model="openai/gpt-oss-20b", finish_reason="stop"),
+                ]
+            ),
+        ],
+        base_url=WANDB_OPENAI_BASE_URL,
+    )
+    client = ChatCompletionClient(_wandb_provider(client=fake_client))
+
+    result = await client.complete(_request_for_model("openai/gpt-oss-20b"))
+    deltas = [delta async for delta in client.stream(_request_for_model("openai/gpt-oss-20b"))]
+
+    assert result.message.reasoning_content == "because"
+    assert deltas[0].reasoning_delta == "because"
     assert deltas[1].finish_reason == "stop"
 
 

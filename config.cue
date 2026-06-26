@@ -18,6 +18,7 @@ config: #Config & {
     qubrid: "${QUBRID_API_KEY}"
     openrouter: "${OPENROUTER_API_KEY}"
     vercel: "${VERCEL_API_KEY}"
+    wandb: "${WANDB_API_KEY}"
   }
 
   display_name: *"plap-ai" | string
@@ -67,12 +68,12 @@ config: #Config & {
           reasoning_effort: *"medium" | #ReasoningEffort
         }
         summary: #FieldConfig & {
-          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb" | string
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,wandb/openai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
+          model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {
@@ -116,12 +117,12 @@ config: #Config & {
           reasoning_effort: *"high" | #ReasoningEffort
         }
         summary: #FieldConfig & {
-          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock,openrouter/openai/gpt-oss-20b:wandb" | string
+          model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,wandb/openai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
+          model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {

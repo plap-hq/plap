@@ -41,6 +41,7 @@ from plap.llms.completions.quirks import (
     DropToolFunctionField,
     EnsureAssistantReasoningContent,
     ExtraBody,
+    ExtraBodyIf,
     ForceNamedToolChoice,
     ForceRequiredToolChoice,
     Move,
@@ -183,6 +184,7 @@ GMICLOUD_OPENAI_BASE_URL = "https://api.gmi-serving.com/v1"
 NOVITA_OPENAI_BASE_URL = "https://api.novita.ai/openai"
 CROF_OPENAI_BASE_URL = "https://crof.ai/v1"
 QUBRID_OPENAI_BASE_URL = "https://platform.qubrid.com/v1"
+WANDB_OPENAI_BASE_URL = "https://api.inference.wandb.ai/v1"
 
 LIGHTNING_FIELDS = (
     "model",
@@ -336,6 +338,36 @@ QUBRID_FIELDS = (
     "user",
     "metadata",
 )
+WANDB_FIELDS = (
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "min_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "logit_bias",
+    "stop",
+    "seed",
+    "n",
+    "logprobs",
+    "top_logprobs",
+    "reasoning_effort",
+    "user",
+    "prompt_cache_key",
+    "metadata",
+    "service_tier",
+    "prediction",
+)
 
 
 def _request_limits(*windows: tuple[int, float]) -> tuple[Quirk, ...]:
@@ -404,6 +436,24 @@ QUBRID_MODELS: dict[str, tuple[Quirk, ...]] = {
         DropToolFunctionField("strict"),
         ForceNamedToolChoice(),
     ),
+}
+WANDB_REASONING_TOGGLE_QUIRKS: tuple[Quirk, ...] = (
+    ExtraBodyIf("reasoning_effort", ("none",), {"chat_template_kwargs": {"enable_thinking": False}}),
+    ExtraBodyIf(
+        "reasoning_effort",
+        (None, "none"),
+        {"chat_template_kwargs": {"enable_thinking": True}},
+        negate=True,
+    ),
+)
+WANDB_MODELS: dict[str, tuple[Quirk, ...]] = {
+    "JetBrains/Mellum2-12B-A2.5B-Instruct": (),
+    "deepseek-ai/DeepSeek-V4-Flash": WANDB_REASONING_TOGGLE_QUIRKS,
+    "google/gemma-4-31B-it": WANDB_REASONING_TOGGLE_QUIRKS,
+    "ibm-granite/granite-4.1-8b": (),
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": WANDB_REASONING_TOGGLE_QUIRKS,
+    "openai/gpt-oss-120b": (),
+    "openai/gpt-oss-20b": (),
 }
 
 
@@ -522,6 +572,23 @@ def build_qubrid_provider(*, api_key: str) -> Provider:
     )
 
 
+def build_wandb_provider(*, api_key: str) -> Provider:
+    return OpenAIProvider(
+        name="wandb",
+        api_key=api_key,
+        base_url=WANDB_OPENAI_BASE_URL,
+        quirks=(
+            SystemRole(),
+            Only(*WANDB_FIELDS),
+            RejectMessageField(("file", "file_id"), content_type="file"),
+            RejectMessageField(("file", "file_url"), content_type="file"),
+            MoveMessageField("reasoning_content", "reasoning", role="assistant"),
+            MoveOutput("reasoning", "reasoning_content"),
+        ),
+        models=WANDB_MODELS,
+    )
+
+
 __all__ = [
     "CEREBRAS_OPENAI_BASE_URL",
     "CROF_OPENAI_BASE_URL",
@@ -531,6 +598,7 @@ __all__ = [
     "NOVITA_OPENAI_BASE_URL",
     "OPENAI_SDK_TOP_LEVEL_FIELDS",
     "QUBRID_OPENAI_BASE_URL",
+    "WANDB_OPENAI_BASE_URL",
     "OpenAIProvider",
     "build_cerebras_provider",
     "build_crof_provider",
@@ -539,5 +607,6 @@ __all__ = [
     "build_lightning_provider",
     "build_novita_provider",
     "build_qubrid_provider",
+    "build_wandb_provider",
     "normalize_openai_error",
 ]
