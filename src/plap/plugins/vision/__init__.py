@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -64,6 +65,9 @@ VISION_PROMPT = (
     "When a text message begins with 'Selected image ids:', use those ids to determine which images are relevant to the question. "
     "Answer only the user's request in plain text. Keep the answer concrete, visually grounded, and concise."
 )
+_IMAGE_ID_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:image-)?([A-Za-z0-9]{4})-([A-Za-z0-9]{4})-([A-Za-z0-9]{4})-([A-Za-z0-9]{4})(?![A-Za-z0-9])"
+)
 
 
 def _data_url_bytes(url: str) -> tuple[str, bytes] | None:
@@ -124,30 +128,63 @@ def _rewrite_request(request: ChatCompletionRequest) -> ChatCompletionRequest:
     return replace(request, messages=messages, tools=[*request.tools, VISION_TOOL])
 
 
+def _canonical_image_id(match: re.Match[str]) -> str:
+    return "image-" + "-".join(part.upper() for part in match.groups())
+
+
+def _image_ids_from_text(text: str) -> list[str]:
+    return [_canonical_image_id(match) for match in _IMAGE_ID_RE.finditer(text)]
+
+
+def _dedupe_image_ids(ids: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for image_id in ids:
+        if image_id in seen:
+            continue
+        seen.add(image_id)
+        deduped.append(image_id)
+    return deduped
+
+
+def _normalize_image_ids(value: object) -> list[str] | None:
+    if not isinstance(value, list) or not value or not all(isinstance(image_id, str) and image_id for image_id in value):
+        return None
+
+    raw = list(value)
+    normalized: list[str] = []
+    for image_id in raw:
+        normalized.extend(_image_ids_from_text(image_id))
+    normalized.extend(_image_ids_from_text("".join(raw)))
+    if normalized:
+        return _dedupe_image_ids(normalized)
+    return raw
+
+
 def _tool_args_or_none(call) -> tuple[list[str], str] | None:
     arguments = decode_json_object_or_none(call.arguments)
     if arguments is None:
         return None
-    ids = arguments.get("ids")
+    ids = _normalize_image_ids(arguments.get("ids"))
     prompt = arguments.get("prompt")
-    if not isinstance(ids, list) or not ids or not all(isinstance(image_id, str) and image_id for image_id in ids):
+    if ids is None:
         return None
     if not isinstance(prompt, str) or not prompt:
         return None
-    return list(ids), prompt
+    return ids, prompt
 
 
 def _tool_args(call) -> tuple[list[str], str]:
     arguments = msgspec.json.decode(call.arguments)
     if not isinstance(arguments, dict):
         raise TypeError("vision tool arguments must decode to an object")
-    ids = arguments.get("ids")
+    ids = _normalize_image_ids(arguments.get("ids"))
     prompt = arguments.get("prompt")
-    if not isinstance(ids, list) or not ids or not all(isinstance(image_id, str) and image_id for image_id in ids):
+    if ids is None:
         raise RuntimeError("vision tool arguments must include a non-empty ids array")
     if not isinstance(prompt, str) or not prompt:
         raise RuntimeError("vision tool arguments must include a non-empty prompt")
-    return list(ids), prompt
+    return ids, prompt
 
 
 def _tool_output_text(result: ChatCompletionResult) -> str:

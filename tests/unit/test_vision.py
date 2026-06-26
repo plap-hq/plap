@@ -416,6 +416,57 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "ids_case",
+    [
+        "prefixless",
+        "split_full_jsonish",
+        "split_prefixless_jsonish",
+        "split_full_backslashes",
+    ],
+)
+async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    prefixless = image_id.removeprefix("image-")
+    if ids_case == "prefixless":
+        ids = [prefixless]
+    elif ids_case == "split_full_jsonish":
+        ids = list(f'["{image_id}"]')
+    elif ids_case == "split_prefixless_jsonish":
+        ids = list(f'["{prefixless}"]')
+    elif ids_case == "split_full_backslashes":
+        ids = list(f"[\\{image_id}\\]")
+    else:  # pragma: no cover
+        raise AssertionError(ids_case)
+    arguments = msgspec.json.encode({"ids": ids, "prompt": "describe"}).decode()
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_vision", VISION_TOOL_NAME, arguments),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            ),
+            _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
+        ],
+        completes=[_complete("vision output", usage=_usage(input_tokens=6, output_tokens=2))],
+    )
+    state, _, _ = _state(client)
+
+    await core.run_response(state=state)
+
+    assert len(client.stream_requests) == 2
+    assert len(client.complete_requests) == 1
+    assert client.complete_requests[0].messages[2].content == f"Selected image ids: {image_id}\nQuestion: describe"
+    assert not any(
+        message.role == "user" and isinstance(message.content, str) and "unknown image ids" in message.content.lower()
+        for request in client.stream_requests
+        for message in request.messages
+    )
+    final_message = next(item for item in _output_items(state) if isinstance(item, ResponseMessageItem))
+    assert _message_text(final_message) == "final answer"
+
+
+@pytest.mark.anyio
 async def test_internal_images_tool_applies_vision_sampling_config() -> None:
     core = _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
