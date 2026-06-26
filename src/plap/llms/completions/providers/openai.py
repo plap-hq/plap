@@ -49,6 +49,7 @@ from plap.llms.completions.quirks import (
     MoveOutput,
     Only,
     RateLimit,
+    RejectIf,
     RejectMessageField,
     RejectResponseFormat,
     Set,
@@ -376,6 +377,15 @@ def _request_limits(*windows: tuple[int, float]) -> tuple[Quirk, ...]:
 
 GROQ_NO_PARALLEL_TOOL_CALLS: tuple[Quirk, ...] = (Set("parallel_tool_calls", False),)
 GROQ_INCLUDE_REASONING: tuple[Quirk, ...] = (ExtraBody({"include_reasoning": True}),)
+CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS: tuple[Quirk, ...] = (
+    ExtraBodyIf("reasoning_effort", ("none",), {"chat_template_kwargs": {"enable_thinking": False}}),
+    ExtraBodyIf(
+        "reasoning_effort",
+        (None, "none"),
+        {"chat_template_kwargs": {"enable_thinking": True}},
+        negate=True,
+    ),
+)
 LIGHTNING_MODELS: dict[str, tuple[Quirk, ...]] = {
     "lightning-ai/gpt-oss-20b": _request_limits((15, 60)),
     "lightning-ai/gpt-oss-120b": (RejectResponseFormat(), *_request_limits((15, 60))),
@@ -405,10 +415,16 @@ NOVITA_MODELS: dict[str, tuple[Quirk, ...]] = {
     "openai/gpt-oss-120b": (),
 }
 GMICLOUD_MODELS: dict[str, tuple[Quirk, ...]] = {
-    "XiaomiMiMo/MiMo-V2.5": (),
-    "XiaomiMiMo/MiMo-V2.5-Pro": (),
-    "openai/gpt-oss-20b": (),
-    "openai/gpt-oss-120b": (),
+    "XiaomiMiMo/MiMo-V2.5": (
+        *CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS,
+        DropIf("reasoning_effort", "none"),
+    ),
+    "XiaomiMiMo/MiMo-V2.5-Pro": (
+        *CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS,
+        DropIf("reasoning_effort", "none"),
+    ),
+    "openai/gpt-oss-20b": (RejectIf("reasoning_effort", "none"),),
+    "openai/gpt-oss-120b": (RejectIf("reasoning_effort", "none"),),
 }
 CROF_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek-v4-flash": (RejectResponseFormat("json_schema"),),
@@ -437,23 +453,17 @@ QUBRID_MODELS: dict[str, tuple[Quirk, ...]] = {
         ForceNamedToolChoice(),
     ),
 }
-WANDB_REASONING_TOGGLE_QUIRKS: tuple[Quirk, ...] = (
-    ExtraBodyIf("reasoning_effort", ("none",), {"chat_template_kwargs": {"enable_thinking": False}}),
-    ExtraBodyIf(
-        "reasoning_effort",
-        (None, "none"),
-        {"chat_template_kwargs": {"enable_thinking": True}},
-        negate=True,
-    ),
-)
 WANDB_MODELS: dict[str, tuple[Quirk, ...]] = {
     "JetBrains/Mellum2-12B-A2.5B-Instruct": (),
-    "deepseek-ai/DeepSeek-V4-Flash": WANDB_REASONING_TOGGLE_QUIRKS,
-    "google/gemma-4-31B-it": WANDB_REASONING_TOGGLE_QUIRKS,
+    "deepseek-ai/DeepSeek-V4-Flash": CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS,
+    "google/gemma-4-31B-it": CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS,
     "ibm-granite/granite-4.1-8b": (),
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": WANDB_REASONING_TOGGLE_QUIRKS,
-    "openai/gpt-oss-120b": (),
-    "openai/gpt-oss-20b": (),
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": (
+        *CHAT_TEMPLATE_ENABLE_THINKING_QUIRKS,
+        DropIf("reasoning_effort", "none"),
+    ),
+    "openai/gpt-oss-120b": (RejectIf("reasoning_effort", "none"),),
+    "openai/gpt-oss-20b": (RejectIf("reasoning_effort", "none"),),
 }
 
 
@@ -484,7 +494,6 @@ def build_gmicloud_provider(*, api_key: str) -> Provider:
             RejectMessageField(("file", "file_url"), content_type="file"),
             EnsureAssistantReasoningContent(),
             Move("max_completion_tokens", "max_tokens"),
-            DropIf("reasoning_effort", "none"),  # gmi does not have a real thinking disable switch
             ExtraBody({"context_length_exceeded_behavior": "error"}),
         ),
         models=GMICLOUD_MODELS,

@@ -2191,13 +2191,28 @@ def test_wandb_request_quirks_keep_supported_fields_and_map_role() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "reasoning_effort", "enable_thinking"),
+    "model",
     [
-        pytest.param("deepseek-ai/DeepSeek-V4-Flash", "low", True, id="deepseek-enable"),
-        pytest.param("google/gemma-4-31B-it", "none", False, id="gemma-disable"),
+        pytest.param("openai/gpt-oss-20b", id="gpt-oss-20b"),
+        pytest.param("openai/gpt-oss-120b", id="gpt-oss-120b"),
+    ],
+)
+def test_wandb_gpt_oss_rejects_none_reasoning_effort(model: str) -> None:
+    request = replace(_request_for_model(model), reasoning_effort="none")
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="reasoning_effort"):
+        _body_for(_wandb_provider(), request, stream=True)
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning_effort", "enable_thinking", "preserve_reasoning_effort"),
+    [
+        pytest.param("deepseek-ai/DeepSeek-V4-Flash", "low", True, True, id="deepseek-enable"),
+        pytest.param("google/gemma-4-31B-it", "none", False, True, id="gemma-disable"),
         pytest.param(
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
             "none",
+            False,
             False,
             id="nemotron-disable",
         ),
@@ -2207,6 +2222,7 @@ def test_wandb_reasoning_toggle_quirks_preserve_reasoning_effort_and_set_enable_
     model: str,
     reasoning_effort: str,
     enable_thinking: bool,
+    preserve_reasoning_effort: bool,
 ) -> None:
     body = _body_for(
         _wandb_provider(),
@@ -2214,15 +2230,18 @@ def test_wandb_reasoning_toggle_quirks_preserve_reasoning_effort_and_set_enable_
         stream=True,
     )
 
-    assert body["reasoning_effort"] == reasoning_effort
+    if preserve_reasoning_effort:
+        assert body["reasoning_effort"] == reasoning_effort
+    else:
+        assert "reasoning_effort" not in body
     assert body["extra_body"] == {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
 
 
 def test_wandb_provider_accepts_supported_models() -> None:
     provider = _wandb_provider()
 
-    assert provider.lookup("openai/gpt-oss-20b") == ()
-    assert provider.lookup("openai/gpt-oss-120b") == ()
+    assert provider.lookup("openai/gpt-oss-20b")
+    assert provider.lookup("openai/gpt-oss-120b")
     assert provider.lookup("ibm-granite/granite-4.1-8b") == ()
     assert provider.lookup("JetBrains/Mellum2-12B-A2.5B-Instruct") == ()
     assert provider.lookup("deepseek-ai/DeepSeek-V4-Flash")
@@ -2427,18 +2446,39 @@ async def test_rate_limit_quirk_blocks_n_plus_1_stream_within_window(monkeypatch
     assert len(provider.stream_calls) == 1
 
 
-def test_gmicloud_request_quirks_map_max_tokens_and_drop_none_effort() -> None:
+def test_gmicloud_request_quirks_map_max_tokens_and_disable_thinking_for_none_effort() -> None:
     request = replace(_request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), reasoning_effort="none")
 
     body = _body_for(_gmicloud_provider(), request, stream=True)
 
     assert body["messages"][0] == {"role": "system", "content": "be precise"}
     assert body["max_tokens"] == 128
-    assert body["extra_body"] == {"context_length_exceeded_behavior": "error"}
+    assert body["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
     assert "max_completion_tokens" not in body
     assert "reasoning_effort" not in body
     assert "logprobs" not in body
     assert "service_tier" not in body
+
+
+def test_gmicloud_request_quirks_enable_thinking_for_non_none_effort() -> None:
+    body = _body_for(_gmicloud_provider(), _request_for_model("XiaomiMiMo/MiMo-V2.5-Pro"), stream=True)
+
+    assert body["reasoning_effort"] == "low"
+    assert body["extra_body"] == {
+        "context_length_exceeded_behavior": "error",
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+def test_gmicloud_gpt_oss_rejects_none_reasoning_effort(model: str) -> None:
+    request = replace(_request_for_model(model), reasoning_effort="none")
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="reasoning_effort"):
+        _body_for(_gmicloud_provider(), request, stream=True)
 
 
 def test_gmicloud_request_quirks_fill_missing_assistant_reasoning_content() -> None:
@@ -2647,6 +2687,7 @@ async def test_gmicloud_client_moves_sdk_unsupported_top_k_into_extra_body() -> 
 
     assert fake_client.chat.completions.calls[0]["extra_body"] == {
         "context_length_exceeded_behavior": "error",
+        "chat_template_kwargs": {"enable_thinking": True},
         "top_k": 17,
     }
     assert "top_k" not in fake_client.chat.completions.calls[0]

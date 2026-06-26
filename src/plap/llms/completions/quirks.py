@@ -301,6 +301,19 @@ class DropIf(Quirk):
             call.body.pop(self._name, None)
 
 
+class RejectIf(Quirk):
+    def __init__(self, name: str, value: Any) -> None:
+        self._name = name
+        self._value = value
+
+    def request(self, call: Call) -> None:
+        if call.body.get(self._name) != self._value:
+            return
+        raise ChatCompletionUnsupportedRequestError(
+            f"field {self._name!r} value {self._value!r} is not supported for model {call.request.model!r}"
+        )
+
+
 class EnsureAssistantReasoningContent(Quirk):
     def request(self, call: Call) -> None:
         for message in _body_messages(call):
