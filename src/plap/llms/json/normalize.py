@@ -3,9 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import blake3
+import msgspec
+
 from plap.llms.json.schema import _schema_for_path, compile_validator
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_ARRAY_HINT_KEYS = frozenset(("items", "prefixItems", "additionalItems", "contains", "unevaluatedItems"))
 _NUMBER_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)?$")
 _MISSING = object()
 
@@ -18,6 +22,14 @@ def _validated(schema: dict[str, Any] | None, value: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+def _digest(value: Any) -> bytes:
+    try:
+        encoded = msgspec.json.encode(value, order="deterministic")
+    except Exception:
+        encoded = repr(value).encode("utf-8", "backslashreplace")
+    return blake3.blake3(encoded).digest()
 
 
 def _schema_types(schema: dict[str, Any]) -> tuple[str, ...]:
@@ -226,6 +238,7 @@ def _normalize_object(
     root_schema: dict[str, Any],
     path: tuple[str | int, ...],
     contexts: dict[tuple[str | int, ...], Any],
+    wraps: frozenset[tuple[bytes, bytes]],
 ) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     contexts[path] = normalized
@@ -236,6 +249,7 @@ def _normalize_object(
                 root_schema=root_schema,
                 path=(*path, key),
                 contexts=contexts,
+                wraps=wraps,
             )
     finally:
         contexts.pop(path, None)
@@ -248,6 +262,7 @@ def _normalize_array(
     root_schema: dict[str, Any],
     path: tuple[str | int, ...],
     contexts: dict[tuple[str | int, ...], Any],
+    wraps: frozenset[tuple[bytes, bytes]],
 ) -> list[Any]:
     normalized: list[Any] = []
     contexts[path] = normalized
@@ -259,11 +274,50 @@ def _normalize_array(
                     root_schema=root_schema,
                     path=(*path, index),
                     contexts=contexts,
+                    wraps=wraps,
                 )
             )
     finally:
         contexts.pop(path, None)
     return normalized
+
+
+def _schema_targets_array(schema: dict[str, Any]) -> bool:
+    if "array" in _schema_types(schema):
+        return True
+    if any(key in schema for key in _ARRAY_HINT_KEYS):
+        return True
+    const_value = schema.get("const", _MISSING)
+    if isinstance(const_value, list):
+        return True
+    enum_values = schema.get("enum")
+    return isinstance(enum_values, list) and any(isinstance(item, list) for item in enum_values)
+
+
+def _try_array_wrap(
+    value: Any,
+    *,
+    schema: dict[str, Any],
+    root_schema: dict[str, Any],
+    path: tuple[str | int, ...],
+    contexts: dict[tuple[str | int, ...], Any],
+    wraps: frozenset[tuple[bytes, bytes]],
+) -> Any:
+    if not _schema_targets_array(schema):
+        return _MISSING
+    key = (_digest(schema), _digest(value))
+    if key in wraps:
+        return _MISSING
+    normalized = _normalize_array(
+        [value],
+        root_schema=root_schema,
+        path=path,
+        contexts=contexts,
+        wraps=wraps | {key},
+    )
+    if _validated(schema, normalized):
+        return normalized
+    return _MISSING
 
 
 def _normalize_node(
@@ -272,16 +326,39 @@ def _normalize_node(
     root_schema: dict[str, Any],
     path: tuple[str | int, ...],
     contexts: dict[tuple[str | int, ...], Any],
+    wraps: frozenset[tuple[bytes, bytes]],
 ) -> Any:
     schema = _schema_for_path(root_schema, path, contexts)
     if not isinstance(schema, dict):
         return value
     if _validated(schema, value):
         return value
-    if isinstance(value, dict):
-        return _normalize_object(value, root_schema=root_schema, path=path, contexts=contexts)
+    wrapped = _try_array_wrap(
+        value,
+        schema=schema,
+        root_schema=root_schema,
+        path=path,
+        contexts=contexts,
+        wraps=wraps,
+    )
+    if wrapped is not _MISSING:
+        return wrapped
     if isinstance(value, list):
-        return _normalize_array(value, root_schema=root_schema, path=path, contexts=contexts)
+        return _normalize_array(
+            value,
+            root_schema=root_schema,
+            path=path,
+            contexts=contexts,
+            wraps=wraps,
+        )
+    if isinstance(value, dict):
+        return _normalize_object(
+            value,
+            root_schema=root_schema,
+            path=path,
+            contexts=contexts,
+            wraps=wraps,
+        )
     return _normalize_scalar(value, schema)
 
 
@@ -290,7 +367,7 @@ def normalize(value: Any, *, schema: dict[str, Any] | None) -> Any:
         return value
     if _validated(schema, value):
         return value
-    return _normalize_node(value, root_schema=schema, path=(), contexts={})
+    return _normalize_node(value, root_schema=schema, path=(), contexts={}, wraps=frozenset())
 
 
 __all__ = ["normalize"]

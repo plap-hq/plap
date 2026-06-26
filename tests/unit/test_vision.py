@@ -419,6 +419,8 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
 @pytest.mark.parametrize(
     "ids_case",
     [
+        "string_full",
+        "string_prefixless",
         "prefixless",
         "split_full_jsonish",
         "split_prefixless_jsonish",
@@ -429,7 +431,11 @@ async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> 
     core = _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     prefixless = image_id.removeprefix("image-")
-    if ids_case == "prefixless":
+    if ids_case == "string_full":
+        ids = image_id
+    elif ids_case == "string_prefixless":
+        ids = prefixless
+    elif ids_case == "prefixless":
         ids = [prefixless]
     elif ids_case == "split_full_jsonish":
         ids = list(f'["{image_id}"]')

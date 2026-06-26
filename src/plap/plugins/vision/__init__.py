@@ -148,6 +148,11 @@ def _dedupe_image_ids(ids: list[str]) -> list[str]:
 
 
 def _normalize_image_ids(value: object) -> list[str] | None:
+    if isinstance(value, str) and value:
+        normalized = _image_ids_from_text(value)
+        if normalized:
+            return _dedupe_image_ids(normalized)
+        return [value]
     if not isinstance(value, list) or not value or not all(isinstance(image_id, str) and image_id for image_id in value):
         return None
 
@@ -181,7 +186,7 @@ def _tool_args(call) -> tuple[list[str], str]:
     ids = _normalize_image_ids(arguments.get("ids"))
     prompt = arguments.get("prompt")
     if ids is None:
-        raise RuntimeError("vision tool arguments must include a non-empty ids array")
+        raise RuntimeError("vision tool arguments must include image ids")
     if not isinstance(prompt, str) or not prompt:
         raise RuntimeError("vision tool arguments must include a non-empty prompt")
     return ids, prompt
@@ -309,7 +314,7 @@ def _vision_validator(state: State) -> RetryValidator:
             arguments = _tool_args_or_none(call)
             if arguments is None:
                 return retry_message(
-                    problems=("The vision tool call must include a non-empty ids array and prompt.",),
+                    problems=("The vision tool call must include image ids and a non-empty prompt.",),
                     rules=("Use the ids field to select one or more image ids and the prompt field to describe what to inspect.",),
                 )
             ids, _prompt = arguments

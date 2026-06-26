@@ -134,6 +134,131 @@ def test_normalize_does_not_parse_stringified_container_targets() -> None:
     assert normalize({"payload": '{"a":1}'}, schema=schema) == {"payload": '{"a":1}'}
 
 
+def test_normalize_wraps_scalar_under_array_schema() -> None:
+    schema = {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}}
+
+    assert normalize({"ids": "image-AAAA-BBBB-CCCC-DDDD"}, schema=schema) == {"ids": ["image-AAAA-BBBB-CCCC-DDDD"]}
+
+
+def test_normalize_wraps_normalized_scalar_under_array_item_schema() -> None:
+    schema = {"type": "object", "properties": {"numbers": {"type": "array", "items": {"type": "integer"}}}}
+
+    assert normalize({"numbers": "0x1f"}, schema=schema) == {"numbers": [31]}
+
+
+def test_normalize_wraps_object_under_array_schema() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"n": {"type": "integer"}},
+                    "required": ["n"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    }
+
+    assert normalize({"items": {"n": "5"}}, schema=schema) == {"items": [{"n": 5}]}
+
+
+def test_normalize_wraps_list_under_nested_array_schema() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "matrix": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            }
+        },
+    }
+
+    assert normalize({"matrix": ["a", "b"]}, schema=schema) == {"matrix": [["a", "b"]]}
+
+
+def test_normalize_wraps_normalized_list_under_nested_array_schema() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "matrix": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+            }
+        },
+    }
+
+    assert normalize({"matrix": ["1", "2"]}, schema=schema) == {"matrix": [[1, 2]]}
+
+
+def test_normalize_wraps_scalar_through_distinct_nested_array_schemas() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "matrix": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            }
+        },
+    }
+
+    assert normalize({"matrix": "a"}, schema=schema) == {"matrix": [["a"]]}
+
+
+def test_normalize_does_not_rewrap_recursive_array_schema_forever() -> None:
+    schema = {"type": "array", "items": {"$ref": "#"}}
+
+    assert normalize("a", schema=schema) == "a"
+
+
+def test_normalize_preserves_already_valid_object_branch_before_singleton_array_branch() -> None:
+    item_schema = {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}},
+        "required": ["n"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "anyOf": [
+                    {"type": "array", "items": item_schema},
+                    item_schema,
+                ]
+            }
+        },
+    }
+
+    assert normalize({"payload": {"n": 5}}, schema=schema) == {"payload": {"n": 5}}
+
+
+def test_normalize_does_not_wrap_scalar_when_singleton_array_is_invalid() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+            }
+        },
+    }
+
+    assert normalize({"ids": "image-AAAA-BBBB-CCCC-DDDD"}, schema=schema) == {"ids": "image-AAAA-BBBB-CCCC-DDDD"}
+
+
 def test_normalize_uses_dynamic_schema_branching() -> None:
     schema = {
         "type": "object",

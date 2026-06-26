@@ -54,6 +54,7 @@ from plap.plugins.vision import (
     VISION_TOOL,
     VISION_TOOL_NAME,
     _image_id,
+    _normalize_image_ids,
     _rewrite_request,
     _tool_output_text,
     _vision_content,
@@ -869,8 +870,11 @@ async def _evaluate_one(
                     args = json.loads(call.arguments)
                 except json.JSONDecodeError as err:
                     raise RuntimeError(f"vision tool call {call.id} has invalid JSON arguments: {call.arguments}") from err
-                requested_ids = args["ids"]
-                prompt = args["prompt"]
+                requested_ids = _normalize_image_ids(args.get("ids"))
+                prompt = args.get("prompt")
+                if requested_ids is None or not isinstance(prompt, str) or not prompt:
+                    error = f"vision tool call {call.id} has invalid arguments"
+                    break
 
                 unknown = [iid for iid in requested_ids if iid not in correct_ids]
                 if unknown:
