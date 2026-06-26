@@ -2525,13 +2525,13 @@ def test_openrouter_reasoning_enable_request_quirks_when_set(model: str) -> None
 
 
 @pytest.mark.parametrize("model", ["google/gemma-4-31b-it", "qwen/qwen3.5-9b"])
-def test_openrouter_reasoning_enable_request_quirks_skip_for_none(model: str) -> None:
+def test_openrouter_reasoning_enable_request_quirks_set_false_for_none(model: str) -> None:
     request = replace(_request_for_model(model), reasoning_effort="none")
 
     body = _body_for(_openrouter_provider(), request, stream=False)
 
     assert body["reasoning_effort"] == "none"
-    assert "extra_body" not in body
+    assert body["extra_body"] == {"reasoning": {"enabled": False}}
 
 
 def test_openrouter_request_quirks_keep_min_p_and_repetition_penalty() -> None:

@@ -47,14 +47,18 @@ OPENROUTER_FIELDS = (
     "service_tier",
     "prediction",
 )
+OPENROUTER_REASONING_ENABLE_QUIRKS: tuple[Quirk, ...] = (
+    ExtraBodyIf("reasoning_effort", ("none",), {"reasoning": {"enabled": False}}),
+    ExtraBodyIf("reasoning_effort", (None, "none"), {"reasoning": {"enabled": True}}, negate=True),
+)
 OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (),
-    "google/gemma-4-31b-it": (ExtraBodyIf("reasoning_effort", (None, "none"), {"reasoning": {"enabled": True}}, negate=True),),
+    "google/gemma-4-31b-it": OPENROUTER_REASONING_ENABLE_QUIRKS,
     "meta-llama/llama-3.1-8b-instruct": (),
     "meta-llama/llama-3.3-70b-instruct": (),
     "openai/gpt-oss-20b": (),
     "openai/gpt-oss-120b": (),
-    "qwen/qwen3.5-9b": (ExtraBodyIf("reasoning_effort", (None, "none"), {"reasoning": {"enabled": True}}, negate=True),),
+    "qwen/qwen3.5-9b": OPENROUTER_REASONING_ENABLE_QUIRKS,
     "stepfun/step-3.5-flash": (),
     "xiaomi/mimo-v2.5-pro": (),
 }

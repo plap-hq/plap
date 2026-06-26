@@ -72,22 +72,19 @@ config: #Config & {
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
+          model: *"openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {
-            temperature: fixed: 0.7
+            temperature: fixed: 1.0
             top_p: fixed: 0.95
-            top_k: fixed: 20
-            repetition_penalty: fixed: 1.15
-            presence_penalty: fixed: 1.5
           }
         }
         overlays: {
           "reasoning_effort": {
             "minimal": {
               main: reasoning_effort: "none"
-              vision: reasoning_effort: "none"
+              vision: reasoning_effort: "medium"
             }
             "low": {
               main: reasoning_effort: "low"
@@ -124,22 +121,19 @@ config: #Config & {
           reasoning_effort: *"low" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"openrouter/qwen/qwen3.5-9b:together,openrouter/qwen/qwen3.5-9b:siliconflow,openrouter/qwen/qwen3.5-9b:venice,openrouter/qwen/qwen3.5-9b:deepinfra" | string
+          model: *"openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {
-            temperature: fixed: 0.7
+            temperature: fixed: 1.0
             top_p: fixed: 0.95
-            top_k: fixed: 20
-            repetition_penalty: fixed: 1.15
-            presence_penalty: fixed: 1.5
           }
         }
         overlays: {
           "reasoning_effort": {
             "minimal": {
               main: reasoning_effort: "none"
-              vision: reasoning_effort: "none"
+              vision: reasoning_effort: "medium"
             }
             "low": {
               main: reasoning_effort: "high"

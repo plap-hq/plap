@@ -343,7 +343,7 @@ def test_vision_history_messages_replay_images_and_prior_turns_in_order_without_
                 ChatToolCall(
                     id="call_vision_1",
                     name=VISION_TOOL_NAME,
-                    arguments=msgspec.json.encode({"prompt": f"compare {image_a_id} and {image_b_id}"}).decode(),
+                    arguments=msgspec.json.encode({"ids": [image_a_id, image_b_id], "prompt": "compare them"}).decode(),
                 )
             ],
         ),
@@ -358,7 +358,7 @@ def test_vision_history_messages_replay_images_and_prior_turns_in_order_without_
     assert isinstance(transcript[0].content, list)
     assert transcript[0].content[0].text == image_a_id
     assert transcript[0].content[2].text == image_b_id
-    assert transcript[1].content == f"compare {image_a_id} and {image_b_id}"
+    assert transcript[1].content == f"Selected image ids: {image_a_id}, {image_b_id}\nQuestion: compare them"
     assert transcript[2].content == "first comparison"
     assert isinstance(transcript[3].content, list)
     assert transcript[3].content[0].text == _image_id(image_c)
@@ -388,7 +388,7 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"prompt":"describe {image_id}"}}'),
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
             _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
@@ -407,7 +407,7 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     assert "immediately following it" in client.complete_requests[0].messages[0].content
     assert client.complete_requests[0].messages[1].content[0].text == image_id
     assert client.complete_requests[0].messages[1].content[1].image_url.url == "https://example.com/cat.png"
-    assert client.complete_requests[0].messages[2].content == f"describe {image_id}"
+    assert client.complete_requests[0].messages[2].content == f"Selected image ids: {image_id}\nQuestion: describe"
     assert any(message.role == "tool" and message.content == "vision output" for message in client.stream_requests[1].messages)
     output = _output_items(state)
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
@@ -423,7 +423,7 @@ async def test_internal_images_tool_applies_vision_sampling_config() -> None:
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"prompt":"describe {image_id}"}}'),
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
             _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
@@ -524,7 +524,7 @@ async def test_internal_images_tool_stays_hidden_when_external_tool_remains_open
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"prompt":"describe {image_id}"}}'),
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
                 ("call_client", "client_tool", "{}"),
                 usage=_usage(input_tokens=8, output_tokens=4),
             )
@@ -551,11 +551,11 @@ async def test_unknown_image_id_retries_before_internal_tool_execution() -> None
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision_bad", VISION_TOOL_NAME, '{"prompt":"describe image-AAAA-BBBB-CCCC-DDDD"}'),
+                ("call_vision_bad", VISION_TOOL_NAME, '{"ids":["image-AAAA-BBBB-CCCC-DDDD"],"prompt":"describe"}'),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"prompt":"describe {image_id}"}}'),
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
             _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
@@ -597,7 +597,7 @@ async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> No
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"prompt":"describe {image_id}"}}'),
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
                 ("call_internal", "internal", "{}"),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
