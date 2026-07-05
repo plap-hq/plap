@@ -60,10 +60,16 @@ VISION_TOOL = ChatTool(
     )
 )
 VISION_PROMPT = (
-    "Answer questions about images from the conversation. "
-    "Any standalone text part matching image-XXXX-XXXX-XXXX-XXXX identifies the image part immediately following it. "
-    "When a text message begins with 'Selected image ids:', use those ids to determine which images are relevant to the question. "
-    "Answer only the user's request in plain text. Keep the answer concrete, visually grounded, and concise."
+    "Answer image questions. "
+    "A standalone text token matching image-XXXX-XXXX-XXXX-XXXX labels the image immediately after it. "
+    'A message starting "Selected image ids:" lists the image(s) to inspect; otherwise use images referenced by the question. '
+    "Rely on visible evidence. "
+    "For OCR, tables, and diagrams, read all relevant labels, numbers, units, symbols, arrows, and spatial relations exactly. "
+    "Mark uncertain or unreadable details as uncertain/unreadable rather than guessing or saying absent. "
+    "For charts and overlays, describe each series/object separately. "
+    "Do not treat a reference curve as part of the target or infer a subgroup from mere overlap. "
+    "If identifying or choosing, compare evidence with the stated criteria and qualify uncertainty. "
+    "Plain text only; answer just the request, concise but complete."
 )
 _IMAGE_ID_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:image-)?([A-Za-z0-9]{4})-([A-Za-z0-9]{4})-([A-Za-z0-9]{4})-([A-Za-z0-9]{4})(?![A-Za-z0-9])"
