@@ -781,7 +781,12 @@ async def _evaluate_example(
                 vision_usage = _merge_usage(vision_usage, vision_result.usage)
                 vision_calls += 1
                 tool_output_text = _tool_output_text(vision_result)
-                tool_message = ChatMessage(role="tool", tool_call_id=call.id, content=tool_output_text)
+                tool_message = ChatMessage(
+                    role="tool",
+                    tool_call_id=call.id,
+                    content=tool_output_text,
+                    reasoning_content=vision_result.message.reasoning_content,
+                )
                 tool_outputs.append(tool_message)
                 rewritten_messages.append(tool_message)
                 history_messages.append(tool_message)
@@ -798,7 +803,7 @@ async def _evaluate_example(
                             ],
                         }
                     )
-                    transcript.append({"role": "tool", "tool_call_id": call.id, "content": tool_output_text})
+                    transcript.append(_serialize_message(tool_message))
 
             if not main_result.message.tool_calls:
                 raw_response_text = _message_text(main_result.message)

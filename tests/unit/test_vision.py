@@ -301,12 +301,17 @@ def _text_step(text: str, *, usage: ChatUsage) -> list[ChatCompletionDelta]:
     return [_delta(content_delta=text, finish_reason=ChatFinishReason.STOP, usage=usage)]
 
 
-def _complete(text: str, *, usage: ChatUsage | None = None) -> ChatCompletionResult:
+def _complete(
+    text: str,
+    *,
+    reasoning_content: str | None = None,
+    usage: ChatUsage | None = None,
+) -> ChatCompletionResult:
     return ChatCompletionResult(
         id="cmp_vision",
         model="vision-model",
         created_at=None,
-        message=ChatMessage(role="assistant", content=text),
+        message=ChatMessage(role="assistant", content=text, reasoning_content=reasoning_content),
         finish_reason=ChatFinishReason.STOP,
         usage=usage,
         service_tier="default",
@@ -366,6 +371,37 @@ def test_vision_history_messages_replay_images_and_prior_turns_in_order_without_
     assert transcript[4].content[0].text == image_a_id
 
 
+def test_vision_history_messages_replay_hidden_reasoning_from_tool_messages() -> None:
+    image = _image("https://example.com/a.png")
+    image_id = _image_id(image)
+    history = [
+        ChatMessage(role="user", content=[image]),
+        ChatMessage(
+            role="assistant",
+            tool_calls=[
+                ChatToolCall(
+                    id="call_vision_1",
+                    name=VISION_TOOL_NAME,
+                    arguments=msgspec.json.encode({"ids": [image_id], "prompt": "inspect closely"}).decode(),
+                )
+            ],
+        ),
+        ChatMessage(
+            role="tool",
+            tool_call_id="call_vision_1",
+            content="first comparison",
+            reasoning_content="I checked the labels before comparing the shapes.",
+        ),
+    ]
+
+    transcript = _vision_history_messages(history)
+
+    assert len(transcript) == 3
+    assert transcript[2].role == "assistant"
+    assert transcript[2].content == "first comparison"
+    assert transcript[2].reasoning_content == "I checked the labels before comparing the shapes."
+
+
 @pytest.mark.anyio
 async def test_request_rewrites_images_and_preserves_none_tool_choice() -> None:
     core = _reload_handlers()
@@ -404,7 +440,7 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     assert len(client.stream_requests) == 2
     assert len(client.complete_requests) == 1
     assert client.complete_requests[0].messages[0].role == "developer"
-    assert "immediately following it" in client.complete_requests[0].messages[0].content
+    assert "labels the image immediately after it" in client.complete_requests[0].messages[0].content
     assert client.complete_requests[0].messages[1].content[0].text == image_id
     assert client.complete_requests[0].messages[1].content[1].image_url.url == "https://example.com/cat.png"
     assert client.complete_requests[0].messages[2].content == f"Selected image ids: {image_id}\nQuestion: describe"
@@ -412,6 +448,48 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     output = _output_items(state)
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
     final_message = next(item for item in output if isinstance(item, ResponseMessageItem))
+    assert _message_text(final_message) == "final answer"
+
+
+@pytest.mark.anyio
+async def test_internal_images_tool_replays_prior_hidden_vision_reasoning_into_later_vision_turns() -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_vision_1", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe the image"}}'),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            ),
+            _tool_step(
+                ("call_vision_2", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"double check the labels"}}'),
+                usage=_usage(input_tokens=7, output_tokens=3),
+            ),
+            _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
+        ],
+        completes=[
+            _complete(
+                "first vision output",
+                reasoning_content="I read the labels before answering.",
+                usage=_usage(input_tokens=6, output_tokens=2),
+            ),
+            _complete(
+                "second vision output",
+                reasoning_content="I verified the labels again.",
+                usage=_usage(input_tokens=6, output_tokens=2),
+            ),
+        ],
+    )
+    state, _, _ = _state(client)
+
+    await core.run_response(state=state)
+
+    assert len(client.complete_requests) == 2
+    second_request = client.complete_requests[1]
+    assert second_request.messages[3].role == "assistant"
+    assert second_request.messages[3].content == "first vision output"
+    assert second_request.messages[3].reasoning_content == "I read the labels before answering."
+    final_message = next(item for item in _output_items(state) if isinstance(item, ResponseMessageItem))
     assert _message_text(final_message) == "final answer"
 
 

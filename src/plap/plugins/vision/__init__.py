@@ -213,6 +213,15 @@ def _tool_output_text(result: ChatCompletionResult) -> str:
     raise RuntimeError("vision model returned no text output")
 
 
+def _tool_output_message(result: ChatCompletionResult, *, tool_call_id: str) -> ChatMessage:
+    return ChatMessage(
+        role="tool",
+        tool_call_id=tool_call_id,
+        content=_tool_output_text(result),
+        reasoning_content=result.message.reasoning_content,
+    )
+
+
 def _vision_turn_prompt(ids: list[str], prompt: str) -> str:
     return f"Selected image ids: {', '.join(ids)}\nQuestion: {prompt}"
 
@@ -245,7 +254,7 @@ def _vision_context(messages: list[Message]) -> tuple[list[ChatMessage], set[str
             continue
         ids, prompt = arguments
         transcript.append(ChatMessage(role="user", content=_vision_turn_prompt(ids, prompt)))
-        transcript.append(ChatMessage(role="assistant", content=message.content))
+        transcript.append(ChatMessage(role="assistant", content=message.content, reasoning_content=message.reasoning_content))
     return transcript, known_image_ids
 
 
@@ -299,7 +308,8 @@ async def _vision_tool_output(
     history: list[Message],
     ids: list[str],
     prompt: str,
-) -> str:
+    tool_call_id: str,
+) -> ChatMessage:
     transcript, known_image_ids = _vision_context(history)
     missing = [image_id for image_id in ids if image_id not in known_image_ids]
     if missing:
@@ -307,7 +317,7 @@ async def _vision_tool_output(
     client = await state.svcs.aget(IChatCompletionClient)
     result = await client.complete(_vision_request(config, state.prepared.execution_request, transcript, ids, prompt))
     ledger.hide(config.vision.public_usage, result.usage)
-    return _tool_output_text(result)
+    return _tool_output_message(result, tool_call_id=tool_call_id)
 
 
 def _vision_validator(state: State) -> RetryValidator:
@@ -370,8 +380,15 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
     image_calls = [call for call in accepted.message.tool_calls if call.name == VISION_TOOL_NAME]
     for call in image_calls:
         ids, prompt = _tool_args(call)
-        output = await _vision_tool_output(state, config, ledger, history=history, ids=ids, prompt=prompt)
-        tool_message = ChatMessage(role="tool", tool_call_id=call.id, content=output)
+        tool_message = await _vision_tool_output(
+            state,
+            config,
+            ledger,
+            history=history,
+            ids=ids,
+            prompt=prompt,
+            tool_call_id=call.id,
+        )
         state.main.append(tool_message)
         history = [*history, tool_message]
     return result
