@@ -1,3 +1,9 @@
+# TODO: this ingestion algorithm still has a key flaw where reasoning is always required to be an unbroken chain (sans compaction nodes).
+# Normally, in serving stacks there is a weaker assumption where the reasoning chain is simply unbroken
+# since the last user message due to tool call reasoning persistence.
+# This can be fixed by re-full-checkpointing at the first reasoning item after every user message,
+# but will lead to higher data transfer, storage, and complexity.
+
 from __future__ import annotations
 
 from collections.abc import Mapping
