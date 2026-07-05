@@ -95,7 +95,7 @@ def _side_codes() -> dict[str, int]:
 
 
 def _request(**updates: object) -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap-ai/wisp-mini", input="hello", **updates)
+    return ResponseCreateRequest(model="plap-ai/mote", input="hello", **updates)
 
 
 def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:

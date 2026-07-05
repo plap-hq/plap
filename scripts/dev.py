@@ -74,7 +74,7 @@ DEFAULT_OTEL_COLLECTOR_IMAGE = "otel/opentelemetry-collector-contrib:0.153.0"
 DEFAULT_OTEL_COLLECTOR_PORT = 4318
 DEFAULT_PORT = 8000
 DEFAULT_POSTGRES_PORT = 55432
-DEFAULT_MODEL = "plap-ai/wisp-mini"
+DEFAULT_MODEL = "plap-ai/mote"
 DEFAULT_LOG_FILE = (REPO_ROOT / ".dev" / "plap.log.jsonl").resolve()
 SERVER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 

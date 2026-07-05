@@ -65,7 +65,7 @@ async def test_async_openai_client_models_list(openai_client: AsyncOpenAI) -> No
     models = await openai_client.models.list()
 
     assert models.object == "list"
-    assert [model.id for model in models.data] == ["plap-ai/wisp", "plap-ai/wisp-mini"]
+    assert [model.id for model in models.data] == ["plap-ai/mote", "plap-ai/wisp"]
     assert all(model.object == "model" for model in models.data)
     assert all(model.owned_by == "plap" for model in models.data)
 

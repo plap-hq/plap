@@ -45,7 +45,7 @@ def _fake_cue_export(calls: list[tuple[tuple[str, ...], str, str | None]]):
                                         },
                                     },
                                 },
-                                "plap-ai/wisp-mini": {
+                                "plap-ai/mote": {
                                     "main": {"model": "mini-model"},
                                     "overlays": {
                                         "reasoning_effort": {

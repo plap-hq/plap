@@ -61,8 +61,8 @@
             "output": 1000000
           }
         },
-        "plap-ai/wisp-mini": {
-          "name": "Wisp Mini",
+        "plap-ai/mote": {
+          "name": "Mote",
           "reasoning": true,
           "modalities": {
             "input": ["text", "image"],

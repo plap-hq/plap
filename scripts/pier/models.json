@@ -20,8 +20,8 @@
           "maxTokens": 131072
         },
         {
-          "id": "plap-ai/wisp-mini",
-          "name": "Wisp Mini",
+          "id": "plap-ai/mote",
+          "name": "Mote",
           "reasoning": true,
           "input": ["text"],
           "cost": {

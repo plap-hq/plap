@@ -106,9 +106,9 @@ config: #Config & {
           }
         }
       }
-      "plap-ai/wisp-mini": {
-        display_name: "Wisp Mini"
-        model_info: display_name: "Wisp Mini"
+      "plap-ai/mote": {
+        display_name: "Mote"
+        model_info: display_name: "Mote"
         model_info: description: "It's smaller."
         model_info: input_modalities: ["text", "image"]
         main: #FieldConfig & {
