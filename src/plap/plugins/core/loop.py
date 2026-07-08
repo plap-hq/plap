@@ -90,11 +90,15 @@ def _last_service_tier(latest_snapshot: object | None) -> str | None:
 
 
 def _should_loop(state: State, result: StreamResult) -> bool:
-    side = state.last_side
-    accepted = result.accepted
-    if side is None or accepted is None or accepted.finish_reason != ChatFinishReason.TOOL_CALLS:
+    if state.last_side != MAIN_SIDE:
         return False
-    return not state.open_calls(side)
+    if result.accepted is None or result.budget_exhausted:
+        return False
+    oc = state.open_calls(MAIN_SIDE)
+    if oc:
+        return False
+    history = state.history(MAIN_SIDE)
+    return bool(history) and not history[-1].is_assistant()
 
 
 @dataclass(slots=True)
@@ -160,7 +164,7 @@ async def stream_response(
         if attempt_cap == 0:
             budget_exhausted = True
             logger.info(
-                "response.runtime.main_request.skipped",
+                "response.runtime.main.skipped",
                 attempt_budget=attempt_budget,
                 attempt_index=attempt_index,
                 hidden_history_messages=len(history.messages),
@@ -175,7 +179,7 @@ async def stream_response(
             max_completion_tokens=attempt_cap,
         )
         logger.info(
-            "response.runtime.main_request",
+            "response.runtime.main",
             attempt_budget=attempt_budget,
             attempt_index=attempt_index,
             hidden_history_messages=len(history.messages),
@@ -184,7 +188,7 @@ async def stream_response(
             remaining_budget=ledger.remaining(),
         )
         logger.bind(log_channel="payload").info(
-            "response.runtime.main_request.payload",
+            "response.runtime.main.payload",
             attempt_index=attempt_index,
             request=asdict(attempt_request),
         )
@@ -226,19 +230,52 @@ async def stream_response(
     except RetryLimitExceededError:
         if latest_snapshot is not None:
             state.main = [*prefix, *latest_snapshot.messages]
+        accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
+        usage = None if accepted is None else accepted.usage
+        logger.info(
+            "response.runtime.main.result",
+            accepted=accepted is not None,
+            budget_exhausted=budget_exhausted,
+            cached_tokens=None if usage is None else usage.cached_tokens,
+            error="retry_limit_exceeded",
+            finish_reason=None if accepted is None else accepted.finish_reason,
+            hidden_results_accounted=hidden_results_accounted,
+            input_tokens=None if usage is None else usage.input_tokens,
+            output_tokens=None if usage is None else usage.output_tokens,
+            reasoning_tokens=None if usage is None else usage.reasoning_tokens,
+            remaining_budget=ledger.remaining(),
+            service_tier=None if accepted is None else accepted.service_tier,
+            total_tokens=None if usage is None else usage.total_tokens,
+        )
         return StreamResult(
             ledger=ledger,
             pricing=main.public_usage,
-            accepted=_accepted_result(latest_snapshot, hidden_results_accounted),
+            accepted=accepted,
             budget_exhausted=budget_exhausted,
             last_service_tier=_last_service_tier(latest_snapshot),
             error=_retry_limit_error(),
         )
 
+    accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
+    usage = None if accepted is None else accepted.usage
+    logger.info(
+        "response.runtime.main.result",
+        accepted=accepted is not None,
+        budget_exhausted=budget_exhausted,
+        cached_tokens=None if usage is None else usage.cached_tokens,
+        finish_reason=None if accepted is None else accepted.finish_reason,
+        hidden_results_accounted=hidden_results_accounted,
+        input_tokens=None if usage is None else usage.input_tokens,
+        output_tokens=None if usage is None else usage.output_tokens,
+        reasoning_tokens=None if usage is None else usage.reasoning_tokens,
+        remaining_budget=ledger.remaining(),
+        service_tier=None if accepted is None else accepted.service_tier,
+        total_tokens=None if usage is None else usage.total_tokens,
+    )
     return StreamResult(
         ledger=ledger,
         pricing=main.public_usage,
-        accepted=_accepted_result(latest_snapshot, hidden_results_accounted),
+        accepted=accepted,
         budget_exhausted=budget_exhausted,
         last_service_tier=_last_service_tier(latest_snapshot),
     )

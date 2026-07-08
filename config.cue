@@ -53,6 +53,7 @@ config: #Config & {
   reasoning_to_output: *1.0 | number
   sides: {
     main: 0
+    advisor: 1
   }
 
   overlays: {
@@ -63,7 +64,7 @@ config: #Config & {
         model_info: description: "It's bigger."
         model_info: input_modalities: ["text", "image"]
         main: #FieldConfig & {
-          model: *"crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,openrouter/xiaomi/mimo-v2.5-pro:novita,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro" | string
+          model: *"crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,openrouter/xiaomi/mimo-v2.5-pro:novita" | string
           max_completion_tokens: *131072 | int
           reasoning_effort: *"medium" | #ReasoningEffort
         }
@@ -71,6 +72,11 @@ config: #Config & {
           model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,wandb/openai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
+        }
+        advisor: #FieldConfig & {
+          model: *"crof/deepseek-v4-pro,openrouter/deepseek/deepseek-v4-pro:deepseek" | string
+          max_completion_tokens: *131072 | int
+          reasoning_effort: *"high" | #ReasoningEffort
         }
         vision: #FieldConfig & {
           model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
@@ -85,23 +91,28 @@ config: #Config & {
           "reasoning_effort": {
             "minimal": {
               main: reasoning_effort: "none"
-              vision: reasoning_effort: "medium"
+              vision: reasoning_effort: "none"
+              advisor: reasoning_effort: "none"
             }
             "low": {
               main: reasoning_effort: "low"
-              vision: reasoning_effort: "medium"
+              vision: reasoning_effort: "none"
+              advisor: reasoning_effort: "high"
             }
             "medium": {
               main: reasoning_effort: "medium"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "high"
             }
             "high": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "xhigh"
             }
             "xhigh": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "xhigh"
             }
           }
         }
@@ -112,14 +123,19 @@ config: #Config & {
         model_info: description: "It's smaller."
         model_info: input_modalities: ["text", "image"]
         main: #FieldConfig & {
-          model: *"openrouter/deepseek/deepseek-v4-flash:gmicloud,openrouter/deepseek/deepseek-v4-flash:baidu,openrouter/deepseek/deepseek-v4-flash:wafer,openrouter/deepseek/deepseek-v4-flash:novita" | string
-          max_completion_tokens: *393216 | int
+          model: *"openrouter/xiaomi/mimo-v2.5:xiaomi,openrouter/xiaomi/mimo-v2.5:digitalocean" | string
+          max_completion_tokens: *131072 | int
           reasoning_effort: *"high" | #ReasoningEffort
         }
         summary: #FieldConfig & {
           model: *"groq/openai/gpt-oss-20b,lightning/lightning-ai/gpt-oss-20b,wandb/openai/gpt-oss-20b,openrouter/openai/gpt-oss-20b:amazon-bedrock" | string
           max_completion_tokens: *768 | int
           reasoning_effort: *"low" | #ReasoningEffort
+        }
+        advisor: #FieldConfig & {
+          model: *"openrouter/deepseek/deepseek-v4-flash:deepseek,openrouter/deepseek/deepseek-v4-flash:baidu,openrouter/deepseek/deepseek-v4-flash:gmicloud,openrouter/deepseek/deepseek-v4-flash:novita" | string
+          max_completion_tokens: *131072 | int
+          reasoning_effort: *"high" | #ReasoningEffort
         }
         vision: #FieldConfig & {
           model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
@@ -134,23 +150,28 @@ config: #Config & {
           "reasoning_effort": {
             "minimal": {
               main: reasoning_effort: "none"
-              vision: reasoning_effort: "medium"
+              vision: reasoning_effort: "none"
+              advisor: reasoning_effort: "none"
             }
             "low": {
-              main: reasoning_effort: "high"
-              vision: reasoning_effort: "medium"
+              main: reasoning_effort: "low"
+              vision: reasoning_effort: "none"
+              advisor: reasoning_effort: "high"
             }
             "medium": {
-              main: reasoning_effort: "high"
+              main: reasoning_effort: "medium"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "high"
             }
             "high": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "xhigh"
             }
             "xhigh": {
-              main: reasoning_effort: "xhigh"
+              main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
+              advisor: reasoning_effort: "xhigh"
             }
           }
         }

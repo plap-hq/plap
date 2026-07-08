@@ -53,6 +53,7 @@ OPENROUTER_REASONING_ENABLE_QUIRKS: tuple[Quirk, ...] = (
 )
 OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "deepseek/deepseek-v4-flash": (),
+    "deepseek/deepseek-v4-pro": (),
     "google/gemma-4-31b-it": OPENROUTER_REASONING_ENABLE_QUIRKS,
     "meta-llama/llama-3.1-8b-instruct": (),
     "meta-llama/llama-3.3-70b-instruct": (),
@@ -60,6 +61,7 @@ OPENROUTER_MODELS: dict[str, tuple[Quirk, ...]] = {
     "openai/gpt-oss-120b": (),
     "qwen/qwen3.5-9b": OPENROUTER_REASONING_ENABLE_QUIRKS,
     "stepfun/step-3.5-flash": (),
+    "xiaomi/mimo-v2.5": (),
     "xiaomi/mimo-v2.5-pro": (),
 }
 
