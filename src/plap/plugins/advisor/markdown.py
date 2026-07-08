@@ -153,6 +153,10 @@ def requirements_instruction(request: ChatCompletionRequest) -> str:
     return "\n".join(["# requirements", *lines])
 
 
+def note_instruction(note: str) -> str:
+    return "\n".join(["# note from previous phase (may be stale)", *_text_fence(note)])
+
+
 def latest_closed_tool_output_turn(history: list[ChatMessage]) -> ToolOutputTurn | None:
     if not history or not history[-1].is_tool():
         return None
@@ -233,6 +237,7 @@ __all__ = [
     "assistant_markdown",
     "canonical_json",
     "latest_closed_tool_output_turn",
+    "note_instruction",
     "render_main_messages",
     "requirements_markdown",
     "requirements_value",

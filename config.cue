@@ -23,7 +23,7 @@ config: #Config & {
 
   display_name: *"plap-ai" | string
   model_info: #ModelInfoConfig & {
-    display_name: *"plap-ai" | string
+    display_name: *"Plap" | string
     description: *"plap responses model" | string
     mode: *"responses" | string
     input_modalities: *["text"] | [...string]
@@ -79,7 +79,7 @@ config: #Config & {
           reasoning_effort: *"high" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
+          model: *"openrouter/xiaomi/mimo-v2.5:xiaomi,openrouter/xiaomi/mimo-v2.5:digitalocean" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {
@@ -138,7 +138,7 @@ config: #Config & {
           reasoning_effort: *"high" | #ReasoningEffort
         }
         vision: #FieldConfig & {
-          model: *"wandb/google/gemma-4-31B-it,openrouter/google/gemma-4-31b-it:novita,openrouter/google/gemma-4-31b-it:siliconflow,openrouter/google/gemma-4-31b-it:modelrun" | string
+          model: *"openrouter/xiaomi/mimo-v2.5:xiaomi,openrouter/xiaomi/mimo-v2.5:digitalocean" | string
           max_completion_tokens: *8192 | int
           reasoning_effort: *"medium" | #ReasoningEffort
           sampling: {

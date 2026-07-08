@@ -323,7 +323,12 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
     ]
 
 
-def _advisor_step(advice: str) -> list[ChatCompletionDelta]:
+def _advisor_step(advice: str | None = "", *, note: str | None = None) -> list[ChatCompletionDelta]:
+    arguments: dict[str, str] = {}
+    if advice is not None:
+        arguments["advice"] = advice
+    if note is not None:
+        arguments["note"] = note
     return [
         _delta(
             model="advisor-model",
@@ -331,7 +336,7 @@ def _advisor_step(advice: str) -> list[ChatCompletionDelta]:
                 index=0,
                 id="call_advise",
                 name=_ADVISE_TOOL_NAME,
-                arguments_delta=msgspec.json.encode({"advice": advice}).decode(),
+                arguments_delta=msgspec.json.encode(arguments).decode(),
             ),
         ),
         _delta(model="advisor-model", finish_reason=ChatFinishReason.TOOL_CALLS, usage=_usage()),
@@ -404,7 +409,8 @@ async def test_before_tool_noop_returns_function_call() -> None:
     assert [tool.function.name for tool in advisor_request.tools] == [_ADVISE_TOOL_NAME, "read_file"]
     assert advisor_request.tool_choice.name == _ADVISE_TOOL_NAME
     assert "### tool_call read_file" in advisor_request.messages[-2].content
-    assert state.sides[_ADVISOR_SIDE][-1].content == _ADVISOR_TOOL_OUTPUT
+    assert state.sides[_ADVISOR_SIDE][-1].role == "tool"
+    assert state.sides[_ADVISOR_SIDE][-1].tool_call_id == "call_advise"
 
 
 @pytest.mark.anyio
@@ -492,6 +498,34 @@ async def test_advisor_retry_history_block_survives_rebuild() -> None:
 
 
 @pytest.mark.anyio
+async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
+    core = _reload_handlers()
+    client = _Client(
+        main=[_tool_step(), _text_step("final answer")],
+        advisor=[_advisor_step(None, note="Watch whether the final answer is actually verified."), _advisor_step("")],
+    )
+    state = _state(client)
+
+    await core.run_response(state=state)
+
+    assert len(client.advisor_requests) == 1
+    machine = state.machine.to_primitive().get(_ADVISOR_SIDE, {})
+    assert isinstance(machine, dict)
+    assert machine.get("note") == "Watch whether the final answer is actually verified."
+    main_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    phase_instruction = _advisor_module()._phase_instruction(state, "before_return", main_request)
+    assert "# note from previous phase (may be stale)" in phase_instruction
+    assert "Watch whether the final answer is actually verified." in phase_instruction
+    assert not any(
+        message.role == "assistant" and message.tool_calls and "note" in message.tool_calls[0].arguments
+        for message in state.sides[_ADVISOR_SIDE]
+    )
+    _advisor_module()._set_advisor_note(state, None)
+    machine = state.machine.to_primitive().get(_ADVISOR_SIDE, {})
+    assert not isinstance(machine, dict) or "note" not in machine
+
+
+@pytest.mark.anyio
 async def test_after_tool_advice_reaches_next_main_request() -> None:
     core = _reload_handlers()
     client = _Client(main=[_text_step("final answer")], advisor=[_advisor_step("Use the tool output."), _advisor_step("")])
@@ -559,6 +593,41 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
 
 
 @pytest.mark.anyio
+async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = _reload_handlers()
+    monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
+    client = _Client(
+        main=[_text_step("final answer")],
+        advisor=[_advisor_step("", note="Watch whether the tools/list call appears next."), _advisor_step("")],
+    )
+    state = _state(
+        client,
+        ingested=Ingested(
+            machine={},
+            sides=Sides(
+                messages={
+                    MAIN_SIDE: [
+                        Message(role="user", content="hello"),
+                        Message(
+                            role="assistant",
+                            tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
+                        ),
+                        Message(role="tool", tool_call_id="call_read", content="file contents"),
+                    ]
+                }
+            ),
+            last_side=MAIN_SIDE,
+            last_reasoning_id=None,
+            current_compaction_id=None,
+        ),
+    )
+
+    await core.run_response(state=state)
+
+    assert "[advisor] note: Watch whether the tools/list call appears next." in _summary_texts(state)
+
+
+@pytest.mark.anyio
 async def test_before_return_advice_loops_and_hides_first_answer() -> None:
     core = _reload_handlers()
     client = _Client(
@@ -594,6 +663,23 @@ async def test_before_return_advice_emits_summary_annotation_when_not_stealth(mo
     await core.run_response(state=state)
 
     assert "[advisor] blocked return. advice: Revise before returning." in _summary_texts(state)
+
+
+@pytest.mark.anyio
+async def test_before_return_note_only_emits_neutral_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = _reload_handlers()
+    monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
+    client = _Client(
+        main=[_text_step("first answer")],
+        advisor=[_advisor_step("", note="All good. Agent read the file and compile passed.")],
+    )
+    state = _state(client)
+
+    await core.run_response(state=state)
+
+    texts = _summary_texts(state)
+    assert "[advisor] note: All good. Agent read the file and compile passed." in texts
+    assert not any(text.startswith("[advisor] blocked return.") for text in texts)
 
 
 def test_content_part_serialization_uses_json_fence() -> None:

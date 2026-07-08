@@ -1,5 +1,8 @@
+# TODO: should probably add a sticky rules system, complementary to notes
+
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -24,6 +27,7 @@ from plap.llms.completions.chat import (
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.advisor.markdown import (
+    note_instruction,
     render_main_messages,
     requirements_instruction,
 )
@@ -47,14 +51,15 @@ You receive the agent transcript incrementally, including thoughts.
 BEFORE_TOOL_CALL_PHASE = """phase: before_tool_call
 
 Call advise exactly once.
-Use {"advice":""} when no guidance is needed.
+Use {"advice":"",  "note": ...} when no guidance is needed.
 IMPORTANT: A non-empty advice will abort the pending tool calls.
 DO NOT provide advice at this time UNLESS you (intentionally) want to BLOCK those tool calls.
 For example, if those tool calls directly go against what the user said or are dangerous.
+If you want to note something to yourself, put it in note, NOT advice.
 
-ALSO IMPORTANT: There will be another phase: after_tool_call directly after the tool execution.
-For efficiency reasons, prefer not providing advice here when the tool call is large yet non-fatal.
-This phase: before_tool_call is mainly for fatal or entirely useless tool calls, especially if they are irreversible.
+ALSO IMPORTANT: You will enter phase: after_tool_call after the tool execution.
+For efficiency reasons, prefer using a note to that phase INSTEAD of advice (which is blocking)
+when a large tool call would take less effort to fix with a follow-up patch.
 
 As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
 you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
@@ -62,8 +67,9 @@ you should advise it to do so (call the tools you want, in order to confirm susp
 AFTER_TOOL_CALL_PHASE = """phase: after_tool_call
 
 Call advise exactly once.
-Use {"advice":""} when no guidance is needed.
+Use {"advice":"",  "note": ...} when no guidance is needed.
 IMPORTANT: If you have nothing of substance to add, prefer staying silent.
+If you want to note something to yourself, put it in note, NOT advice.
 
 As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
 you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
@@ -71,13 +77,14 @@ you should advise it to do so (call the tools you want, in order to confirm susp
 BEFORE_RETURN_PHASE = """phase: before_return
 
 Call advise exactly once.
-Use {"advice":""} when no guidance is needed.
+Use {"advice":"",  "note": ...} when no guidance is needed.
 IMPORTANT: This is the last point to intercept before the agent returns a response.
 I repeat, it is VERY IMPORTANT for you to verify your suspicions at this time, or else you will not be able to later.
 
 ALSO IMPORTANT: A non-empty advice will abort the pending return and cause the model to loop.
 DO NOT provide advice at this time UNLESS you (intentionally) want to LOOP the main agent.
 For example, if the main agent has not sufficiently completed or verified its completion of a task and instead returned early.
+If you want to note something to yourself, put it in note, NOT advice.
 
 As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
 you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
@@ -92,9 +99,14 @@ ADVISE_TOOL = ChatTool(
                 "advice": {
                     "type": "string",
                     "description": "Guidance for the main agent.",
-                }
+                },
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "Note passed to the next advice phase. This is non-blocking; writing one does NOT cause aborts or loops."
+                    ),
+                },
             },
-            "required": ["advice"],
             "additionalProperties": False,
         },
         strict=True,
@@ -124,6 +136,29 @@ def _advisor_error(
     )
 
 
+def _advisor_machine(state: State) -> dict[str, object]:
+    raw = state.machine.to_primitive().get(ADVISOR_SIDE)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return {}
+
+
+def _advisor_note(state: State) -> str | None:
+    value = _advisor_machine(state).get("note")
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _set_advisor_note(state: State, note: str | None) -> None:
+    machine = _advisor_machine(state)
+    if note is None:
+        machine.pop("note", None)
+    else:
+        machine["note"] = note
+    state.machine = state.machine.model_copy(update={ADVISOR_SIDE: machine}, deep=True)
+
+
 def _is_advisor_artifact(msg: ChatMessage) -> bool:
     if msg.reasoning_content is None:
         return False
@@ -141,6 +176,30 @@ def _advisor_call_id(msg: ChatMessage) -> str:
 
 def _is_advisor_transcript_message(msg: ChatMessage) -> bool:
     return msg.role == "user" and msg.reasoning_content == _advisor_sentinel(True)
+
+
+def _strip_note_from_messages(messages: tuple[ChatMessage, ...]) -> list[ChatMessage]:
+    stripped: list[ChatMessage] = []
+    for message in messages:
+        if not message.is_assistant() or not message.tool_calls:
+            stripped.append(message)
+            continue
+        changed = False
+        tool_calls: list[ChatToolCall] = []
+        for call in message.tool_calls:
+            if call.name != ADVISE_TOOL_NAME:
+                tool_calls.append(call)
+                continue
+            arguments = msgspec.json.decode(call.arguments)
+            if isinstance(arguments, dict) and "note" in arguments:
+                changed = True
+                arguments = dict(arguments)
+                arguments.pop("note", None)
+                tool_calls.append(ChatToolCall(id=call.id, name=call.name, arguments=msgspec.json.encode(arguments).decode()))
+                continue
+            tool_calls.append(call)
+        stripped.append(message if not changed else replace(message, tool_calls=tool_calls))
+    return stripped
 
 
 def _final_block_call_id(block: list[ChatMessage]) -> str | None:
@@ -204,16 +263,21 @@ def _rebuild_advisor_side(state: State) -> None:
     state.sides[ADVISOR_SIDE] = new_side
 
 
-def _phase_instruction(phase: str, main_request: ChatCompletionRequest) -> str:
+def _phase_instruction(state: State, phase: str, main_request: ChatCompletionRequest) -> str:
     req = requirements_instruction(main_request)
     base = {
         "before_tool_call": BEFORE_TOOL_CALL_PHASE,
         "after_tool_call": AFTER_TOOL_CALL_PHASE,
         "before_return": BEFORE_RETURN_PHASE,
     }[phase]
+    parts: list[str] = []
     if req:
-        return f"{req}\n{base}"
-    return base
+        parts.append(req)
+    note = _advisor_note(state)
+    if note is not None:
+        parts.append(note_instruction(note))
+    parts.append(base)
+    return "\n".join(parts)
 
 
 def _advisor_request(
@@ -261,10 +325,25 @@ def _advisor_request(
     )
 
 
-def _advice(call: ChatToolCall) -> str | None:
-    value = msgspec.json.decode(call.arguments)["advice"]
-    stripped = value.strip()
-    return stripped or None
+def _advice_fields(call: ChatToolCall) -> tuple[str | None, str | None]:
+    arguments = msgspec.json.decode(call.arguments)
+    advice_value = arguments.get("advice") if isinstance(arguments, dict) else None
+    advice = advice_value.strip() if isinstance(advice_value, str) else ""
+    note_value = arguments.get("note") if isinstance(arguments, dict) else None
+    note = note_value.strip() if isinstance(note_value, str) else ""
+    return advice or None, note or None
+
+
+def _annotation_text(prefix: str, advice: str | None, note: str | None) -> str | None:
+    if advice is None and note is None:
+        return None
+    if advice is None:
+        return f"[advisor] note: {note}"
+    parts = [prefix]
+    parts.append(f"advice: {advice}")
+    if note is not None:
+        parts.append(f"note: {note}")
+    return " ".join(parts)
 
 
 async def _emit_annotation(state: State, text: str) -> None:
@@ -353,7 +432,7 @@ async def _run_advisor(
     result = latest_snapshot.results[-1]
     ledger.hide(config.advisor.public_usage, result.usage)
     call = result.message.tool_calls[0]
-    advice = _advice(call)
+    advice, note = _advice_fields(call)
     usage = result.usage
 
     logger.info(
@@ -369,8 +448,10 @@ async def _run_advisor(
         remaining=ledger.remaining(),
     )
 
-    state.sides[ADVISOR_SIDE].extend(latest_snapshot.messages)
+    state.sides[ADVISOR_SIDE].extend(_strip_note_from_messages(latest_snapshot.messages))
     state.sides[ADVISOR_SIDE].append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
+
+    _set_advisor_note(state, note)
 
     return advice, call.id
 
@@ -385,7 +466,7 @@ async def _maybe_advise_after_tool_call(
     history = state.history(MAIN_SIDE)
     if not history or not history[-1].is_tool():
         return
-    phase_instruction = _phase_instruction("after_tool_call", main_request)
+    phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
     logger.info("response.advisor.phase", phase="after_tool_call", main_model=main_request.model, main_messages=len(history))
     advice, call_id = await _run_advisor(
         state=state,
@@ -395,8 +476,11 @@ async def _maybe_advise_after_tool_call(
         phase_instruction=phase_instruction,
         phase="after_tool_call",
     )
+    note = _advisor_note(state)
+    text = _annotation_text("[advisor]", advice, note)
+    if text is not None:
+        await _emit_annotation(state, text)
     if advice is not None:
-        await _emit_annotation(state, f"[advisor] advice: {advice}")
         state.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
@@ -414,7 +498,7 @@ async def _maybe_advise_before_tool_call(
     open_calls = state.open_calls(MAIN_SIDE)
     if not open_calls:
         return
-    phase_instruction = _phase_instruction("before_tool_call", main_request)
+    phase_instruction = _phase_instruction(state, "before_tool_call", main_request)
     call_names = [c.name for c in open_calls]
     logger.info("response.advisor.phase", phase="before_tool_call", main_model=main_request.model, pending_calls=call_names)
     advice, call_id = await _run_advisor(
@@ -438,7 +522,10 @@ async def _maybe_advise_before_tool_call(
         for call in open_calls
     )
     joined = ", ".join(call.name for call in open_calls)
-    await _emit_annotation(state, f"[advisor] blocked tool call(s): {joined}. advice: {advice}")
+    note = _advisor_note(state)
+    text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
+    if text is not None:
+        await _emit_annotation(state, text)
     state.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
@@ -455,7 +542,7 @@ async def _maybe_advise_before_return(
         return
     if state.open_calls(MAIN_SIDE):
         return
-    phase_instruction = _phase_instruction("before_return", main_request)
+    phase_instruction = _phase_instruction(state, "before_return", main_request)
     logger.info("response.advisor.phase", phase="before_return", main_model=main_request.model)
     advice, call_id = await _run_advisor(
         state=state,
@@ -465,8 +552,11 @@ async def _maybe_advise_before_return(
         phase_instruction=phase_instruction,
         phase="before_return",
     )
+    note = _advisor_note(state)
+    text = _annotation_text("[advisor] blocked return.", advice, note)
+    if text is not None:
+        await _emit_annotation(state, text)
     if advice is not None:
-        await _emit_annotation(state, f"[advisor] blocked return. advice: {advice}")
         state.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
