@@ -30,12 +30,12 @@ from testcontainers.core.container import DockerContainer
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 from plap.app import _import_plugin, _plugin_names, _plugins  # noqa: E402
-from plap.auth import APIKeyManager, normalize_email  # noqa: E402
+from plap.auth import API_KEY_PREFIX, APIKeyManager, normalize_email  # noqa: E402
 from plap.bus import bus  # noqa: E402
 from plap.config import CueBox, load  # noqa: E402
 from plap.llms.completions.providers import PROVIDER_BUILDERS  # noqa: E402
 from plap.persistence.db import create_database_engine, create_session_maker  # noqa: E402
-from plap.persistence.models import Organization, OrganizationMembership, User, UserEmail  # noqa: E402
+from plap.persistence.models import APIKey, Organization, OrganizationMembership, User, UserEmail  # noqa: E402
 
 STATE_ENV_KEYS = (
     "PLAP_DATABASE_URL",
@@ -66,6 +66,9 @@ DEFAULT_POSTGRES_USER = "plap"
 DEFAULT_POSTGRES_PASSWORD = "plap"
 DEFAULT_POSTGRES_IMAGE = "plap-postgres-pg-cron:16"
 DEFAULT_DEV_EMAIL = "dev@example.com"
+DEFAULT_DEV_API_KEY_ID = "dev"
+DEFAULT_DEV_API_KEY_SECRET = "change-this-after-demo"
+DEFAULT_DEV_API_KEY = f"{API_KEY_PREFIX}_{DEFAULT_DEV_API_KEY_ID}_{DEFAULT_DEV_API_KEY_SECRET}"
 DEFAULT_DEV_ORG_SLUG = "plap-dev"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_OTEL_COLLECTOR_CONTAINER = "plap-dev-otelcol"
@@ -552,14 +555,31 @@ async def _ensure_dev_api_key(
             user = await _ensure_user(session, email_address)
             organization = await _ensure_organization(session, organization_slug)
             await _ensure_membership(session, user_id=user.id, organization_id=organization.id)
-            issued_key = await manager.issue_key(
-                session,
-                user_id=user.id,
-                organization_id=organization.id,
-                name="local dev key",
+            record = await session.scalar(select(APIKey).where(APIKey.key_id == DEFAULT_DEV_API_KEY_ID))
+            if record is None:
+                record = APIKey(
+                    user_id=user.id,
+                    organization_id=organization.id,
+                    name="local dev key",
+                    key_id=DEFAULT_DEV_API_KEY_ID,
+                    key_prefix=f"{API_KEY_PREFIX}_{DEFAULT_DEV_API_KEY_ID}",
+                    secret_hash="",
+                    last_four=DEFAULT_DEV_API_KEY_SECRET[-4:],
+                )
+                session.add(record)
+            record.user_id = user.id
+            record.organization_id = organization.id
+            record.name = "local dev key"
+            record.key_prefix = f"{API_KEY_PREFIX}_{DEFAULT_DEV_API_KEY_ID}"
+            record.secret_hash = manager.build_secret_hash(
+                key_id=DEFAULT_DEV_API_KEY_ID,
+                secret=DEFAULT_DEV_API_KEY_SECRET,
             )
+            record.last_four = DEFAULT_DEV_API_KEY_SECRET[-4:]
+            record.expires_at = None
+            record.revoked_at = None
             await session.commit()
-            return issued_key.plaintext_key
+            return DEFAULT_DEV_API_KEY
     finally:
         await engine.dispose()
 
