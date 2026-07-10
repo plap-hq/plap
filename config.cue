@@ -107,12 +107,12 @@ config: #Config & {
             "high": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
-              advisor: reasoning_effort: "xhigh"
+              advisor: reasoning_effort: "max"
             }
             "xhigh": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
-              advisor: reasoning_effort: "xhigh"
+              advisor: reasoning_effort: "max"
             }
           }
         }
@@ -166,12 +166,12 @@ config: #Config & {
             "high": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
-              advisor: reasoning_effort: "xhigh"
+              advisor: reasoning_effort: "max"
             }
             "xhigh": {
               main: reasoning_effort: "high"
               vision: reasoning_effort: "medium"
-              advisor: reasoning_effort: "xhigh"
+              advisor: reasoning_effort: "max"
             }
           }
         }

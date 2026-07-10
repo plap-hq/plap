@@ -1,6 +1,6 @@
 package plap
 
-#ReasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+#ReasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
 
 #FloatTransform: {
   disabled: *false | bool

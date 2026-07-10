@@ -1955,6 +1955,14 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
     assert body["stream_options"] == {"include_usage": True}
 
 
+def test_build_chat_body_preserves_max_reasoning_effort() -> None:
+    request = ChatCompletionRequest(model="deepseek-v4-pro", messages=[], reasoning_effort="max")
+
+    body = build_chat_body(request, stream=False)
+
+    assert body["reasoning_effort"] == "max"
+
+
 def test_build_chat_body_serializes_structured_chat_content() -> None:
     request = ChatCompletionRequest(
         model="model-a",

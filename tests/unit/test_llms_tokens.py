@@ -708,7 +708,7 @@ def test_measure_prompt_tokens_keeps_invalid_fallback_tool_arguments_raw(monkeyp
     }
 
 
-def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkeypatch) -> None:
+def test_measure_request_tokens_uses_dsv4_max_for_max_and_xhigh_effort(monkeypatch) -> None:
     encoded = []
 
     def fake_encode_messages(messages, thinking_mode, context=None, drop_thinking=True, add_default_bos_token=True, reasoning_effort=None):
@@ -722,15 +722,19 @@ def test_measure_request_tokens_uses_dsv4_encoder_for_pro_and_maps_effort(monkey
     monkeypatch.setattr("plap.llms.completions.tokens.encode_dsv4_messages", fake_encode_messages)
     monkeypatch.setattr("plap.llms.completions.tokens._hf_tokenizer", lambda *args: _FakeTokenizer())
 
-    count = measure_request_tokens(
-        ChatCompletionRequest(
-            model="deepseek/deepseek-v4-pro", messages=[ChatMessage(role="user", content="hello")], reasoning_effort="xhigh"
-        ),
-        tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
-    )
+    for effort in ("max", "xhigh"):
+        count = measure_request_tokens(
+            ChatCompletionRequest(
+                model="deepseek/deepseek-v4-pro", messages=[ChatMessage(role="user", content="hello")], reasoning_effort=effort
+            ),
+            tokenizer_config=_tokenizer_config(model="deepseek/deepseek-v4-pro", tokenizer_hf_repo="deepseek-ai/DeepSeek-V4-Pro"),
+        )
 
-    assert count == 1
-    assert encoded == [([{"role": "user", "content": "hello"}], "thinking", True, "max")]
+        assert count == 1
+    assert encoded == [
+        ([{"role": "user", "content": "hello"}], "thinking", True, "max"),
+        ([{"role": "user", "content": "hello"}], "thinking", True, "max"),
+    ]
 
 
 def test_measure_prompt_tokens_keeps_dsv4_thinking_for_tool_history_without_request_tools(monkeypatch) -> None:

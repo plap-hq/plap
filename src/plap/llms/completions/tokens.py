@@ -259,7 +259,7 @@ def _dsv4_thinking_mode(
 
 
 def _dsv4_reasoning_effort(reasoning_effort: ReasoningEffort | None) -> str | None:
-    if reasoning_effort == "xhigh":
+    if reasoning_effort in {"xhigh", "max"}:
         return "max"
     if reasoning_effort == "high":
         return "high"
