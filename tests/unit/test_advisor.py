@@ -24,6 +24,8 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
+from plap.plugins.advisor import advise_response
+from plap.plugins.core.ledger import UsageLedger
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, Sides
@@ -274,7 +276,6 @@ def _state(
         or Ingested(
             machine={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
-            last_side=MAIN_SIDE,
             last_reasoning_id=None,
             current_compaction_id=None,
         ),
@@ -321,6 +322,30 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
         ),
         _delta(model="main-model", finish_reason=ChatFinishReason.TOOL_CALLS, usage=_usage()),
     ]
+
+
+@pytest.mark.anyio
+async def test_advisor_delegates_without_work_when_main_is_inactive() -> None:
+    client = _Client(main=[], advisor=[])
+    state = _state(client)
+    state.deactivate(MAIN_SIDE)
+    delegated = 0
+
+    async def next_handler(**kwargs):
+        nonlocal delegated
+        _ = kwargs
+        delegated += 1
+
+    result = await advise_response(
+        state=state,
+        config=state.svcs.get(CueBox).plap.config,
+        ledger=UsageLedger(budget=None, reasoning_to_output=1.0),
+        next=next_handler,
+    )
+
+    assert result is None
+    assert delegated == 1
+    assert client.advisor_requests == []
 
 
 def _advisor_step(advice: str | None = "", *, note: str | None = None) -> list[ChatCompletionDelta]:
@@ -545,7 +570,6 @@ async def test_after_tool_advice_reaches_next_main_request() -> None:
                     ]
                 }
             ),
-            last_side=MAIN_SIDE,
             last_reasoning_id=None,
             current_compaction_id=None,
         ),
@@ -581,7 +605,6 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
                     ]
                 }
             ),
-            last_side=MAIN_SIDE,
             last_reasoning_id=None,
             current_compaction_id=None,
         ),
@@ -616,7 +639,6 @@ async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeyp
                     ]
                 }
             ),
-            last_side=MAIN_SIDE,
             last_reasoning_id=None,
             current_compaction_id=None,
         ),

@@ -8,6 +8,7 @@ from typing import cast
 from uuid import uuid4
 
 import anyio
+import jsonpatch
 import pytest
 import svcs
 from box import Box
@@ -15,7 +16,6 @@ from pydantic import TypeAdapter
 
 from plap.bus import bus
 from plap.config import CueBox
-from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
@@ -23,8 +23,8 @@ from plap.plugins.core.loop import UsageLedger, response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
-from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
-from plap.responses.state import State
+from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
+from plap.responses.state import INTERRUPTED_TOOL_OUTPUT, State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 
@@ -91,7 +91,7 @@ def _keyring() -> SealingKeyring:
 
 
 def _side_codes() -> dict[str, int]:
-    return {MAIN_SIDE: 0}
+    return {MAIN_SIDE: 0, "defender": 1, "reviewer": 2}
 
 
 def _request(**updates: object) -> ResponseCreateRequest:
@@ -112,11 +112,10 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
     )
 
 
-def _ingested(*, last_side: str | None = None) -> Ingested:
+def _ingested(*, active: set[str] | None = None) -> Ingested:
     return Ingested(
         machine={},
-        sides=Sides(),
-        last_side=last_side,
+        sides=Sides(active={MAIN_SIDE} if active is None else active),
         last_reasoning_id=None,
         current_compaction_id=None,
     )
@@ -518,7 +517,6 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
         ingested=Ingested(
             machine={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
-            last_side=MAIN_SIDE,
             last_reasoning_id=None,
             current_compaction_id=None,
         ),
@@ -540,10 +538,10 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
     assert response.usage.input_tokens == 7
 
 
-def test_state_from_ingested_preserves_last_side() -> None:
-    state = _state(ingested=_ingested(last_side="reviewer"))
+def test_state_from_ingested_preserves_active_sides() -> None:
+    state = _state(ingested=_ingested(active={"reviewer"}))
 
-    assert state.last_side == "reviewer"
+    assert state.sides.active == {"reviewer"}
 
 
 async def test_run_response_cancellation_before_created_is_noop() -> None:
@@ -564,7 +562,7 @@ async def test_run_response_cancellation_before_created_is_noop() -> None:
 async def test_run_response_cancellation_after_created_persists_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    state = _state(store, channels, client=object(), ingested=_ingested(last_side=MAIN_SIDE))
+    state = _state(store, channels, client=object())
     body_started = anyio.Event()
 
     async def _block(**kwargs):
@@ -595,35 +593,21 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
     ]
 
 
-@pytest.mark.parametrize(
-    ("last_side", "status_code", "code"),
-    [
-        (None, 500, "internal_error"),
-        ("reviewer", 500, "internal_error"),
-    ],
-)
-async def test_run_response_fails_when_core_has_no_default_handler_for_last_side(
-    last_side: str | None,
-    status_code: int,
-    code: str,
-) -> None:
+async def test_run_response_completes_without_main_execution_when_main_is_inactive() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
-    state = _state(store, channels, client=object(), ingested=_ingested(last_side=last_side))
+    state = _state(store, channels, client=object(), ingested=_ingested(active=set()))
 
-    with pytest.raises(PlapError) as exc_info:
-        await run_response(state=state)
+    await run_response(state=state)
 
-    assert exc_info.value.public is not None
-    assert exc_info.value.public.status_code == status_code
-    assert exc_info.value.public.code == code
     assert store.begin_calls == 1
-    assert store.fail_calls == 1
-    assert state.coordinator.current_response().status == "failed"
+    assert store.fail_calls == 0
+    assert store.finish_calls == 1
+    assert state.coordinator.current_response().status == "completed"
     assert _published_event_types(channels) == [
         "response.created",
         "response.in_progress",
-        "error",
+        "response.completed",
     ]
 
 
@@ -650,7 +634,7 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
             )
         ],
     )
-    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
+    state = _state(store, channels, request=request, client=client)
 
     await run_response(state=state)
 
@@ -690,7 +674,7 @@ async def test_run_response_summary_flushes_on_summary_done(monkeypatch: pytest.
             ),
         ]
     )
-    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
+    state = _state(store, channels, request=request, client=client)
     run_response_with_summary = _reload_summary_handlers()
     monkeypatch.setattr("plap.plugins.summary.ChatReasoningSummarizer", _FakeReasoningSummarizer)
 
@@ -722,7 +706,7 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
             )
         ]
     )
-    state = _state(store, channels, request=request, client=client, ingested=_ingested(last_side=MAIN_SIDE))
+    state = _state(store, channels, request=request, client=client)
 
     await run_response(state=state)
 
@@ -808,6 +792,80 @@ async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> No
     assert response.output[2].call_id.startswith("call_")
 
 
+async def test_state_finalize_keeps_inactive_main_output_private() -> None:
+    state = _state(ingested=_ingested(active=set()))
+    state.main = [
+        Message(
+            role="assistant",
+            content="private answer",
+            tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
+        )
+    ]
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert payload.sides.main == state.main
+
+
+async def test_run_response_emits_reactivated_persisted_main_call_without_main_completion() -> None:
+    store = _RecordingStore()
+    channels = _RecordingChannels()
+    assistant = Message(
+        role="assistant",
+        content="private answer",
+        tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
+    )
+    state = _state(
+        store,
+        channels,
+        client=object(),
+        ingested=Ingested(
+            machine={},
+            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            last_reasoning_id=None,
+            current_compaction_id=None,
+        ),
+    )
+    state.activate(MAIN_SIDE)
+
+    await run_response(state=state)
+
+    response = state.coordinator.current_response()
+    assert response.status == "completed"
+    assert len(response.output) == 2
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert reasoning.sides.active == {MAIN_SIDE}
+    assert isinstance(response.output[1], ResponseFunctionCallItem)
+    assert open_call_id(response.output[1].call_id, keyring=_keyring(), side_codes=_side_codes()).side == MAIN_SIDE
+
+
+async def test_state_finalize_emits_active_side_calls_in_deterministic_order() -> None:
+    state = _state(ingested=_ingested(active={MAIN_SIDE, "reviewer", "defender"}))
+    state.main = [
+        Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")]),
+    ]
+    state.sides["reviewer"] = [
+        Message(role="assistant", tool_calls=[ToolCall(id="call_reviewer", name="review_tool", arguments="{}")]),
+    ]
+    state.sides["defender"] = [
+        Message(role="assistant", tool_calls=[ToolCall(id="call_defender", name="defend_tool", arguments="{}")]),
+    ]
+
+    await state.finalize()
+
+    calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
+    assert [open_call_id(item.call_id, keyring=_keyring(), side_codes=_side_codes()).side for item in calls] == [
+        MAIN_SIDE,
+        "defender",
+        "reviewer",
+    ]
+
+
 async def test_state_finalize_keeps_closed_assistant_with_user_tail_hidden() -> None:
     store = _RecordingStore()
     channels = _RecordingChannels()
@@ -856,3 +914,97 @@ async def test_state_compaction_finishes_empty_reasoning_then_rebases() -> None:
     assert compaction_payload.sides["reviewer"][0].content == "review"
     assert state.machine.to_primitive() == {"active": ["reviewer"]}
     assert state.main == []
+
+
+async def test_state_compaction_restores_active_and_inactive_call_residue() -> None:
+    state = _state(ingested=_ingested(active={MAIN_SIDE}))
+    main_assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")],
+    )
+    reviewer_assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="call_reviewer", name="review_tool", arguments="{}")],
+    )
+    state.main = [main_assistant]
+    state.sides["reviewer"] = [reviewer_assistant]
+
+    await state.compaction()
+
+    response = state.coordinator.current_response()
+    assert isinstance(response.output[0], ResponseCompactionItem)
+    compaction = open_compaction_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert compaction.sides.active == {MAIN_SIDE}
+    assert compaction.sides.get(MAIN_SIDE) is None
+    assert compaction.sides["reviewer"] == []
+
+    assert isinstance(response.output[1], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[1].encrypted_content, keyring=_keyring())
+    assert reasoning.sides.main == [
+        main_assistant,
+        Message(role="tool", tool_call_id="call_main", content=INTERRUPTED_TOOL_OUTPUT),
+    ]
+    reviewer_patch = reasoning.sides.patches["reviewer"].patch
+    assert reviewer_patch is not None
+    assert jsonpatch.apply_patch([], reviewer_patch) == [reviewer_assistant.to_primitive()]
+
+    await state.finalize()
+
+    calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
+    assert [open_call_id(item.call_id, keyring=_keyring(), side_codes=_side_codes()).side for item in calls] == [MAIN_SIDE]
+
+
+async def test_run_response_finishes_all_public_calls_when_cancelled_during_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _RecordingStore()
+    channels = _RecordingChannels()
+    state = _state(
+        store,
+        channels,
+        client=object(),
+        ingested=Ingested(
+            machine={},
+            sides=Sides(
+                active=set(),
+                messages={
+                    MAIN_SIDE: [Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")])],
+                    "reviewer": [
+                        Message(
+                            role="assistant",
+                            tool_calls=[ToolCall(id="call_reviewer", name="review_tool", arguments="{}")],
+                        )
+                    ],
+                },
+            ),
+            last_reasoning_id=None,
+            current_compaction_id=None,
+        ),
+    )
+    state.activate(MAIN_SIDE)
+    state.activate("reviewer")
+    first_call_emitted = anyio.Event()
+    release_finalization = anyio.Event()
+    original_emit = StreamCoordinator.emit
+    emitted_calls = 0
+
+    async def emit_with_pause(coordinator: StreamCoordinator, item) -> None:
+        nonlocal emitted_calls
+        await original_emit(coordinator, item)
+        if not isinstance(item, ResponseFunctionCallItem):
+            return
+        emitted_calls += 1
+        if emitted_calls == 1:
+            first_call_emitted.set()
+            await release_finalization.wait()
+
+    monkeypatch.setattr(StreamCoordinator, "emit", emit_with_pause)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(partial(run_response, state=state))
+        await first_call_emitted.wait()
+        task_group.cancel_scope.cancel()
+        release_finalization.set()
+
+    response = state.coordinator.current_response()
+    assert response.status == "completed"
+    assert emitted_calls == 2
+    assert store.cancel_calls == 0

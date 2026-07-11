@@ -371,8 +371,12 @@ async def validate_images(
 
 
 @bus.listen("response.loop")
-async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult:
+async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
+    if MAIN_SIDE not in state.sides.active:
+        return await next(state=state, config=config, ledger=ledger)
     result = await next(state=state, config=config, ledger=ledger)
+    if result is None:
+        return None
     accepted = result.accepted
     if accepted is None or accepted.finish_reason != "tool_calls":
         return result

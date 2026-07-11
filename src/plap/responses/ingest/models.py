@@ -55,6 +55,15 @@ def _required_side(value: object, *, label: str) -> Side:
     return _required_string(value, label=label)
 
 
+def _required_side_set(value: object, *, label: str) -> set[Side]:
+    if not isinstance(value, list):
+        raise TypeError(f"{label} must be an array")
+    sides = {_required_side(side, label=f"{label} item") for side in value}
+    if len(sides) != len(value):
+        raise ValueError(f"{label} must not contain duplicates")
+    return sides
+
+
 @dataclass(frozen=True, slots=True)
 class MessagePatch:
     content_hash: str
@@ -218,9 +227,11 @@ def _validate_main_updates(main: list[MainUpdate]) -> None:
 
 @dataclass(slots=True)
 class Sides:
+    active: set[Side] = field(default_factory=lambda: {MAIN_SIDE})
     messages: dict[Side, list[Message]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.active = {_required_side(side, label="active side") for side in self.active}
         normalized: dict[Side, list[Message]] = {}
         for raw_side, messages in self.messages.items():
             side = _required_side(raw_side, label="sides key")
@@ -247,7 +258,10 @@ class Sides:
         return self.messages.items()
 
     def to_primitive(self) -> dict[str, object]:
-        return {side: [message.to_primitive() for message in self.messages[side]] for side in sorted(self.messages)}
+        return {
+            "active": sorted(self.active),
+            "messages": {side: [message.to_primitive() for message in self.messages[side]] for side in sorted(self.messages)},
+        }
 
     def shape(self, side: Side) -> JSONValue:
         messages = self.get(side)
@@ -258,11 +272,22 @@ class Sides:
     @classmethod
     def from_primitive(cls, value: object) -> Sides:
         item = _required_mapping(value, label="sides")
+        allowed = {"active", "messages"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"sides contains unknown keys: {names}")
+        missing = allowed - set(item)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"sides is missing keys: {names}")
+        messages_value = _required_mapping(item["messages"], label="sides messages")
         return cls(
+            active=_required_side_set(item["active"], label="sides active"),
             messages={
                 _required_side(side, label="sides key"): _required_message_list(messages, label=f"sides.{side}")
-                for side, messages in item.items()
-            }
+                for side, messages in messages_value.items()
+            },
         )
 
 
@@ -302,11 +327,14 @@ class GuardedPatch:
 
 @dataclass(frozen=True, slots=True)
 class SidesUpdate:
+    active: set[Side] | None = None
     main: list[MainUpdate] = field(default_factory=list)
     patches: dict[Side, GuardedPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_main_updates(self.main)
+        if self.active is not None:
+            object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
         normalized: dict[Side, GuardedPatch] = {}
         for raw_side, guarded in self.patches.items():
             side = _required_side(raw_side, label="sides update patches key")
@@ -318,6 +346,7 @@ class SidesUpdate:
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
+            "active": None if self.active is None else sorted(self.active),
             "main": [message.to_primitive() for message in self.main],
             "patches": {side: guarded.to_primitive() for side, guarded in sorted(self.patches.items())},
         }
@@ -326,13 +355,15 @@ class SidesUpdate:
     @classmethod
     def from_primitive(cls, value: object) -> SidesUpdate:
         item = _required_mapping(value, label="sides update")
-        allowed = {"main", "patches"}
+        allowed = {"active", "main", "patches"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"sides update contains unknown keys: {names}")
         patches_value = _required_mapping(item.get("patches", {}), label="sides update patches")
+        active_value = item.get("active")
         return cls(
+            active=None if active_value is None else _required_side_set(active_value, label="sides update active"),
             main=_required_main_update_list(item.get("main", []), label="sides update main"),
             patches={
                 _required_side(side, label="sides update patches key"): GuardedPatch.from_primitive(guarded)
@@ -421,6 +452,5 @@ class CallID:
 class Ingested:
     machine: dict[str, JSONValue]
     sides: Sides
-    last_side: Side | None
     last_reasoning_id: str | None
     current_compaction_id: str | None

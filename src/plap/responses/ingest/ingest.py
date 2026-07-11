@@ -285,12 +285,23 @@ class _SideCalls:
     def rebuild(cls, messages: list[Message]) -> _SideCalls:
         side_calls = cls()
         for message in messages:
+            if not message.is_tool() and side_calls.has_unfinished():
+                raise _tool_replay_error(
+                    reason="pending_tool_outputs_block_message",
+                    private_message="message cannot appear before open function calls are closed",
+                )
             if message.is_assistant() and message.tool_calls:
                 side_calls.register(message)
                 continue
             if message.is_tool():
                 side_calls.settle_output(message)
         return side_calls
+
+    def has_declared(self) -> bool:
+        return any(phase == _Phase.DECLARED for phase in self.by_id.values())
+
+    def has_open(self) -> bool:
+        return any(phase == _Phase.OPEN for phase in self.by_id.values())
 
     def has_unfinished(self) -> bool:
         return any(phase != _Phase.CLOSED for phase in self.by_id.values())
@@ -370,15 +381,13 @@ class _SideCalls:
         self.by_id[call_id] = _Phase.CLOSED
         return True
 
-    def assert_finished(self) -> None:
-        for phase in self.by_id.values():
-            if phase == _Phase.CLOSED:
-                continue
-            if phase == _Phase.OPEN:
-                raise _tool_replay_error(
-                    reason="function_call_missing_function_call_output",
-                    private_message="function_call is missing function_call_output",
-                )
+    def validate_completion(self, *, active: bool) -> None:
+        if self.has_open():
+            raise _tool_replay_error(
+                reason="function_call_missing_function_call_output",
+                private_message="function_call is missing function_call_output",
+            )
+        if active and self.has_declared():
             raise _reasoning_replay_error(
                 reason="reasoning_tool_call_missing_function_call_item",
                 private_message="reasoning tool call is missing function_call item",
@@ -773,7 +782,27 @@ class _Main:
         self.committed.extend(self.bundle.render())
         self.bundle = None
 
+    def current_messages(self) -> list[Message]:
+        if self.bundle is None:
+            return list(self.committed)
+        return [*self.committed, *self.bundle.render()]
+
+    def current_calls(self) -> _SideCalls:
+        committed_calls = _SideCalls.rebuild(self.committed)
+        if self.bundle is None:
+            return committed_calls
+        return committed_calls.merge(self.bundle.side_calls())
+
+    def validate(self) -> None:
+        if self.bundle is not None and self.bundle.anchor.pending():
+            raise _reasoning_replay_error(
+                reason="main_message_patch_target_missing",
+                private_message="main message patch target is missing",
+            )
+        _SideCalls.rebuild(self.current_messages())
+
     def commit_before_reasoning(self) -> None:
+        self.validate()
         self._finalize()
 
     def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
@@ -888,33 +917,36 @@ class _Main:
             return
         raise TypeError(f"unsupported standalone main item: {type(item).__name__}")
 
-    def current_messages(self) -> list[Message]:
+    def interrupt_parked_calls(self, *, output: str) -> None:
+        self.validate()
+        calls = self.current_calls()
+        if calls.has_open():
+            calls.validate_completion(active=True)
+        if not calls.has_declared():
+            self._finalize()
+            return
         if self.bundle is None:
-            return list(self.committed)
-        return [*self.committed, *self.bundle.render()]
-
-    def current_calls(self) -> _SideCalls:
-        committed_calls = _SideCalls.rebuild(self.committed)
-        if self.bundle is None:
-            return committed_calls
-        return committed_calls.merge(self.bundle.side_calls())
-
-    def history_changed_by_last_event(self, item: _DecodedInput) -> bool:
-        return not isinstance(item, _DecodedSealedFunctionCall)
-
-    def assert_finished(self) -> None:
-        if self.bundle is not None and self.bundle.anchor.pending():
-            raise _reasoning_replay_error(
-                reason="main_message_patch_target_missing",
-                private_message="main message patch target is missing",
+            self.load_attachable_snapshot(self.committed)
+        if self.bundle is None:  # pragma: no cover - stable declarations require an assistant anchor
+            raise RuntimeError("parked main calls require an assistant anchor")
+        parked = [call for call in self.bundle.anchor.declared if call.phase == _Phase.DECLARED]
+        declared_ids = {call_id for call_id, phase in calls.by_id.items() if phase == _Phase.DECLARED}
+        if {call.id for call in parked} != declared_ids:
+            raise _tool_replay_error(
+                reason="parked_main_call_not_on_final_anchor",
+                private_message="parked main calls must belong to the final assistant anchor",
             )
+        for call in parked:
+            self.bundle.anchor.add_output(Message(role="tool", tool_call_id=call.id, content=output))
+            call.settle()
+        self._finalize()
 
 
 @dataclass(slots=True)
 class _Replay:
     machine: dict[str, JSONValue]
     sides: Sides
-    last_side: Side | None
+    allowed_sides: set[Side]
     calls_by_side: dict[Side, _SideCalls] = field(default_factory=dict)
     main: _Main = field(default_factory=_Main)
     current_compaction_id: str | None = None
@@ -936,22 +968,32 @@ class _Replay:
             if side == MAIN_SIDE:
                 continue
             self._rebuild_non_main_calls(side)
+        self.main.validate()
 
-    def _assert_side_patch_matches_history(self, side: Side, shape: JSONValue) -> None:
+    def _validate_side_patch(self, side: Side, shape: JSONValue) -> None:
         if self.sides.shape(side) != shape:
             raise _reasoning_replay_error(
                 reason="reasoning_sides_shape_mismatch",
                 private_message=f"reasoning {side} shape does not match replay history",
             )
 
-    def _assert_no_unfinished_calls_before_reasoning(self) -> None:
-        if any(side_calls.has_unfinished() for side_calls in self.calls_by_side.values()):
-            raise _tool_replay_error(
-                reason="pending_tool_outputs_block_message",
-                private_message="reasoning cannot appear before open function calls are closed",
+    def _validate_sides(self) -> None:
+        unknown = (self.sides.active | set(self.sides.messages)) - self.allowed_sides
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise _reasoning_replay_error(
+                reason="reasoning_active_side_invalid",
+                private_message=f"reasoning activates unconfigured sides: {names}",
             )
 
-    def _assert_reasoning_chain_matches_state(self, payload: ReasoningPayload) -> None:
+    def _validate_reasoning(self, payload: ReasoningPayload) -> None:
+        for side, side_calls in self.calls_by_side.items():
+            if side_calls.has_open() or (side in self.sides.active and side_calls.has_declared()):
+                raise _tool_replay_error(
+                    reason="pending_tool_outputs_block_message",
+                    private_message="reasoning cannot appear before active function calls are closed",
+                )
+
         if payload.previous_reasoning_id != self.last_reasoning_id:
             raise _reasoning_replay_error(
                 reason="reasoning_previous_reasoning_id_mismatch",
@@ -966,19 +1008,23 @@ class _Replay:
     def _step_compaction(self, payload: CompactionPayload) -> None:
         self.machine = dict(payload.machine)
         self.sides = Sides.from_primitive(payload.sides.to_primitive())
+        self._validate_sides()
         self.main.load_attachable_snapshot(self.sides.get(MAIN_SIDE) or [])
         self._rebuild_all_calls()
+        if any(side_calls.has_unfinished() for side_calls in self.calls_by_side.values()):
+            raise _compaction_replay_error(
+                reason="compaction_contains_unresolved_tool_call",
+                private_message="compaction side histories must not contain unresolved tool calls",
+            )
         self.current_compaction_id = payload.id
         self.last_reasoning_id = None
-        self.last_side = None
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
-        self._assert_no_unfinished_calls_before_reasoning()
-        self._assert_reasoning_chain_matches_state(payload)
+        self._validate_reasoning(payload)
         self.main.commit_before_reasoning()
         self._sync_main()
         for side, guarded in payload.sides.patches.items():
-            self._assert_side_patch_matches_history(side, guarded.shape)
+            self._validate_side_patch(side, guarded.shape)
         self.machine = _apply_machine_patch(self.machine, payload.machine)
         for side, guarded in payload.sides.patches.items():
             patch = guarded.patch
@@ -990,6 +1036,9 @@ class _Replay:
                 continue
             self.sides[side] = [] if not patch else _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
             self._rebuild_non_main_calls(side)
+        if payload.sides.active is not None:
+            self.sides.active = set(payload.sides.active)
+        self._validate_sides()
         if payload.sides.main:
             self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
             self.main.apply_hidden_main_updates(payload.sides)
@@ -997,21 +1046,27 @@ class _Replay:
             self.main.load_attachable_snapshot(self.sides.get(MAIN_SIDE, []) or [])
         self._sync_main()
         self.last_reasoning_id = payload.id
-        self.last_side = None
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:
         side_calls = self.calls_by_side.get(call_id.side)
         if side_calls is None:
             return
-        if not side_calls.open(call_id.upstream_tool_call_id):
+        if side_calls.phase(call_id.upstream_tool_call_id) is None:
             return
+        if call_id.side not in self.sides.active:
+            raise _tool_replay_error(
+                reason="inactive_side_function_call",
+                private_message="public function_call belongs to an inactive side",
+            )
+        side_calls.open(call_id.upstream_tool_call_id)
 
     def _step_non_main_function_call_output(self, item: RequestFunctionCallOutputItem, call_id: CallID) -> None:
         side_calls = self.calls_by_side.get(call_id.side)
         if side_calls is None:
             return
-        if not side_calls.close(call_id.upstream_tool_call_id):
+        if side_calls.phase(call_id.upstream_tool_call_id) is None:
             return
+        side_calls.close(call_id.upstream_tool_call_id)
         side_messages = self.sides.setdefault(call_id.side)
         side_messages.append(
             Message(
@@ -1021,25 +1076,30 @@ class _Replay:
             )
         )
         self._rebuild_non_main_calls(call_id.side)
-        self.last_side = call_id.side
 
     def _step_standalone_main_item(self, item: _DecodedInput) -> None:
+        if isinstance(item, _DecodedMessage) and item.message.role == "user":
+            if MAIN_SIDE not in self.sides.active:
+                self.main.interrupt_parked_calls(output="Tool call aborted by user.")
+            self.sides.active.add(MAIN_SIDE)
+        if isinstance(item, (_DecodedSealedFunctionCall, _DecodedFabricatedFunctionCall)) and MAIN_SIDE not in self.sides.active:
+            raise _tool_replay_error(
+                reason="inactive_side_function_call",
+                private_message="public function_call belongs to an inactive side",
+            )
         self.main.add_standalone_main_item(item)
         self._sync_main()
-        if self.main.history_changed_by_last_event(item):
-            self.last_side = MAIN_SIDE
 
-    def _validate_all_calls_closed(self) -> None:
-        self.main.assert_finished()
-        for side_calls in self.calls_by_side.values():
-            side_calls.assert_finished()
+    def _validate_finish(self) -> None:
+        self.main.validate()
+        for side, side_calls in self.calls_by_side.items():
+            side_calls.validate_completion(active=side in self.sides.active)
 
     def finish(self) -> Ingested:
-        self._validate_all_calls_closed()
+        self._validate_finish()
         return Ingested(
             machine=self.machine,
             sides=self.sides,
-            last_side=self.last_side,
             last_reasoning_id=self.last_reasoning_id,
             current_compaction_id=self.current_compaction_id,
         )
@@ -1066,8 +1126,9 @@ class _Replay:
         self._step_standalone_main_item(item)
 
 
-def _replay_decoded_queue(items: list[_DecodedInput]) -> Ingested:
-    replay = _Replay(machine={}, sides=Sides(), last_side=None)
+def _replay_decoded_queue(items: list[_DecodedInput], *, allowed_sides: set[Side]) -> Ingested:
+    replay = _Replay(machine={}, sides=Sides(), allowed_sides=allowed_sides)
+    replay._validate_sides()
     for item in items:
         replay.step(item)
     return replay.finish()
@@ -1082,4 +1143,4 @@ async def ingest_response_request(
     input_items = _normalize_input_items(request)
     replay_items = _slice_to_last_compaction(input_items)
     decoded_items = _decode_queue(replay_items, keyring=keyring, side_codes=side_codes)
-    return _replay_decoded_queue(decoded_items)
+    return _replay_decoded_queue(decoded_items, allowed_sides=set(side_codes))

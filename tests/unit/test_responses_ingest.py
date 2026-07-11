@@ -158,6 +158,7 @@ def _reasoning_payload(
 
 def _sides_update(
     *,
+    active: set[Side] | None = None,
     main: list[Message | MessagePatch] | None = None,
     patches: dict[Side, list[dict[str, object]] | None] | None = None,
     current: Sides | None = None,
@@ -166,7 +167,7 @@ def _sides_update(
     normalized_patches = {
         side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
     }
-    return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
+    return SidesUpdate(active=active, main=[] if main is None else list(main), patches=normalized_patches)
 
 
 def _guarded_patch(side: Side, current: list[Message] | None, patch: list[dict[str, object]] | None) -> GuardedPatch:
@@ -213,6 +214,26 @@ def _sealed_call_id_for_message(side: str, upstream_tool_call_id: str, message: 
         ),
         keyring=_keyring(),
     )
+
+
+def _parallel_active_calls() -> tuple[ReasoningPayload, str, str]:
+    main_assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"main"}')],
+    )
+    reviewer_assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"reviewer"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
+            main=[main_assistant],
+            patches={"reviewer": [{"op": "add", "path": "/0", "value": reviewer_assistant.to_primitive()}]},
+        ),
+    )
+    return payload, _sealed_call_id(MAIN_SIDE, "up_main_0"), _sealed_call_id("reviewer", "up_reviewer_0")
 
 
 def test_normalize_input_items_wraps_string_as_user_message() -> None:
@@ -838,9 +859,34 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
 
     assert result.machine == payload.machine
     assert result.sides == payload.sides
-    assert result.last_side is None
     assert result.last_reasoning_id is None
     assert result.current_compaction_id == payload.id
+
+
+async def test_ingest_response_request_rejects_unresolved_call_inside_compaction_snapshot() -> None:
+    payload = _compaction_payload(
+        machine={},
+        sides=Sides(
+            active=set(),
+            messages={
+                "reviewer": [
+                    Message(
+                        role="assistant",
+                        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+                    )
+                ]
+            },
+        ),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "compaction_contains_unresolved_tool_call"
 
 
 async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compaction() -> None:
@@ -887,7 +933,6 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
     ]
-    assert result.last_side is None
     assert result.last_reasoning_id == second.id
     assert result.current_compaction_id == compaction.id
 
@@ -905,7 +950,6 @@ async def test_ingest_response_request_applies_reasoning_machine_patch() -> None
 
     assert result.machine == {"active": ["reviewer"]}
     assert result.sides == Sides()
-    assert result.last_side is None
     assert result.last_reasoning_id == payload.id
     assert result.current_compaction_id is None
 
@@ -928,7 +972,6 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
     )
 
     assert result.sides["reviewer"] == [Message(role="assistant", content="review hidden")]
-    assert result.last_side is None
 
 
 async def test_ingest_response_request_appends_main_messages_from_reasoning() -> None:
@@ -943,7 +986,6 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
     )
 
     assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="main hidden")]
-    assert result.last_side is None
 
 
 async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
@@ -972,7 +1014,6 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
     ]
-    assert result.last_side is None
 
 
 async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_reasoning_id() -> None:
@@ -1098,7 +1139,6 @@ async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_wh
     )
 
     assert result.machine == {"active": ["reviewer"], "meta": {"step": 1}}
-    assert result.last_side is None
 
 
 async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_pair() -> None:
@@ -1110,11 +1150,12 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
     call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
@@ -1140,7 +1181,6 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="review result"),
     ]
-    assert result.last_side == "reviewer"
 
 
 async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_output_only() -> None:
@@ -1171,7 +1211,204 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="hidden result"),
     ]
-    assert result.last_side is None
+
+
+async def test_ingest_response_request_parks_inactive_call_across_reasoning() -> None:
+    assistant = Message(
+        role="assistant",
+        content="review hidden",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    first = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
+        ),
+    )
+    second = _reasoning_payload(
+        machine=[{"op": "add", "path": "/step", "value": 2}],
+        sides=_sides_update(),
+        previous_reasoning_id=first.id,
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(first), _sealed_reasoning(second)]),
+        keyring=_keyring(),
+    )
+
+    assert result.machine == {"step": 2}
+    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides["reviewer"] == [assistant]
+
+
+async def test_ingest_response_request_rejects_public_replay_of_parked_call() -> None:
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
+        ),
+    )
+    call_id = _sealed_call_id("reviewer", "up_reviewer_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _sealed_reasoning(payload),
+                    RequestFunctionCallItem(arguments='{"path":"README.md"}', call_id=call_id, name="read_file", type="function_call"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "inactive_side_function_call"
+
+
+async def test_ingest_response_request_replays_call_after_side_activation() -> None:
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    parked = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
+        ),
+    )
+    activated = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active={MAIN_SIDE, "reviewer"}),
+        previous_reasoning_id=parked.id,
+    )
+    call_id = _sealed_call_id("reviewer", "up_reviewer_0")
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(parked),
+                _sealed_reasoning(activated),
+                RequestFunctionCallItem(arguments='{"path":"README.md"}', call_id=call_id, name="read_file", type="function_call"),
+                RequestFunctionCallOutputItem(call_id=call_id, output="review result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == {MAIN_SIDE, "reviewer"}
+    assert result.sides["reviewer"][-1] == Message(
+        role="tool",
+        tool_call_id="up_reviewer_0",
+        content="review result",
+    )
+
+
+async def test_ingest_response_request_requires_every_active_side_call_output() -> None:
+    payload, main_call_id, reviewer_call_id = _parallel_active_calls()
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _sealed_reasoning(payload),
+                    RequestFunctionCallItem(arguments='{"path":"main"}', call_id=main_call_id, name="read_file", type="function_call"),
+                    RequestFunctionCallItem(
+                        arguments='{"path":"reviewer"}', call_id=reviewer_call_id, name="read_file", type="function_call"
+                    ),
+                    RequestFunctionCallOutputItem(call_id=reviewer_call_id, output="review result", type="function_call_output"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "function_call_missing_function_call_output"
+
+
+async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_sides() -> None:
+    payload, main_call_id, reviewer_call_id = _parallel_active_calls()
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments='{"path":"main"}', call_id=main_call_id, name="read_file", type="function_call"),
+                RequestFunctionCallItem(arguments='{"path":"reviewer"}', call_id=reviewer_call_id, name="read_file", type="function_call"),
+                RequestFunctionCallOutputItem(call_id=reviewer_call_id, output="review result", type="function_call_output"),
+                RequestFunctionCallOutputItem(call_id=main_call_id, output="main result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE][-1] == Message(role="tool", tool_call_id="up_main_0", content="main result")
+    assert result.sides["reviewer"][-1] == Message(
+        role="tool",
+        tool_call_id="up_reviewer_0",
+        content="review result",
+    )
+
+
+async def test_ingest_response_request_user_interrupts_only_parked_main_calls() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active={"reviewer"}, main=[assistant]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload), _message("new request")]),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == {MAIN_SIDE, "reviewer"}
+    assert result.sides[MAIN_SIDE] == [
+        assistant,
+        Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
+        Message(role="user", content="new request"),
+    ]
+
+
+async def test_ingest_response_request_user_does_not_close_open_main_call() -> None:
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(machine=[], sides=_sides_update(main=[assistant]))
+    call_id = _sealed_call_id(MAIN_SIDE, "up_main_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _sealed_reasoning(payload),
+                    RequestFunctionCallItem(
+                        arguments='{"path":"README.md"}',
+                        call_id=call_id,
+                        name="read_file",
+                        type="function_call",
+                    ),
+                    _message("new request"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
 
 
 async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair() -> None:
@@ -1207,7 +1444,6 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
     ]
-    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_accepts_main_patched_open_cluster_with_empty_main_updates() -> None:
@@ -1249,7 +1485,6 @@ async def test_ingest_response_request_accepts_main_patched_open_cluster_with_em
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
     ]
-    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_accepts_main_patched_closed_cluster_with_fabricated_pair() -> None:
@@ -1299,7 +1534,6 @@ async def test_ingest_response_request_accepts_main_patched_closed_cluster_with_
         Message(role="tool", tool_call_id="up_main_0", content="hidden result"),
         Message(role="tool", tool_call_id="fab_0", content="main result"),
     ]
-    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_accepts_fabricated_main_pair_after_closed_cluster_and_user() -> None:
@@ -1351,7 +1585,6 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_closed
         Message(role="tool", tool_call_id="fab_0", content="main result"),
         Message(role="user", content="later user"),
     ]
-    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_reasoning_step() -> None:
@@ -1392,7 +1625,6 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_
         ),
         Message(role="tool", tool_call_id="fab_0", content="main result"),
     ]
-    assert result.last_side == MAIN_SIDE
 
 
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
@@ -1435,11 +1667,12 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
 
@@ -1462,11 +1695,12 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
     call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
@@ -1496,11 +1730,12 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
     call_id = _sealed_call_id_for_message("reviewer", "up_reviewer_0", assistant)
@@ -1530,11 +1765,12 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
     first_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
     second_payload = _reasoning_payload(
@@ -1584,11 +1820,12 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
     first_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
+            active={MAIN_SIDE, "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
                 ]
-            }
+            },
         ),
     )
     second_payload = _reasoning_payload(
@@ -1653,7 +1890,7 @@ async def test_ingest_response_request_accepts_standalone_main_message() -> None
     )
 
     assert result.sides[MAIN_SIDE] == [Message(role="user", content="hello")]
-    assert result.last_side == MAIN_SIDE
+    assert result.sides.active == {MAIN_SIDE}
 
 
 async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
@@ -1670,7 +1907,6 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_function_c
     )
 
     assert result.sides.get("reviewer", []) == []
-    assert result.last_side is None
 
 
 async def test_ingest_response_request_rejects_naked_main_sealed_pair_without_anchor() -> None:

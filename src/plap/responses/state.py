@@ -62,7 +62,6 @@ class State:
     _base_sides: Sides
     _reasoning_id: str | None
 
-    last_side: Side | None
     machine: Machine
     sides: Sides
     main: list[Message]
@@ -89,7 +88,6 @@ class State:
             _base_machine=base_machine,
             _base_sides=base_sides,
             _reasoning_id=None,
-            last_side=ingested.last_side,
             machine=base_machine.model_copy(deep=True),
             sides=deepcopy(base_sides),
             main=[],
@@ -125,10 +123,6 @@ class State:
             if message.is_assistant() or message.is_tool():
                 raise RuntimeError(f"{label}[{index}] must be a closed non-assistant tail message")
         return prefix, anchor, suffix, after, open_calls
-
-    def _assert_closed(self, messages: list[Message], *, label: str) -> None:
-        if self._split_tail(messages, label=label)[4]:
-            raise RuntimeError(f"{label} contains unresolved tool calls")
 
     def _closed_and_residue(
         self,
@@ -234,24 +228,27 @@ class State:
                     [] if current_messages is None else [message.to_primitive() for message in current_messages],
                 ),
             )
-        return machine_patch, SidesUpdate(main=main_update, patches=patches)
+        active = None if self._base_sides.active == sides.active else set(sides.active)
+        return machine_patch, SidesUpdate(active=active, main=main_update, patches=patches)
+
+    def _validate_main(self) -> None:
+        persisted_main = self.sides.get(MAIN_SIDE, []) or []
+        if self._split_tail(persisted_main, label="persisted main history")[4] and self.main:
+            raise RuntimeError("main append lane must remain empty while persisted main calls are unresolved")
+        self._split_tail([*persisted_main, *self.main], label="main history")
 
     def _shadow_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
-        main_patch_lane = self.sides.get(MAIN_SIDE)
-        self._assert_closed([] if main_patch_lane is None else main_patch_lane, label="main patch lane")
+        self._validate_main()
         shadow_machine = self.machine.model_copy(deep=True)
         shadow_sides = deepcopy(self.sides)
         for side in list(shadow_sides.messages):
-            if side == MAIN_SIDE:
-                continue
-            shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
-        shadow_main = self._stubbed(self.main, label="main append lane")
+            if side in shadow_sides.active:
+                shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
+        shadow_main = self._stubbed(self.main, label="main append lane") if MAIN_SIDE in shadow_sides.active else deepcopy(self.main)
         return shadow_machine, shadow_sides, shadow_main
 
     def _live_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
-        main_patch_lane = self.sides.get(MAIN_SIDE)
-        self._assert_closed([] if main_patch_lane is None else main_patch_lane, label="main patch lane")
-        self._split_tail(self.main, label="main append lane")
+        self._validate_main()
         for side, messages in self.sides.items():
             if side == MAIN_SIDE:
                 continue
@@ -263,6 +260,16 @@ class State:
             return [*(self.sides.get(MAIN_SIDE, []) or []), *self.main]
         return list(self.sides.get(side, []) or [])
 
+    def activate(self, side: Side) -> None:
+        if side not in self._side_codes:
+            raise ValueError(f"cannot activate unconfigured side {side!r}")
+        self.sides.active.add(side)
+
+    def deactivate(self, side: Side) -> None:
+        if side not in self._side_codes:
+            raise ValueError(f"cannot deactivate unconfigured side {side!r}")
+        self.sides.active.discard(side)
+
     def open_calls(self, side: Side) -> list[ChatToolCall]:
         return self._split_tail(self.history(side), label=f"{side} history")[4]
 
@@ -270,7 +277,7 @@ class State:
         machine, sides, main = self._shadow_snapshot()
         machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=deepcopy(main))
         if self._reasoning_id is None:
-            if not machine_patch and not sides_update.main and not sides_update.patches:
+            if not machine_patch and sides_update.active is None and not sides_update.main and not sides_update.patches:
                 return
             self._reasoning_id = await self.coordinator.begin_reasoning(machine=machine_patch, sides=sides_update)
             return
@@ -286,8 +293,10 @@ class State:
         visible_calls: list[ResponseFunctionCallItem] = []
         main_update: list[Message | MessagePatch] = []
 
-        if main:
-            prefix, anchor, suffix, after, open_calls = self._split_tail(main, label="main append lane")
+        if main and MAIN_SIDE not in sides.active:
+            main_update = deepcopy(main)
+        elif main:
+            prefix, anchor, suffix, after, _open_calls = self._split_tail(main, label="main append lane")
             if anchor is None:
                 main_update = [*deepcopy(prefix), *deepcopy(after)]
             else:
@@ -305,16 +314,18 @@ class State:
                         main_update = [*deepcopy(prefix), patch, *deepcopy(suffix)]
                     else:
                         main_update = deepcopy(prefix)
-                    visible_calls.extend(self._function_items(MAIN_SIDE, open_calls))
+        if MAIN_SIDE in sides.active:
+            visible_calls.extend(self._function_items(MAIN_SIDE, self.open_calls(MAIN_SIDE)))
 
         machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=main_update)
 
-        for side, messages in sides.items():
-            if side == MAIN_SIDE:
+        for side in sorted(sides.messages):
+            if side == MAIN_SIDE or side not in sides.active:
                 continue
+            messages = sides[side]
             visible_calls.extend(self._function_items(side, self._split_tail(messages, label=f"{side} side")[4]))
 
-        if self._reasoning_id is None and (machine_patch or sides_update.main or sides_update.patches):
+        if self._reasoning_id is None and (machine_patch or sides_update.active is not None or sides_update.main or sides_update.patches):
             self._reasoning_id = await self.coordinator.begin_reasoning(machine=machine_patch, sides=sides_update)
         if self._reasoning_id is not None:
             await self.coordinator.finish_reasoning(machine=machine_patch, sides=sides_update)
@@ -335,19 +346,16 @@ class State:
 
         for side, messages in list(full_sides.items()):
             if side == MAIN_SIDE:
-                self._assert_closed(messages, label="main patch lane")
                 continue
             closed, residue = self._closed_and_residue(messages, label=f"{side} side")
             full_sides[side] = closed
             if residue:
                 residue_sides[side] = residue
 
-        closed_main, residue_main = self._closed_and_residue(
-            self.main,
-            label="main append lane",
-        )
-        if closed_main:
-            full_sides[MAIN_SIDE] = [*(full_sides.get(MAIN_SIDE) or []), *closed_main]
+        main_present = MAIN_SIDE in full_sides.messages
+        closed_main, residue_main = self._closed_and_residue(self.history(MAIN_SIDE), label="main history")
+        if closed_main or main_present:
+            full_sides[MAIN_SIDE] = closed_main
 
         await self.coordinator.emit_compaction(
             machine=full_machine.to_primitive(),

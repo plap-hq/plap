@@ -567,12 +567,14 @@ async def collect(paths: tuple[str, ...], *, next):
 
 
 @bus.listen("response.loop")
-async def advise_response(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult:
-    if state.last_side != MAIN_SIDE:
+async def advise_response(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
+    if MAIN_SIDE not in state.sides.active or state.open_calls(MAIN_SIDE):
         return await next(state=state, config=config, ledger=ledger)
     main_request = await response_request(state=state, config=config)
     await _maybe_advise_after_tool_call(state=state, config=config, ledger=ledger, main_request=main_request)
     result = await next(state=state, config=config, ledger=ledger)
+    if result is None:
+        return None
     await _maybe_advise_before_tool_call(state=state, config=config, ledger=ledger, main_request=main_request, result=result)
     await _maybe_advise_before_return(state=state, config=config, ledger=ledger, main_request=main_request, result=result)
     return result

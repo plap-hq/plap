@@ -12,7 +12,7 @@ from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import ResponseCreateRequest
-from plap.responses.ingest.models import Ingested, Sides
+from plap.responses.ingest.models import MAIN_SIDE, Ingested, Sides
 from plap.responses.routes import _prepare_create, _run_stream
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
@@ -163,7 +163,7 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     assert ingested.sides.messages.keys() == {"main"}
     assert ingested.sides["main"][0].role == "user"
     assert ingested.sides["main"][0].content == "hello"
-    assert ingested.last_side == "main"
+    assert ingested.sides.active == {MAIN_SIDE}
     assert ingested.last_reasoning_id is None
     assert ingested.current_compaction_id is None
     assert coordinator.current_response().model == request.model
@@ -186,7 +186,7 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     await _run_stream(
         prepared=_prepared(),
-        ingested=Ingested(machine={}, sides=Sides(), last_side=None, last_reasoning_id=None, current_compaction_id=None),
+        ingested=Ingested(machine={}, sides=Sides(), last_reasoning_id=None, current_compaction_id=None),
         coordinator=_coordinator(),
         svcs=container,
     )

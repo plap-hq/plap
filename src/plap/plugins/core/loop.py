@@ -51,29 +51,6 @@ def _unexpected_public_error() -> PublicError:
     )
 
 
-def _unsupported_continuation_error(state: State) -> PlapError:
-    if state.last_side is None:
-        return PlapError(
-            public=_unexpected_public_error(),
-            private=PrivateError(
-                event="response.continuation_side_missing",
-                reason="continuation_side_missing",
-                message="responses execution cannot continue because replay did not select a continuation side",
-                level=ErrorLevel.WARNING,
-            ),
-        )
-    return PlapError(
-        public=_unexpected_public_error(),
-        private=PrivateError(
-            event="response.continuation_side_unsupported",
-            reason="continuation_side_unsupported",
-            message=f"responses execution has no handler for continuation side {state.last_side!r}",
-            level=ErrorLevel.WARNING,
-            context={"side": state.last_side},
-        ),
-    )
-
-
 def _accepted_result(latest_snapshot: object | None, hidden_results_accounted: int) -> ChatCompletionResult | None:
     if latest_snapshot is None:
         return None
@@ -90,7 +67,7 @@ def _last_service_tier(latest_snapshot: object | None) -> str | None:
 
 
 def _should_loop(state: State, result: StreamResult) -> bool:
-    if state.last_side != MAIN_SIDE:
+    if MAIN_SIDE not in state.sides.active:
         return False
     if result.accepted is None or result.budget_exhausted:
         return False
@@ -148,7 +125,7 @@ async def stream_response(
 
     logger.info(
         "response.runtime.turn",
-        continuation_side="main",
+        side=MAIN_SIDE,
         main_model=request.model,
         tool_count=len(request.tools),
     )
@@ -282,13 +259,16 @@ async def stream_response(
 
 
 @bus.emit("response.finalize")
-async def finalize_response(state: State, config: CueBox, result: StreamResult) -> None:
+async def finalize_response(state: State, config: CueBox, result: StreamResult | None) -> None:
     _ = config, result
     await state.finalize()
 
 
 @bus.emit("response.finish")
-async def finish_response(state: State, config: CueBox, result: StreamResult) -> None:
+async def finish_response(state: State, config: CueBox, result: StreamResult | None, ledger: UsageLedger) -> None:
+    if result is None:
+        await state.coordinator.completed(service_tier=None, usage=ledger.usage())
+        return
     if result.error is not None:
         raise result.error
 
@@ -310,9 +290,9 @@ async def finish_response(state: State, config: CueBox, result: StreamResult) ->
 
 
 @bus.emit("response.loop")
-async def loop_response(state: State, config: CueBox, ledger: UsageLedger) -> StreamResult:
-    if state.last_side != MAIN_SIDE:
-        raise _unsupported_continuation_error(state)
+async def loop_response(state: State, config: CueBox, ledger: UsageLedger) -> StreamResult | None:
+    if MAIN_SIDE not in state.sides.active or state.open_calls(MAIN_SIDE):
+        return None
     request = await response_request(state=state, config=config)
     return await stream_response(state=state, config=config, request=request, ledger=ledger)
 
@@ -326,30 +306,32 @@ async def run_response(state: State) -> None:
             span.set_attribute("plap.response.conversation_id", state.prepared.conversation_id)
         created = False
         try:
-            config = await resolve_config(state=state, request=build_config_request(state))
-            ledger = UsageLedger(
-                budget=state.prepared.execution_request.max_output_tokens,
-                reasoning_to_output=config.reasoning_to_output,
-            )
-            await anyio.sleep(0)
+            try:
+                config = await resolve_config(state=state, request=build_config_request(state))
+                ledger = UsageLedger(
+                    budget=state.prepared.execution_request.max_output_tokens,
+                    reasoning_to_output=config.reasoning_to_output,
+                )
+                await anyio.sleep(0)
+                with anyio.CancelScope(shield=True):
+                    await state.coordinator.created()
+                created = True
+                await state.coordinator.in_progress()
+                while True:
+                    result = await loop_response(state=state, config=config, ledger=ledger)
+                    if result is None or not _should_loop(state, result):
+                        break
+                    result.ledger.hide(result.pricing, result.accepted.usage if result.accepted is not None else None)
+            except anyio.get_cancelled_exc_class():
+                if created:
+                    with anyio.CancelScope(shield=True):
+                        await state.flush()
+                    with anyio.CancelScope(shield=True):
+                        await state.coordinator.cancelled()
+                raise
             with anyio.CancelScope(shield=True):
-                await state.coordinator.created()
-            created = True
-            await state.coordinator.in_progress()
-            while True:
-                result = await loop_response(state=state, config=config, ledger=ledger)
-                if not _should_loop(state, result):
-                    break
-                result.ledger.hide(result.pricing, result.accepted.usage if result.accepted is not None else None)
-            await finalize_response(state=state, config=config, result=result)
-            await finish_response(state=state, config=config, result=result)
-        except anyio.get_cancelled_exc_class():
-            if created:
-                with anyio.CancelScope(shield=True):
-                    await state.flush()
-                with anyio.CancelScope(shield=True):
-                    await state.coordinator.cancelled()
-            raise
+                await finalize_response(state=state, config=config, result=result)
+                await finish_response(state=state, config=config, result=result, ledger=ledger)
         except PlapError as exc:
             public = exc.public or _unexpected_public_error()
             exc.log(

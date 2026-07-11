@@ -22,7 +22,7 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 2,
+        "version": 3,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
@@ -34,11 +34,30 @@ Reasoning and compaction payloads
 - Compaction envelope:
 
     {
-        "version": 2,
+        "version": 3,
         "type": "compaction",
         "id": <string>,
         "machine": <object>,
         "sides": <Sides>,
+    }
+
+- Side snapshot:
+
+    {
+        "active": [<side>, ...],
+        "messages": {
+            <side>: [<message>, ...],
+        },
+    }
+
+- Incremental side update:
+
+    {
+        "active": [<side>, ...] | null,
+        "main": [<message-or-patch>, ...],
+        "patches": {
+            <side>: <guarded-patch>,
+        },
     }
 
 - The JSON bytes are compressed with zstd, then encrypted with
@@ -132,7 +151,7 @@ COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
-PAYLOAD_FORMAT_VERSION = 2
+PAYLOAD_FORMAT_VERSION = 3
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2

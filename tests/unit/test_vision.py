@@ -26,7 +26,8 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages
+from plap.plugins.core.ledger import UsageLedger
+from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages, run_images
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem
 from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, Sides
@@ -150,7 +151,6 @@ def _ingested(url: str = "https://example.com/cat.png") -> Ingested:
     return Ingested(
         machine={},
         sides=Sides(messages={MAIN_SIDE: [_image_message(url)]}),
-        last_side=MAIN_SIDE,
         last_reasoning_id=None,
         current_compaction_id=None,
     )
@@ -286,6 +286,31 @@ def _delta(
         usage=usage,
         service_tier="default",
     )
+
+
+@pytest.mark.anyio
+async def test_vision_delegates_without_work_when_main_is_inactive() -> None:
+    client = _Client(streams=[], completes=[])
+    state, _, _ = _state(client)
+    state.deactivate(MAIN_SIDE)
+    delegated = 0
+
+    async def next_handler(**kwargs):
+        nonlocal delegated
+        _ = kwargs
+        delegated += 1
+
+    result = await run_images(
+        state=state,
+        config=state.svcs.get(CueBox).plap.config,
+        ledger=UsageLedger(budget=None, reasoning_to_output=1.0),
+        next=next_handler,
+    )
+
+    assert result is None
+    assert delegated == 1
+    assert client.stream_requests == []
+    assert client.complete_requests == []
 
 
 def _tool_step(*calls: tuple[str, str, str], usage: ChatUsage) -> list[ChatCompletionDelta]:
