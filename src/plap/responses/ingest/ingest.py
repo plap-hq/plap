@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 import jsonpatch
@@ -28,6 +28,7 @@ from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
     CompactionPayload,
+    GuardedPatch,
     Ingested,
     Message,
     MessagePatch,
@@ -1153,6 +1154,213 @@ class _Replay:
         self._step_standalone_main_item(item)
 
 
+def _logical_tail_bundle(messages: list[Message]) -> list[Message] | None:
+    _, anchor, suffix, after = split_tail(messages)
+    if anchor is None or after:
+        return None
+    pending = {call.id for call in anchor.tool_calls}
+    for output in suffix:
+        if output.tool_call_id is not None:
+            pending.discard(output.tool_call_id)
+    if suffix and not pending:
+        return None
+    return [anchor, *suffix]
+
+
+def _replace_reasoning_sides(item: _DecodedReasoning, sides: SidesUpdate) -> _DecodedReasoning:
+    return _DecodedReasoning(payload=replace(item.payload, sides=sides))
+
+
+def _replace_reasoning_main(item: _DecodedReasoning, main: list[Message | MessagePatch]) -> _DecodedReasoning:
+    return _replace_reasoning_sides(item, replace(item.payload.sides, main=main))
+
+
+def _replace_compaction_main(item: _DecodedCompaction, main: list[Message]) -> _DecodedCompaction:
+    sides = Sides.from_primitive(item.payload.sides.to_primitive())
+    if main or MAIN_SIDE in sides.messages:
+        sides[MAIN_SIDE] = main
+    else:
+        sides.messages.pop(MAIN_SIDE, None)
+    return _DecodedCompaction(payload=replace(item.payload, sides=sides))
+
+
+def _main_guard_result(messages: list[Message], guarded: GuardedPatch) -> list[Message]:
+    patch = guarded.patch
+    if patch is None:
+        return list(messages)
+    if not patch:
+        return []
+    return _apply_side_patch(messages, patch, side=MAIN_SIDE)
+
+
+def _replace_guard_with_tail_removal(
+    item: _DecodedReasoning,
+    *,
+    tail_length: int,
+    post_patch_length: int,
+) -> _DecodedReasoning:
+    guarded = item.payload.sides.patches[MAIN_SIDE]
+    removals = [{"op": "remove", "path": f"/{index}"} for index in range(post_patch_length - 1, post_patch_length - tail_length - 1, -1)]
+    patch = [] if guarded.patch is None else list(guarded.patch)
+    patches = dict(item.payload.sides.patches)
+    patches[MAIN_SIDE] = GuardedPatch(shape=guarded.shape, patch=[*patch, *removals])
+    return _replace_reasoning_sides(item, replace(item.payload.sides, patches=patches))
+
+
+def _is_standalone_main_item(item: _DecodedInput) -> bool:
+    if isinstance(item, _DecodedMessage | _DecodedFabricatedFunctionCall | _DecodedFabricatedFunctionCallOutput):
+        return True
+    if isinstance(item, _DecodedSealedFunctionCall | _DecodedSealedFunctionCallOutput):
+        return item.call_id.side == MAIN_SIDE
+    return False
+
+
+def _normalize_one_timewarped_patch(items: list[_DecodedInput]) -> list[_DecodedInput] | None:
+    """Compile one cross-reasoning patch into an ordinary local postfix patch.
+
+    Source selection follows only the authenticated main lane reconstructed from
+    compaction and reasoning payloads. Queue positions below identify payloads
+    to rebuild after that structural selection; they never identify transcript
+    messages and therefore cannot be shifted or impersonated by fabrication.
+    """
+    trusted_main: list[Message] = []
+    source_message: Message | None = None
+    source_bundle: list[Message] = []
+    source_replacements: dict[int, _DecodedInput] = {}
+    interposed = False
+
+    for item_index, item in enumerate(items):
+        if _is_standalone_main_item(item):
+            if source_message is not None:
+                interposed = True
+            continue
+
+        if isinstance(item, _DecodedCompaction):
+            trusted_main = list(item.payload.sides.get(MAIN_SIDE) or [])
+            tail = _logical_tail_bundle(trusted_main)
+            if tail is None:
+                source_message = None
+                source_bundle = []
+                source_replacements = {}
+                interposed = False
+                continue
+            source_message = tail[0]
+            source_bundle = tail
+            source_replacements = {
+                item_index: _replace_compaction_main(item, trusted_main[: -len(tail)]),
+            }
+            interposed = False
+            continue
+
+        if not isinstance(item, _DecodedReasoning):
+            continue
+
+        guarded = item.payload.sides.patches.get(MAIN_SIDE)
+        if guarded is not None:
+            trusted_main = _main_guard_result(trusted_main, guarded)
+            tail = _logical_tail_bundle(trusted_main)
+            if source_message is None or interposed or tail is None:
+                source_message = None
+                source_bundle = []
+                source_replacements = {}
+                interposed = False
+            else:
+                source_message = tail[0]
+                source_bundle = tail
+                source_replacements = {
+                    item_index: _replace_guard_with_tail_removal(
+                        item,
+                        tail_length=len(tail),
+                        post_patch_length=len(trusted_main),
+                    ),
+                }
+
+        leading_outputs, prefix, anchor, suffix, after, patch = item.payload.sides.split_main()
+        if patch is not None and anchor is None:
+            if source_message is not None and interposed and source_message == patch.message:
+                normalized = list(items)
+                for source_index, replacement in source_replacements.items():
+                    normalized[source_index] = replacement
+                normalized[item_index] = _replace_reasoning_main(
+                    item,
+                    [patch.message, *source_bundle[1:], *leading_outputs, patch],
+                )
+                return normalized
+
+            source_message = None
+            source_bundle = []
+            source_replacements = {}
+            interposed = False
+
+        had_source = source_message is not None
+        if leading_outputs:
+            trusted_main.extend(leading_outputs)
+            if had_source:
+                replacement = source_replacements.get(item_index, item)
+                if not isinstance(replacement, _DecodedReasoning):  # pragma: no cover - reasoning index replacement
+                    raise TypeError("main output replacement must be a reasoning item")
+                source_replacements[item_index] = _replace_reasoning_main(
+                    replacement,
+                    list(replacement.payload.sides.main[len(leading_outputs) :]),
+                )
+                tail = _logical_tail_bundle(trusted_main)
+                if tail is None:
+                    source_message = None
+                    source_bundle = []
+                    source_replacements = {}
+                    interposed = False
+                else:
+                    source_message = tail[0]
+                    source_bundle = tail
+
+        local_messages = [*prefix]
+        if anchor is not None:
+            local_messages.extend([anchor, *suffix, *after])
+        else:
+            local_messages.extend(after)
+        trusted_main.extend(local_messages)
+
+        if anchor is not None:
+            if patch is not None:
+                source_message = None
+                source_bundle = []
+                source_replacements = {}
+                interposed = False
+                continue
+            tail = _logical_tail_bundle(trusted_main)
+            if tail is None or tail[0] != anchor:
+                source_message = None
+                source_bundle = []
+                source_replacements = {}
+                interposed = False
+                continue
+            source_message = tail[0]
+            source_bundle = tail
+            replacement_main = [*leading_outputs, *prefix, *after]
+            source_replacements = {
+                item_index: _replace_reasoning_main(item, replacement_main),
+            }
+            interposed = False
+            continue
+
+        if after:
+            source_message = None
+            source_bundle = []
+            source_replacements = {}
+            interposed = False
+
+    return None
+
+
+def _normalize_timewarped_patches(items: list[_DecodedInput]) -> list[_DecodedInput]:
+    normalized = list(items)
+    while True:
+        next_items = _normalize_one_timewarped_patch(normalized)
+        if next_items is None:
+            return normalized
+        normalized = next_items
+
+
 def _replay_decoded_queue(items: list[_DecodedInput], *, allowed_sides: set[Side]) -> Ingested:
     replay = _Replay(machine={}, sides=Sides(), allowed_sides=allowed_sides)
     replay._validate_sides()
@@ -1170,4 +1378,5 @@ async def ingest_response_request(
     input_items = _normalize_input_items(request)
     replay_items = _slice_to_last_compaction(input_items)
     decoded_items = _decode_queue(replay_items, keyring=keyring, side_codes=side_codes)
-    return _replay_decoded_queue(decoded_items, allowed_sides=set(side_codes))
+    normalized_items = _normalize_timewarped_patches(decoded_items)
+    return _replay_decoded_queue(normalized_items, allowed_sides=set(side_codes))
