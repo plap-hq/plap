@@ -66,36 +66,26 @@ def _required_side_set(value: object, *, label: str) -> set[Side]:
 
 @dataclass(frozen=True, slots=True)
 class MessagePatch:
-    content_hash: str
-    tool_calls: list[ToolCall] | None = None
-    reasoning_content: str | None = None
+    message: Message
 
     def __post_init__(self) -> None:
-        if self.tool_calls is None and self.reasoning_content is None:
-            raise ValueError("message patch must change hidden assistant fields")
+        if not self.message.is_assistant():
+            raise ValueError("message patch must wrap an assistant message")
 
     def to_primitive(self) -> dict[str, object]:
-        value: dict[str, object] = {"content_hash": self.content_hash}
-        if self.tool_calls is not None:
-            value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
-        if self.reasoning_content is not None:
-            value["reasoning_content"] = self.reasoning_content
-        return value
+        return {"message": self.message.to_primitive()}
 
     @classmethod
     def from_primitive(cls, value: object) -> MessagePatch:
         item = _required_mapping(value, label="message patch")
-        tool_calls_value = item.get("tool_calls")
-        tool_calls: list[ToolCall] | None = None
-        if tool_calls_value is not None:
-            if not isinstance(tool_calls_value, list):
-                raise TypeError("message patch tool_calls must be an array")
-            tool_calls = [ToolCall.from_primitive(call) for call in tool_calls_value]
-        return cls(
-            content_hash=_required_string(item.get("content_hash"), label="message patch content_hash"),
-            tool_calls=tool_calls,
-            reasoning_content=_optional_string(item.get("reasoning_content"), label="message patch reasoning_content"),
-        )
+        allowed = {"message"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"message patch contains unknown keys: {names}")
+        if "message" not in item:
+            raise ValueError("message patch is missing key: message")
+        return cls(message=Message.from_primitive(item["message"]))
 
 
 def _required_message_list(value: object, *, label: str) -> list[Message]:
@@ -112,7 +102,7 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
         raise TypeError(f"{label} must be an array")
     updates: list[MainUpdate] = []
     for index, item in enumerate(value):
-        if isinstance(item, Mapping) and isinstance(item.get("content_hash"), str):
+        if isinstance(item, Mapping) and "message" in item and "role" not in item:
             updates.append(MessagePatch.from_primitive(item))
             continue
         try:
@@ -154,75 +144,32 @@ def _validate_closed_prefix_messages(messages: list[Message], *, label: str) -> 
         raise ValueError(f"{label} must satisfy all prefix tool calls before the anchor")
 
 
-def _anchor_open_call_ids(anchor: MainUpdate) -> set[str]:
-    if isinstance(anchor, MessagePatch):
-        if anchor.tool_calls is None:
-            return set()
-        return set(_tool_call_ids(anchor.tool_calls, label="message patch tool_calls"))
+def _anchor_open_call_ids(anchor: Message) -> set[str]:
     return set(_tool_call_ids(anchor.tool_calls, label="anchor tool_calls"))
 
 
-def split_tail(items: list[MainUpdate]) -> tuple[list[Message], MainUpdate | None, list[Message], list[Message]]:
+def split_tail(items: list[Message]) -> tuple[list[Message], Message | None, list[Message], list[Message]]:
     anchor_index: int | None = None
     for index in range(len(items) - 1, -1, -1):
         candidate = items[index]
-        if isinstance(candidate, MessagePatch) or candidate.is_assistant():
+        if candidate.is_assistant():
             anchor_index = index
             break
     if anchor_index is None:
-        return [], None, [], [item for item in items if isinstance(item, Message)]
+        return [], None, [], list(items)
 
-    prefix = [item for item in items[:anchor_index] if isinstance(item, Message)]
+    prefix = list(items[:anchor_index])
     anchor = items[anchor_index]
     suffix: list[Message] = []
     after: list[Message] = []
     after_started = False
     for item in items[anchor_index + 1 :]:
-        if not isinstance(item, Message):
-            raise TypeError("sides update main may not contain a message patch after the anchor")
         if not after_started and item.is_tool():
             suffix.append(item)
             continue
         after_started = True
         after.append(item)
     return prefix, anchor, suffix, after
-
-
-def _validate_main_updates(main: list[MainUpdate]) -> None:
-    if not main:
-        return
-    patch_indices = [index for index, update in enumerate(main) if isinstance(update, MessagePatch)]
-    if len(patch_indices) > 1:
-        raise ValueError("sides update main may contain at most one message patch")
-    prefix, anchor, suffix, after = split_tail(main)
-    if anchor is None:
-        if any(message.is_tool() for message in after):
-            raise ValueError("sides update main without an assistant anchor may not contain tool outputs")
-        _validate_closed_prefix_messages(after, label="sides update main")
-        return
-
-    anchor_index = next(index for index, update in enumerate(main) if update is anchor)
-    if isinstance(anchor, MessagePatch):
-        if patch_indices != [anchor_index]:
-            raise ValueError("message patch must be the last non-tool main update")
-        if after:
-            raise ValueError("message patch anchor may not have trailing non-assistant tail")
-    prefix_updates = main[:anchor_index]
-    if any(isinstance(update, MessagePatch) for update in prefix_updates):
-        raise ValueError("message patch must be the last non-tool main update")
-    _validate_closed_prefix_messages(prefix, label="sides update main prefix")
-    pending_anchor_call_ids = _anchor_open_call_ids(anchor)
-    for offset, update in enumerate(suffix, start=anchor_index + 1):
-        if update.tool_call_id is None:
-            raise ValueError(f"sides update main[{offset}] must be a tool message with tool_call_id after the anchor")
-        if update.tool_call_id not in pending_anchor_call_ids:
-            raise ValueError(f"sides update main[{offset}] does not match an unresolved anchor tool call")
-        pending_anchor_call_ids.remove(update.tool_call_id)
-    if pending_anchor_call_ids and after:
-        raise ValueError("sides update main with unresolved anchor tool calls may not have trailing non-assistant tail")
-    for offset, update in enumerate(after, start=anchor_index + 1 + len(suffix)):
-        if update.is_assistant() or update.is_tool():
-            raise ValueError(f"sides update main[{offset}] must be a closed non-assistant tail message")
 
 
 @dataclass(slots=True)
@@ -331,8 +278,54 @@ class SidesUpdate:
     main: list[MainUpdate] = field(default_factory=list)
     patches: dict[Side, GuardedPatch] = field(default_factory=dict)
 
+    def split_main(
+        self,
+    ) -> tuple[list[Message], list[Message], Message | None, list[Message], list[Message], MessagePatch | None]:
+        patch_indices = [index for index, update in enumerate(self.main) if isinstance(update, MessagePatch)]
+        if len(patch_indices) > 1:
+            raise ValueError("sides update main may contain at most one message patch")
+        patch: MessagePatch | None = None
+        if patch_indices:
+            candidate = self.main[patch_indices[0]]
+            if not isinstance(candidate, MessagePatch):  # pragma: no cover - narrowed by patch_indices
+                raise TypeError("expected message patch")
+            patch = candidate
+        if patch_indices and patch_indices[0] != len(self.main) - 1:
+            raise ValueError("message patch must be the final main update")
+
+        messages = [update for update in self.main if isinstance(update, Message)]
+        leading_end = 0
+        while leading_end < len(messages) and messages[leading_end].is_tool():
+            leading_end += 1
+        leading_outputs = messages[:leading_end]
+        local = messages[leading_end:]
+        prefix, anchor, suffix, after = split_tail(local)
+        if anchor is None:
+            _validate_closed_prefix_messages(after, label="sides update main")
+            if patch is not None and after:
+                raise ValueError("message patch target may not have a trailing non-assistant tail")
+            return leading_outputs, [], None, [], after, patch
+
+        anchor_index = next(index for index, update in enumerate(local) if update is anchor)
+        _validate_closed_prefix_messages(prefix, label="sides update main prefix")
+        pending_anchor_call_ids = _anchor_open_call_ids(anchor)
+        for offset, update in enumerate(suffix, start=leading_end + anchor_index + 1):
+            if update.tool_call_id is None:
+                raise ValueError(f"sides update main[{offset}] must be a tool message with tool_call_id after the anchor")
+            if update.tool_call_id not in pending_anchor_call_ids:
+                raise ValueError(f"sides update main[{offset}] does not match an unresolved anchor tool call")
+            pending_anchor_call_ids.remove(update.tool_call_id)
+        if pending_anchor_call_ids and after:
+            raise ValueError("sides update main with unresolved anchor tool calls may not have trailing non-assistant tail")
+        for offset, update in enumerate(after, start=leading_end + anchor_index + 1 + len(suffix)):
+            if update.is_assistant() or update.is_tool():
+                raise ValueError(f"sides update main[{offset}] must be a closed non-assistant tail message")
+        if patch is not None and after:
+            raise ValueError("message patch target may not have a trailing non-assistant tail")
+        return leading_outputs, prefix, anchor, suffix, after, patch
+
     def __post_init__(self) -> None:
-        _validate_main_updates(self.main)
+        self.split_main()
         if self.active is not None:
             object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
         normalized: dict[Side, GuardedPatch] = {}
@@ -340,9 +333,6 @@ class SidesUpdate:
             side = _required_side(raw_side, label="sides update patches key")
             normalized[side] = guarded
         object.__setattr__(self, "patches", normalized)
-
-    def split_main(self) -> tuple[list[Message], MainUpdate | None, list[Message], list[Message]]:
-        return split_tail(self.main)
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {

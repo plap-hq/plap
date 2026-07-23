@@ -41,6 +41,8 @@ from plap.responses.ingest.models import (
 from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
 
+INTERRUPTED_TOOL_OUTPUT = "Tool call aborted by user."
+
 
 def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
     return PlapError(
@@ -404,6 +406,7 @@ def _copy_message(
         role=message.role,
         content=message.content,
         name=message.name,
+        refusal=message.refusal,
         tool_call_id=message.tool_call_id,
         tool_calls=list(message.tool_calls if tool_calls is None else tool_calls),
         reasoning_content=message.reasoning_content if reasoning_content is None else reasoning_content,
@@ -514,9 +517,8 @@ type _Cluster = Message | _Turn
 
 @dataclass(slots=True)
 class _Anchor:
-    assistant: Message | None
+    assistant: Message
     patch: MessagePatch | None
-    suffix: list[Message]
     declared: list[_Call]
     added: list[_Call]
     outputs: list[Message]
@@ -526,7 +528,6 @@ class _Anchor:
         anchor = cls(
             assistant=message,
             patch=None,
-            suffix=[],
             declared=[_Call.declared(tool_call) for tool_call in message.tool_calls],
             added=[],
             outputs=[],
@@ -535,36 +536,17 @@ class _Anchor:
         return anchor
 
     @classmethod
-    def from_patch(cls, patch: MessagePatch, suffix: list[Message]) -> _Anchor:
-        return cls(
-            assistant=None,
-            patch=patch,
-            suffix=list(suffix),
-            declared=[],
-            added=[],
-            outputs=[],
-        )
-
-    @classmethod
     def from_message(cls, message: Message) -> _Anchor:
         return cls(
             assistant=message,
             patch=None,
-            suffix=[],
             declared=[],
             added=[],
             outputs=[],
         )
 
     def pending(self) -> bool:
-        return self.assistant is None and self.patch is not None
-
-    def declared_ids(self) -> set[str]:
-        if self.patch is not None:
-            if self.patch.tool_calls is None:
-                return set()
-            return {tool_call.id for tool_call in self.patch.tool_calls}
-        return {call.id for call in self.declared}
+        return self.patch is not None
 
     def call(self, call_id: str) -> _Call | None:
         for call in self.declared:
@@ -578,6 +560,12 @@ class _Anchor:
     def all_calls(self) -> list[_Call]:
         return [*self.declared, *self.added]
 
+    def message(self) -> Message:
+        return _copy_message(
+            self.assistant,
+            tool_calls=[call.to_tool_call() for call in self.all_calls()],
+        )
+
     def released(self) -> bool:
         return all(call.is_closed() for call in self.declared)
 
@@ -588,9 +576,6 @@ class _Anchor:
         self.outputs.append(message)
 
     def apply_hidden_suffix(self, suffix: list[Message]) -> None:
-        if self.pending():
-            self.suffix = list(suffix)
-            return
         for message in suffix:
             if message.tool_call_id is None:
                 raise _reasoning_replay_error(
@@ -611,38 +596,43 @@ class _Anchor:
             call.settle()
             self.outputs.append(message)
 
-    def resolve(self, message: Message) -> None:
-        if self.patch is None:
-            raise RuntimeError("patch anchor resolution requires a pending patch")
-        if not message.is_assistant():
-            raise _tool_replay_error(
-                reason="main_message_patch_target_missing",
-                private_message="main message patch target must resolve to an assistant message",
+    def stage(self, patch: MessagePatch) -> None:
+        if self.pending():
+            raise _reasoning_replay_error(
+                reason="reasoning_message_patch_invalid",
+                private_message="main assistant is already pending public materialization",
             )
-        tool_calls = [] if self.patch.tool_calls is None else list(self.patch.tool_calls)
-        self.assistant = _copy_message(
-            message,
-            tool_calls=tool_calls,
-            reasoning_content=self.patch.reasoning_content,
-        )
-        self.declared = [_Call.declared(tool_call) for tool_call in tool_calls]
-        pending = list(self.suffix)
+        if self.message() != patch.message:
+            raise _reasoning_replay_error(
+                reason="reasoning_message_patch_mismatch",
+                private_message="message patch does not match the final logical main assistant",
+            )
+        if not content.assistant_output(patch.message):
+            raise _reasoning_replay_error(
+                reason="reasoning_message_patch_invalid",
+                private_message="message patch assistant has no public output",
+            )
+        self.patch = patch
+
+    def resolves(self, message: Message) -> bool:
+        if self.patch is None:
+            return False
+        output = content.assistant_output(message)
+        return bool(output) and output == content.assistant_output(self.patch.message)
+
+    def resolve(self) -> None:
+        if self.patch is None:
+            raise RuntimeError("message patch resolution requires a pending patch")
         self.patch = None
-        self.suffix = []
-        self.apply_hidden_suffix(pending)
 
     def render(self) -> list[Message]:
-        if self.assistant is None:
+        if self.pending():
             return []
-        assistant = _copy_message(
-            self.assistant,
-            tool_calls=[call.to_tool_call() for call in self.declared] + [call.to_tool_call() for call in self.added],
-        )
-        return [assistant, *self.outputs]
+        return [self.message(), *self.outputs]
 
     def side_calls(self) -> _SideCalls:
         side_calls = _SideCalls()
-        if self.assistant is None:
+        if self.pending():
             return side_calls
         for call in self.all_calls():
             side_calls.record(call)
@@ -708,9 +698,10 @@ class _Bundle:
             call = cluster.call(call_id)
             if call is not None:
                 return cluster, call
-        call = self.anchor.call(call_id)
-        if call is not None:
-            return self.anchor, call
+        if not self.anchor.pending():
+            call = self.anchor.call(call_id)
+            if call is not None:
+                return self.anchor, call
         for cluster in reversed(self.before):
             if not isinstance(cluster, _Turn):
                 continue
@@ -732,7 +723,7 @@ class _Bundle:
         turn = self._last_turn(self.current())
         if turn is not None:
             return turn
-        if self.anchor.assistant is not None:
+        if not self.anchor.pending():
             return self.anchor
         return None
 
@@ -740,7 +731,7 @@ class _Bundle:
         turn = self._last_turn(self.current())
         if turn is not None:
             return turn
-        if self.anchor.assistant is not None:
+        if not self.anchor.pending():
             return self.anchor
         return None
 
@@ -755,10 +746,6 @@ class _Bundle:
 class _Main:
     committed: list[Message] = field(default_factory=list)
     bundle: _Bundle | None = None
-
-    def load_snapshot(self, messages: list[Message]) -> None:
-        self.committed = list(messages)
-        self.bundle = None
 
     def load_attachable_snapshot(self, messages: list[Message]) -> None:
         before, anchor, suffix, after = split_tail(messages)
@@ -805,16 +792,54 @@ class _Main:
         self.validate()
         self._finalize()
 
-    def apply_hidden_main_updates(self, sides: SidesUpdate) -> None:
-        prefix, anchor, suffix, after = sides.split_main()
-        self.committed.extend(prefix)
-        if anchor is None:
-            self.committed.extend(after)
-            return
-        if isinstance(anchor, MessagePatch):
-            self.bundle = _Bundle(anchor=_Anchor.from_patch(anchor, suffix), past_anchor=False)
-            return
-        self.bundle = _Bundle(anchor=_Anchor.from_hidden(anchor, suffix), past_anchor=bool(after), after=list(after))
+    def _stage_patch(self, patch: MessagePatch) -> None:
+        if self.bundle is None or self.bundle.after:
+            raise _reasoning_replay_error(
+                reason="main_message_patch_target_missing",
+                private_message="message patch requires a final logical main assistant",
+            )
+        anchor = self.bundle.anchor
+        if anchor.outputs and all(call.is_closed() for call in anchor.all_calls()):
+            raise _reasoning_replay_error(
+                reason="main_message_patch_target_missing",
+                private_message="message patch cannot target a fully settled hidden assistant",
+            )
+        anchor.stage(patch)
+        self.bundle.past_anchor = False
+
+    def apply_main_update(self, baseline: list[Message], sides: SidesUpdate) -> None:
+        self.load_attachable_snapshot(baseline)
+        leading_outputs, prefix, anchor, suffix, after, patch = sides.split_main()
+        if leading_outputs and self.bundle is None:
+            raise _reasoning_replay_error(
+                reason="reasoning_message_invalid",
+                private_message="leading main outputs require a post-patch baseline assistant anchor",
+            )
+        if leading_outputs:
+            if self.bundle is None:  # pragma: no cover - narrowed above
+                raise RuntimeError("leading main outputs require a baseline bundle")
+            self.bundle.anchor.apply_hidden_suffix(leading_outputs)
+            self.bundle.past_anchor = True
+
+        if prefix or anchor is not None or after:
+            if self.bundle is not None and not self.bundle.can_handoff():
+                raise _reasoning_replay_error(
+                    reason="reasoning_message_invalid",
+                    private_message="main update cannot cross unresolved baseline calls",
+                )
+            self._finalize()
+            self.committed.extend(prefix)
+            if anchor is None:
+                self.committed.extend(after)
+            else:
+                self.bundle = _Bundle(
+                    anchor=_Anchor.from_hidden(anchor, suffix),
+                    past_anchor=bool(suffix or after),
+                    after=list(after),
+                )
+
+        if patch is not None:
+            self._stage_patch(patch)
 
     def _append_message(self, message: Message) -> None:
         if self.bundle is None:
@@ -825,8 +850,8 @@ class _Main:
             return
         anchor = self.bundle.anchor
         if anchor.pending():
-            if message.is_assistant() and message.content_hash() == anchor.patch.content_hash:
-                anchor.resolve(message)
+            if message.is_assistant() and anchor.resolves(message):
+                anchor.resolve()
                 self.bundle.past_anchor = True
                 return
             self.bundle.append_message(message)
@@ -1039,11 +1064,7 @@ class _Replay:
         if payload.sides.active is not None:
             self.sides.active = set(payload.sides.active)
         self._validate_sides()
-        if payload.sides.main:
-            self.main.load_snapshot(self.sides.get(MAIN_SIDE, []) or [])
-            self.main.apply_hidden_main_updates(payload.sides)
-        else:
-            self.main.load_attachable_snapshot(self.sides.get(MAIN_SIDE, []) or [])
+        self.main.apply_main_update(self.sides.get(MAIN_SIDE, []) or [], payload.sides)
         self._sync_main()
         self.last_reasoning_id = payload.id
 
@@ -1078,15 +1099,21 @@ class _Replay:
         self._rebuild_non_main_calls(call_id.side)
 
     def _step_standalone_main_item(self, item: _DecodedInput) -> None:
-        if isinstance(item, _DecodedMessage) and item.message.role == "user":
+        if isinstance(item, _DecodedMessage) and item.message.role in {"user", "assistant"}:
             if MAIN_SIDE not in self.sides.active:
-                self.main.interrupt_parked_calls(output="Tool call aborted by user.")
+                self.main.interrupt_parked_calls(output=INTERRUPTED_TOOL_OUTPUT)
             self.sides.active.add(MAIN_SIDE)
-        if isinstance(item, (_DecodedSealedFunctionCall, _DecodedFabricatedFunctionCall)) and MAIN_SIDE not in self.sides.active:
-            raise _tool_replay_error(
-                reason="inactive_side_function_call",
-                private_message="public function_call belongs to an inactive side",
-            )
+        if isinstance(item, _DecodedSealedFunctionCall) and MAIN_SIDE not in self.sides.active:
+            phase = self.main.current_calls().phase(item.call_id.upstream_tool_call_id)
+            if phase == _Phase.DECLARED:
+                # TODO: This ID may come from another branch that activated and published
+                # the same parked call. Demote it to a fabricated call with a fresh internal
+                # ID so it cannot open or discard the parked work; doing so requires aliasing
+                # the subsequent sealed output to the fresh ID for the rest of this request.
+                raise _tool_replay_error(
+                    reason="inactive_side_function_call",
+                    private_message="public function_call belongs to an inactive side",
+                )
         self.main.add_standalone_main_item(item)
         self._sync_main()
 

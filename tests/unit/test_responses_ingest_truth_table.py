@@ -806,6 +806,18 @@ class _DiscardCase:
     expected_side: list[dict[str, object]]
 
 
+@dataclass(frozen=True, slots=True)
+class _BaselineSettlementCase:
+    baseline: tuple[Message, ...]
+    main: tuple[Message | MessagePatch, ...]
+    expected_main: tuple[Message, ...] | None
+    patch: tuple[dict[str, object], ...] | None = None
+    has_patch: bool = False
+    active: frozenset[Side] | None = None
+    trailing_items: tuple[RequestInputItem, ...] = ()
+    expected_reason: str | None = None
+
+
 def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
@@ -853,6 +865,7 @@ def _reasoning_payload(
 
 def _sides_update(
     *,
+    active: set[Side] | None = None,
     main: list[Message | MessagePatch] | None = None,
     patches: dict[Side, list[dict[str, object]] | None] | None = None,
     current: Sides | None = None,
@@ -861,7 +874,7 @@ def _sides_update(
     normalized_patches = {
         side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
     }
-    return SidesUpdate(main=[] if main is None else list(main), patches=normalized_patches)
+    return SidesUpdate(active=active, main=[] if main is None else list(main), patches=normalized_patches)
 
 
 def _guarded_patch(side: Side, current: list[Message] | None, patch: list[dict[str, object]] | None) -> GuardedPatch:
@@ -935,10 +948,6 @@ def _plain_item(role: str, content: str) -> RequestMessageItem:
     return RequestMessageItem(content=content, role=role, type="message")
 
 
-def _message_hash(value: dict[str, object]) -> str:
-    return Message.from_primitive(value).content_hash()
-
-
 def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
@@ -988,17 +997,19 @@ def _reasoning_patch_main(
     tool_call_ids: tuple[str, ...],
     deferred_outputs: tuple[dict[str, object], ...] = (),
 ) -> RequestReasoningItem:
-    patch = MessagePatch(
-        content_hash=_message_hash(target),
-        tool_calls=[_tool_call_model(call_id) for call_id in tool_call_ids],
-    )
+    value = dict(target)
+    if tool_call_ids:
+        value["tool_calls"] = [_tool_call_value(call_id) for call_id in tool_call_ids]
+    assistant = Message.from_primitive(value)
+    patch = MessagePatch(message=assistant)
     return _sealed_reasoning(
         _reasoning_payload(
             machine=[],
             sides=_sides_update(
                 main=[
-                    patch,
+                    assistant,
                     *[Message.from_primitive(output) for output in deferred_outputs],
+                    patch,
                 ]
             ),
         )
@@ -1100,6 +1111,7 @@ ACCEPT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
 DISCARD_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
 
 m = _assistant_value("m")
+patched = Message.from_primitive(_assistant_value("m", "up_0"))
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -2720,7 +2732,8 @@ ACCEPT_CASES.append(
                                     tool_calls=[_tool_call_model("pref_0")],
                                 ),
                                 Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                MessagePatch(content_hash=_message_hash(m), tool_calls=[_tool_call_model("up_0")]),
+                                patched,
+                                MessagePatch(message=patched),
                             ]
                         ),
                     )
@@ -2777,6 +2790,7 @@ ACCEPT_CASES.append(
 )
 
 m = _assistant_value("m")
+patched = Message.from_primitive(_assistant_value("m", "up_0", "up_hidden_1"))
 ACCEPT_CASES.append(
     pytest.param(
         _AcceptCase(
@@ -2792,11 +2806,9 @@ ACCEPT_CASES.append(
                                     tool_calls=[_tool_call_model("pref_0")],
                                 ),
                                 Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                MessagePatch(
-                                    content_hash=_message_hash(m),
-                                    tool_calls=[_tool_call_model("up_0"), _tool_call_model("up_hidden_1")],
-                                ),
+                                patched,
                                 Message(role="tool", tool_call_id="up_hidden_1", content="hidden output"),
+                                MessagePatch(message=patched),
                             ]
                         ),
                     )
@@ -3054,6 +3066,261 @@ REJECT_CASES.append(
         id="reject_duplicate_pending_call_ids",
     )
 )
+
+
+def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
+    owner_x = Message(role="assistant", content="owner", tool_calls=[_tool_call_model("x")])
+    owner_xy = Message(
+        role="assistant",
+        content="owner",
+        tool_calls=[_tool_call_model("x"), _tool_call_model("y")],
+    )
+    owner_z = Message(role="assistant", content="owner", tool_calls=[_tool_call_model("z")])
+    tool_x = Message(role="tool", tool_call_id="x", content="x result")
+    tool_y = Message(role="tool", tool_call_id="y", content="y result")
+    tool_z = Message(role="tool", tool_call_id="z", content="z result")
+    successor = Message(role="assistant", content="successor")
+    local_owner = Message(role="assistant", content="local owner", tool_calls=[_tool_call_model("local")])
+    local_output = Message(role="tool", tool_call_id="local", content="local result")
+    projected = Message(role="assistant", content="projected", reasoning_content="hidden")
+    projected_patch = MessagePatch(message=projected)
+    rewrite_x_to_z = ({"op": "replace", "path": "/0/tool_calls/0/id", "value": "z"},)
+    close_x = ({"op": "add", "path": "/1", "value": tool_x.to_primitive()},)
+    introduce_x = ({"op": "add", "path": "/0", "value": owner_x.to_primitive()},)
+    introduce_and_close_x = (
+        {"op": "add", "path": "/0", "value": owner_x.to_primitive()},
+        {"op": "add", "path": "/1", "value": tool_x.to_primitive()},
+    )
+    invalid = "reasoning_message_invalid"
+    return [
+        pytest.param(
+            _BaselineSettlementCase(baseline=(), main=(successor,), expected_main=(successor,)),
+            id="local_remainder_without_baseline_owner",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(),
+                main=(tool_x,),
+                expected_main=None,
+                expected_reason=invalid,
+            ),
+            id="reject_leading_output_without_baseline_owner",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy,),
+                main=(tool_x,),
+                expected_main=(owner_xy, tool_x),
+            ),
+            id="partial_baseline_settlement_without_remainder",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy,),
+                main=(tool_y, tool_x),
+                expected_main=(owner_xy, tool_y, tool_x),
+            ),
+            id="complete_baseline_settlement_preserves_output_order",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy,),
+                main=(tool_x, successor),
+                expected_main=None,
+                expected_reason=invalid,
+            ),
+            id="reject_partial_baseline_settlement_before_remainder",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy,),
+                main=(tool_x, tool_y, successor),
+                expected_main=(owner_xy, tool_x, tool_y, successor),
+            ),
+            id="complete_baseline_settlement_hands_off_to_remainder",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy, tool_x),
+                main=(tool_y,),
+                expected_main=(owner_xy, tool_x, tool_y),
+            ),
+            id="settle_remaining_baseline_sibling",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x, tool_x),
+                main=(tool_x,),
+                expected_main=None,
+                expected_reason=invalid,
+            ),
+            id="reject_already_settled_baseline_call",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_z,),
+                expected_main=None,
+                expected_reason=invalid,
+            ),
+            id="reject_unknown_baseline_call",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x,),
+                expected_main=(owner_x, tool_x),
+                patch=None,
+                has_patch=True,
+            ),
+            id="shape_guard_preserves_baseline_owner",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_z,),
+                expected_main=(owner_z, tool_z),
+                patch=rewrite_x_to_z,
+                has_patch=True,
+            ),
+            id="main_patch_rewrites_baseline_owner_before_settlement",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x,),
+                expected_main=None,
+                patch=rewrite_x_to_z,
+                has_patch=True,
+                expected_reason=invalid,
+            ),
+            id="reject_pre_patch_call_id_after_owner_rewrite",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x,),
+                expected_main=None,
+                patch=(),
+                has_patch=True,
+                expected_reason=invalid,
+            ),
+            id="reject_output_after_main_patch_removes_owner",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x,),
+                expected_main=None,
+                patch=close_x,
+                has_patch=True,
+                expected_reason=invalid,
+            ),
+            id="reject_output_after_main_patch_closes_call",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(),
+                main=(tool_x,),
+                expected_main=(owner_x, tool_x),
+                patch=introduce_x,
+                has_patch=True,
+            ),
+            id="main_patch_introduces_baseline_owner",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(),
+                main=(successor,),
+                expected_main=(owner_x, tool_x, successor),
+                patch=introduce_and_close_x,
+                has_patch=True,
+            ),
+            id="main_patch_introduces_closed_baseline_before_remainder",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x, successor),
+                expected_main=(owner_x, tool_x, successor),
+            ),
+            id="complete_baseline_settlement_before_full_assistant",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x, projected, projected_patch),
+                expected_main=(owner_x, tool_x, projected),
+                active=frozenset({MAIN_SIDE}),
+                trailing_items=(_assistant_item("projected"),),
+            ),
+            id="complete_baseline_settlement_before_postfix_patch",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_xy,),
+                main=(tool_x, projected, projected_patch),
+                expected_main=None,
+                expected_reason=invalid,
+            ),
+            id="reject_partial_baseline_settlement_before_postfix_patch",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(owner_x,),
+                main=(tool_x, local_owner, local_output, successor),
+                expected_main=(owner_x, tool_x, local_owner, local_output, successor),
+            ),
+            id="complete_baseline_settlement_before_closed_local_prefix",
+        ),
+        pytest.param(
+            _BaselineSettlementCase(
+                baseline=(),
+                main=(local_owner, local_output),
+                expected_main=(local_owner, local_output),
+            ),
+            id="local_anchor_owns_local_suffix",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("case", _baseline_settlement_cases())
+async def test_baseline_settlement_truth_table(case: _BaselineSettlementCase) -> None:
+    baseline_messages = {MAIN_SIDE: list(case.baseline)} if case.baseline else {}
+    baseline_sides = Sides(active=set(), messages=baseline_messages)
+    first = _sealed_reasoning(
+        _reasoning_payload(
+            machine=[],
+            sides=_sides_update(active=set(), main=list(case.baseline)),
+        )
+    )
+    patches = None
+    if case.has_patch:
+        patches = {MAIN_SIDE: None if case.patch is None else list(case.patch)}
+    second = _sealed_reasoning(
+        _reasoning_payload(
+            machine=[],
+            sides=_sides_update(
+                active=None if case.active is None else set(case.active),
+                main=list(case.main),
+                patches=patches,
+                current=baseline_sides,
+            ),
+        )
+    )
+    request = _request([first, second, *case.trailing_items])
+
+    if case.expected_reason is not None:
+        with pytest.raises(PlapError) as exc_info:
+            await ingest_response_request(request, keyring=_keyring())
+        assert exc_info.value.private is not None
+        assert exc_info.value.private.reason == case.expected_reason
+        return
+
+    result = await ingest_response_request(request, keyring=_keyring())
+
+    assert case.expected_main is not None
+    assert result.sides[MAIN_SIDE] == list(case.expected_main)
 
 
 @pytest.mark.parametrize("case", ACCEPT_CASES)

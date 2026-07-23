@@ -50,7 +50,7 @@ def _parts(values: list[object]) -> list[ChatContentPart]:
     return [_part(value) for value in values]
 
 
-def _assistant_message_content(value: str | list[object]) -> tuple[str | list[ChatContentPart], str | None]:
+def _assistant_message_content(value: str | list[object]) -> tuple[str | list[ChatContentPart] | None, str | None]:
     if isinstance(value, str):
         return value, None
     parts: list[ChatContentPart] = []
@@ -64,13 +64,36 @@ def _assistant_message_content(value: str | list[object]) -> tuple[str | list[Ch
             continue
         raise TypeError(f"unsupported assistant message content part: {type(part).__name__}")
     refusal = "\n".join(refusals) if refusals else None
-    # Replay normalisation: a single text part is a degenerate list form.
-    # Without this, content_hash() would differ between the runtime string
-    # and the replayed list, breaking MessagePatch resolution on every
-    # continuation and poisoning provider prompt caches with structural noise.
+    if not parts and refusal is not None:
+        return None, refusal
+    # A single text part is the replay form of the runtime string representation.
+    # Keeping that shape stable also avoids poisoning provider prompt caches.
     if len(parts) == 1 and isinstance(parts[0], ChatContentText):
         return parts[0].text, refusal
     return parts, refusal
+
+
+def assistant_output(message: ChatMessage) -> list[OutputTextContent | OutputRefusalContent]:
+    if not message.is_assistant():
+        return []
+    parts: list[OutputTextContent | OutputRefusalContent] = []
+    if isinstance(message.content, str):
+        if message.content:
+            parts.append(OutputTextContent(text=message.content, type="output_text"))
+    elif isinstance(message.content, list):
+        parts.extend(
+            OutputTextContent(text=part.text, type="output_text")
+            for part in message.content
+            if isinstance(part, ChatContentText) and part.text
+        )
+    if message.refusal:
+        parts.append(OutputRefusalContent(refusal=message.refusal, type="refusal"))
+    return parts
+
+
+def assistant_message(parts: list[OutputTextContent | OutputRefusalContent]) -> ChatMessage:
+    content, refusal = _assistant_message_content(parts)
+    return ChatMessage(role="assistant", content=content, refusal=refusal)
 
 
 def message(item: RequestMessageItem) -> ChatMessage:
@@ -90,4 +113,4 @@ def tool_output(item: RequestFunctionCallOutputItem) -> str | list[ChatContentPa
     return _parts(item.output)
 
 
-__all__ = ["message", "tool_output"]
+__all__ = ["assistant_message", "assistant_output", "message", "tool_output"]

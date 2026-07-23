@@ -10,13 +10,9 @@ import svcs
 from pydantic import BaseModel, ConfigDict
 
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ChatContentText, ChatToolCall
-from plap.responses.contracts import (
-    OutputRefusalContent,
-    OutputTextContent,
-    ResponseFunctionCallItem,
-    ResponseMessageItem,
-)
+from plap.llms.completions.chat import ChatToolCall
+from plap.responses.contracts import ResponseFunctionCallItem, ResponseMessageItem
+from plap.responses.ingest import content
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
@@ -34,7 +30,7 @@ from plap.responses.ingest.sealing import seal_call_id
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 
-INTERRUPTED_TOOL_OUTPUT = "Tool output unavailable because the response was interrupted."
+INTERRUPTED_TOOL_OUTPUT = "Tool call aborted because the response was interrupted."
 
 
 class Machine(BaseModel):
@@ -145,40 +141,14 @@ class State:
         shadow.extend(Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls)
         return shadow
 
-    def _message_patch(self, message: Message) -> MessagePatch | None:
-        if message.content is None and message.refusal is None:
-            return None
-        tool_calls = list(message.tool_calls) or None
-        if tool_calls is None and message.reasoning_content is None:
-            return None
-        visible = Message(role="assistant", content=message.content, refusal=message.refusal)
-        return MessagePatch(
-            content_hash=visible.content_hash(),
-            tool_calls=tool_calls,
-            reasoning_content=message.reasoning_content,
-        )
-
-    def _message_output_content(self, message: Message) -> list[OutputTextContent | OutputRefusalContent] | None:
-        parts: list[OutputTextContent | OutputRefusalContent] = []
-        if isinstance(message.content, str):
-            if message.content:
-                parts.append(OutputTextContent(text=message.content, type="output_text"))
-        elif isinstance(message.content, list):
-            parts.extend(
-                OutputTextContent(text=part.text, type="output_text") for part in message.content if isinstance(part, ChatContentText)
-            )
-        if message.refusal is not None and not any(isinstance(part, OutputRefusalContent) for part in parts):
-            parts.append(OutputRefusalContent(refusal=message.refusal, type="refusal"))
-        return parts or None
-
     def _message_item(self, message: Message) -> ResponseMessageItem | None:
         if not message.is_assistant():
             return None
-        content = self._message_output_content(message)
-        if content is None:
+        output = content.assistant_output(message)
+        if not output:
             return None
         return ResponseMessageItem(
-            content=content,
+            content=output,
             id=f"msg_{secrets.token_urlsafe(18)}",
             role="assistant",
             status="completed",
@@ -232,19 +202,50 @@ class State:
         return machine_patch, SidesUpdate(active=active, main=main_update, patches=patches)
 
     def _validate_main(self) -> None:
-        persisted_main = self.sides.get(MAIN_SIDE, []) or []
-        if self._split_tail(persisted_main, label="persisted main history")[4] and self.main:
-            raise RuntimeError("main append lane must remain empty while persisted main calls are unresolved")
-        self._split_tail([*persisted_main, *self.main], label="main history")
+        self._split_tail(self.history(MAIN_SIDE), label="main history")
+
+    def _logical_main(self, *, sides: Sides | None = None, main: list[Message] | None = None) -> Message | None:
+        current_sides = self.sides if sides is None else sides
+        current_main = self.main if main is None else main
+        persisted = current_sides.get(MAIN_SIDE, []) or []
+        _, anchor, suffix, after, open_calls = self._split_tail([*persisted, *current_main], label="main history")
+        if anchor is None or after:
+            return None
+        if suffix and not open_calls:
+            return None
+        return anchor
+
+    def _main_update(
+        self,
+        main: list[Message],
+        visible: Message | None,
+        visible_message: ResponseMessageItem | None,
+    ) -> list[Message | MessagePatch]:
+        if visible is None or visible_message is None:
+            return deepcopy(main)
+
+        visible_index = next((index for index, message in enumerate(main) if message is visible), None)
+        if visible_index is None:
+            return [*deepcopy(main), MessagePatch(message=deepcopy(visible))]
+
+        if visible == content.assistant_message(list(visible_message.content)):
+            return [*deepcopy(main[:visible_index]), *deepcopy(main[visible_index + 1 :])]
+        return [*deepcopy(main), MessagePatch(message=deepcopy(visible))]
 
     def _shadow_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
         self._validate_main()
         shadow_machine = self.machine.model_copy(deep=True)
         shadow_sides = deepcopy(self.sides)
         for side in list(shadow_sides.messages):
-            if side in shadow_sides.active:
+            if side != MAIN_SIDE and side in shadow_sides.active:
                 shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
-        shadow_main = self._stubbed(self.main, label="main append lane") if MAIN_SIDE in shadow_sides.active else deepcopy(self.main)
+        shadow_main = deepcopy(self.main)
+        if MAIN_SIDE in shadow_sides.active:
+            open_calls = self._split_tail(
+                [*(shadow_sides.get(MAIN_SIDE, []) or []), *shadow_main],
+                label="main history",
+            )[4]
+            shadow_main.extend(Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls)
         return shadow_machine, shadow_sides, shadow_main
 
     def _live_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
@@ -289,33 +290,17 @@ class State:
 
     async def finalize(self) -> None:
         machine, sides, main = self._live_snapshot()
-        visible_message: ResponseMessageItem | None = None
+        visible_main = self._logical_main(sides=sides, main=main) if MAIN_SIDE in sides.active else None
+        visible_message = None if visible_main is None else self._message_item(visible_main)
         visible_calls: list[ResponseFunctionCallItem] = []
-        main_update: list[Message | MessagePatch] = []
-
-        if main and MAIN_SIDE not in sides.active:
-            main_update = deepcopy(main)
-        elif main:
-            prefix, anchor, suffix, after, _open_calls = self._split_tail(main, label="main append lane")
-            if anchor is None:
-                main_update = [*deepcopy(prefix), *deepcopy(after)]
-            else:
-                if after:
-                    main_update = [*deepcopy(prefix), anchor, *deepcopy(suffix)]
-                    main_update.extend(deepcopy(after))
-                else:
-                    patch = self._message_patch(anchor)
-                    visible_message = self._message_item(anchor)
-                    if visible_message is None:
-                        main_update = [*deepcopy(prefix), anchor, *deepcopy(suffix)]
-                    elif patch is not None or suffix:
-                        if patch is None:  # pragma: no cover
-                            raise RuntimeError("assistant patch is required when hidden fields are present")
-                        main_update = [*deepcopy(prefix), patch, *deepcopy(suffix)]
-                    else:
-                        main_update = deepcopy(prefix)
+        main_update = self._main_update(main, visible_main, visible_message)
         if MAIN_SIDE in sides.active:
-            visible_calls.extend(self._function_items(MAIN_SIDE, self.open_calls(MAIN_SIDE)))
+            visible_calls.extend(
+                self._function_items(
+                    MAIN_SIDE,
+                    self._split_tail([*(sides.get(MAIN_SIDE, []) or []), *main], label="main history")[4],
+                )
+            )
 
         machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=main_update)
 
@@ -340,6 +325,7 @@ class State:
             await self.coordinator.finish_reasoning(machine=[], sides=SidesUpdate())
             self._reasoning_id = None
 
+        self._validate_main()
         full_machine = self.machine.model_copy(deep=True)
         full_sides = deepcopy(self.sides)
         residue_sides: dict[str, list[Message]] = {}

@@ -398,6 +398,21 @@ def test_decode_queue_normalizes_assistant_refusal_to_top_level_runtime_field() 
     ]
 
 
+def test_decode_queue_normalizes_refusal_only_assistant_content_to_none() -> None:
+    decoded = _decode_queue(
+        [
+            RequestMessageItem(
+                content=[OutputRefusalContent(refusal="nope", type="refusal")],
+                role="assistant",
+                type="message",
+            )
+        ],
+        keyring=_keyring(),
+    )
+
+    assert decoded == [_DecodedMessage(message=Message(role="assistant", content=None, refusal="nope"))]
+
+
 def test_decode_queue_decodes_structured_message_parts_to_chat_superset() -> None:
     decoded = _decode_queue(
         [
@@ -563,12 +578,35 @@ def test_unpack_call_id_rejects_invalid_packed_payload() -> None:
     assert exc_info.value.private.reason == "function_call_id_packed_payload_invalid"
 
 
-def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messages() -> None:
+def test_message_patch_round_trips_complete_assistant() -> None:
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        refusal="partial refusal",
+        reasoning_content="hidden",
+        tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
+    )
+    patch = MessagePatch(message=assistant)
+
+    assert MessagePatch.from_primitive(patch.to_primitive()) == patch
+
+
+def test_message_patch_rejects_non_assistant_message() -> None:
+    with pytest.raises(ValueError, match="must wrap an assistant"):
+        MessagePatch(message=Message(role="user", content="not an assistant"))
+
+
+def test_sides_update_main_accepts_terminal_patch_after_hidden_tool_messages() -> None:
+    assistant = Message(
+        role="assistant",
+        content="anchor",
+        tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
+    )
     update = _sides_update(
         main=[
-            Message(role="assistant", content="prefix"),
-            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            assistant,
             Message(role="tool", tool_call_id="call_1", content="hidden output"),
+            MessagePatch(message=assistant),
         ]
     )
 
@@ -576,36 +614,45 @@ def test_sides_update_main_accepts_single_patch_followed_by_trailing_tool_messag
 
 
 def test_sides_update_main_rejects_second_patch() -> None:
+    first = Message(role="assistant", content="first")
+    second = Message(role="assistant", content="second")
     with pytest.raises(ValueError, match="at most one message patch"):
         _sides_update(
             main=[
-                MessagePatch(content_hash="abcd", reasoning_content="first"),
-                MessagePatch(content_hash="efgh", reasoning_content="second"),
+                MessagePatch(message=first),
+                MessagePatch(message=second),
             ]
         )
 
 
 def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
-    with pytest.raises(ValueError, match="message patch must be the last non-tool main update"):
+    assistant = Message(role="assistant", content="anchor")
+    with pytest.raises(ValueError, match="message patch must be the final main update"):
         _sides_update(
             main=[
-                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                MessagePatch(message=assistant),
                 Message(role="assistant", content="later assistant"),
             ]
         )
 
 
-def test_sides_update_main_rejects_tool_message_without_tool_call_id_after_patch() -> None:
-    with pytest.raises(ValueError, match="must be a tool message with tool_call_id after the anchor"):
+def test_sides_update_main_rejects_tool_message_after_patch() -> None:
+    assistant = Message(role="assistant", content="anchor")
+    with pytest.raises(ValueError, match="message patch must be the final main update"):
         _sides_update(
             main=[
-                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                MessagePatch(message=assistant),
                 Message(role="tool", content="missing id"),
             ]
         )
 
 
 def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
+    anchor = Message(
+        role="assistant",
+        content="anchor",
+        tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
+    )
     update = _sides_update(
         main=[
             Message(
@@ -614,12 +661,13 @@ def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
                 tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
             ),
             Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-            MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+            anchor,
             Message(role="tool", tool_call_id="call_1", content="anchor hidden output"),
+            MessagePatch(message=anchor),
         ]
     )
 
-    assert len(update.main) == 4
+    assert len(update.main) == 5
 
 
 def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
@@ -667,11 +715,13 @@ def test_sides_update_main_accepts_closed_assistant_with_user_tail() -> None:
 
 
 def test_sides_update_main_rejects_message_patch_with_user_tail() -> None:
-    with pytest.raises(ValueError, match="message patch anchor may not have trailing non-assistant tail"):
+    assistant = Message(role="assistant", content="anchor")
+    with pytest.raises(ValueError, match="message patch target may not have a trailing non-assistant tail"):
         _sides_update(
             main=[
-                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                assistant,
                 Message(role="user", content="tail"),
+                MessagePatch(message=assistant),
             ]
         )
 
@@ -691,6 +741,7 @@ def test_sides_update_main_rejects_open_assistant_with_user_tail() -> None:
 
 
 def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
+    anchor = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
         _sides_update(
             main=[
@@ -699,7 +750,8 @@ def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None
                     content="prefix tool turn",
                     tool_calls=[ToolCall(id="pref_0", name="read_file", arguments="{}")],
                 ),
-                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                anchor,
+                MessagePatch(message=anchor),
             ]
         )
 
@@ -719,6 +771,7 @@ def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> 
 
 
 def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
+    anchor = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="cannot appear before earlier tool calls are satisfied"):
         _sides_update(
             main=[
@@ -729,17 +782,24 @@ def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_clo
                 ),
                 Message(role="user", content="interrupting prefix"),
                 Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                MessagePatch(content_hash="abcd", reasoning_content="hidden"),
+                anchor,
+                MessagePatch(message=anchor),
             ]
         )
 
 
 def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
+    anchor = Message(
+        role="assistant",
+        content="anchor",
+        tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
+    )
     with pytest.raises(ValueError, match="does not match an unresolved anchor tool call"):
         _sides_update(
             main=[
-                MessagePatch(content_hash="abcd", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
+                anchor,
                 Message(role="tool", tool_call_id="wrong", content="hidden output"),
+                MessagePatch(message=anchor),
             ]
         )
 
@@ -986,6 +1046,157 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
     )
 
     assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="main hidden")]
+
+
+async def test_ingest_response_request_materializes_new_postfix_message_patch() -> None:
+    assistant = Message(role="assistant", content="answer", reasoning_content="hidden")
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(main=[assistant, MessagePatch(message=assistant)]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestMessageItem(content="answer", role="assistant", type="message"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [assistant]
+
+
+async def test_ingest_response_request_materializes_text_and_refusal_from_sealed_message() -> None:
+    assistant = Message(
+        role="assistant",
+        content="partial answer",
+        refusal="remaining request refused",
+        reasoning_content="hidden",
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(main=[assistant, MessagePatch(message=assistant)]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestMessageItem(
+                    content=[
+                        OutputTextContent(text="partial answer", type="output_text"),
+                        OutputRefusalContent(refusal="remaining request refused", type="refusal"),
+                    ],
+                    role="assistant",
+                    type="message",
+                ),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [assistant]
+
+
+async def test_ingest_response_request_materializes_parked_postfix_message_patch() -> None:
+    assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
+    parked = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    published = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        previous_reasoning_id=parked.id,
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(parked),
+                _sealed_reasoning(published),
+                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides[MAIN_SIDE] == [assistant]
+
+
+async def test_ingest_response_request_preserves_equal_message_multiplicity_before_patch() -> None:
+    assistant = Message(role="assistant", content="same", reasoning_content="hidden")
+    first = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    second = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            active={MAIN_SIDE},
+            main=[assistant, MessagePatch(message=assistant)],
+        ),
+        previous_reasoning_id=first.id,
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(first),
+                _sealed_reasoning(second),
+                RequestMessageItem(content="same", role="assistant", type="message"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [assistant, assistant]
+
+
+async def test_ingest_response_request_does_not_deduplicate_unpatched_equal_assistant() -> None:
+    hidden = Message(role="assistant", content="same", reasoning_content="hidden")
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active={MAIN_SIDE}, main=[hidden]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestMessageItem(content="same", role="assistant", type="message"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="same"), hidden]
+
+
+async def test_ingest_response_request_rejects_postfix_message_patch_mismatch() -> None:
+    assistant = Message(role="assistant", content="answer", reasoning_content="hidden")
+    other = Message(role="assistant", content="other", reasoning_content="hidden")
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(main=[assistant, MessagePatch(message=other)]),
+    )
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "reasoning_message_patch_mismatch"
 
 
 async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
@@ -1379,6 +1590,308 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
         Message(role="user", content="new request"),
     ]
+
+
+async def test_ingest_response_request_fabricated_assistant_interrupts_parked_main_calls() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestMessageItem(content="imported answer", role="assistant", type="message"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides[MAIN_SIDE] == [
+        assistant,
+        Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
+        Message(role="assistant", content="imported answer"),
+    ]
+
+
+async def test_ingest_response_request_fabricated_pair_attaches_to_inactive_main() -> None:
+    assistant = Message(role="assistant", content="hidden")
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments="{}", call_id="fab_0", name="fabricated", type="function_call"),
+                RequestFunctionCallOutputItem(call_id="fab_0", output="fabricated result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[ToolCall(id="fab_0", name="fabricated", arguments="{}")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+    ]
+
+
+async def test_ingest_response_request_fabricated_pair_preserves_other_parked_call() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments="{}", call_id="fab_0", name="fabricated", type="function_call"),
+                RequestFunctionCallOutputItem(call_id="fab_0", output="fabricated result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[
+                ToolCall(id="parked_0", name="parked", arguments="{}"),
+                ToolCall(id="fab_0", name="fabricated", arguments="{}"),
+            ],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+    ]
+
+
+async def test_ingest_response_request_fabricated_pair_settles_matching_parked_call() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments="{}", call_id="parked_0", name="parked", type="function_call"),
+                RequestFunctionCallOutputItem(call_id="parked_0", output="fabricated result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        assistant,
+        Message(role="tool", tool_call_id="parked_0", content="fabricated result"),
+    ]
+
+
+async def test_ingest_response_request_sealed_transplant_attaches_to_inactive_main() -> None:
+    assistant = Message(role="assistant", content="hidden")
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments="{}", call_id=call_id, name="transplanted", type="function_call"),
+                RequestFunctionCallOutputItem(call_id=call_id, output="transplanted result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[ToolCall(id="transplanted_0", name="transplanted", arguments="{}")],
+        ),
+        Message(role="tool", tool_call_id="transplanted_0", content="transplanted result"),
+    ]
+
+
+async def test_ingest_response_request_sealed_transplant_preserves_other_parked_call() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(payload),
+                RequestFunctionCallItem(arguments="{}", call_id=call_id, name="transplanted", type="function_call"),
+                RequestFunctionCallOutputItem(call_id=call_id, output="transplanted result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[
+                ToolCall(id="parked_0", name="parked", arguments="{}"),
+                ToolCall(id="transplanted_0", name="transplanted", arguments="{}"),
+            ],
+        ),
+        Message(role="tool", tool_call_id="transplanted_0", content="transplanted result"),
+    ]
+
+
+async def test_ingest_response_request_rejects_sealed_replay_of_inactive_main_parked_call() -> None:
+    assistant = Message(
+        role="assistant",
+        content="hidden",
+        tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
+    )
+    payload = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "parked_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await ingest_response_request(
+            ResponseCreateRequest(
+                model="plap/test",
+                input=[
+                    _sealed_reasoning(payload),
+                    RequestFunctionCallItem(arguments="{}", call_id=call_id, name="parked", type="function_call"),
+                ],
+            ),
+            keyring=_keyring(),
+        )
+
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == "inactive_side_function_call"
+
+
+async def test_ingest_response_request_materializes_partially_settled_baseline() -> None:
+    assistant = Message(
+        role="assistant",
+        content="working",
+        tool_calls=[
+            ToolCall(id="up_main_0", name="subagent", arguments="{}"),
+            ToolCall(id="up_main_1", name="client_tool", arguments="{}"),
+        ],
+    )
+    parked = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    hidden_output = Message(role="tool", tool_call_id="up_main_0", content="subagent result")
+    published = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(
+            active={MAIN_SIDE},
+            main=[hidden_output, MessagePatch(message=assistant)],
+        ),
+        previous_reasoning_id=parked.id,
+    )
+    call_id = _sealed_call_id_for_message(MAIN_SIDE, "up_main_1", assistant, tool_call_index=1)
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[
+                _sealed_reasoning(parked),
+                _sealed_reasoning(published),
+                RequestMessageItem(content="working", role="assistant", type="message"),
+                RequestFunctionCallItem(
+                    arguments="{}",
+                    call_id=call_id,
+                    name="client_tool",
+                    type="function_call",
+                ),
+                RequestFunctionCallOutputItem(call_id=call_id, output="client result", type="function_call_output"),
+            ],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        assistant,
+        hidden_output,
+        Message(role="tool", tool_call_id="up_main_1", content="client result"),
+    ]
+
+
+async def test_ingest_response_request_keeps_fully_settled_baseline_hidden() -> None:
+    assistant = Message(
+        role="assistant",
+        content="working",
+        tool_calls=[ToolCall(id="up_main_0", name="subagent", arguments="{}")],
+    )
+    parked = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(active=set(), main=[assistant]),
+    )
+    hidden_output = Message(role="tool", tool_call_id="up_main_0", content="subagent result")
+    settled = _reasoning_payload(
+        machine=[],
+        sides=_sides_update(main=[hidden_output]),
+        previous_reasoning_id=parked.id,
+    )
+
+    result = await ingest_response_request(
+        ResponseCreateRequest(
+            model="plap/test",
+            input=[_sealed_reasoning(parked), _sealed_reasoning(settled)],
+        ),
+        keyring=_keyring(),
+    )
+
+    assert result.sides[MAIN_SIDE] == [assistant, hidden_output]
 
 
 async def test_ingest_response_request_user_does_not_close_open_main_call() -> None:
@@ -1861,16 +2374,10 @@ async def test_ingest_response_request_rejects_machine_only_reasoning_while_wait
 
 
 async def test_ingest_response_request_rejects_main_message_patch_until_supported() -> None:
+    assistant = Message(role="assistant", content="answer", reasoning_content="hidden assistant state")
     payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/active", "value": []}],
-        sides=_sides_update(
-            main=[
-                MessagePatch(
-                    content_hash="abcd",
-                    reasoning_content="hidden assistant state",
-                )
-            ]
-        ),
+        sides=_sides_update(main=[MessagePatch(message=assistant)]),
     )
 
     with pytest.raises(PlapError) as exc_info:

@@ -22,7 +22,7 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 3,
+        "version": 4,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
@@ -34,7 +34,7 @@ Reasoning and compaction payloads
 - Compaction envelope:
 
     {
-        "version": 3,
+        "version": 4,
         "type": "compaction",
         "id": <string>,
         "machine": <object>,
@@ -54,7 +54,7 @@ Reasoning and compaction payloads
 
     {
         "active": [<side>, ...] | null,
-        "main": [<message-or-patch>, ...],
+        "main": [<message>..., <optional-postfix-message-patch>],
         "patches": {
             <side>: <guarded-patch>,
         },
@@ -151,7 +151,7 @@ COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
-PAYLOAD_FORMAT_VERSION = 3
+PAYLOAD_FORMAT_VERSION = 4
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
