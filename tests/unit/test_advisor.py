@@ -277,7 +277,6 @@ def _state(
             machine={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
         prepared=_prepared(actual_request),
         svcs=_svcs(client),
@@ -571,7 +570,6 @@ async def test_after_tool_advice_reaches_next_main_request() -> None:
                 }
             ),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
 
@@ -606,7 +604,6 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
                 }
             ),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
 
@@ -640,7 +637,6 @@ async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeyp
                 }
             ),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
 

@@ -165,7 +165,6 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     assert ingested.sides["main"][0].content == "hello"
     assert ingested.sides.active == {MAIN_SIDE}
     assert ingested.last_reasoning_id is None
-    assert ingested.current_compaction_id is None
     assert coordinator.current_response().model == request.model
 
 
@@ -186,7 +185,7 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     await _run_stream(
         prepared=_prepared(),
-        ingested=Ingested(machine={}, sides=Sides(), last_reasoning_id=None, current_compaction_id=None),
+        ingested=Ingested(machine={}, sides=Sides(), last_reasoning_id=None),
         coordinator=_coordinator(),
         svcs=container,
     )

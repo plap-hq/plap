@@ -920,7 +920,6 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
     assert result.machine == payload.machine
     assert result.sides == payload.sides
     assert result.last_reasoning_id is None
-    assert result.current_compaction_id == payload.id
 
 
 async def test_ingest_response_request_rejects_unresolved_call_inside_compaction_snapshot() -> None:
@@ -949,7 +948,7 @@ async def test_ingest_response_request_rejects_unresolved_call_inside_compaction
     assert exc_info.value.private.reason == "compaction_contains_unresolved_tool_call"
 
 
-async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compaction() -> None:
+async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_snapshot() -> None:
     compaction = _compaction_payload(
         payload_id="cmp_root",
         machine={"active": []},
@@ -957,14 +956,12 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
     )
     first = _reasoning_payload(
         payload_id="rs_first",
-        previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
         sides=_sides_update(main=[Message(role="assistant", content="first")], current=compaction.sides),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
         previous_reasoning_id=first.id,
-        previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             main=[Message(role="assistant", content="second")],
@@ -994,7 +991,6 @@ async def test_ingest_response_request_accepts_reasoning_chain_anchored_to_compa
         Message(role="assistant", content="second"),
     ]
     assert result.last_reasoning_id == second.id
-    assert result.current_compaction_id == compaction.id
 
 
 async def test_ingest_response_request_applies_reasoning_machine_patch() -> None:
@@ -1011,7 +1007,6 @@ async def test_ingest_response_request_applies_reasoning_machine_patch() -> None
     assert result.machine == {"active": ["reviewer"]}
     assert result.sides == Sides()
     assert result.last_reasoning_id == payload.id
-    assert result.current_compaction_id is None
 
 
 async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:
@@ -1952,40 +1947,14 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
     assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
 
 
-async def test_ingest_response_request_rejects_first_reasoning_with_non_none_previous_compaction_id() -> None:
-    payload = _reasoning_payload(
-        payload_id="rs_first",
-        previous_compaction_id="cmp_missing",
-        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            ResponseCreateRequest(model="plap/test", input=[_sealed_reasoning(payload)]),
-            keyring=_keyring(),
+def test_reasoning_payload_rejects_previous_compaction_id() -> None:
+    with pytest.raises(ValueError, match="previous_compaction_id is no longer supported"):
+        _reasoning_payload(
+            payload_id="rs_first",
+            previous_compaction_id="cmp_missing",
+            machine=[],
+            sides=_sides_update(),
         )
-
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
-
-
-async def test_ingest_response_request_rejects_reasoning_with_none_previous_compaction_id_after_compaction() -> None:
-    compaction = _compaction_payload(payload_id="cmp_root", machine={"active": []}, sides=Sides())
-    payload = _reasoning_payload(
-        payload_id="rs_first",
-        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(compaction), _sealed_reasoning(payload)]),
-            keyring=_keyring(),
-        )
-
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "reasoning_previous_compaction_id_mismatch"
 
 
 async def test_ingest_response_request_rejects_reasoning_when_guarded_patch_shape_drifts() -> None:
@@ -1996,7 +1965,6 @@ async def test_ingest_response_request_rejects_reasoning_when_guarded_patch_shap
     )
     payload = _reasoning_payload(
         payload_id="rs_first",
-        previous_compaction_id=compaction.id,
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             patches={

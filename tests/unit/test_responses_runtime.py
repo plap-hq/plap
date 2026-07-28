@@ -8,7 +8,6 @@ from typing import cast
 from uuid import uuid4
 
 import anyio
-import jsonpatch
 import pytest
 import svcs
 from box import Box
@@ -21,9 +20,9 @@ from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, Ch
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
 from plap.plugins.core.loop import UsageLedger, response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
-from plap.responses.contracts.items import ResponseCompactionItem, ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
-from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, SidesUpdate, ToolCall
-from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
+from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
+from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, ToolCall
+from plap.responses.ingest.sealing import open_call_id, open_reasoning_payload
 from plap.responses.state import INTERRUPTED_TOOL_OUTPUT, State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -117,7 +116,6 @@ def _ingested(*, active: set[str] | None = None) -> Ingested:
         machine={},
         sides=Sides(active={MAIN_SIDE} if active is None else active),
         last_reasoning_id=None,
-        current_compaction_id=None,
     )
 
 
@@ -518,7 +516,6 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
             machine={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
 
@@ -760,7 +757,6 @@ async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
             machine={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
@@ -792,7 +788,6 @@ async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> 
             machine={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
@@ -887,7 +882,6 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
             machine={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
     state.activate(MAIN_SIDE)
@@ -914,7 +908,6 @@ async def test_state_finalize_materializes_parked_text_tail_after_activation() -
             machine={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         )
     )
     state.activate(MAIN_SIDE)
@@ -943,7 +936,6 @@ async def test_state_finalize_materializes_partial_cross_lane_settlement() -> No
             machine={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
@@ -971,7 +963,6 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
             machine={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
-            current_compaction_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
@@ -1030,72 +1021,6 @@ async def test_state_finalize_keeps_closed_assistant_with_user_tail_hidden() -> 
     assert payload.sides.main[1].content == "tail"
 
 
-async def test_state_compaction_finishes_empty_reasoning_then_rebases() -> None:
-    store = _RecordingStore()
-    channels = _RecordingChannels()
-    state = _state(store, channels)
-
-    state.main = [Message(role="assistant", content="hello")]
-    await state.flush()
-
-    state.machine = state.machine.model_copy(update={"active": ["reviewer"]})
-    state.sides["reviewer"] = [Message(role="assistant", content="review")]
-    state.main = [Message(role="assistant", content="post-compaction")]
-
-    await state.compaction(created_by="runtime")
-
-    response = state.coordinator.current_response()
-    assert isinstance(response.output[0], ResponseReasoningItem)
-    reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning_payload.machine == []
-    assert reasoning_payload.sides == SidesUpdate()
-    assert isinstance(response.output[1], ResponseCompactionItem)
-    compaction_payload = open_compaction_payload(response.output[1].encrypted_content, keyring=_keyring())
-    assert compaction_payload.machine == {"active": ["reviewer"]}
-    assert compaction_payload.sides[MAIN_SIDE][-1].content == "post-compaction"
-    assert compaction_payload.sides["reviewer"][0].content == "review"
-    assert state.machine.to_primitive() == {"active": ["reviewer"]}
-    assert state.main == []
-
-
-async def test_state_compaction_restores_active_and_inactive_call_residue() -> None:
-    state = _state(ingested=_ingested(active={MAIN_SIDE}))
-    main_assistant = Message(
-        role="assistant",
-        tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")],
-    )
-    reviewer_assistant = Message(
-        role="assistant",
-        tool_calls=[ToolCall(id="call_reviewer", name="review_tool", arguments="{}")],
-    )
-    state.main = [main_assistant]
-    state.sides["reviewer"] = [reviewer_assistant]
-
-    await state.compaction()
-
-    response = state.coordinator.current_response()
-    assert isinstance(response.output[0], ResponseCompactionItem)
-    compaction = open_compaction_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert compaction.sides.active == {MAIN_SIDE}
-    assert compaction.sides.get(MAIN_SIDE) is None
-    assert compaction.sides["reviewer"] == []
-
-    assert isinstance(response.output[1], ResponseReasoningItem)
-    reasoning = open_reasoning_payload(response.output[1].encrypted_content, keyring=_keyring())
-    assert reasoning.sides.main == [
-        main_assistant,
-        Message(role="tool", tool_call_id="call_main", content=INTERRUPTED_TOOL_OUTPUT),
-    ]
-    reviewer_patch = reasoning.sides.patches["reviewer"].patch
-    assert reviewer_patch is not None
-    assert jsonpatch.apply_patch([], reviewer_patch) == [reviewer_assistant.to_primitive()]
-
-    await state.finalize()
-
-    calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
-    assert [open_call_id(item.call_id, keyring=_keyring(), side_codes=_side_codes()).side for item in calls] == [MAIN_SIDE]
-
-
 async def test_run_response_finishes_all_public_calls_when_cancelled_during_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _RecordingStore()
     channels = _RecordingChannels()
@@ -1118,7 +1043,6 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_fina
                 },
             ),
             last_reasoning_id=None,
-            current_compaction_id=None,
         ),
     )
     state.activate(MAIN_SIDE)

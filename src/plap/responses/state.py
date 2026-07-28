@@ -120,19 +120,6 @@ class State:
                 raise RuntimeError(f"{label}[{index}] must be a closed non-assistant tail message")
         return prefix, anchor, suffix, after, open_calls
 
-    def _closed_and_residue(
-        self,
-        messages: list[Message],
-        *,
-        label: str,
-    ) -> tuple[list[Message], list[Message]]:
-        prefix, anchor, suffix, after, open_calls = self._split_tail(messages, label=label)
-        if anchor is None:
-            return [*deepcopy(prefix), *deepcopy(after)], []
-        if not open_calls:
-            return deepcopy(messages), []
-        return prefix, [anchor, *suffix]
-
     def _stubbed(self, messages: list[Message], *, label: str) -> list[Message]:
         prefix, anchor, suffix, after, open_calls = self._split_tail(messages, label=label)
         if anchor is None:
@@ -319,43 +306,3 @@ class State:
             await self.coordinator.emit(visible_message)
         for item in visible_calls:
             await self.coordinator.emit(item)
-
-    async def compaction(self, *, created_by: str | None = None) -> None:
-        if self._reasoning_id is not None:
-            await self.coordinator.finish_reasoning(machine=[], sides=SidesUpdate())
-            self._reasoning_id = None
-
-        self._validate_main()
-        full_machine = self.machine.model_copy(deep=True)
-        full_sides = deepcopy(self.sides)
-        residue_sides: dict[str, list[Message]] = {}
-
-        for side, messages in list(full_sides.items()):
-            if side == MAIN_SIDE:
-                continue
-            closed, residue = self._closed_and_residue(messages, label=f"{side} side")
-            full_sides[side] = closed
-            if residue:
-                residue_sides[side] = residue
-
-        main_present = MAIN_SIDE in full_sides.messages
-        closed_main, residue_main = self._closed_and_residue(self.history(MAIN_SIDE), label="main history")
-        if closed_main or main_present:
-            full_sides[MAIN_SIDE] = closed_main
-
-        await self.coordinator.emit_compaction(
-            machine=full_machine.to_primitive(),
-            sides=full_sides,
-            created_by=created_by,
-        )
-
-        self._base_machine = full_machine
-        self._base_sides = deepcopy(full_sides)
-        self.machine = full_machine.model_copy(deep=True)
-        self.sides = deepcopy(full_sides)
-        for side, residue in residue_sides.items():
-            self.sides[side] = [*(self.sides.get(side) or []), *residue]
-        self.main = residue_main
-
-        if residue_main or residue_sides:
-            await self.flush()

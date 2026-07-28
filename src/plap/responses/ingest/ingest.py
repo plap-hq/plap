@@ -976,7 +976,6 @@ class _Replay:
     allowed_sides: set[Side]
     calls_by_side: dict[Side, _SideCalls] = field(default_factory=dict)
     main: _Main = field(default_factory=_Main)
-    current_compaction_id: str | None = None
     last_reasoning_id: str | None = None
 
     def _sync_main(self) -> None:
@@ -1026,11 +1025,6 @@ class _Replay:
                 reason="reasoning_previous_reasoning_id_mismatch",
                 private_message="reasoning payload previous_reasoning_id does not match replay history",
             )
-        if payload.previous_compaction_id != self.current_compaction_id:
-            raise _reasoning_replay_error(
-                reason="reasoning_previous_compaction_id_mismatch",
-                private_message="reasoning payload previous_compaction_id does not match replay history",
-            )
 
     def _step_compaction(self, payload: CompactionPayload) -> None:
         self.machine = dict(payload.machine)
@@ -1043,7 +1037,6 @@ class _Replay:
                 reason="compaction_contains_unresolved_tool_call",
                 private_message="compaction side histories must not contain unresolved tool calls",
             )
-        self.current_compaction_id = payload.id
         self.last_reasoning_id = None
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
@@ -1130,7 +1123,6 @@ class _Replay:
             machine=self.machine,
             sides=self.sides,
             last_reasoning_id=self.last_reasoning_id,
-            current_compaction_id=self.current_compaction_id,
         )
 
     def step(self, item: _DecodedInput) -> None:

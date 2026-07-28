@@ -178,7 +178,7 @@ def test_rejects_empty_compaction_context_management() -> None:
             }
         )
     except ValidationError as exc:
-        assert "at least one threshold or round override" in str(exc)
+        assert "compact_threshold" in str(exc)
     else:
         raise AssertionError("expected validation error")
 

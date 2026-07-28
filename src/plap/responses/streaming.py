@@ -13,7 +13,6 @@ from plap.responses.contracts import (
     ConversationReference,
     OutputRefusalContent,
     OutputTextContent,
-    ResponseCompactionItem,
     ResponseCompletedEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
@@ -44,9 +43,9 @@ from plap.responses.contracts import (
     ResponseUsage,
     SummaryTextContent,
 )
-from plap.responses.ingest.models import CompactionPayload, ReasoningPayload, Sides, SidesUpdate
-from plap.responses.ingest.patch import JSONPatch, JSONValue
-from plap.responses.ingest.sealing import seal_compaction_payload, seal_reasoning_payload
+from plap.responses.ingest.models import ReasoningPayload, SidesUpdate
+from plap.responses.ingest.patch import JSONPatch
+from plap.responses.ingest.sealing import seal_reasoning_payload
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.summary import SummaryDelta, SummaryDone
 
@@ -107,35 +106,24 @@ def _new_reasoning_id() -> str:
     return f"rs_{secrets.token_urlsafe(18)}"
 
 
-def _new_compaction_id() -> str:
-    return f"cmp_{secrets.token_urlsafe(18)}"
-
-
 @dataclass(frozen=True, slots=True)
 class _Lineage:
     item_id: str
     previous_reasoning_id: str | None
-    previous_compaction_id: str | None
 
 
 @dataclass(slots=True)
 class _Chain:
     last_reasoning_id: str | None = None
-    current_compaction_id: str | None = None
 
     def next_reasoning(self) -> _Lineage:
         return _Lineage(
             item_id=_new_reasoning_id(),
             previous_reasoning_id=self.last_reasoning_id,
-            previous_compaction_id=self.current_compaction_id,
         )
 
     def record_reasoning(self, item_id: str) -> None:
         self.last_reasoning_id = item_id
-
-    def record_compaction(self, compaction_id: str) -> None:
-        self.current_compaction_id = compaction_id
-        self.last_reasoning_id = None
 
 
 @dataclass(slots=True)
@@ -159,7 +147,6 @@ class StreamCoordinator:
         response_id: str | None = None,
         sealing_keyring: SealingKeyring | None = None,
         last_reasoning_id: str | None = None,
-        current_compaction_id: str | None = None,
     ) -> None:
         if (prepared is None) != (response_store is None):
             raise ValueError("prepared and response_store must either both be provided or both be omitted")
@@ -169,10 +156,7 @@ class StreamCoordinator:
         self._sealing_keyring = sealing_keyring
         self._response = _new_response(request, response_id=response_id)
         self._items: list[ResponseOutputItem] = []
-        self._chain = _Chain(
-            last_reasoning_id=last_reasoning_id,
-            current_compaction_id=current_compaction_id,
-        )
+        self._chain = _Chain(last_reasoning_id=last_reasoning_id)
         self._draft: _Draft | None = None
         self._sequence_number = 0
 
@@ -209,7 +193,7 @@ class StreamCoordinator:
 
     def _require_sealing_keyring(self) -> SealingKeyring:
         if self._sealing_keyring is None:
-            raise RuntimeError("stream coordinator requires a sealing keyring for reasoning or compaction items")
+            raise RuntimeError("stream coordinator requires a sealing keyring for reasoning items")
         return self._sealing_keyring
 
     async def _publish(self, event: object) -> None:
@@ -267,7 +251,7 @@ class StreamCoordinator:
         payload = ReasoningPayload(
             id=lineage.item_id,
             previous_reasoning_id=lineage.previous_reasoning_id,
-            previous_compaction_id=lineage.previous_compaction_id,
+            previous_compaction_id=None,
             machine=machine,
             sides=sides,
         )
@@ -573,29 +557,6 @@ class StreamCoordinator:
         self._chain.record_reasoning(draft.lineage.item_id)
         self._draft = None
         return item.id
-
-    async def emit_compaction(
-        self,
-        *,
-        machine: dict[str, JSONValue],
-        sides: Sides,
-        created_by: str | None = None,
-    ) -> str:
-        if self._draft is not None:
-            raise RuntimeError("cannot emit a compaction item while a reasoning item is active")
-        compaction_id = _new_compaction_id()
-        item = ResponseCompactionItem(
-            created_by=created_by,
-            encrypted_content=seal_compaction_payload(
-                CompactionPayload(id=compaction_id, machine=machine, sides=sides),
-                keyring=self._require_sealing_keyring(),
-            ),
-            id=compaction_id,
-            type="compaction",
-        )
-        await self.emit(item)
-        self._chain.record_compaction(compaction_id)
-        return compaction_id
 
     async def completed(
         self,

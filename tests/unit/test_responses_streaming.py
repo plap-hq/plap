@@ -13,8 +13,8 @@ from plap.responses.contracts import (
     ResponseStreamEvent,
     SummaryTextContent,
 )
-from plap.responses.ingest.models import Message, Sides, SidesUpdate
-from plap.responses.ingest.sealing import open_compaction_payload, open_reasoning_payload
+from plap.responses.ingest.models import Message, SidesUpdate
+from plap.responses.ingest.sealing import open_reasoning_payload
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 from plap.responses.summary import SummaryDelta, SummaryDone
@@ -102,10 +102,6 @@ def _open_reasoning_item(item) -> object:
     return open_reasoning_payload(item.encrypted_content, keyring=_keyring())
 
 
-def _open_compaction_item(item) -> object:
-    return open_compaction_payload(item.encrypted_content, keyring=_keyring())
-
-
 def _published_event_types(channels: _RecordingChannels) -> list[str]:
     return [_STREAM_EVENT_ADAPTER.validate_python(payload).type for _, payload in channels.published]
 
@@ -126,32 +122,8 @@ async def test_begin_then_finish_reasoning_chains_previous_reasoning_id() -> Non
 
     assert first_id == first_item.id == first_payload.id
     assert first_payload.previous_reasoning_id is None
-    assert first_payload.previous_compaction_id is None
     assert second_id == second_item.id == second_payload.id
     assert second_payload.previous_reasoning_id == first_payload.id
-    assert second_payload.previous_compaction_id is None
-
-
-async def test_emit_compaction_resets_reasoning_chain_and_becomes_anchor() -> None:
-    channels = _RecordingChannels()
-    coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
-
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("first"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("first"))
-    first_reasoning = _open_reasoning_item(_last_output_item(coordinator))
-
-    await coordinator.emit_compaction(machine={"active": ["reviewer"]}, sides=Sides())
-    compaction_item = _last_output_item(coordinator)
-    compaction_payload = _open_compaction_item(compaction_item)
-
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("after compaction"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("after compaction"))
-    second_reasoning = _open_reasoning_item(_last_output_item(coordinator))
-
-    assert compaction_item.id == compaction_payload.id
-    assert second_reasoning.previous_reasoning_id is None
-    assert second_reasoning.previous_compaction_id == compaction_payload.id
-    assert first_reasoning.id != second_reasoning.id
 
 
 async def test_reasoning_item_lineage_stays_stable_across_replace_and_finish() -> None:
@@ -185,23 +157,8 @@ async def test_reasoning_item_lineage_stays_stable_across_replace_and_finish() -
 
     assert begun.id == replaced.id == finished.id == finished_item.id == reasoning_id
     assert begun.previous_reasoning_id == replaced.previous_reasoning_id == finished.previous_reasoning_id
-    assert begun.previous_compaction_id == replaced.previous_compaction_id == finished.previous_compaction_id
     assert finished_item.summary == [SummaryTextContent(text="summary part", type="summary_text")]
     assert next_payload.previous_reasoning_id == finished.id
-
-
-async def test_emit_compaction_rejects_active_reasoning_item() -> None:
-    channels = _RecordingChannels()
-    coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
-
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
-
-    try:
-        await coordinator.emit_compaction(machine={}, sides=Sides())
-    except RuntimeError as exc:
-        assert "active" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("expected compaction to reject active reasoning item")
 
 
 async def test_reasoning_summary_deltas_publish_expected_event_types() -> None:
@@ -243,7 +200,6 @@ async def test_begin_then_finish_reasoning_uses_seeded_chain_state() -> None:
         channels=channels,
         sealing_keyring=_keyring(),
         last_reasoning_id="rs_seed",
-        current_compaction_id="cmp_seed",
     )
 
     await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("seeded"))
@@ -251,7 +207,6 @@ async def test_begin_then_finish_reasoning_uses_seeded_chain_state() -> None:
     payload = _open_reasoning_item(_last_output_item(coordinator))
 
     assert payload.previous_reasoning_id == "rs_seed"
-    assert payload.previous_compaction_id == "cmp_seed"
 
 
 async def test_cancelled_flushes_active_reasoning_item_without_completing_chain() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 
 from plap.responses.contracts.base import (
     Metadata,
@@ -89,23 +89,11 @@ class StreamOptions(StrictModel):
 
 
 class ContextManagementCompaction(StrictModel):
-    compact_threshold: int | None = Field(
-        default=None,
+    compact_threshold: int = Field(
         ge=0,
         description="Token threshold at which dedicated context compaction should be attempted.",
     )
-    compact_max_rounds: int | None = Field(
-        default=None,
-        ge=0,
-        description="Maximum compaction rounds allowed for this request.",
-    )
     type: Literal["compaction"] = Field(description="Context-management discriminator.")
-
-    @model_validator(mode="after")
-    def validate_override(self) -> ContextManagementCompaction:
-        if self.compact_threshold is None and self.compact_max_rounds is None:
-            raise ValueError("compaction context_management requires at least one threshold or round override")
-        return self
 
 
 class ResponseCreateRequest(StrictModel):

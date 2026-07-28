@@ -373,7 +373,12 @@ class ReasoningPayload:
     def __post_init__(self) -> None:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
-        _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
+        previous_compaction_id = _optional_non_empty_string(
+            self.previous_compaction_id,
+            label="reasoning payload previous_compaction_id",
+        )
+        if previous_compaction_id is not None:
+            raise ValueError("reasoning payload previous_compaction_id is no longer supported")
 
     def to_primitive(self) -> dict[str, object]:
         return {
@@ -443,4 +448,3 @@ class Ingested:
     machine: dict[str, JSONValue]
     sides: Sides
     last_reasoning_id: str | None
-    current_compaction_id: str | None
