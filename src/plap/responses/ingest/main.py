@@ -6,7 +6,17 @@ from enum import StrEnum
 from plap.responses.contracts import RequestFunctionCallItem, RequestFunctionCallOutputItem
 from plap.responses.ingest import content
 from plap.responses.ingest.errors import reasoning_replay_error, tool_replay_error
-from plap.responses.ingest.models import MainUpdate, Message, MessagePatch, ToolCall, split_main_updates
+from plap.responses.ingest.models import (
+    CompactedMainTail,
+    HiddenMainTail,
+    MainTail,
+    MainUpdate,
+    Message,
+    MessagePatch,
+    PublicMainTail,
+    ToolCall,
+    split_main_updates,
+)
 
 
 class CallPhase(StrEnum):
@@ -94,10 +104,11 @@ class _Call:
 @dataclass(slots=True)
 class _AssistantBundle:
     private: Message
-    source: Message
+    source: Message | None
     calls: list[_Call] = field(default_factory=list)
     outputs: list[Message] = field(default_factory=list)
     public: Message | None = None
+    snapshot: bool = False
 
     def call(self, call_id: str) -> _Call | None:
         for call in self.calls:
@@ -117,6 +128,17 @@ class _AssistantBundle:
 
     def render(self) -> list[Message]:
         return [self.assistant(), *self.outputs]
+
+    def tail(self) -> MainTail:
+        if self.public is not None:
+            return PublicMainTail(source=self.source)
+        if self.snapshot:
+            if self.source is None:  # pragma: no cover - snapshots are authenticated
+                raise RuntimeError("compacted main tail has no authenticated source")
+            return CompactedMainTail(source=self.source)
+        if self.source is None:  # pragma: no cover - hidden bundles are authenticated
+            raise RuntimeError("hidden main tail has no authenticated source")
+        return HiddenMainTail(source=self.source)
 
 
 type _Node = Message | _AssistantBundle
@@ -147,8 +169,20 @@ class MainReplay:
                 return bundle, call
         return None
 
-    def _new_bundle(self, message: Message) -> _AssistantBundle:
-        bundle = _AssistantBundle(private=message, source=message)
+    def _new_bundle(
+        self,
+        message: Message,
+        *,
+        authenticated: bool = True,
+        public: bool = False,
+        snapshot: bool = False,
+    ) -> _AssistantBundle:
+        bundle = _AssistantBundle(
+            private=message,
+            source=message if authenticated else None,
+            public=message if public else None,
+            snapshot=snapshot,
+        )
         for tool_call in message.tool_calls:
             if self._find_call(tool_call.id) is not None:
                 raise tool_replay_error(
@@ -180,7 +214,7 @@ class MainReplay:
         call.settle_hidden()
         bundle.outputs.append(message)
 
-    def _append_hidden_message(self, message: Message) -> _AssistantBundle | None:
+    def _append_hidden_message(self, message: Message, *, snapshot: bool = False) -> _AssistantBundle | None:
         if message.is_tool():
             owner = self._find_call(message.tool_call_id or "")
             if owner is None:
@@ -191,7 +225,7 @@ class MainReplay:
             self._apply_hidden_output(owner[0], message)
             return None
         if message.is_assistant():
-            bundle = self._new_bundle(message)
+            bundle = self._new_bundle(message, snapshot=snapshot)
             self.nodes.append(bundle)
             self.authenticated_tail = bundle
             return bundle
@@ -255,7 +289,7 @@ class MainReplay:
         self.pending_public = None
         self._next_call_order = 0
         for message in messages:
-            self._append_hidden_message(message)
+            self._append_hidden_message(message, snapshot=True)
 
     def patch_matches_authenticated(self, updates: list[MainUpdate]) -> bool:
         patch = split_main_updates(updates)[5]
@@ -298,7 +332,7 @@ class MainReplay:
             self.pending_public = None
             return
         if message.is_assistant():
-            self.nodes.append(self._new_bundle(message))
+            self.nodes.append(self._new_bundle(message, authenticated=False, public=True))
             return
         self.nodes.append(message)
 
@@ -360,6 +394,10 @@ class MainReplay:
                 continue
             rendered.append(node)
         return rendered
+
+    def tail(self) -> MainTail | None:
+        bundle = self._last_assistant()
+        return None if bundle is None else bundle.tail()
 
 
 __all__ = ["CallPhase", "MainReplay"]

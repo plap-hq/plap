@@ -23,9 +23,12 @@ from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import (
     MAIN_SIDE,
+    CompactedMainTail,
+    HiddenMainTail,
     Ingested,
     Message,
     MessagePatch,
+    PublicMainTail,
     ReasoningCheckpoint,
     ReasoningPatch,
     Sides,
@@ -124,6 +127,7 @@ def _ingested(*, active: set[str] | None = None) -> Ingested:
     return Ingested(
         durable={},
         sides=Sides(active={MAIN_SIDE} if active is None else active),
+        main_tail=None,
         last_reasoning_id=None,
     )
 
@@ -524,6 +528,7 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
         ingested=Ingested(
             durable={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            main_tail=None,
             last_reasoning_id=None,
         ),
     )
@@ -765,6 +770,7 @@ async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
         ingested=Ingested(
             durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
@@ -797,6 +803,7 @@ async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> 
         ingested=Ingested(
             durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
@@ -893,6 +900,7 @@ async def test_state_finalize_emits_full_non_main_checkpoint_after_user() -> Non
                 active={MAIN_SIDE},
                 messages={MAIN_SIDE: [Message(role="user", content="question")]},
             ),
+            main_tail=None,
             last_reasoning_id="rs_old",
             checkpoint_required=True,
         )
@@ -949,6 +957,7 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
         ingested=Ingested(
             durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         ),
     )
@@ -976,6 +985,7 @@ async def test_state_finalize_materializes_parked_text_tail_after_activation() -
         ingested=Ingested(
             durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
@@ -991,6 +1001,95 @@ async def test_state_finalize_materializes_parked_text_tail_after_activation() -
     assert response.output[1].content[0].text == "delayed answer"
 
 
+async def test_state_finalize_does_not_republish_active_public_tail() -> None:
+    source = Message(role="assistant", content="sealed answer", reasoning_content="private")
+    public = Message(role="assistant", content="edited answer", reasoning_content="private")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [public]}),
+            main_tail=PublicMainTail(source=source),
+            last_reasoning_id="rs_public",
+        )
+    )
+
+    await state.finalize()
+
+    assert state.coordinator.current_response().output == []
+
+
+async def test_state_finalize_does_not_republish_reactivated_public_tail() -> None:
+    source = Message(role="assistant", content="sealed answer", reasoning_content="private")
+    public = Message(role="assistant", content="edited answer", reasoning_content="private")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(active=set(), messages={MAIN_SIDE: [public]}),
+            main_tail=PublicMainTail(source=source),
+            last_reasoning_id="rs_public",
+        )
+    )
+    state.activate(MAIN_SIDE)
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert isinstance(reasoning.state, ReasoningPatch)
+    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.main == []
+
+
+async def test_state_finalize_publishes_new_active_tail_after_public_history() -> None:
+    source = Message(role="assistant", content="sealed answer", reasoning_content="private")
+    public = Message(role="assistant", content="edited answer", reasoning_content="private")
+    current = Message(role="assistant", content="new answer", reasoning_content="new private")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [public]}),
+            main_tail=PublicMainTail(source=source),
+            last_reasoning_id="rs_public",
+        )
+    )
+    state.main.append(current)
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert reasoning.main == [current, MessagePatch(current)]
+    assert isinstance(response.output[1], ResponseMessageItem)
+    assert response.output[1].content[0].text == "new answer"
+
+
+async def test_state_finalize_does_not_publish_reactivated_compacted_tail() -> None:
+    snapshot = Message(role="assistant", content="historical answer", reasoning_content="compacted private")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(active=set(), messages={MAIN_SIDE: [snapshot]}),
+            main_tail=CompactedMainTail(source=snapshot),
+            last_reasoning_id=None,
+            last_compaction_id="cmp_history",
+        )
+    )
+    state.activate(MAIN_SIDE)
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert len(response.output) == 1
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert isinstance(reasoning.state, ReasoningPatch)
+    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.main == []
+
+
 async def test_state_finalize_repositions_persisted_call_only_tail_without_public_message() -> None:
     assistant = Message(
         role="assistant",
@@ -1000,6 +1099,7 @@ async def test_state_finalize_repositions_persisted_call_only_tail_without_publi
         ingested=Ingested(
             durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id="rs_parked",
         )
     )
@@ -1028,6 +1128,7 @@ async def test_state_finalize_materializes_partial_cross_lane_settlement() -> No
         ingested=Ingested(
             durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
@@ -1055,6 +1156,7 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
         ingested=Ingested(
             durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
@@ -1134,6 +1236,12 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_fina
                         )
                     ],
                 },
+            ),
+            main_tail=HiddenMainTail(
+                source=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")],
+                ),
             ),
             last_reasoning_id=None,
         ),

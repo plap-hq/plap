@@ -16,7 +16,9 @@ from plap.responses.ingest import content
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
+    HiddenMainTail,
     Ingested,
+    MainTail,
     Message,
     MessagePatch,
     ReasoningCheckpoint,
@@ -57,6 +59,7 @@ class State:
     _side_codes: Mapping[str, int]
     _base_durable: DurableState
     _base_sides: Sides
+    _base_main_tail: MainTail | None
     _reasoning_id: str | None
     _checkpoint_required: bool
 
@@ -85,6 +88,7 @@ class State:
             _side_codes=dict(side_codes),
             _base_durable=base_durable,
             _base_sides=base_sides,
+            _base_main_tail=deepcopy(ingested.main_tail),
             _reasoning_id=None,
             _checkpoint_required=ingested.checkpoint_required,
             durable=base_durable.model_copy(deep=True),
@@ -215,6 +219,23 @@ class State:
             return None
         return anchor
 
+    def _main_publication(
+        self,
+        *,
+        sides: Sides,
+        main: list[Message],
+    ) -> tuple[Message | None, Message | None]:
+        if MAIN_SIDE not in sides.active:
+            return None, None
+        visible = self._logical_main(sides=sides, main=main)
+        if visible is None:
+            return None, None
+        if any(message is visible for message in main):
+            return visible, None
+        if not isinstance(self._base_main_tail, HiddenMainTail):
+            return None, None
+        return visible, self._base_main_tail.source
+
     def _main_update(
         self,
         main: list[Message],
@@ -222,13 +243,16 @@ class State:
         visible_message: ResponseMessageItem | None,
         *,
         has_visible_calls: bool,
+        persisted_source: Message | None,
     ) -> list[Message | MessagePatch]:
         if visible is None or (visible_message is None and not has_visible_calls):
             return deepcopy(main)
 
         visible_index = next((index for index, message in enumerate(main) if message is visible), None)
         if visible_index is None:
-            return [*deepcopy(main), MessagePatch(message=deepcopy(visible))]
+            if persisted_source is None:  # pragma: no cover - _main_publication supplies persisted provenance
+                raise RuntimeError("persisted main publication requires an authenticated source")
+            return [*deepcopy(main), MessagePatch(message=deepcopy(persisted_source))]
 
         if visible_message is None:
             return deepcopy(main)
@@ -300,11 +324,11 @@ class State:
 
     async def finalize(self) -> None:
         durable, sides, main = self._live_snapshot()
-        visible_main = self._logical_main(sides=sides, main=main) if MAIN_SIDE in sides.active else None
+        visible_main, persisted_source = self._main_publication(sides=sides, main=main)
         visible_message = None if visible_main is None else self._message_item(visible_main)
         visible_calls: list[ResponseFunctionCallItem] = []
         main_open_calls: list[ChatToolCall] = []
-        if MAIN_SIDE in sides.active:
+        if visible_main is not None:
             main_open_calls = self._split_tail(
                 [*(sides.get(MAIN_SIDE, []) or []), *main],
                 label="main history",
@@ -315,6 +339,7 @@ class State:
             visible_main,
             visible_message,
             has_visible_calls=bool(main_open_calls),
+            persisted_source=persisted_source,
         )
 
         state = self._build_update(durable=durable, sides=sides)

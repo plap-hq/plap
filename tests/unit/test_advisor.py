@@ -28,7 +28,7 @@ from plap.plugins.advisor import advise_response
 from plap.plugins.core.ledger import UsageLedger
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
-from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, Sides
+from plap.responses.ingest.models import MAIN_SIDE, HiddenMainTail, Ingested, Message, Sides
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -276,6 +276,7 @@ def _state(
         or Ingested(
             durable={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            main_tail=None,
             last_reasoning_id=None,
         ),
         prepared=_prepared(actual_request),
@@ -283,6 +284,27 @@ def _state(
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
         side_codes={MAIN_SIDE: 0, _ADVISOR_SIDE: 1},
+    )
+
+
+def _after_tool_ingested() -> Ingested:
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
+    )
+    return Ingested(
+        durable={},
+        sides=Sides(
+            messages={
+                MAIN_SIDE: [
+                    Message(role="user", content="hello"),
+                    assistant,
+                    Message(role="tool", tool_call_id="call_read", content="file contents"),
+                ]
+            }
+        ),
+        main_tail=HiddenMainTail(source=assistant),
+        last_reasoning_id=None,
     )
 
 
@@ -555,22 +577,7 @@ async def test_after_tool_advice_reaches_next_main_request() -> None:
     client = _Client(main=[_text_step("final answer")], advisor=[_advisor_step("Use the tool output."), _advisor_step("")])
     state = _state(
         client,
-        ingested=Ingested(
-            durable={},
-            sides=Sides(
-                messages={
-                    MAIN_SIDE: [
-                        Message(role="user", content="hello"),
-                        Message(
-                            role="assistant",
-                            tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
-                        ),
-                        Message(role="tool", tool_call_id="call_read", content="file contents"),
-                    ]
-                }
-            ),
-            last_reasoning_id=None,
-        ),
+        ingested=_after_tool_ingested(),
     )
 
     await core.run_response(state=state)
@@ -589,22 +596,7 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
     client = _Client(main=[_text_step("final answer")], advisor=[_advisor_step("Use the tool output."), _advisor_step("")])
     state = _state(
         client,
-        ingested=Ingested(
-            durable={},
-            sides=Sides(
-                messages={
-                    MAIN_SIDE: [
-                        Message(role="user", content="hello"),
-                        Message(
-                            role="assistant",
-                            tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
-                        ),
-                        Message(role="tool", tool_call_id="call_read", content="file contents"),
-                    ]
-                }
-            ),
-            last_reasoning_id=None,
-        ),
+        ingested=_after_tool_ingested(),
     )
 
     await core.run_response(state=state)
@@ -622,22 +614,7 @@ async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeyp
     )
     state = _state(
         client,
-        ingested=Ingested(
-            durable={},
-            sides=Sides(
-                messages={
-                    MAIN_SIDE: [
-                        Message(role="user", content="hello"),
-                        Message(
-                            role="assistant",
-                            tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
-                        ),
-                        Message(role="tool", tool_call_id="call_read", content="file contents"),
-                    ]
-                }
-            ),
-            last_reasoning_id=None,
-        ),
+        ingested=_after_tool_ingested(),
     )
 
     await core.run_response(state=state)

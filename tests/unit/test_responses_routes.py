@@ -338,7 +338,7 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     await _run_stream(
         prepared=_prepared(),
-        ingested=Ingested(durable={}, sides=Sides(), last_reasoning_id=None),
+        ingested=Ingested(durable={}, sides=Sides(), main_tail=None, last_reasoning_id=None),
         coordinator=_coordinator(),
         svcs=container,
     )

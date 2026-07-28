@@ -50,6 +50,39 @@ type Side = str
 MAIN_SIDE: Side = "main"
 
 
+def _validate_main_source(source: Message) -> None:
+    if not source.is_assistant():
+        raise ValueError("main tail source must be an assistant message")
+
+
+@dataclass(frozen=True, slots=True)
+class HiddenMainTail:
+    source: Message
+
+    def __post_init__(self) -> None:
+        _validate_main_source(self.source)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicMainTail:
+    source: Message | None
+
+    def __post_init__(self) -> None:
+        if self.source is not None:
+            _validate_main_source(self.source)
+
+
+@dataclass(frozen=True, slots=True)
+class CompactedMainTail:
+    source: Message
+
+    def __post_init__(self) -> None:
+        _validate_main_source(self.source)
+
+
+type MainTail = HiddenMainTail | PublicMainTail | CompactedMainTail
+
+
 def _required_side(value: object, *, label: str) -> Side:
     return _required_string(value, label=label)
 
@@ -472,6 +505,7 @@ class CallID:
 class Ingested:
     durable: dict[str, JSONValue]
     sides: Sides
+    main_tail: MainTail | None
     last_reasoning_id: str | None
     last_compaction_id: str | None = None
     checkpoint_required: bool = False

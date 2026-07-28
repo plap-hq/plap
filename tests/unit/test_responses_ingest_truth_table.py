@@ -251,9 +251,12 @@ from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
+    CompactedMainTail,
     CompactionPayload,
+    HiddenMainTail,
     Message,
     MessagePatch,
+    PublicMainTail,
     ReasoningCheckpoint,
     ReasoningPatch,
     ReasoningPayload,
@@ -441,6 +444,7 @@ async def test_patch_after_compaction_uses_null_reasoning_predecessor() -> None:
 
     assert result.durable == {"root": True, "next": True}
     assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="old")]
+    assert result.main_tail == CompactedMainTail(source=Message(role="assistant", content="old"))
     assert result.last_compaction_id == compaction.id
 
 
@@ -646,6 +650,7 @@ async def test_public_patch_uses_next_assistant_without_content_validation(
     result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), *between, _message("edited")])
 
     assert result.sides[MAIN_SIDE] == [Message(role="user", content="u"), *expected]
+    assert result.main_tail == PublicMainTail(source=private)
 
 
 async def test_first_fabricated_assistant_consumes_public_patch() -> None:
@@ -718,6 +723,12 @@ async def test_equal_public_assistants_remain_distinct_occurrences() -> None:
     ]
 
 
+async def test_standalone_public_tail_has_no_authenticated_source() -> None:
+    result = await _ingest([_message("public")])
+
+    assert result.main_tail == PublicMainTail(source=None)
+
+
 async def test_public_source_match_moves_live_source_past_plain_message() -> None:
     source = Message(role="assistant", content="sealed", reasoning_content="private")
     root = _patch("rs_root", main=[source])
@@ -736,6 +747,46 @@ async def test_public_source_match_moves_live_source_past_plain_message() -> Non
         Message(role="developer", content="developer note"),
         Message(role="assistant", content="edited", reasoning_content="private"),
     ]
+    assert result.main_tail == PublicMainTail(source=source)
+
+
+async def test_repeated_public_timewarp_replaces_projection_on_one_bundle() -> None:
+    source = Message(role="assistant", content="sealed", reasoning_content="private")
+    first = _patch("rs_first", main=[source, MessagePatch(source)])
+    second = _patch("rs_second", previous_reasoning_id=first.id, main=[MessagePatch(source)])
+    third = _patch("rs_third", previous_reasoning_id=second.id, main=[MessagePatch(source)])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(first),
+            _message("first projection"),
+            _sealed_reasoning(second),
+            _message("second projection"),
+            _sealed_reasoning(third),
+            _message("final projection"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="final projection", reasoning_content="private")]
+    assert result.main_tail == PublicMainTail(source=source)
+
+
+async def test_repeated_public_timewarp_with_same_projection_does_not_duplicate_bundle() -> None:
+    source = Message(role="assistant", content="sealed", reasoning_content="private")
+    first = _patch("rs_first", main=[source, MessagePatch(source)])
+    second = _patch("rs_second", previous_reasoning_id=first.id, main=[MessagePatch(source)])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(first),
+            _message("projection"),
+            _sealed_reasoning(second),
+            _message("projection"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="projection", reasoning_content="private")]
+    assert result.main_tail == PublicMainTail(source=source)
 
 
 async def test_sliced_public_source_stages_from_message_patch() -> None:
@@ -893,6 +944,7 @@ async def test_direct_hidden_main_owns_call_without_public_assistant() -> None:
         hidden,
         Message(role="tool", tool_call_id="up_0", content="result"),
     ]
+    assert result.main_tail == HiddenMainTail(source=hidden)
 
 
 async def test_output_empty_patch_is_immediate_hidden_owner() -> None:

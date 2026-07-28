@@ -525,6 +525,7 @@ class _Replay:
         return Ingested(
             durable=self.durable,
             sides=self.sides,
+            main_tail=self.main.tail(),
             last_reasoning_id=self.last_reasoning_id,
             last_compaction_id=self.last_compaction_id,
             checkpoint_required=self.checkpoint_required,

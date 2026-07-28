@@ -151,6 +151,7 @@ def _ingested(url: str = "https://example.com/cat.png") -> Ingested:
     return Ingested(
         durable={},
         sides=Sides(messages={MAIN_SIDE: [_image_message(url)]}),
+        main_tail=None,
         last_reasoning_id=None,
     )
 

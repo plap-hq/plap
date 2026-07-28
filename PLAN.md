@@ -192,6 +192,12 @@ It does not compare against:
 - Arbitrary older assistants.
 - Fabricated message equality.
 The current authenticated tail is the only source candidate.
+Replay also exports transient structural metadata for the final main assistant
+bundle. HiddenMainTail and CompactedMainTail retain their complete authenticated
+source. PublicMainTail retains source A after P(A) B and has no source for an
+unauthenticated standalone public assistant. This metadata is reconstructed
+from request history on every ingestion and is never added to reasoning or
+compaction wire formats.
 9. MessagePatch Representation
 MessagePatch continues carrying the full sealed assistant:
 MessagePatch {
@@ -216,6 +222,7 @@ The main reducer therefore tracks:
 HIDDEN
 AWAITING_PUBLIC_ASSISTANT
 PUBLICLY_ATTACHED
+COMPACTED_SNAPSHOT
 Only AWAITING_PUBLIC_ASSISTANT is invalid at another reasoning boundary or replay completion.
 Public-Bearing Patch
 For:
@@ -298,6 +305,10 @@ The movement excludes:
 - system messages.
 - developer messages.
 If prior fabricated history was sliced away, the patch does not invent it. Fallback staging contains only what is authenticated by P(A) and its current main update.
+An exact repeated P(A) is an explicit revision of the same live bundle. If B
+previously consumed P(A), another P(A) moves that bundle again and the next
+public assistant C replaces B as its public projection. Canonical model history
+contains one bundle rendered as C; B is not retained as a second assistant.
 13. Hidden Timewarp
 For:
 R1(M) RN(P(M)) FC FCO
@@ -498,21 +509,23 @@ A streamed reasoning draft cannot change from checkpoint to patch or patch to ch
 Main text projection and call projection must be computed separately:
 public_message: ResponseMessageItem | None
 public_calls: ResponseFunctionCallItem[]
-visible_message is not None can no longer be the only condition for producing a persisted-tail patch.
-Logical main tail
-Newly appended text/refusal assistant
-Newly appended call-only assistant
-Persisted text/refusal tail being published
-Persisted call-only tail being activated
-Persisted text and calls
-Fully server-settled hidden tail
+Publication eligibility is structural rather than content-based:
+- A new logical assistant appended through State.main is eligible when main is active.
+- A persisted HiddenMainTail is eligible when main is active.
+- A persisted PublicMainTail is historical and is never automatically eligible.
+- A persisted CompactedMainTail is historical and is never automatically eligible.
+- An inactive main tail is never eligible.
+- Active-to-active remains eligible when State.main contains a genuinely new logical assistant.
+- Deactivation and reactivation do not make a public or compacted tail eligible again.
+- The complete source retained by HiddenMainTail, not its rendered assistant, is carried by P(A).
 Producer forms:
 - Newly appended public-bearing assistant with private state or declarations:
   R(M, P(M)), then public M.
-- Persisted public-bearing assistant: R(P(M)), then public M.
+- Persisted hidden public-bearing assistant: R(P(M)), then public M.
 - Newly appended call-only assistant: R(M), then FC.
-- Persisted call-only assistant: R(P(M)), then FC.
+- Persisted hidden call-only assistant: R(P(M)), then FC.
 - Public-only assistant without private state or declarations: public M only.
+- Persisted public and compacted assistants: no automatic patch or public item.
 Public output order:
 R
 optional public message
@@ -527,6 +540,10 @@ FC
 Direct newly generated call-only turn:
 R(M)
 FC
+For stored P(A) B, replay reconstructs PublicMainTail(source=A). A no-op
+finalization therefore emits neither R(P(A)) nor B. A caller may still provide
+another explicit P(A) C as an intentional revision; ingestion accepts it and
+the canonical bundle is rendered with C.
 23. Streaming Lineage
 StreamCoordinator derives lineage from the reasoning state variant.
 Checkpoint:
@@ -661,6 +678,10 @@ No compatibility shim or transitional replay path will remain.
 - Source-mismatching patch preserves the unrelated tail.
 - Sliced source stages from P(A).
 - Staged A never overwrites public content.
+- Repeated P(A) replaces the prior public projection on one live bundle.
+- Repeated P(A) with equal public fields does not duplicate the bundle.
+- Public tail provenance retains source A after A is rendered as B.
+- A compaction snapshot re-roots source identity and is classified as historical.
 30. Required Hidden Main Tests
 - R(M) FC FCO accepts without a public message.
 - R(M) FC rejects for missing output.
@@ -702,6 +723,10 @@ No compatibility shim or transitional replay path will remain.
 - Call-only hidden turns emit no public message.
 - Delayed call-only activation emits R, then FC.
 - Runtime finalization emits message before calls when both exist.
+- An unchanged active public tail emits no output.
+- Reactivating a public tail emits no public message or MessagePatch.
+- Reactivating a compacted tail emits no public message or MessagePatch.
+- Active-to-active with a new State.main assistant still publishes it.
 - Cancellation preserves checkpoint/patch variant.
 - Stored replay preserves chain boundaries.
 - Advisor behavior remains unchanged.
@@ -739,4 +764,6 @@ The rebuild is complete only when:
 - Plain non-assistant messages are not dragged through timewarp.
 - No payload-normalization pass remains.
 - No content-hash publication system remains.
+- Already-public and compacted tails are not automatically republished.
+- Explicit repeated source timewarp revises one bundle rather than duplicating it.
 - No old replay or compatibility path remains.
