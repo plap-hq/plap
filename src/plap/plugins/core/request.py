@@ -145,7 +145,7 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
     ]
     return ChatCompletionRequest(
         model=main.model,
-        messages=[*instructions, *state.history(MAIN_SIDE)],
+        messages=[*instructions, *state.sides[MAIN_SIDE]],
         tools=tools,
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,

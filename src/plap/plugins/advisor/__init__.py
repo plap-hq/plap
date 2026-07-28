@@ -228,7 +228,7 @@ def _rebuild_advisor_side(state: State) -> None:
         if call_id is not None:
             existing_blocks[call_id] = list(current_block)
 
-    history = state.history(MAIN_SIDE)
+    history = list(state.sides[MAIN_SIDE])
     new_side: list[ChatMessage] = []
     current_msgs: list[ChatMessage] = []
     buffered_msgs: list[ChatMessage] = []
@@ -303,7 +303,7 @@ def _advisor_request(
         model=advisor.model,
         messages=[
             ChatMessage(role="developer", content=ADVISOR_PROMPT),
-            *state.history(ADVISOR_SIDE),
+            *state.sides.get(ADVISOR_SIDE, []),
             ChatMessage(role="user", content=phase_instruction),
         ],
         tools=tools,
@@ -349,7 +349,7 @@ def _annotation_text(prefix: str, advice: str | None, note: str | None) -> str |
 async def _emit_annotation(state: State, text: str) -> None:
     if STEALTH or not text:
         return
-    await state.ensure_reasoning()
+    await state.ensure_staged()
     await state.coordinator.summary_delta(SummaryDelta(text=text))
     await state.coordinator.summary_done(SummaryDone())
 
@@ -463,7 +463,7 @@ async def _maybe_advise_after_tool_call(
     ledger: UsageLedger,
     main_request: ChatCompletionRequest,
 ) -> None:
-    history = state.history(MAIN_SIDE)
+    history = list(state.sides[MAIN_SIDE])
     if not history or not history[-1].is_tool():
         return
     phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
@@ -481,7 +481,7 @@ async def _maybe_advise_after_tool_call(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 async def _maybe_advise_before_tool_call(
@@ -511,7 +511,7 @@ async def _maybe_advise_before_tool_call(
     )
     if advice is None:
         return
-    state.sides.main.extend(
+    state.sides[MAIN_SIDE].extend(
         ChatMessage(
             role="tool",
             name=call.name,
@@ -526,7 +526,7 @@ async def _maybe_advise_before_tool_call(
     text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    state.sides.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+    state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 async def _maybe_advise_before_return(
@@ -557,7 +557,7 @@ async def _maybe_advise_before_return(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides.main.append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 @bus.listen("config.collect")

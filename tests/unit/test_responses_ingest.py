@@ -627,20 +627,17 @@ def test_message_patch_rejects_non_assistant_message() -> None:
         MessagePatch(message=Message(role="user", content="not an assistant"))
 
 
-def test_sides_main_is_replaceable_and_copies_assigned_lists() -> None:
+def test_sides_assignment_is_replaceable_and_copies_assigned_lists() -> None:
     sides = Sides()
     first = Message(role="assistant", content="first")
     second = Message(role="assistant", content="second")
 
-    assert sides.main == []
-    assert MAIN_SIDE in sides.messages
-
     replacement = [first]
-    sides.main = replacement
+    sides[MAIN_SIDE] = replacement
     replacement.append(second)
 
-    assert sides.main == [first]
-    sides.main.append(second)
+    assert sides[MAIN_SIDE] == [first]
+    sides[MAIN_SIDE].append(second)
     assert sides[MAIN_SIDE] == [first, second]
 
 

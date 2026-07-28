@@ -323,7 +323,7 @@ async def _vision_tool_output(
 def _vision_validator(state: State) -> RetryValidator:
     async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
-        _transcript, known_image_ids = _vision_context(state.history(MAIN_SIDE))
+        _transcript, known_image_ids = _vision_context(state.sides[MAIN_SIDE])
         for call in result.message.tool_calls:
             if call.name != VISION_TOOL_NAME:
                 continue
@@ -380,7 +380,7 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
     accepted = result.accepted
     if accepted is None or accepted.finish_reason != "tool_calls":
         return result
-    history = state.history(MAIN_SIDE)
+    history = list(state.sides[MAIN_SIDE])
     image_calls = [call for call in accepted.message.tool_calls if call.name == VISION_TOOL_NAME]
     for call in image_calls:
         ids, prompt = _tool_args(call)
@@ -393,6 +393,6 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
             prompt=prompt,
             tool_call_id=call.id,
         )
-        state.sides.main.append(tool_message)
+        state.sides[MAIN_SIDE].append(tool_message)
         history = [*history, tool_message]
     return result

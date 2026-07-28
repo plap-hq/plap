@@ -750,7 +750,7 @@ async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> No
             return result
         for call in accepted.message.tool_calls:
             if call.name == "internal":
-                state.sides.main.append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
+                state.sides[MAIN_SIDE].append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
         return result
 
     image_id = _image_id(_image("https://example.com/cat.png"))

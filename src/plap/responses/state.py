@@ -169,8 +169,8 @@ class State:
         return items
 
     def _main_suffix(self, sides: Sides) -> list[Message]:
-        base = self._base_sides.main
-        current = sides.main
+        base = self._base_sides[MAIN_SIDE]
+        current = sides[MAIN_SIDE]
         if len(current) < len(base) or current[: len(base)] != base:
             raise RuntimeError("persisted main history is immutable; replace only the current response suffix")
         return current[len(base) :]
@@ -210,11 +210,11 @@ class State:
 
     def _validate_main(self) -> None:
         self._main_suffix(self.sides)
-        self._split_tail(self.sides.main, label="main history")
+        self._split_tail(self.sides[MAIN_SIDE], label="main history")
 
     def _logical_main(self, *, sides: Sides | None = None) -> Message | None:
         current_sides = self.sides if sides is None else sides
-        _, anchor, suffix, after, open_calls = self._split_tail(current_sides.main, label="main history")
+        _, anchor, suffix, after, open_calls = self._split_tail(current_sides[MAIN_SIDE], label="main history")
         if anchor is None or after:
             return None
         if suffix and not open_calls:
@@ -267,7 +267,7 @@ class State:
             return False
         return not state.durable and state.active is None and not state.sides
 
-    def _shadow_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
+    def _staged_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
         self._validate_main()
         shadow_durable = self.durable.model_copy(deep=True)
         shadow_sides = deepcopy(self.sides)
@@ -275,13 +275,13 @@ class State:
             if side != MAIN_SIDE and side in shadow_sides.active:
                 shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
         if MAIN_SIDE in shadow_sides.active:
-            open_calls = self._split_tail(shadow_sides.main, label="main history")[4]
-            shadow_sides.main.extend(
+            open_calls = self._split_tail(shadow_sides[MAIN_SIDE], label="main history")[4]
+            shadow_sides[MAIN_SIDE].extend(
                 Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls
             )
         return shadow_durable, shadow_sides, self._main_suffix(shadow_sides)
 
-    def _live_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
+    def _commit_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
         self._validate_main()
         for side, messages in self.sides.items():
             if side == MAIN_SIDE:
@@ -289,11 +289,6 @@ class State:
             self._split_tail(messages, label=f"{side} side")
         sides = deepcopy(self.sides)
         return self.durable.model_copy(deep=True), sides, self._main_suffix(sides)
-
-    def history(self, side: Side) -> list[Message]:
-        if side == MAIN_SIDE:
-            return list(self.sides.main)
-        return list(self.sides.get(side, []) or [])
 
     def activate(self, side: Side) -> None:
         if side not in self._side_codes:
@@ -306,10 +301,10 @@ class State:
         self.sides.active.discard(side)
 
     def open_calls(self, side: Side) -> list[ChatToolCall]:
-        return self._split_tail(self.history(side), label=f"{side} history")[4]
+        return self._split_tail(self.sides.get(side, []) or [], label=f"{side} history")[4]
 
-    async def flush(self) -> None:
-        durable, sides, main = self._shadow_snapshot()
+    async def stage(self) -> None:
+        durable, sides, main = self._staged_snapshot()
         state = self._build_update(durable=durable, sides=sides)
         main_update = deepcopy(main)
         if self._reasoning_id is None:
@@ -319,18 +314,18 @@ class State:
             return
         await self.coordinator.replace_reasoning(state=state, main=main_update)
 
-    async def ensure_reasoning(self) -> None:
+    async def ensure_staged(self) -> None:
         if self._reasoning_id is None:
-            await self.flush()
+            await self.stage()
 
-    async def finalize(self) -> None:
-        durable, sides, main = self._live_snapshot()
+    async def commit(self) -> None:
+        durable, sides, main = self._commit_snapshot()
         visible_main, persisted_source = self._main_publication(sides=sides, main=main)
         visible_message = None if visible_main is None else self._message_item(visible_main)
         visible_calls: list[ResponseFunctionCallItem] = []
         main_open_calls: list[ChatToolCall] = []
         if visible_main is not None:
-            main_open_calls = self._split_tail(sides.main, label="main history")[4]
+            main_open_calls = self._split_tail(sides[MAIN_SIDE], label="main history")[4]
             visible_calls.extend(self._function_items(MAIN_SIDE, main_open_calls))
         main_update = self._main_update(
             main,

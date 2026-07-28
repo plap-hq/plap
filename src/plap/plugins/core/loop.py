@@ -74,7 +74,7 @@ def _should_loop(state: State, result: StreamResult) -> bool:
     oc = state.open_calls(MAIN_SIDE)
     if oc:
         return False
-    history = state.history(MAIN_SIDE)
+    history = state.sides[MAIN_SIDE]
     return bool(history) and not history[-1].is_assistant()
 
 
@@ -120,7 +120,7 @@ async def stream_response(
     hidden_results_accounted = 0
     budget_exhausted = False
     latest_snapshot = None
-    prefix = list(state.sides.main)
+    prefix = list(state.sides[MAIN_SIDE])
     chat_completion_client = await state.svcs.aget(IChatCompletionClient)
 
     logger.info(
@@ -194,7 +194,7 @@ async def stream_response(
             try:
                 async for snapshot in source:
                     latest_snapshot = snapshot
-                    state.sides.main = [*prefix, *snapshot.messages]
+                    state.sides[MAIN_SIDE] = [*prefix, *snapshot.messages]
 
                     delta = snapshot.delta
                     if delta is not None and delta.reasoning_delta is not None:
@@ -206,7 +206,7 @@ async def stream_response(
 
     except RetryLimitExceededError:
         if latest_snapshot is not None:
-            state.sides.main = [*prefix, *latest_snapshot.messages]
+            state.sides[MAIN_SIDE] = [*prefix, *latest_snapshot.messages]
         accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
         usage = None if accepted is None else accepted.usage
         logger.info(
@@ -258,10 +258,10 @@ async def stream_response(
     )
 
 
-@bus.emit("response.finalize")
-async def finalize_response(state: State, config: CueBox, result: StreamResult | None) -> None:
+@bus.emit("response.commit")
+async def commit_response(state: State, config: CueBox, result: StreamResult | None) -> None:
     _ = config, result
-    await state.finalize()
+    await state.commit()
 
 
 @bus.emit("response.finish")
@@ -325,12 +325,12 @@ async def run_response(state: State) -> None:
             except anyio.get_cancelled_exc_class():
                 if created:
                     with anyio.CancelScope(shield=True):
-                        await state.flush()
+                        await state.stage()
                     with anyio.CancelScope(shield=True):
                         await state.coordinator.cancelled()
                 raise
             with anyio.CancelScope(shield=True):
-                await finalize_response(state=state, config=config, result=result)
+                await commit_response(state=state, config=config, result=result)
                 await finish_response(state=state, config=config, result=result, ledger=ledger)
         except PlapError as exc:
             public = exc.public or _unexpected_public_error()
@@ -368,21 +368,21 @@ async def default_summary(
     async for item in source:
         if isinstance(item, SummaryDelta):
             if not open_part:
-                await state.ensure_reasoning()
+                await state.ensure_staged()
                 open_part = True
             await state.coordinator.summary_delta(SummaryDelta(text=item.text))
             accumulated += len(item.text)
             if accumulated >= SUMMARY_HARD_FLUSH_CHARS:
                 await state.coordinator.summary_done(SummaryDone())
-                await state.flush()
+                await state.stage()
                 open_part = False
                 accumulated = 0
         elif isinstance(item, SummaryDone):
             if open_part:
                 await state.coordinator.summary_done(SummaryDone())
-                await state.flush()
+                await state.stage()
                 open_part = False
                 accumulated = 0
     if open_part:
         await state.coordinator.summary_done(SummaryDone())
-        await state.flush()
+        await state.stage()
