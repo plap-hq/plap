@@ -415,7 +415,7 @@ def test_vision_history_messages_replay_hidden_reasoning_from_tool_messages() ->
             role="tool",
             tool_call_id="call_vision_1",
             content="first comparison",
-            reasoning_content="I checked the labels before comparing the shapes.",
+            durable={"vision": {"reasoning_content": "I checked the labels before comparing the shapes."}},
         ),
     ]
 

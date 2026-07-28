@@ -48,6 +48,7 @@ class ReasoningEffort(StrEnum):
 
 
 type ServiceTier = str
+type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 
 REASONING_EFFORT_VALUES: frozenset[ReasoningEffort] = frozenset(ReasoningEffort)
 
@@ -80,6 +81,28 @@ def _optional_literal_string(value: object, *, allowed: set[str], label: str) ->
         allowed_values = ", ".join(sorted(allowed))
         raise ValueError(f"{label} must be one of: {allowed_values}")
     return text
+
+
+def _json_value(value: object, *, label: str) -> JSONValue:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, list):
+        return [_json_value(item, label=f"{label} item") for item in value]
+    if isinstance(value, Mapping):
+        result: dict[str, JSONValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"{label} keys must be non-empty strings")
+            result[key] = _json_value(item, label=f"{label}.{key}")
+        return result
+    raise TypeError(f"{label} must contain only JSON values")
+
+
+def _json_object(value: object, *, label: str) -> dict[str, JSONValue]:
+    normalized = _json_value(value, label=label)
+    if not isinstance(normalized, dict):
+        raise TypeError(f"{label} must be an object")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -353,12 +376,14 @@ class ChatMessage:
     tool_calls: list[ChatToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     reasoning_content: str | None = None
+    durable: dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", ChatRole(self.role))
         object.__setattr__(self, "tool_calls", list(self.tool_calls))
         if isinstance(self.content, list):
             object.__setattr__(self, "content", list(self.content))
+        object.__setattr__(self, "durable", _json_object(self.durable, label="message durable state"))
 
     def is_assistant(self) -> bool:
         return self.role == ChatRole.ASSISTANT
@@ -383,11 +408,18 @@ class ChatMessage:
             value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
         if self.reasoning_content is not None:
             value["reasoning_content"] = self.reasoning_content
+        if self.durable:
+            value["durable"] = _json_object(self.durable, label="message durable state")
         return value
 
     @classmethod
     def from_primitive(cls, value: object) -> ChatMessage:
         item = _required_mapping(value, label="message")
+        allowed = {"role", "content", "name", "refusal", "tool_calls", "tool_call_id", "reasoning_content", "durable"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"message contains unknown keys: {names}")
         tool_calls_value = item.get("tool_calls")
         tool_calls: list[ChatToolCall] = []
         if tool_calls_value is not None:
@@ -402,6 +434,7 @@ class ChatMessage:
             tool_calls=tool_calls,
             tool_call_id=_optional_string(item.get("tool_call_id"), label="message tool_call_id"),
             reasoning_content=_optional_string(item.get("reasoning_content"), label="message reasoning_content"),
+            durable=_json_object(item.get("durable", {}), label="message durable state"),
         )
 
 

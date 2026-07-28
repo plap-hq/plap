@@ -4,10 +4,8 @@ import secrets
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
 
 import svcs
-from pydantic import BaseModel, ConfigDict
 
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatToolCall
@@ -35,20 +33,6 @@ from plap.responses.streaming import StreamCoordinator
 INTERRUPTED_TOOL_OUTPUT = "Tool call aborted because the response was interrupted."
 
 
-class DurableState(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    @classmethod
-    def from_primitive(cls, value: dict[str, JSONValue]) -> DurableState:
-        return cls.model_validate(value)
-
-    def to_primitive(self) -> dict[str, JSONValue]:
-        dumped = self.model_dump(mode="json", exclude_none=True)
-        if not isinstance(dumped, dict):  # pragma: no cover
-            raise TypeError("durable state dump must be an object")
-        return cast(dict[str, JSONValue], dumped)
-
-
 @dataclass(slots=True)
 class State:
     prepared: PreparedRequest
@@ -56,13 +40,13 @@ class State:
     coordinator: StreamCoordinator
     _sealing_keyring: SealingKeyring
     _side_codes: Mapping[str, int]
-    _base_durable: DurableState
+    _base_durable: dict[str, JSONValue]
     _base_sides: Sides
     _base_main_tail: MainTail | None
     _reasoning_id: str | None
     _checkpoint_required: bool
 
-    durable: DurableState
+    durable: dict[str, JSONValue]
     sides: Sides
 
     @classmethod
@@ -76,7 +60,7 @@ class State:
         sealing_keyring: SealingKeyring,
         side_codes: Mapping[str, int],
     ) -> State:
-        base_durable = DurableState.from_primitive(ingested.durable)
+        base_durable = deepcopy(ingested.durable)
         base_sides = deepcopy(ingested.sides)
         base_sides.setdefault("main")
         return cls(
@@ -90,7 +74,7 @@ class State:
             _base_main_tail=deepcopy(ingested.main_tail),
             _reasoning_id=None,
             _checkpoint_required=ingested.checkpoint_required,
-            durable=base_durable.model_copy(deep=True),
+            durable=deepcopy(base_durable),
             sides=deepcopy(base_sides),
         )
 
@@ -177,19 +161,19 @@ class State:
     def _build_update(
         self,
         *,
-        durable: DurableState,
+        durable: dict[str, JSONValue],
         sides: Sides,
     ) -> ReasoningState:
         self._main_suffix(sides)
 
         if self._checkpoint_required:
             return ReasoningCheckpoint(
-                durable=durable.to_primitive(),
+                durable=deepcopy(durable),
                 active=set(sides.active),
                 sides={side: deepcopy(messages) for side, messages in sides.items() if side != "main"},
             )
 
-        durable_patch = diff(self._base_durable.to_primitive(), durable.to_primitive())
+        durable_patch = diff(self._base_durable, durable)
         patches: dict[str, JSONPatch] = {}
         for side in sorted(set(self._base_sides.messages) | set(sides.messages)):
             if side == "main":
@@ -273,9 +257,9 @@ class State:
             return False
         return not state.durable and state.active is None and not state.sides
 
-    def _staged_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
+    def _staged_snapshot(self) -> tuple[dict[str, JSONValue], Sides, list[Message]]:
         self._validate_main()
-        shadow_durable = self.durable.model_copy(deep=True)
+        shadow_durable = deepcopy(self.durable)
         shadow_sides = deepcopy(self.sides)
         for side in list(shadow_sides.messages):
             if side != "main" and side in shadow_sides.active:
@@ -287,14 +271,14 @@ class State:
             )
         return shadow_durable, shadow_sides, self._main_suffix(shadow_sides)
 
-    def _commit_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
+    def _commit_snapshot(self) -> tuple[dict[str, JSONValue], Sides, list[Message]]:
         self._validate_main()
         for side, messages in self.sides.items():
             if side == "main":
                 continue
             self._split_tail(messages, label=f"{side} side")
         sides = deepcopy(self.sides)
-        return self.durable.model_copy(deep=True), sides, self._main_suffix(sides)
+        return deepcopy(self.durable), sides, self._main_suffix(sides)
 
     def open_calls(self, side: Side) -> list[ChatToolCall]:
         return self._split_tail(self.sides.get(side, []) or [], label=f"{side} history")[4]

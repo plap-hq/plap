@@ -381,6 +381,7 @@ def _private_reasoning(message: Message, public_content: str) -> Message:
         name=message.name,
         refusal=message.refusal,
         reasoning_content=message.reasoning_content,
+        durable=message.durable,
     )
 
 

@@ -183,6 +183,16 @@ def latest_closed_tool_output_turn(history: list[ChatMessage]) -> ToolOutputTurn
     return ToolOutputTurn(assistant=assistant, outputs=outputs)
 
 
+def _tool_output_name(msg: ChatMessage) -> str | None:
+    if msg.name is not None:
+        return msg.name
+    advisor = msg.durable.get("advisor")
+    if not isinstance(advisor, Mapping):
+        return None
+    tool_name = advisor.get("tool_name")
+    return tool_name if isinstance(tool_name, str) else None
+
+
 def render_main_message_line(msg: ChatMessage) -> list[str]:
     lines: list[str] = []
     role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
@@ -191,9 +201,10 @@ def render_main_message_line(msg: ChatMessage) -> list[str]:
         _append_text_section(lines, "reasoning_content", msg.reasoning_content)
     if msg.refusal is not None:
         _append_text_section(lines, "refusal", msg.refusal)
-    if msg.role == "tool" and msg.name is not None:
+    tool_name = _tool_output_name(msg)
+    if msg.role == "tool" and tool_name is not None:
         language, body_lines = _content_lines(msg.content)
-        lines.append(f"### tool_output {msg.name}")
+        lines.append(f"### tool_output {tool_name}")
         lines.extend(_fence("\n".join(body_lines), language))
     else:
         _append_content_section(lines, "content", msg.content)

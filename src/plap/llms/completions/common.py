@@ -109,14 +109,20 @@ def _stringify_json_value(value: Any) -> str | None:
 
 
 def _message_body(message: ChatMessage) -> dict[str, Any]:
-    value = message.to_primitive()
+    value: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         value["content"] = content_to_wire(message.content)
+    if message.name is not None:
+        value["name"] = message.name
+    if message.tool_call_id is not None:
+        value["tool_call_id"] = message.tool_call_id
     if message.tool_calls:
         value["tool_calls"] = [_tool_call_body(tool_call) for tool_call in message.tool_calls]
-    if message.role != "assistant":
-        value.pop("refusal", None)
-        value.pop("reasoning_content", None)
+    if message.role == "assistant":
+        if message.refusal is not None:
+            value["refusal"] = message.refusal
+        if message.reasoning_content is not None:
+            value["reasoning_content"] = message.reasoning_content
     return value
 
 

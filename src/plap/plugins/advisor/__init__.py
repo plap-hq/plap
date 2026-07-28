@@ -113,10 +113,6 @@ ADVISE_TOOL = ChatTool(
 )
 
 
-def _advisor_sentinel(value: str | bool) -> str:
-    return msgspec.json.encode({"advisor": value}).decode()
-
-
 def _advisor_error(
     *,
     reason: str,
@@ -136,7 +132,7 @@ def _advisor_error(
 
 
 def _advisor_durable(state: State) -> dict[str, object]:
-    raw = state.durable.to_primitive().get(ADVISOR_SIDE)
+    raw = state.durable.get(ADVISOR_SIDE)
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
@@ -155,26 +151,29 @@ def _set_advisor_note(state: State, note: str | None) -> None:
         durable.pop("note", None)
     else:
         durable["note"] = note
-    state.durable = state.durable.model_copy(update={ADVISOR_SIDE: durable}, deep=True)
+    state.durable[ADVISOR_SIDE] = durable
+
+
+def _advisor_message_durable(msg: ChatMessage) -> dict[str, object]:
+    raw = msg.durable.get(ADVISOR_SIDE)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return {}
 
 
 def _is_advisor_artifact(msg: ChatMessage) -> bool:
-    if msg.reasoning_content is None:
-        return False
-    try:
-        data = msgspec.json.decode(msg.reasoning_content)
-        return isinstance(data, dict) and "advisor" in data
-    except Exception:
-        return False
+    return isinstance(_advisor_message_durable(msg).get("call_id"), str)
 
 
 def _advisor_call_id(msg: ChatMessage) -> str:
-    data = msgspec.json.decode(msg.reasoning_content)
-    return data["advisor"]
+    call_id = _advisor_message_durable(msg).get("call_id")
+    if not isinstance(call_id, str):
+        raise TypeError("advisor artifact is missing its call id")
+    return call_id
 
 
 def _is_advisor_transcript_message(msg: ChatMessage) -> bool:
-    return msg.role == "user" and msg.reasoning_content == _advisor_sentinel(True)
+    return msg.role == "user" and _advisor_message_durable(msg).get("transcript") is True
 
 
 def _strip_note_from_messages(messages: tuple[ChatMessage, ...]) -> list[ChatMessage]:
@@ -235,7 +234,7 @@ def _rebuild_advisor_side(state: State) -> None:
     def flush_user():
         if current_msgs:
             rendered = "\n".join(render_main_messages(current_msgs))
-            new_side.append(ChatMessage(role="user", content=rendered, reasoning_content=_advisor_sentinel(True)))
+            new_side.append(ChatMessage(role="user", content=rendered, durable={ADVISOR_SIDE: {"transcript": True}}))
             current_msgs.clear()
 
     for msg in history:
@@ -258,7 +257,7 @@ def _rebuild_advisor_side(state: State) -> None:
     flush_user()
     if buffered_msgs:
         rendered = "\n".join(render_main_messages(buffered_msgs))
-        new_side.append(ChatMessage(role="user", content=rendered, reasoning_content=_advisor_sentinel(True)))
+        new_side.append(ChatMessage(role="user", content=rendered, durable={ADVISOR_SIDE: {"transcript": True}}))
     state.sides[ADVISOR_SIDE] = new_side
 
 
@@ -480,7 +479,7 @@ async def _maybe_advise_after_tool_call(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
 
 
 async def _maybe_advise_before_tool_call(
@@ -513,10 +512,9 @@ async def _maybe_advise_before_tool_call(
     state.sides["main"].extend(
         ChatMessage(
             role="tool",
-            name=call.name,
             tool_call_id=call.id,
             content=ABORTED_TOOL_OUTPUT,
-            reasoning_content=_advisor_sentinel(call_id),
+            durable={ADVISOR_SIDE: {"call_id": call_id, "tool_name": call.name}},
         )
         for call in open_calls
     )
@@ -525,7 +523,7 @@ async def _maybe_advise_before_tool_call(
     text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+    state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
 
 
 async def _maybe_advise_before_return(
@@ -556,7 +554,7 @@ async def _maybe_advise_before_return(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
 
 
 @bus.listen("config.collect")

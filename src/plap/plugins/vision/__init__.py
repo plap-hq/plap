@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -213,12 +214,21 @@ def _tool_output_text(result: ChatCompletionResult) -> str:
     raise RuntimeError("vision model returned no text output")
 
 
+def _vision_reasoning_content(message: ChatMessage) -> str | None:
+    raw = message.durable.get(VISION_TOOL_NAME)
+    if not isinstance(raw, Mapping):
+        return None
+    reasoning_content = raw.get("reasoning_content")
+    return reasoning_content if isinstance(reasoning_content, str) else None
+
+
 def _tool_output_message(result: ChatCompletionResult, *, tool_call_id: str) -> ChatMessage:
+    reasoning_content = result.message.reasoning_content
     return ChatMessage(
         role="tool",
         tool_call_id=tool_call_id,
         content=_tool_output_text(result),
-        reasoning_content=result.message.reasoning_content,
+        durable={} if reasoning_content is None else {VISION_TOOL_NAME: {"reasoning_content": reasoning_content}},
     )
 
 
@@ -254,7 +264,7 @@ def _vision_context(messages: list[Message]) -> tuple[list[ChatMessage], set[str
             continue
         ids, prompt = arguments
         transcript.append(ChatMessage(role="user", content=_vision_turn_prompt(ids, prompt)))
-        transcript.append(ChatMessage(role="assistant", content=message.content, reasoning_content=message.reasoning_content))
+        transcript.append(ChatMessage(role="assistant", content=message.content, reasoning_content=_vision_reasoning_content(message)))
     return transcript, known_image_ids
 
 

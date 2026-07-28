@@ -998,7 +998,7 @@ async def test_state_commit_uses_direct_hidden_assistant_for_new_call_only_turn(
 async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
     state = _state(
         ingested=Ingested(
-            durable={"base": True},
+            durable={"base": True, "nullable": None},
             sides=Sides(
                 active={"main"},
                 messages={"main": [Message(role="user", content="question")]},
@@ -1019,7 +1019,7 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
     payload = open_reasoning_payload(reasoning_item.encrypted_content, keyring=_keyring())
     assert payload.previous_reasoning_id is None
     assert isinstance(payload.state, ReasoningCheckpoint)
-    assert payload.state.durable == {"base": True}
+    assert payload.state.durable == {"base": True, "nullable": None}
     assert payload.state.active == {"main", "reviewer"}
     assert payload.state.sides == {"reviewer": [Message(role="assistant", content="review state")]}
     assert "main" not in payload.state.sides

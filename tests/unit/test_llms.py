@@ -1912,6 +1912,30 @@ def test_build_providers_includes_wandb_route_when_api_key_is_configured() -> No
     assert isinstance(providers["wandb/"], OpenAIProvider)
 
 
+def test_chat_message_durable_state_round_trips_through_primitive() -> None:
+    message = ChatMessage(
+        role="tool",
+        content="result",
+        tool_call_id="call_1",
+        durable={"vision": {"reasoning_content": "private"}},
+    )
+
+    primitive = message.to_primitive()
+
+    assert primitive["durable"] == {"vision": {"reasoning_content": "private"}}
+    assert ChatMessage.from_primitive(primitive) == message
+
+
+def test_chat_message_rejects_unknown_top_level_primitive_fields() -> None:
+    with pytest.raises(ValueError, match="message contains unknown keys: advisor"):
+        ChatMessage.from_primitive({"role": "developer", "advisor": {"call_id": "call_1"}})
+
+
+def test_chat_message_rejects_non_json_durable_state() -> None:
+    with pytest.raises(TypeError, match=r"message durable state\.advisor must contain only JSON values"):
+        ChatMessage(role="developer", durable={"advisor": object()})
+
+
 def test_build_chat_body_preserves_full_request_shape() -> None:
     body = build_chat_body(replace(_request(), min_p=0.05, repetition_penalty=1.2), stream=True)
 
@@ -1953,6 +1977,35 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
     assert body["service_tier"] == "flex"
     assert body["prediction"] == {"type": "content", "content": "expected"}
     assert body["stream_options"] == {"include_usage": True}
+
+
+def test_build_chat_body_excludes_message_durable_state() -> None:
+    request = ChatCompletionRequest(
+        model="model-a",
+        messages=[
+            ChatMessage(
+                role="assistant",
+                content="answer",
+                reasoning_content="private reasoning",
+                durable={"advisor": {"call_id": "call_1"}},
+            ),
+            ChatMessage(role="developer", content="continue", durable={"advisor": {"transcript": True}}),
+            ChatMessage(
+                role="tool",
+                content="cancelled",
+                tool_call_id="call_2",
+                durable={"advisor": {"call_id": "call_1", "tool_name": "read_file"}},
+            ),
+        ],
+    )
+
+    body = build_chat_body(request, stream=False)
+
+    assert body["messages"] == [
+        {"role": "assistant", "content": "answer", "reasoning_content": "private reasoning"},
+        {"role": "developer", "content": "continue"},
+        {"role": "tool", "content": "cancelled", "tool_call_id": "call_2"},
+    ]
 
 
 def test_build_chat_body_preserves_max_reasoning_effort() -> None:

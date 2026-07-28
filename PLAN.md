@@ -69,6 +69,15 @@ ReasoningPatch {
 }
 Main updates remain:
 MainUpdate = Message | MessagePatch
+Durable state has two scopes with the same mutable JSON-object API:
+- State.durable is global state whose lifetime is independent of any message.
+- Message.durable is state owned by one message and follows that message through
+  replay, patches, movement, and compaction.
+- Plugin data is nested under its plugin name at either scope.
+- Message durable state is sealed and hashed but never included in provider
+  messages or token projections.
+- Empty message durable state is omitted from the message primitive; unknown
+  top-level message fields are invalid.
 Structural rules:
 - Reasoning checkpoints cannot contain main in state.sides.
 - Reasoning patches cannot contain main in state.sides.

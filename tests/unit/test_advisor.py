@@ -40,17 +40,7 @@ _ABORTED_TOOL_OUTPUT = "Tool call cancelled by advisor."
 
 
 def _has_advisor_marker(msg: ChatMessage) -> bool:
-    if msg.reasoning_content is None:
-        return False
-    try:
-        data = msgspec.json.decode(msg.reasoning_content)
-        return isinstance(data, dict) and "advisor" in data
-    except Exception:
-        return False
-
-
-def _advisor_sentinel(value: str | bool) -> str:
-    return msgspec.json.encode({"advisor": value}).decode()
+    return isinstance(msg.durable.get(_ADVISOR_SIDE), dict)
 
 
 @pytest.fixture(autouse=True)
@@ -509,15 +499,15 @@ async def test_before_tool_advice_aborts_call_and_loops_to_final_answer() -> Non
     assert message.content[0].text == "final answer"
     assert len(client.main_requests) == 2
     second_main = client.main_requests[1]
-    assert any(
-        message.role == "tool" and message.content == _ABORTED_TOOL_OUTPUT and message.name == "read_file" and _has_advisor_marker(message)
-        for message in second_main.messages
-    )
+    aborted = next(message for message in second_main.messages if message.role == "tool" and message.content == _ABORTED_TOOL_OUTPUT)
+    assert aborted.name is None
+    assert aborted.durable == {_ADVISOR_SIDE: {"call_id": "call_advise", "tool_name": "read_file"}}
     assert any(
         message.role == "developer" and message.content == "Do not read that file." and _has_advisor_marker(message)
         for message in second_main.messages
     )
     second_advisor = client.advisor_requests[1]
+    assert "### tool_output read_file" in second_advisor.messages[-2].content
     assert '{"advisor":"call_advise"}' not in second_advisor.messages[-2].content
 
 
@@ -555,7 +545,7 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
     await core.run_response(state=state)
 
     assert len(client.advisor_requests) == 1
-    durable = state.durable.to_primitive().get(_ADVISOR_SIDE, {})
+    durable = state.durable.get(_ADVISOR_SIDE, {})
     assert isinstance(durable, dict)
     assert durable.get("note") == "Watch whether the final answer is actually verified."
     main_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
@@ -567,7 +557,7 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
         for message in state.sides[_ADVISOR_SIDE]
     )
     _advisor_module()._set_advisor_note(state, None)
-    durable = state.durable.to_primitive().get(_ADVISOR_SIDE, {})
+    durable = state.durable.get(_ADVISOR_SIDE, {})
     assert not isinstance(durable, dict) or "note" not in durable
 
 
@@ -703,17 +693,22 @@ def test_render_main_messages_includes_all_roles() -> None:
     assert "## user\n### content\n```text\nmore\n```" in rendered
 
 
-def test_render_main_messages_does_not_emit_non_assistant_reasoning_content() -> None:
+def test_render_main_messages_does_not_emit_message_durable_state() -> None:
     messages = [
-        ChatMessage(role="tool", name="read_file", tool_call_id="call_1", content="output", reasoning_content='{"advisor":"call_x"}'),
-        ChatMessage(role="developer", content="note", reasoning_content="hidden"),
+        ChatMessage(
+            role="tool",
+            name="read_file",
+            tool_call_id="call_1",
+            content="output",
+            durable={"advisor": {"call_id": "call_x"}},
+        ),
+        ChatMessage(role="developer", content="note", durable={"advisor": {"transcript": True}}),
     ]
 
     rendered = "\n".join(_markdown_module().render_main_messages(messages))
 
-    assert "### reasoning_content" not in rendered
-    assert '{"advisor":"call_x"}' not in rendered
-    assert "hidden" not in rendered
+    assert "call_x" not in rendered
+    assert "transcript" not in rendered
 
 
 def test_requirements_instruction_renders_effective_defaults() -> None:
