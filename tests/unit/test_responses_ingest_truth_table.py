@@ -1097,6 +1097,84 @@ async def test_persisted_hidden_output_settles_authenticated_tail() -> None:
     assert result.sides[MAIN_SIDE] == [hidden, hidden_output]
 
 
+async def test_fully_settled_parked_turn_accepts_explicit_later_publication() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("server_0")],
+    )
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    settled = _patch("rs_settled", previous_reasoning_id=parked.id, main=[hidden_output])
+    published = _patch(
+        "rs_published",
+        previous_reasoning_id=settled.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(settled),
+            _sealed_reasoning(published),
+            _message("public"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("server_0")],
+        ),
+        hidden_output,
+    ]
+
+
+async def test_partially_settled_parked_turn_publishes_only_remaining_call() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("server_0"), _tool_call("client_0")],
+    )
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    settled = _patch("rs_settled", previous_reasoning_id=parked.id, main=[hidden_output])
+    published = _patch(
+        "rs_published",
+        previous_reasoning_id=settled.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "client_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(settled),
+            _sealed_reasoning(published),
+            _message("public"),
+            _function_call(call_id),
+            _function_output(call_id, "client result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("server_0"), _tool_call("client_0")],
+        ),
+        hidden_output,
+        Message(role="tool", tool_call_id="client_0", content="client result"),
+    ]
+
+
 async def test_partial_persisted_hidden_settlement_precedes_public_call() -> None:
     hidden = Message(
         role="assistant",

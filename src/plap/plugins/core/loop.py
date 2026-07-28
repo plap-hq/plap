@@ -120,7 +120,7 @@ async def stream_response(
     hidden_results_accounted = 0
     budget_exhausted = False
     latest_snapshot = None
-    prefix = list(state.main)
+    prefix = list(state.sides.main)
     chat_completion_client = await state.svcs.aget(IChatCompletionClient)
 
     logger.info(
@@ -194,7 +194,7 @@ async def stream_response(
             try:
                 async for snapshot in source:
                     latest_snapshot = snapshot
-                    state.main = [*prefix, *snapshot.messages]
+                    state.sides.main = [*prefix, *snapshot.messages]
 
                     delta = snapshot.delta
                     if delta is not None and delta.reasoning_delta is not None:
@@ -206,7 +206,7 @@ async def stream_response(
 
     except RetryLimitExceededError:
         if latest_snapshot is not None:
-            state.main = [*prefix, *latest_snapshot.messages]
+            state.sides.main = [*prefix, *latest_snapshot.messages]
         accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
         usage = None if accepted is None else accepted.usage
         logger.info(

@@ -736,7 +736,7 @@ async def test_state_flush_persists_stubbed_open_tail_calls() -> None:
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.main = [
+    state.sides.main = [
         Message(
             role="assistant",
             content="thinking",
@@ -775,7 +775,7 @@ async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.main.append(completed)
+    state.sides.main.append(completed)
 
     await state.flush()
 
@@ -808,7 +808,7 @@ async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> 
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.main.append(completed)
+    state.sides.main.append(completed)
 
     await state.flush()
 
@@ -838,10 +838,101 @@ async def test_state_flush_preserves_explicit_empty_side() -> None:
 
 
 async def test_state_flush_rejects_persisted_main_mutation() -> None:
-    state = _state()
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="original")]}),
+            main_tail=None,
+            last_reasoning_id=None,
+        )
+    )
     state.sides[MAIN_SIDE] = [Message(role="user", content="wrong lane")]
 
-    with pytest.raises(RuntimeError, match=r"use State\.main"):
+    with pytest.raises(RuntimeError, match="replace only the current response suffix"):
+        await state.flush()
+
+
+async def test_state_flush_accepts_replaced_current_response_suffix() -> None:
+    base = Message(role="developer", content="base")
+    first = Message(role="developer", content="first")
+    second = Message(role="developer", content="second")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(messages={MAIN_SIDE: [base]}),
+            main_tail=None,
+            last_reasoning_id=None,
+        )
+    )
+    state.sides.main = [base, first, second]
+    state.sides.main = [base, second, first]
+
+    await state.flush()
+
+    item = _last_output_item(state.coordinator)
+    assert isinstance(item, ResponseReasoningItem)
+    payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
+    assert payload.main == [second, first]
+    assert isinstance(payload.state, ReasoningPatch)
+    assert MAIN_SIDE not in payload.state.sides
+
+
+async def test_state_flush_accepts_cleared_current_response_suffix() -> None:
+    base = Message(role="developer", content="base")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(messages={MAIN_SIDE: [base]}),
+            main_tail=None,
+            last_reasoning_id=None,
+        )
+    )
+    state.sides.main.append(Message(role="developer", content="discarded draft"))
+    state.sides.main = [base]
+
+    await state.flush()
+
+    assert state.coordinator.current_response().output == []
+
+
+async def test_state_flush_rejects_changes_within_persisted_main_prefix() -> None:
+    first = Message(role="system", content="first")
+    second = Message(role="developer", content="second")
+    replacements = [
+        [],
+        [second, first],
+        [Message(role="system", content="changed"), second],
+        [first, Message(role="user", content="inserted"), second],
+    ]
+
+    for replacement in replacements:
+        state = _state(
+            ingested=Ingested(
+                durable={},
+                sides=Sides(messages={MAIN_SIDE: [first, second]}),
+                main_tail=None,
+                last_reasoning_id=None,
+            )
+        )
+        state.sides.main = replacement
+
+        with pytest.raises(RuntimeError, match="replace only the current response suffix"):
+            await state.flush()
+
+
+async def test_state_flush_rejects_nested_persisted_main_mutation() -> None:
+    base = Message(role="assistant", content="base")
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(messages={MAIN_SIDE: [base]}),
+            main_tail=PublicMainTail(source=None),
+            last_reasoning_id=None,
+        )
+    )
+    state.sides.main[0].tool_calls.append(ToolCall(id="changed", name="changed", arguments="{}"))
+
+    with pytest.raises(RuntimeError, match="replace only the current response suffix"):
         await state.flush()
 
 
@@ -850,7 +941,7 @@ async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> No
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.main = [
+    state.sides.main = [
         Message(
             role="assistant",
             content="hello",
@@ -864,9 +955,9 @@ async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> No
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning_payload.main[0] == state.main[0]
+    assert reasoning_payload.main[0] == state.sides.main[0]
     assert isinstance(reasoning_payload.main[1], MessagePatch)
-    assert reasoning_payload.main[1].message == state.main[0]
+    assert reasoning_payload.main[1].message == state.sides.main[0]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "hello"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
@@ -880,7 +971,7 @@ async def test_state_finalize_uses_direct_hidden_assistant_for_new_call_only_tur
         reasoning_content="private",
         tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
     )
-    state.main = [assistant]
+    state.sides.main = [assistant]
 
     await state.finalize()
 
@@ -907,7 +998,7 @@ async def test_state_finalize_emits_full_non_main_checkpoint_after_user() -> Non
     )
     state.sides["reviewer"] = [Message(role="assistant", content="review state")]
     state.activate("reviewer")
-    state.main = [Message(role="assistant", content="answer", reasoning_content="private")]
+    state.sides.main.append(Message(role="assistant", content="answer", reasoning_content="private"))
 
     await state.finalize()
 
@@ -920,12 +1011,12 @@ async def test_state_finalize_emits_full_non_main_checkpoint_after_user() -> Non
     assert payload.state.active == {MAIN_SIDE, "reviewer"}
     assert payload.state.sides == {"reviewer": [Message(role="assistant", content="review state")]}
     assert MAIN_SIDE not in payload.state.sides
-    assert payload.main == [state.main[0], MessagePatch(state.main[0])]
+    assert payload.main == [state.sides.main[-1], MessagePatch(state.sides.main[-1])]
 
 
 async def test_state_finalize_keeps_inactive_main_output_private() -> None:
     state = _state(ingested=_ingested(active=set()))
-    state.main = [
+    state.sides.main = [
         Message(
             role="assistant",
             content="private answer",
@@ -939,7 +1030,7 @@ async def test_state_finalize_keeps_inactive_main_output_private() -> None:
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert payload.main == state.main
+    assert payload.main == state.sides.main
 
 
 async def test_run_response_emits_reactivated_persisted_main_call_without_main_completion() -> None:
@@ -1054,7 +1145,7 @@ async def test_state_finalize_publishes_new_active_tail_after_public_history() -
             last_reasoning_id="rs_public",
         )
     )
-    state.main.append(current)
+    state.sides.main.append(current)
 
     await state.finalize()
 
@@ -1133,7 +1224,7 @@ async def test_state_finalize_materializes_partial_cross_lane_settlement() -> No
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.main.append(completed)
+    state.sides.main.append(completed)
 
     await state.finalize()
 
@@ -1161,7 +1252,7 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.main.append(completed)
+    state.sides.main.append(completed)
 
     await state.finalize()
 
@@ -1174,7 +1265,7 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
 
 async def test_state_finalize_emits_active_side_calls_in_deterministic_order() -> None:
     state = _state(ingested=_ingested(active={MAIN_SIDE, "reviewer", "defender"}))
-    state.main = [
+    state.sides.main = [
         Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")]),
     ]
     state.sides["reviewer"] = [
@@ -1199,7 +1290,7 @@ async def test_state_finalize_keeps_closed_assistant_with_user_tail_hidden() -> 
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.main = [
+    state.sides.main = [
         Message(role="assistant", content="hidden assistant"),
         Message(role="user", content="tail"),
     ]

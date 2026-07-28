@@ -217,6 +217,14 @@ class Sides:
             self.messages[key] = [] if default is None else list(default)
         return self.messages[key]
 
+    @property
+    def main(self) -> list[Message]:
+        return self.setdefault(MAIN_SIDE)
+
+    @main.setter
+    def main(self, messages: list[Message]) -> None:
+        self[MAIN_SIDE] = messages
+
     def items(self):
         return self.messages.items()
 

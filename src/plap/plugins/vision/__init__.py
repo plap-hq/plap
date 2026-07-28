@@ -393,6 +393,6 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
             prompt=prompt,
             tool_call_id=call.id,
         )
-        state.main.append(tool_message)
+        state.sides.main.append(tool_message)
         history = [*history, tool_message]
     return result

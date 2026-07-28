@@ -505,17 +505,23 @@ Patch generation:
 - Emit optional active replacement.
 - Generate the same append-only main updates.
 A streamed reasoning draft cannot change from checkpoint to patch or patch to checkpoint during replacement.
+State exposes one complete mutable main history as State.sides.main. The list
+may be appended, cleared, reordered, or replaced like any other side. Before
+emission, State validates that the ingested main history remains an exact
+prefix and derives the reasoning main update from everything after that prefix.
+Only the persisted prefix is immutable; the current-response suffix remains
+freely replaceable. State has no separate main field or compatibility alias.
 22. Main Producer Cases
 Main text projection and call projection must be computed separately:
 public_message: ResponseMessageItem | None
 public_calls: ResponseFunctionCallItem[]
 Publication eligibility is structural rather than content-based:
-- A new logical assistant appended through State.main is eligible when main is active.
+- A new logical assistant appended through State.sides.main is eligible when main is active.
 - A persisted HiddenMainTail is eligible when main is active.
 - A persisted PublicMainTail is historical and is never automatically eligible.
 - A persisted CompactedMainTail is historical and is never automatically eligible.
 - An inactive main tail is never eligible.
-- Active-to-active remains eligible when State.main contains a genuinely new logical assistant.
+- Active-to-active remains eligible when State.sides.main contains a genuinely new logical assistant.
 - Deactivation and reactivation do not make a public or compacted tail eligible again.
 - The complete source retained by HiddenMainTail, not its rendered assistant, is carried by P(A).
 Producer forms:
@@ -697,6 +703,9 @@ No compatibility shim or transitional replay path will remain.
 - Persisted call-only activation emits reasoning followed directly by FC.
 - Checkpoint reasoning may append a new hidden call-only assistant.
 - Patch reasoning may relocate a persisted hidden call-only assistant.
+- R1(M(FC)) R2(FCO) R3(P(M)) M accepts as explicit delayed publication.
+- R1(M(FC1,FC2)) R2(FCO1) R3(P(M)) M FC2 FCO2 publishes only FC2.
+- State does not infer delayed publication after every call on a hidden turn is settled.
 31. Required Call Tests
 - R(P(A)) M FC FCO attaches call to M.
 - R(P(A)) FMa M FC FCO splits reasoning and call ownership.
@@ -726,7 +735,9 @@ No compatibility shim or transitional replay path will remain.
 - An unchanged active public tail emits no output.
 - Reactivating a public tail emits no public message or MessagePatch.
 - Reactivating a compacted tail emits no public message or MessagePatch.
-- Active-to-active with a new State.main assistant still publishes it.
+- Active-to-active with a new State.sides.main assistant still publishes it.
+- State.sides.main may replace any current-response suffix.
+- State rejects deletion, replacement, reordering, insertion, or altered-message substitution within the persisted main prefix.
 - Cancellation preserves checkpoint/patch variant.
 - Stored replay preserves chain boundaries.
 - Advisor behavior remains unchanged.
@@ -766,4 +777,5 @@ The rebuild is complete only when:
 - No content-hash publication system remains.
 - Already-public and compacted tails are not automatically republished.
 - Explicit repeated source timewarp revises one bundle rather than duplicating it.
+- State.sides.main is the only mutable main API and reasoning emits only its validated suffix.
 - No old replay or compatibility path remains.
