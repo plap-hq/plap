@@ -19,9 +19,11 @@ from plap.responses.ingest.models import (
     Ingested,
     Message,
     MessagePatch,
+    ReasoningCheckpoint,
+    ReasoningPatch,
+    ReasoningState,
     Side,
     Sides,
-    SidesUpdate,
     split_tail,
 )
 from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
@@ -32,17 +34,17 @@ from plap.responses.streaming import StreamCoordinator
 INTERRUPTED_TOOL_OUTPUT = "Tool call aborted because the response was interrupted."
 
 
-class Machine(BaseModel):
+class DurableState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     @classmethod
-    def from_primitive(cls, value: dict[str, JSONValue]) -> Machine:
+    def from_primitive(cls, value: dict[str, JSONValue]) -> DurableState:
         return cls.model_validate(value)
 
     def to_primitive(self) -> dict[str, JSONValue]:
         dumped = self.model_dump(mode="json", exclude_none=True)
         if not isinstance(dumped, dict):  # pragma: no cover
-            raise TypeError("machine dump must be an object")
+            raise TypeError("durable state dump must be an object")
         return cast(dict[str, JSONValue], dumped)
 
 
@@ -53,11 +55,12 @@ class State:
     coordinator: StreamCoordinator
     _sealing_keyring: SealingKeyring
     _side_codes: Mapping[str, int]
-    _base_machine: Machine
+    _base_durable: DurableState
     _base_sides: Sides
     _reasoning_id: str | None
+    _checkpoint_required: bool
 
-    machine: Machine
+    durable: DurableState
     sides: Sides
     main: list[Message]
 
@@ -72,7 +75,7 @@ class State:
         sealing_keyring: SealingKeyring,
         side_codes: Mapping[str, int],
     ) -> State:
-        base_machine = Machine.from_primitive(ingested.machine)
+        base_durable = DurableState.from_primitive(ingested.durable)
         base_sides = deepcopy(ingested.sides)
         return cls(
             prepared=prepared,
@@ -80,10 +83,11 @@ class State:
             coordinator=coordinator,
             _sealing_keyring=sealing_keyring,
             _side_codes=dict(side_codes),
-            _base_machine=base_machine,
+            _base_durable=base_durable,
             _base_sides=base_sides,
             _reasoning_id=None,
-            machine=base_machine.model_copy(deep=True),
+            _checkpoint_required=ingested.checkpoint_required,
+            durable=base_durable.model_copy(deep=True),
             sides=deepcopy(base_sides),
             main=[],
         )
@@ -164,16 +168,22 @@ class State:
     def _build_update(
         self,
         *,
-        machine: Machine,
+        durable: DurableState,
         sides: Sides,
-        main_update: list[Message | MessagePatch],
-    ) -> tuple[JSONPatch, SidesUpdate]:
-        machine_patch = diff(self._base_machine.to_primitive(), machine.to_primitive())
+    ) -> ReasoningState:
         base_main_present = MAIN_SIDE in self._base_sides.messages
         current_main_present = MAIN_SIDE in sides.messages
         if base_main_present != current_main_present or self._base_sides.get(MAIN_SIDE) != sides.get(MAIN_SIDE):
             raise RuntimeError("persisted main history is immutable; use State.main for main updates")
 
+        if self._checkpoint_required:
+            return ReasoningCheckpoint(
+                durable=durable.to_primitive(),
+                active=set(sides.active),
+                sides={side: deepcopy(messages) for side, messages in sides.items() if side != MAIN_SIDE},
+            )
+
+        durable_patch = diff(self._base_durable.to_primitive(), durable.to_primitive())
         patches: dict[str, JSONPatch] = {}
         for side in sorted(set(self._base_sides.messages) | set(sides.messages)):
             if side == MAIN_SIDE:
@@ -189,7 +199,7 @@ class State:
                 [] if current_messages is None else [message.to_primitive() for message in current_messages],
             )
         active = None if self._base_sides.active == sides.active else set(sides.active)
-        return machine_patch, SidesUpdate(active=active, main=main_update, patches=patches)
+        return ReasoningPatch(durable=durable_patch, active=active, sides=patches)
 
     def _validate_main(self) -> None:
         self._split_tail(self.history(MAIN_SIDE), label="main history")
@@ -210,21 +220,30 @@ class State:
         main: list[Message],
         visible: Message | None,
         visible_message: ResponseMessageItem | None,
+        *,
+        has_visible_calls: bool,
     ) -> list[Message | MessagePatch]:
-        if visible is None or visible_message is None:
+        if visible is None or (visible_message is None and not has_visible_calls):
             return deepcopy(main)
 
         visible_index = next((index for index, message in enumerate(main) if message is visible), None)
         if visible_index is None:
             return [*deepcopy(main), MessagePatch(message=deepcopy(visible))]
 
+        if visible_message is None:
+            return deepcopy(main)
         if visible == content.assistant_message(list(visible_message.content)):
             return [*deepcopy(main[:visible_index]), *deepcopy(main[visible_index + 1 :])]
         return [*deepcopy(main), MessagePatch(message=deepcopy(visible))]
 
-    def _shadow_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
+    def _update_empty(self, state: ReasoningState, main: list[Message | MessagePatch]) -> bool:
+        if main or isinstance(state, ReasoningCheckpoint):
+            return False
+        return not state.durable and state.active is None and not state.sides
+
+    def _shadow_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
         self._validate_main()
-        shadow_machine = self.machine.model_copy(deep=True)
+        shadow_durable = self.durable.model_copy(deep=True)
         shadow_sides = deepcopy(self.sides)
         for side in list(shadow_sides.messages):
             if side != MAIN_SIDE and side in shadow_sides.active:
@@ -236,15 +255,15 @@ class State:
                 label="main history",
             )[4]
             shadow_main.extend(Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls)
-        return shadow_machine, shadow_sides, shadow_main
+        return shadow_durable, shadow_sides, shadow_main
 
-    def _live_snapshot(self) -> tuple[Machine, Sides, list[Message]]:
+    def _live_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
         self._validate_main()
         for side, messages in self.sides.items():
             if side == MAIN_SIDE:
                 continue
             self._split_tail(messages, label=f"{side} side")
-        return self.machine.model_copy(deep=True), deepcopy(self.sides), deepcopy(self.main)
+        return self.durable.model_copy(deep=True), deepcopy(self.sides), deepcopy(self.main)
 
     def history(self, side: Side) -> list[Message]:
         if side == MAIN_SIDE:
@@ -265,34 +284,40 @@ class State:
         return self._split_tail(self.history(side), label=f"{side} history")[4]
 
     async def flush(self) -> None:
-        machine, sides, main = self._shadow_snapshot()
-        machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=deepcopy(main))
+        durable, sides, main = self._shadow_snapshot()
+        state = self._build_update(durable=durable, sides=sides)
+        main_update = deepcopy(main)
         if self._reasoning_id is None:
-            if not machine_patch and sides_update.active is None and not sides_update.main and not sides_update.patches:
+            if self._update_empty(state, main_update):
                 return
-            self._reasoning_id = await self.coordinator.begin_reasoning(machine=machine_patch, sides=sides_update)
+            self._reasoning_id = await self.coordinator.begin_reasoning(state=state, main=main_update)
             return
-        await self.coordinator.replace_reasoning(machine=machine_patch, sides=sides_update)
+        await self.coordinator.replace_reasoning(state=state, main=main_update)
 
     async def ensure_reasoning(self) -> None:
         if self._reasoning_id is None:
             await self.flush()
 
     async def finalize(self) -> None:
-        machine, sides, main = self._live_snapshot()
+        durable, sides, main = self._live_snapshot()
         visible_main = self._logical_main(sides=sides, main=main) if MAIN_SIDE in sides.active else None
         visible_message = None if visible_main is None else self._message_item(visible_main)
         visible_calls: list[ResponseFunctionCallItem] = []
-        main_update = self._main_update(main, visible_main, visible_message)
+        main_open_calls: list[ChatToolCall] = []
         if MAIN_SIDE in sides.active:
-            visible_calls.extend(
-                self._function_items(
-                    MAIN_SIDE,
-                    self._split_tail([*(sides.get(MAIN_SIDE, []) or []), *main], label="main history")[4],
-                )
-            )
+            main_open_calls = self._split_tail(
+                [*(sides.get(MAIN_SIDE, []) or []), *main],
+                label="main history",
+            )[4]
+            visible_calls.extend(self._function_items(MAIN_SIDE, main_open_calls))
+        main_update = self._main_update(
+            main,
+            visible_main,
+            visible_message,
+            has_visible_calls=bool(main_open_calls),
+        )
 
-        machine_patch, sides_update = self._build_update(machine=machine, sides=sides, main_update=main_update)
+        state = self._build_update(durable=durable, sides=sides)
 
         for side in sorted(sides.messages):
             if side == MAIN_SIDE or side not in sides.active:
@@ -300,11 +325,12 @@ class State:
             messages = sides[side]
             visible_calls.extend(self._function_items(side, self._split_tail(messages, label=f"{side} side")[4]))
 
-        if self._reasoning_id is None and (machine_patch or sides_update.active is not None or sides_update.main or sides_update.patches):
-            self._reasoning_id = await self.coordinator.begin_reasoning(machine=machine_patch, sides=sides_update)
+        if self._reasoning_id is None and not self._update_empty(state, main_update):
+            self._reasoning_id = await self.coordinator.begin_reasoning(state=state, main=main_update)
         if self._reasoning_id is not None:
-            await self.coordinator.finish_reasoning(machine=machine_patch, sides=sides_update)
+            await self.coordinator.finish_reasoning(state=state, main=main_update)
             self._reasoning_id = None
+            self._checkpoint_required = False
         if visible_message is not None:
             await self.coordinator.emit(visible_message)
         for item in visible_calls:

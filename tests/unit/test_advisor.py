@@ -274,7 +274,7 @@ def _state(
     return State.from_ingested(
         ingested=ingested
         or Ingested(
-            machine={},
+            durable={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
             last_reasoning_id=None,
         ),
@@ -533,9 +533,9 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
     await core.run_response(state=state)
 
     assert len(client.advisor_requests) == 1
-    machine = state.machine.to_primitive().get(_ADVISOR_SIDE, {})
-    assert isinstance(machine, dict)
-    assert machine.get("note") == "Watch whether the final answer is actually verified."
+    durable = state.durable.to_primitive().get(_ADVISOR_SIDE, {})
+    assert isinstance(durable, dict)
+    assert durable.get("note") == "Watch whether the final answer is actually verified."
     main_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
     phase_instruction = _advisor_module()._phase_instruction(state, "before_return", main_request)
     assert "# note from previous phase (may be stale)" in phase_instruction
@@ -545,8 +545,8 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
         for message in state.sides[_ADVISOR_SIDE]
     )
     _advisor_module()._set_advisor_note(state, None)
-    machine = state.machine.to_primitive().get(_ADVISOR_SIDE, {})
-    assert not isinstance(machine, dict) or "note" not in machine
+    durable = state.durable.to_primitive().get(_ADVISOR_SIDE, {})
+    assert not isinstance(durable, dict) or "note" not in durable
 
 
 @pytest.mark.anyio
@@ -556,7 +556,7 @@ async def test_after_tool_advice_reaches_next_main_request() -> None:
     state = _state(
         client,
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(
                 messages={
                     MAIN_SIDE: [
@@ -590,7 +590,7 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
     state = _state(
         client,
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(
                 messages={
                     MAIN_SIDE: [
@@ -623,7 +623,7 @@ async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeyp
     state = _state(
         client,
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(
                 messages={
                     MAIN_SIDE: [

@@ -1,817 +1,267 @@
-"""Replay ingest truth table.
-
-Legend
-
-- `R(h)`: reasoning item whose hidden main anchor exists and declares no
-  main-side `tool_calls`
-- `R(h[up_0,...])`: reasoning item whose hidden main anchor declares those
-  main-side `tool_calls` in that order
-- `R(h-empty-main)`: same as `R(h)`, but the hidden anchor has empty public
-  content
-- `R(h-empty-main[up_0,...])`: same as `R(h[up_0,...])`, but the hidden anchor
-  has empty public content
-- `R(c)`: reasoning item whose main side is fully closed and contributes only
-  carrier state before later standalone main replay
-- `R(p->M)`: reasoning patch targeting explicit assistant `M` and declaring no
-  main-side `tool_calls`
-- `R(p->M[up_0,...])`: reasoning patch targeting explicit assistant `M` and
-  declaring those main-side `tool_calls` in that order
-- `M`: explicit assistant anchor message
-- `FMa`: fabricated assistant message
-- `FMu`: fabricated non-assistant message (`user` / `system` / `developer`)
-- `FF / FFO`: fabricated `function_call` / `function_call_output`
-- `F / FO`: sealed `function_call` / `function_call_output`
-- `F1 / FO1`, `F2 / FO2`: multiple sealed calls in the same anchored bundle
-
-Bundle model
-
-Replay normalization operates on bundles, not on one region-wide anchor that
-survives until the next reasoning item.
-
-The normalized shape of one bundle is:
-
-- `pre=[...]`: ordered clusters hoisted immediately before the anchor
-- `anchor=...`: the anchor assistant
-- `slots=[...]`: the anchor assistant's rendered `tool_calls`
-- `outputs=[...]`: the anchor-owned `role: tool` messages in real chronology
-- `post=[...]`: ordered clusters that remain in the same bundle after the
-  anchor
-
-`pre` exists only for pending-patch / hidden-prelude hoists.
-`post` exists only while a later assistant has clustered into the current
-bundle instead of superseding it.
-
-Anchor call model
-
-For any anchor `A`, define:
-
-- `declared(A)`:
-  - the ordered tool-call ids declared by the anchor itself
-  - hidden anchors take them from the hidden assistant message in the reasoning
-    payload
-  - patch anchors take them from `R(p->M[up_0,...])` once `M` resolves
-  - standalone public anchors start with `declared(A)=[]`
-- `added(A)`:
-  - the ordered direct calls later attached to `A` during standalone replay
-    that are not already in `declared(A)`
-  - includes sealed direct calls
-  - includes fabricated direct calls
-  - preserves first-arrival order across both kinds
-- `slots(A) = declared(A) + added(A)`
-
-A sealed direct call whose id is already in `declared(A)` replays that declared
-slot; it does not create a second slot and it does not move the declared
-segment.
-
-- `free_anchor`: `declared(A)=[]`, so `slots(A)=added(A)`
-- `strict_anchor`: `declared(A)!=[]`, so `slots(A)` begins with the declared
-  segment and only then appends later additions
-
-Release and settlement
-
-- `pending_patch`
-  - `R(p->M[...])` has appeared but `M` has not resolved yet.
-- `released`
-  - a pending patch is not released
-  - otherwise, every id in `declared(A)` has a matching output
-  - a free anchor is therefore released immediately once its anchor exists
-- `settled`
-  - no open call remains anywhere in the current bundle
-  - this includes declared anchor calls, added anchor calls, and clustered
-    assistant mini-turn calls
-
-Turnover rules
-
-- A later assistant starts a new anchor only when the current bundle is both
-  released and settled.
-- If the current bundle is not released or not settled, a later assistant stays
-  inside that bundle as a cluster.
-- A later reasoning item still forces finalization, but only if the current
-  bundle is already settled and there is no pending patch.
-- Non-assistant messages never supersede the current anchor.
-
-Cluster kinds
-
-- Plain message cluster:
-  - a `user` / `system` / `developer` message
-  - or an assistant message with no attached calls
-- Assistant mini-turn cluster:
-  - an assistant message
-  - zero or more calls attached to that assistant
-  - all corresponding tool outputs
-- Anchor bundle:
-  - the anchor assistant
-  - its `declared(A)` segment
-  - its `added(A)` segment
-  - all corresponding tool outputs
-  - hidden reasoning/tool rows if the anchor came from `R`
-
-Call attachment
-
-- A direct call first looks for the nearest preceding assistant within the local
-  bundle parse.
-- If such an assistant exists, the call belongs to that assistant mini-turn
-  cluster.
-- Otherwise the call belongs directly to the current anchor.
-- A pending patch has no resolved anchor assistant yet, so before `M` appears a
-  direct call without a preceding assistant has no owner and replay rejects.
-- If a direct sealed call belongs to the anchor and its id is already in
-  `declared(A)`, it replays that declared slot.
-- Otherwise the direct call contributes the next entry in `added(A)`.
-- Once a call or output attaches to an assistant mini-turn, that mini-turn is
-  indivisible for chronology purposes.
-
-Normalized form
-
-- `A(FMa)`: assistant message cluster with no attached calls
-- `A(FMa; FF,FFO)`: assistant cluster with attached mini-turn
-- `P(FMu)`: plain non-assistant message cluster
-- `pre=[...]`: clusters hoisted immediately before the anchor assistant
-- `anchor=...`
-- `slots=[...]`: assistant `tool_calls` order
-- `outputs=[...]`: `role: tool` message chronology
-- `post=[...]`: clusters appended after the anchored bundle settles
-
-Invariants
-
-- If `FF/FFO` attach to an assistant cluster, that assistant cluster becomes
-  contiguous.
-- `outputs` preserve real chronology. So `F1 F2 FO2 FO1` keeps
-  `outputs=[FO2,FO1]` and is not reordered.
-- Direct anchor slot order never reorders later additions by call kind. Only
-  the declared segment may stay ahead of later additions.
-- `free_anchor` later assistants supersede immediately once the current bundle
-  is settled.
-- `strict_anchor` later assistants cluster until the current bundle is both
-  released and settled.
-
-Replay cases
-
-1. Baseline anchored bundles
-
-- Raw: `M F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[]`
-  Outcome: Accept
-  Notes: Explicit anchor.
-
-- Raw: `M F1 FO1 F2 FO2`
-  Normalized: `pre=[] anchor=M slots=[F1,F2] outputs=[FO1,FO2] post=[]`
-  Outcome: Accept
-  Notes: Multiple sealed calls.
-
-- Raw: `M F1 F2 FO2 FO1`
-  Normalized: `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[]`
-  Outcome: Accept
-  Notes: Preserve output chronology.
-
-- Raw: `R(h) F FO`
-  Normalized: `pre=[] anchor=R.hidden slots=[F] outputs=[FO] post=[]`
-  Outcome: Accept
-  Notes: Hidden free anchor. `F` becomes the first added slot.
-
-- Raw: `R(h[up_0]) F(up_0) FO(up_0)`
-  Normalized: `pre=[] anchor=R.hidden slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Hidden strict anchor. The sealed call replays the declared slot.
-
-- Raw: `R(h-empty-main) F FO`
-  Normalized: `pre=[] anchor=R.hidden(empty-main) slots=[F] outputs=[FO] post=[]`
-  Outcome: Accept
-  Notes: Hidden free anchor with empty public content. Anchored, not synthetic.
-
-- Raw: `R(h-empty-main[up_0]) F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Hidden strict anchor with empty public content. The sealed call replays the declared slot.
-
-- Raw: `R(p->M[up_0]) M F(up_0) FO(up_0)`
-  Normalized: `pre=[] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Patch resolves to `M`.
-
-- Raw: `M F FO` after stripping `R(p->M[up_0])`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[]`
-  Outcome: Accept
-  Notes: Sealed targeting is based on `M`, not `R+M`.
-
-2. Pre-anchor plain message hoists
-
-Hidden and patch-anchor rows in sections 2-5 use explicit declared ids when the
-row is testing hoist or attachment rather than free-anchor direct-call order.
-
-- Raw: `R(h-empty-main[up_0]) FMu F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Effective visible order `FMu F FO`.
-
-- Raw: `R(h-empty-main[up_0]) FMu FMu2 F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Preserve order.
-
-- Raw: `R(h-empty-main[up_0]) FMa F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[A(FMa)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Assistant plain message before hidden anchor.
-
-- Raw: `R(p->M[up_0]) FMu M F(up_0) FO(up_0)`
-  Normalized: `pre=[P(FMu)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Hoist before `M`, not before whole `R`.
-
-- Raw: `R(p->M[up_0]) FMu FMu2 M F(up_0) FO(up_0)`
-  Normalized: `pre=[P(FMu),P(FMu2)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Preserve order.
-
-- Raw: `R(p->M[up_0]) FMa M F(up_0) FO(up_0)`
-  Normalized: `pre=[A(FMa)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Assistant plain message before `M`.
-
-3. Pre-anchor assistant mini-bundles
-
-- Raw: `R(h-empty-main[up_0]) FMa FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: `FF/FFO` bind to `FMa`, sealed pair binds to hidden anchor.
-
-- Raw: `R(h-empty-main[up_0]) FMa F(tx) FO(tx) F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[A(FMa;F(tx),FO(tx))] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Sealed transplant binds to `FMa`, declared sealed pair binds to the hidden anchor.
-
-- Raw: `R(p->M[up_0]) FMa FF FFO M F(up_0) FO(up_0)`
-  Normalized: `pre=[A(FMa;FF,FFO)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Same, explicit anchor.
-
-- Raw: `R(p->M[up_0]) FMa F(tx) FO(tx) M F(up_0) FO(up_0)`
-  Normalized: `pre=[A(FMa;F(tx),FO(tx))] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Same, explicit patch target.
-
-4. Pre-anchor mixed `FMa` / `FMu`
-
-- Raw: `R(h-empty-main[up_0]) FMu FMa FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Plain message stays before assistant cluster.
-
-- Raw: `R(h-empty-main[up_0]) FMa FMu FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: `FMu` cannot split `FMa` from `FF/FFO`.
-
-- Raw: `R(p->M[up_0]) FMu FMa FF FFO M F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu),A(FMa;FF,FFO)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Explicit anchor.
-
-- Raw: `R(p->M[up_0]) FMa FMu FF FFO M F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[A(FMa;FF,FFO),P(FMu)] anchor=M slots=[F(up_0)] outputs=[FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: `FMu` pushed outside attached assistant cluster.
-
-5. Pre-anchor non-assistant plus fabricated fallback to the hidden anchor
-
-These are attachment rows. The hidden anchor is declared explicitly so the row
-tests which anchor owns `FF/FFO`, not free-anchor direct-call ordering.
-
-- Raw: `R(h-empty-main[up_0]) FMu FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu)] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: No assistant before `FF`, so `FF/FFO` fall back to the hidden anchor.
-
-- Raw: `R(h-empty-main[up_0]) FMu FMu2 FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[P(FMu),P(FMu2)] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Same fallback.
-
-- Raw: `R(p->M[up_0]) FMu FF FFO M F(up_0) FO(up_0)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: No assistant exists before `M` for `FF` to bind to.
-
-- Raw: `R(p->M[up_0]) FMu FMu2 FF FFO M F(up_0) FO(up_0)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Same reason.
-
-- Raw: `R(p->M[up_0]) F(tx) FO(tx) M F(up_0) FO(up_0)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: No assistant exists before `M` for the sealed transplant to bind to.
-
-- Raw: `R(p->M[up_0]) FMu F(tx) FO(tx) M F(up_0) FO(up_0)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: `FMu` is not an assistant anchor for the sealed transplant.
-
-6. Mixed direct calls on one anchor
-
-6A. Hidden strict-anchor attachment
-
-- Raw: `R(h[up_0]) FF FFO F(up_0) FO(up_0)`
-  Normalized: `pre=[] anchor=R.hidden slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Hidden strict anchor. `FF/FFO` fall back to the anchor while the sealed replay item replays the declared slot.
-
-- Raw: `R(h[up_0,up_1]) FF FFO F(up_0) FO(up_0) FF2 FFO2 F(up_1) FO(up_1)`
-  Normalized:
-  `pre=[] anchor=R.hidden slots=[F(up_0),F(up_1),FF,FF2] outputs=[FFO,FO(up_0),FFO2,FO(up_1)] post=[]`
-  Outcome: Accept
-  Notes: The declared segment stays first; later direct additions keep arrival order.
-
-- Raw: `R(h-empty-main[up_0]) FF FFO F(up_0) FO(up_0)`
-  Normalized:
-  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0),FF] outputs=[FFO,FO(up_0)] post=[]`
-  Outcome: Accept
-  Notes: Same on hidden-empty strict anchor.
-
-- Raw: `R(h-empty-main[up_0,up_1]) FF FFO F(up_0) FO(up_0) FF2 FFO2 F(up_1) FO(up_1)`
-  Normalized:
-  `pre=[] anchor=R.hidden(empty-main) slots=[F(up_0),F(up_1),FF,FF2] outputs=[FFO,FO(up_0),FFO2,FO(up_1)] post=[]`
-  Outcome: Accept
-  Notes: Same generalized bundle with empty public content.
-
-6B. Free explicit-anchor order
-
-- Raw: `R(c) M FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[]`
-  Outcome: Accept
-  Notes: Free explicit anchor. With no declared segment, direct calls stay in arrival order.
-
-- Raw: `R(c) M FF FFO F FO FF2 FFO2 F2 FO2`
-  Normalized:
-  `pre=[] anchor=M slots=[FF,F,FF2,F2] outputs=[FFO,FO,FFO2,FO2] post=[]`
-  Outcome: Accept
-  Notes: Same rule generalized across multiple direct additions.
-
-7. Free-anchor bundles
-
-A free anchor has `declared(A)=[]`.
-
-- Therefore `slots(A)=added(A)`.
-- Direct anchor-owned calls appear in first-arrival order across both sealed
-  and fabricated calls.
-
-- A later assistant starts a new anchor immediately once the current bundle is
-  settled.
-- A non-assistant message never supersedes the current anchor.
-- Fabricated calls may attach to the current free anchor when there is no later
-  assistant mini-turn to own them.
-
-7A. Free-anchor plain continuations
-
-- Raw: `R(c) M FMu F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Plain non-assistant messages never supersede the current anchor.
-
-- Raw: `R(c) M FMu FMu2 F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu),P(FMu2)]`
-  Outcome: Accept
-  Notes: Preserve order.
-
-- Raw: `R(c) M FMa F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[F] outputs=[FO]`
-  Outcome: Accept
-  Notes: The later assistant supersedes immediately because the free anchor is already settled.
-
-7B. Free-anchor assistant mini-turns
-
-- Raw: `R(c) M FMa FF FFO F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO]`
-  Outcome: Accept
-  Notes: The new free anchor has no declared segment, so its direct calls stay in arrival order while outputs keep chronology.
-
-- Raw: `R(c) M FMa FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[FF,F1,F2] outputs=[FFO,FO2,FO1]`
-  Outcome: Accept
-  Notes: The later assistant owns both fabricated and sealed calls, and free-anchor direct order follows arrival order across both kinds.
-
-- Raw: `R(c) M FMa1 FF1 FFO1 FMa2 FF2 FFO2 F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa1 slots=[FF1] outputs=[FFO1]`
-  `bundle3 anchor=FMa2 slots=[FF2,F] outputs=[FFO2,FO]`
-  Outcome: Accept
-  Notes: Each settled assistant mini-turn hands off to the next assistant anchor.
-
-7C. Free-anchor mixed `FMa` / `FMu`
-
-- Raw: `R(c) M FMu FMa FF FFO F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[] post=[P(FMu)]`
-  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO]`
-  Outcome: Accept
-  Notes: Plain message stays between bundles; the later assistant becomes the new anchor.
-
-- Raw: `R(c) M FMa FMu FF FFO F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[FF,F] outputs=[FFO,FO] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: `FMu` cannot split the attached assistant mini-turn.
-
-- Raw: `R(c) M FMa FMu FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa slots=[FF,F1,F2] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Same with parallel sealed calls.
-
-- Raw: `R(c) M FMa1 FMu1 FF1 FFO1 FMa2 FMu2 FF2 FFO2 F FO`
-  Normalized:
-  `bundle1 anchor=M slots=[] outputs=[]`
-  `bundle2 anchor=FMa1 slots=[FF1] outputs=[FFO1] post=[P(FMu1)]`
-  `bundle3 anchor=FMa2 slots=[FF2,F] outputs=[FFO2,FO] post=[P(FMu2)]`
-  Outcome: Accept
-  Notes: Each interleaved plain message remains outside the assistant mini-turn that follows it.
-
-7D. Free-anchor non-assistant fallback
-
-- Raw: `R(c) M FMu FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: With no later assistant, `FF/FFO` fall back to `M`.
-
-- Raw: `R(c) M FMu FMu2 FF FFO F FO`
-  Normalized:
-  `pre=[] anchor=M slots=[FF,F] outputs=[FFO,FO] post=[P(FMu),P(FMu2)]`
-  Outcome: Accept
-  Notes: Same fallback.
-
-- Raw: `R(c) M FMu FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `pre=[] anchor=M slots=[FF,F1,F2] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Sealed outputs preserve chronology.
-
-- Raw: `R(c) M FMu FF FFO F FO FF2 FFO2 F2 FO2`
-  Normalized:
-  `pre=[] anchor=M slots=[FF,F,FF2,F2] outputs=[FFO,FO,FFO2,FO2] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: All fabricated calls bind to the current free anchor because no later assistant supersedes it.
-
-7E. Free-anchor assistant arrival before settlement
-
-- Raw: `M F M2 FO FF FFO`
-  Normalized:
-  `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(M2;FF,FFO)]`
-  Outcome: Accept
-  Notes: The later assistant arrives while the current free bundle is unsettled, so it clusters.
-
-- Raw: `M F FO M2 FF FFO`
-  Normalized:
-  `bundle1 anchor=M slots=[F] outputs=[FO]`
-  `bundle2 anchor=M2 slots=[FF] outputs=[FFO]`
-  Outcome: Accept
-  Notes: Once settled, the next assistant starts a new anchor immediately.
-
-- Raw: `M F FO M2 F2 FO2 M3 F3 FO3`
-  Normalized:
-  `bundle1 anchor=M slots=[F] outputs=[FO]`
-  `bundle2 anchor=M2 slots=[F2] outputs=[FO2]`
-  `bundle3 anchor=M3 slots=[F3] outputs=[FO3]`
-  Outcome: Accept
-  Notes: Stripped replay forms repeated free bundles, not synthetic anchor splits.
-
-8. Strict-anchor bundles
-
-A strict anchor has `declared(A)!=[]`. In this truth table, strict anchors come
-from hidden main anchors or resolved patches that declare main-side
-`tool_calls`.
-
-- Therefore `slots(A)=declared(A)+added(A)`.
-- The declared segment keeps the order supplied by hidden reasoning state or by
-  `R(p->M[up_0,...])`.
-- Later direct anchor additions append after that declared segment in
-  first-arrival order.
-
-- While any declared hidden tool call is unresolved, later assistants cluster.
-- Once all declared hidden tool calls are satisfied and the bundle is settled,
-  the next assistant starts a new anchor immediately.
-- Fabricated calls may still attach to the current anchor after release as long
-  as no new assistant has superseded it yet.
-
-8A. Strict-anchor plain clustered continuations
-
-- Raw: `R(p->M[up_0]) M FMu F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Plain non-assistant messages never supersede the strict anchor.
-
-- Raw: `R(p->M[up_0]) M FMu FMu2 F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu),P(FMu2)]`
-  Outcome: Accept
-  Notes: Preserve order.
-
-- Raw: `R(p->M[up_0]) M post F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(post)]`
-  Outcome: Accept
-  Notes: The later assistant plain message clusters while the declared strict call is unresolved.
-
-8B. Strict-anchor assistant mini-turn clusters
-
-- Raw: `R(p->M[up_0]) M post FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(post;FF,FFO)]`
-  Outcome: Accept
-  Notes: The clustered assistant keeps its fabricated mini-turn contiguous.
-
-- Raw: `R(p->M[up_0,up_1]) M post FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[A(post;FF,FFO)]`
-  Outcome: Accept
-  Notes: The later assistant clusters and owns its fabricated mini-turn while the strict calls remain unresolved.
-
-- Raw: `R(p->M[up_0]) M post1 FF1 FFO1 post2 FF2 FFO2 F FO`
-  Normalized:
-  `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(post1;FF1,FFO1),A(post2;FF2,FFO2)]`
-  Outcome: Accept
-  Notes: Multiple later assistants remain separate clustered mini-turns while the strict call is unresolved.
-
-8C. Strict-anchor mixed `FMa` / `FMu`
-
-- Raw: `R(p->M[up_0]) M FMu post FF FFO F FO`
-  Normalized:
-  `pre=[] anchor=M slots=[F] outputs=[FO] post=[P(FMu),A(post;FF,FFO)]`
-  Outcome: Accept
-  Notes: Plain message stays before the clustered assistant mini-turn.
-
-- Raw: `R(p->M[up_0,up_1]) M post FMu FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `pre=[] anchor=M slots=[F1,F2] outputs=[FO2,FO1] post=[A(post;FF,FFO),P(FMu)]`
-  Outcome: Accept
-  Notes: The later assistant still clusters because the declared sealed calls are unresolved.
-
-- Raw: `R(p->M[up_0]) M post1 FMu1 FF1 FFO1 post2 FMu2 FF2 FFO2 F FO`
-  Normalized:
-  `pre=[] anchor=M slots=[F] outputs=[FO] post=[A(post1;FF1,FFO1),P(FMu1),A(post2;FF2,FFO2),P(FMu2)]`
-  Outcome: Accept
-  Notes: Each plain message stays outside the clustered assistant mini-turn that follows it.
-
-8D. Strict-anchor non-assistant fallback
-
-- Raw: `R(p->M[up_0]) M FMu FF FFO F FO`
-  Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: With no later assistant before `FF`, fabricated fallback still binds to the strict anchor.
-
-- Raw: `R(p->M[up_0]) M FMu FMu2 FF FFO F FO`
-  Normalized:
-  `pre=[] anchor=M slots=[F,FF] outputs=[FFO,FO] post=[P(FMu),P(FMu2)]`
-  Outcome: Accept
-  Notes: Same fallback.
-
-- Raw: `R(p->M[up_0,up_1]) M FMu FF FFO F1 F2 FO2 FO1`
-  Normalized:
-  `pre=[] anchor=M slots=[F1,F2,FF] outputs=[FFO,FO2,FO1] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Parallel strict calls preserve chronology while fabricated fallback still binds to the anchor.
-
-- Raw: `R(p->M[up_0,up_1]) M FMu FF FFO F(up_0) FO(up_0) FF2 FFO2 F(up_1) FO(up_1)`
-  Normalized:
-  `pre=[] anchor=M slots=[F(up_0),F(up_1),FF,FF2] outputs=[FFO,FO(up_0),FFO2,FO(up_1)] post=[P(FMu)]`
-  Outcome: Accept
-  Notes: Fabricated fallback remains on the same strict anchor until a later assistant supersedes it.
-
-8E. Strict-anchor release and turnover
-
-- Raw: `R(p->M[up_0]) M F FO FF FFO`
-  Normalized: `pre=[] anchor=M slots=[F,FF] outputs=[FO,FFO] post=[]`
-  Outcome: Accept
-  Notes: Satisfying the declared strict call releases the anchor, but fabricated fallback may still
-  attach until a later assistant supersedes it.
-
-- Raw: `R(p->M[up_0]) M F FO post FF FFO`
-  Normalized:
-  `bundle1 anchor=M slots=[F] outputs=[FO]`
-  `bundle2 anchor=post slots=[FF] outputs=[FFO]`
-  Outcome: Accept
-  Notes: After release and settlement, the later assistant starts a new anchor.
-
-- Raw: `R(p->M[up_0]) M F FO post F2 FO2`
-  Normalized:
-  `bundle1 anchor=M slots=[F] outputs=[FO]`
-  `bundle2 anchor=post slots=[F2] outputs=[FO2]`
-  Outcome: Accept
-  Notes: The later assistant also owns later sealed calls once the strict anchor has settled.
-
-- Raw: `R(p->M[up_0,up_1]) M F(up_0) FO(up_0) post FF FFO F(up_1) FO(up_1)`
-  Normalized:
-  `pre=[] anchor=M slots=[F(up_0),F(up_1)] outputs=[FO(up_0),FO(up_1)] post=[A(post;FF,FFO)]`
-  Outcome: Accept
-  Notes: Partial satisfaction keeps the later assistant clustered until all declared strict calls are satisfied.
-
-9. Later reasoning finalization
-
-- Raw: `R(p->M[up_0]) M F R2(...)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Later reasoning cannot finalize a bundle with unresolved declared outputs.
-
-- Raw: `R(p->M[up_0]) M F FO FF R2(...)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Later reasoning cannot finalize a bundle with unresolved fabricated calls either.
-
-- Raw: `R(p->M[up_0]) M F FO FF FFO R2(...)`
-  Normalized:
-  `bundle1 anchor=M slots=[F,FF] outputs=[FO,FFO]`
-  `then next reasoning bundle`
-  Outcome: Accept
-  Notes: Later reasoning still forces closure, but only after the current bundle is settled.
-
-Replay rejections that stay rejected
-
-- Raw: `R(p->M) FF FFO M F FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: `FF` has no assistant anchor before `M`.
-
-- Raw: `R(p->M) FF FFO F FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Same reason.
-
-- Raw: `R(p->M) FMu FF FFO M F FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: `FMu` is not an assistant anchor.
-
-- Raw: `R(p->M) FMu FMu2 FF FFO M F FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Same reason.
-
-- Raw: `Any case requiring retroactive reopen of an older anchor after a newer`
-  `bundle has started`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Replay has no retroactive reopen.
-
-- Raw: `Any case where M never appears for R(p->M)`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Patch target missing.
-
-- Raw: `Sealed output for a call id that is not pending in the current bundle`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Output must match an actually pending call id.
-
-- Raw: `FO with no pending F`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Output without call.
-
-- Raw: `Pending F with no later FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Missing output.
-
-- Raw: `Duplicate pending call ids`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: Invalid replay state.
-
-Synthetic main recovery is removed.
-
-- Raw: `F FO on main`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: No naked main sealed replay without a real anchor.
-
-- Raw: `Stripped R(h-empty-main) F FO -> F FO`
-  Normalized: N/A
-  Outcome: Reject
-  Notes: No synthetic stripped-anchor recovery when no current anchor exists.
-
-- Raw: `R(c) M R(h-empty-main) F FO stripped into M F FO`
-  Normalized: `pre=[] anchor=M slots=[F] outputs=[FO] post=[]`
-  Outcome: Accept
-  Notes: With an existing free anchor, stripped sealed replay attaches to that current anchor instead of synthesizing a new one.
-
-- Raw: `Naked reviewer F FO`
-  Normalized: N/A
-  Outcome: Silent discard
-  Notes: No main-side semantics here; non-main naked sealed pairs are still dropped.
-
-- Raw: `Naked arbitrator F FO`
-  Normalized: N/A
-  Outcome: Silent discard
-  Notes: Same.
-
-- Raw: `Reviewer side already contains unrelated closed history, then reviewer F FO for a missing call id`
-  Normalized: reviewer side unchanged
-  Outcome: Silent discard
-  Notes: Non-main sealed replay is discarded whenever the side has no matching call, not only when the side is empty.
-
-- Raw: `Arbitrator side already contains unrelated closed history, then arbitrator F FO for a missing call id`
-  Normalized: arbitrator side unchanged
-  Outcome: Silent discard
-  Notes: Same discard rule.
-
-Quick validation rules
-
-- `R(p->M[up_0]) M F(up_0) FO(up_0) -> M F FO`: yes
-- `R(p->M[up_0]) FMu M F(up_0) FO(up_0)`: hoist `FMu` immediately before `M`, not before whole `R`
-- `F1 F2 FO2 FO1`: keep `outputs=[FO2,FO1]`, do not reorder to slot order
-- `R(h[up_0]) FF FFO F(up_0) FO(up_0)`: attachment row, so the hidden declared slot stays first
-- `R(p->M[up_0]) FMa F(tx) FO(tx) M F(up_0) FO(up_0)`: sealed transplant binds to `FMa`; the declared slot stays on `M`
-- `R(c) M FF FFO F FO`: free explicit anchor, so direct calls stay in arrival order as `slots=[FF,F]`
-- `M F M2 FO FF FFO`: `M2` clusters because the first free bundle is unsettled
-- `M F FO M2 FF FFO`: `M2` starts a new bundle because the first free bundle is settled
-- `R(p->M[up_0]) M F(up_0) FO(up_0) FF FFO`: `FF/FFO` may still attach to `M` until a later assistant supersedes it
-- `R(p->M[up_0,up_1]) M F(up_0) FO(up_0) M2 ...`: `M2` still clusters because the strict bundle is only partially satisfied
-- later `R` forces finalization but does not define anchor lifetime by itself
+"""Half-chained response replay truth table.
+
+Purpose
+-------
+
+This file is the readable, executable specification for request ingestion. It
+describes the state lanes, the positional main reducer, and the interactions
+between reasoning, public messages, and tool items. A row is useful only when a
+reader can derive both the accepted history and the rejection reason without
+reading the reducer implementation.
+
+The table covers replay semantics from PLAN.md sections 28 through 31. Producer
+selection and streamed lineage are not replay-table concerns; their required
+rows live in test_responses_runtime.py and test_responses_streaming.py.
+
+Notation
+--------
+
+- `C`: full compaction checkpoint.
+- `U`: standalone public user message.
+- `Rk(...)`: reasoning checkpoint. Its reasoning predecessor is always null.
+- `Rp(...)`: reasoning patch. It references the preceding reasoning ID.
+- `@C`: every reasoning item also references its current compaction anchor C.
+- `A`: complete authenticated assistant stored inside reasoning main data.
+- `P(A)`: terminal MessagePatch carrying complete authenticated assistant A.
+- `R(A)`: reasoning appends A directly as a hidden assistant position.
+- `M`: standalone public assistant message.
+- `FMa`: fabricated public assistant message used to emphasize position.
+- `FMu`: fabricated user, system, or developer message.
+- `FC` / `FCO`: function_call and function_call_output request items.
+- `SFC`: FC whose call ID opens a sealed side declaration.
+- `FFC`: FC whose call ID is unsealed and therefore fabricated.
+- `D`: durable application state.
+- `S[x]`: complete non-main history for side x.
+- `dD` / `dS[x]`: JSON patches for durable state or side x.
+
+There are three independent persistence lanes:
+
+1. Durable state is replaced by Rk and JSON-patched by Rp.
+2. Non-main sides are replaced as a complete map by Rk and individually
+   JSON-patched by Rp.
+3. Main is never in either reasoning state variant. It is reconstructed by one
+   positional reducer from the common append-only `main` update and standalone
+   input items.
+
+Compaction is stronger than reasoning: C replaces all three lanes, including
+main, establishes the authenticated main tail, clears reasoning lineage, and
+becomes the required compaction anchor for every following reasoning item.
+
+Boundary state machine
+----------------------
+
+Replay carries `(last_reasoning_id, last_compaction_id, checkpoint_required)`.
+
+Raw transition                 Required result
+-----------------------------  -----------------------------------------------
+empty -> Rp(null, @null)       accept a root patch
+C -> Rp(null, @C)              accept a post-compaction root patch
+C -> Rp(null, @null)           reject: compaction predecessor mismatch
+C2 -> Rp(..., @C1)             reject: stale compaction predecessor
+U -> Rp                        reject: reasoning_checkpoint_required
+U -> Rk(null, @current)        replace D, active, and every non-main side
+Rp/Rk -> Rp(previous=id)       accept and advance the chain
+Rp/Rk -> Rp(wrong predecessor) reject: previous reasoning ID mismatch
+no U -> Rk                     reject: reasoning_checkpoint_unexpected
+U -> Rk(non-null predecessor)  reject: checkpoint has predecessor
+... -> U -> Rk                 start a new chain root again
+
+Only a standalone public U creates this boundary. A role=user message sealed
+inside reasoning main is data in the append lane and does not request Rk.
+
+An Rk transaction preserves reconstructed main, replaces D and active exactly,
+removes omitted non-main sides, and preserves explicitly empty non-main sides.
+Main is rejected structurally if placed in Rk.sides or Rp.sides.
+
+Positional main model
+---------------------
+
+Main replay stores plain transcript nodes and assistant bundles. An assistant
+bundle contains:
+
+- one private authenticated assistant representation;
+- an optional public assistant projection;
+- calls currently owned by this assistant;
+- outputs for those calls in observed output chronology.
+
+The rendered bundle is always contiguous:
+
+    assistant(tool_calls in declaration order)
+    tool(output in observed chronology)
+    tool(...)
+
+A bundle does not own user, system, or developer nodes. Those nodes can be
+pushed after a tool bundle by canonical rendering, but they are never moved as
+part of source timewarp.
+
+Authenticated tail
+------------------
+
+The authenticated tail is the latest assistant introduced by C, a full
+assistant in reasoning main, or P(A). A fabricated public assistant never
+becomes authenticated merely because it appears in input.
+
+P(A) compares complete sealed A only with this one authenticated tail. It does
+not compare A with public M, with arbitrary older assistants, or by public
+content hash. Equal public messages remain distinct transcript occurrences.
+
+MessagePatch modes
+------------------
+
+`content.assistant_output(A)` chooses one of two modes:
+
+Patch form       State after reasoning       What resolves it
+---------------  --------------------------  -------------------------------
+public P(A)      awaiting public assistant   the next M or FMa
+output-empty P(A) hidden immediately          nothing; it is already an owner
+
+For public P(A), FMu is transparent and does not consume the patch. The first
+assistant does consume it:
+
+    R(P(A)) FMu M
+      -> FMu, M(public fields from M; private reasoning from A)
+
+The consuming assistant's content and refusal are authoritative. Sealed A's
+content and refusal exist only for exact source selection. If no assistant
+arrives, or an FC arrives before one, replay rejects with
+`main_message_patch_target_missing`.
+
+Output-empty P(A) resolves as a hidden position and may own calls immediately:
+
+    R(P(A_empty_with_call)) SFC FCO
+      -> hidden A(with call), tool output
+
+Direct R(A) is also hidden immediately, even when A contains text. It never
+requires a redundant public M.
+
+Call lifecycle and owner selection
+----------------------------------
+
+Authenticated declarations begin DECLARED. FC changes a declaration to OPEN;
+FCO changes it to CLOSED. Fabricated calls begin OPEN. Ordinary transcript
+messages may appear while calls are OPEN; canonical rendering places each
+eventual output inside its owner bundle. OPEN calls must be closed before a
+reasoning boundary or replay completion. A DECLARED call may remain parked only
+while its side is inactive.
+
+On main, FC chooses the nearest preceding eligible assistant position:
+
+- FMu is skipped.
+- a later FMa wins over an earlier hidden or patched assistant;
+- hidden R(A) and output-empty P(A) are eligible;
+- public P(A) awaiting an assistant is not eligible;
+- claiming a sealed declaration may move that declaration to the positional
+  owner, but its authenticated name and arguments are retained.
+
+Representative rows:
+
+Raw input                       Canonical main / result
+------------------------------  ----------------------------------------------
+R(P(A)) M SFC FCO               M(private from A, owns SFC), FCO
+R(P(A)) FMa M SFC FCO           FMa(private from A), M(owns SFC), FCO
+R(P(A)) FMu M                   FMu, M(private from A)
+R(A) SFC FCO                    hidden A(owns SFC), FCO
+R(A) FMa SFC FCO                hidden A, FMa(owns rehomed SFC), FCO
+R(P(A_empty)) SFC FCO           hidden A(owns SFC), FCO
+M FMu FFC FCO                   M(owns FFC), FCO, FMu
+M FMa FFC FCO                   M, FMa(owns FFC), FCO
+M FC1 FC2 FCO2 FCO1             M(FC1, FC2), FCO2, FCO1
+M FC1 FMu FCO1                  M(FC1), FCO1, FMu
+M FC1 FMa FCO1                  M(FC1), FCO1, FMa
+M FC1 FCO1 FMa FC2 FCO2         M(FC1), FCO1, FMa(FC2), FCO2
+M FC1 FMa FC2 FCO2 FCO1         M(FC1), FCO1, FMa(FC2), FCO2
+
+Declared calls can cross FMu before they are opened. This is required for an
+inactive source to be relocated later. Open calls may cross messages, but not
+reasoning, compaction, or replay completion.
+
+Timewarp
+--------
+
+When P(A) exactly matches the authenticated tail, the live source bundle is
+removed from its old position and inserted at the patch position. The move
+includes its assistant, hidden settlements, and fabricated calls/outputs that
+were attached to that source. It excludes FMu and unrelated assistant bundles.
+
+    R1(A) FMu RN(P(A))
+      -> FMu, relocated A
+
+    R1(A) FFC FCO FMu RN(P(A)) SFC FCO
+      -> FMu, relocated A(with FFC and SFC), FCO(FFC), FCO(SFC)
+
+If the authenticated tail does not equal A, that tail remains in place and a
+new bundle is staged from P(A). This is also the fallback after compaction
+slicing removes the original source.
+
+A user boundary has one special parked-main interaction. U temporarily defers
+interrupting inactive DECLARED main calls so the required Rk can relocate an
+exact source with P(A). If the checkpoint does not match that source, replay
+closes the parked declarations with the user-interruption output before
+applying the checkpoint main update.
+
+Non-main isolation
+------------------
+
+Non-main sides do not use positional MessagePatch semantics. Their complete
+checkpoint histories or patched histories authenticate declarations. A sealed
+non-main FC/FCO pair opens and closes only that side's tracker and never enters
+main nodes, owner selection, or timewarp.
+
+- active non-main declaration without FC rejects;
+- opened non-main call without FCO rejects;
+- FC for an inactive known declaration rejects;
+- inactive declarations may remain parked;
+- a sealed pair with no surviving non-main declaration is stale and discarded;
+- main timewarp cannot rehome a non-main declaration.
+
+Coverage map
+------------
+
+The tests below retain named rows for state replacement and error contracts,
+then exercise the complete positional grammar: projection, direct hidden
+positions, parking/reactivation, hidden settlement, fabricated work, call
+rehoming, open-call interleaving, timewarp, and non-main isolation. Runtime
+producer tests separately prove Rk/Rp selection, R then optional M then FC
+output order, delayed call-only activation, and checkpoint exclusion of main.
+Streaming tests prove null checkpoint lineage, patch chaining, stable draft
+variant, and cancellation behavior. Advisor and vision suites prove downstream
+plugin behavior.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from itertools import count
+from collections.abc import Sequence
 
 import pytest
 
 from plap.errors import PlapError
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
+    OutputRefusalContent,
+    OutputTextContent,
+    RequestCompactionItem,
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
     RequestInputItem,
     RequestMessageItem,
     RequestReasoningItem,
     ResponseCreateRequest,
-    SummaryTextContent,
 )
-from plap.responses.ingest.ingest import ingest_response_request as _ingest_response_request_impl
+from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
+    CompactionPayload,
     Message,
     MessagePatch,
+    ReasoningCheckpoint,
+    ReasoningPatch,
     ReasoningPayload,
     Side,
-    SidesUpdate,
+    Sides,
     ToolCall,
 )
-from plap.responses.ingest.sealing import (
-    open_reasoning_payload,
-    seal_reasoning_payload,
-)
-from plap.responses.ingest.sealing import (
-    seal_call_id as _seal_call_id_impl,
-)
-
-
-@dataclass(frozen=True, slots=True)
-class _AcceptCase:
-    items: list[RequestInputItem]
-    expected_main: list[dict[str, object]]
-
-
-@dataclass(frozen=True, slots=True)
-class _RejectCase:
-    items: list[RequestInputItem]
-    expected_reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class _DiscardCase:
-    items: list[RequestInputItem]
-    side: Side
-    expected_side: list[dict[str, object]]
-
-
-@dataclass(frozen=True, slots=True)
-class _BaselineSettlementCase:
-    baseline: tuple[Message, ...]
-    main: tuple[Message | MessagePatch, ...]
-    expected_main: tuple[Message, ...] | None
-    active: frozenset[Side] | None = None
-    trailing_items: tuple[RequestInputItem, ...] = ()
-    expected_reason: str | None = None
+from plap.responses.ingest.sealing import seal_call_id, seal_compaction_payload, seal_reasoning_payload
 
 
 def _keyring() -> SealingKeyring:
@@ -819,2412 +269,1481 @@ def _keyring() -> SealingKeyring:
 
 
 def _side_codes() -> dict[str, int]:
-    return {
-        MAIN_SIDE: 0,
-        "defender": 1,
-        "reviewer": 2,
-        "arbitrator": 3,
-    }
+    return {MAIN_SIDE: 0, "reviewer": 1, "arbitrator": 2}
 
 
-async def ingest_response_request(request: ResponseCreateRequest, *, keyring: SealingKeyring):
-    return await _ingest_response_request_impl(request, keyring=keyring, side_codes=_side_codes())
+def _tool_call(call_id: str, *, name: str = "read_file") -> ToolCall:
+    return ToolCall(id=call_id, name=name, arguments='{"path":"README.md"}')
 
 
-def seal_call_id(value: CallID, *, keyring: SealingKeyring) -> str:
-    return _seal_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
+def _message(content: str, *, role: str = "assistant") -> RequestMessageItem:
+    return RequestMessageItem(content=content, role=role, type="message")
 
 
-_REASONING_PAYLOAD_COUNTER = count()
-
-
-def _next_reasoning_payload_id() -> str:
-    return f"rs_truth_{next(_REASONING_PAYLOAD_COUNTER)}"
-
-
-def _reasoning_payload(
-    *,
-    machine: list[dict[str, object]],
-    sides: SidesUpdate,
-    payload_id: str | None = None,
-    previous_reasoning_id: str | None = None,
-) -> ReasoningPayload:
-    return ReasoningPayload(
-        id=payload_id or _next_reasoning_payload_id(),
-        previous_reasoning_id=previous_reasoning_id,
-        machine=machine,
-        sides=sides,
+def _function_call(call_id: str, *, name: str = "read_file") -> RequestFunctionCallItem:
+    return RequestFunctionCallItem(
+        arguments='{"path":"README.md"}',
+        call_id=call_id,
+        name=name,
+        type="function_call",
     )
 
 
-def _sides_update(
+def _function_output(call_id: str, output: str = "result") -> RequestFunctionCallOutputItem:
+    return RequestFunctionCallOutputItem(call_id=call_id, output=output, type="function_call_output")
+
+
+def _sealed_call_id(side: Side, upstream_call_id: str) -> str:
+    return seal_call_id(
+        CallID(side=side, upstream_tool_call_id=upstream_call_id),
+        keyring=_keyring(),
+        side_codes=_side_codes(),
+    )
+
+
+def _checkpoint(
+    payload_id: str,
     *,
+    durable: dict[str, object] | None = None,
     active: set[Side] | None = None,
+    sides: dict[Side, list[Message]] | None = None,
     main: list[Message | MessagePatch] | None = None,
-    patches: dict[Side, list[dict[str, object]]] | None = None,
-) -> SidesUpdate:
-    return SidesUpdate(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
+    previous_reasoning_id: str | None = None,
+    previous_compaction_id: str | None = None,
+) -> ReasoningPayload:
+    return ReasoningPayload(
+        id=payload_id,
+        previous_reasoning_id=previous_reasoning_id,
+        previous_compaction_id=previous_compaction_id,
+        state=ReasoningCheckpoint(
+            durable={} if durable is None else durable,
+            active={MAIN_SIDE} if active is None else active,
+            sides={} if sides is None else sides,
+        ),
+        main=[] if main is None else main,
+    )
 
 
-def _chain_reasoning_items(items: list[RequestInputItem]) -> list[RequestInputItem]:
-    chained: list[RequestInputItem] = []
-    last_reasoning_id: str | None = None
-    for item in items:
-        if not isinstance(item, RequestReasoningItem) or item.encrypted_content is None:
-            chained.append(item)
-            continue
-        payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
-        chained_payload = _reasoning_payload(
-            payload_id=payload.id,
-            previous_reasoning_id=last_reasoning_id,
-            machine=payload.machine,
-            sides=payload.sides,
-        )
-        last_reasoning_id = chained_payload.id
-        chained.append(
-            RequestReasoningItem(
-                content=item.content,
-                encrypted_content=seal_reasoning_payload(chained_payload, keyring=_keyring()),
-                id=chained_payload.id,
-                status=item.status,
-                summary=item.summary,
-                type="reasoning",
-            )
-        )
-    return chained
-
-
-def _request(items: list[RequestInputItem]) -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap/test", input=_chain_reasoning_items(items))
-
-
-def _tool_call_model(call_id: str) -> ToolCall:
-    return ToolCall(id=call_id, name="read_file", arguments='{"path":"README.md"}')
-
-
-def _tool_call_value(call_id: str) -> dict[str, object]:
-    return {"id": call_id, "name": "read_file", "arguments": '{"path":"README.md"}'}
-
-
-def _assistant_value(content: str, *tool_call_ids: str) -> dict[str, object]:
-    value: dict[str, object] = {"role": "assistant", "content": content}
-    if tool_call_ids:
-        value["tool_calls"] = [_tool_call_value(call_id) for call_id in tool_call_ids]
-    return value
-
-
-def _plain_value(role: str, content: str) -> dict[str, object]:
-    return {"role": role, "content": content}
-
-
-def _tool_value(call_id: str, content: str) -> dict[str, object]:
-    return {"role": "tool", "tool_call_id": call_id, "content": content}
-
-
-def _assistant_item(content: str) -> RequestMessageItem:
-    return RequestMessageItem(content=content, role="assistant", type="message")
-
-
-def _plain_item(role: str, content: str) -> RequestMessageItem:
-    return RequestMessageItem(content=content, role=role, type="message")
+def _patch(
+    payload_id: str,
+    *,
+    previous_reasoning_id: str | None = None,
+    previous_compaction_id: str | None = None,
+    durable: list[dict[str, object]] | None = None,
+    active: set[Side] | None = None,
+    sides: dict[Side, list[dict[str, object]]] | None = None,
+    main: list[Message | MessagePatch] | None = None,
+) -> ReasoningPayload:
+    return ReasoningPayload(
+        id=payload_id,
+        previous_reasoning_id=previous_reasoning_id,
+        previous_compaction_id=previous_compaction_id,
+        state=ReasoningPatch(
+            durable=[] if durable is None else durable,
+            active=active,
+            sides={} if sides is None else sides,
+        ),
+        main=[] if main is None else main,
+    )
 
 
 def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     return RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
         id=payload.id,
-        summary=[SummaryTextContent(text="sealed", type="summary_text")],
+        summary=[],
         type="reasoning",
     )
 
 
-def _reasoning_closed_main(label: str) -> RequestReasoningItem:
-    return _sealed_reasoning(
-        _reasoning_payload(
-            machine=[{"op": "add", "path": f"/{label}", "value": True}],
-            sides=_sides_update(),
-        )
+def _sealed_compaction(payload: CompactionPayload) -> RequestCompactionItem:
+    return RequestCompactionItem(
+        encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
+        id=payload.id,
+        type="compaction",
     )
 
 
-def _reasoning_hidden_main(*messages: dict[str, object]) -> RequestReasoningItem:
-    return _sealed_reasoning(
-        _reasoning_payload(
-            machine=[],
-            sides=_sides_update(main=[Message.from_primitive(message) for message in messages]),
-        )
-    )
-
-
-def _reasoning_closed_non_main(side: Side, assistant: dict[str, object], tool_output: dict[str, object]) -> RequestReasoningItem:
-    return _sealed_reasoning(
-        _reasoning_payload(
-            machine=[],
-            sides=_sides_update(
-                patches={
-                    side: [
-                        {"op": "add", "path": "/0", "value": assistant},
-                        {"op": "add", "path": "/1", "value": tool_output},
-                    ]
-                }
-            ),
-        )
-    )
-
-
-def _reasoning_patch_main(
-    target: dict[str, object],
-    *,
-    tool_call_ids: tuple[str, ...],
-    deferred_outputs: tuple[dict[str, object], ...] = (),
-) -> RequestReasoningItem:
-    value = dict(target)
-    if tool_call_ids:
-        value["tool_calls"] = [_tool_call_value(call_id) for call_id in tool_call_ids]
-    assistant = Message.from_primitive(value)
-    patch = MessagePatch(message=assistant)
-    return _sealed_reasoning(
-        _reasoning_payload(
-            machine=[],
-            sides=_sides_update(
-                main=[
-                    assistant,
-                    *[Message.from_primitive(output) for output in deferred_outputs],
-                    patch,
-                ]
-            ),
-        )
-    )
-
-
-def _sealed_main_call(anchor: dict[str, object], upstream_id: str, *, tool_call_index: int = 0) -> RequestFunctionCallItem:
-    _ = anchor
-    _ = tool_call_index
-    call_id = seal_call_id(
-        CallID(
-            side="main",
-            upstream_tool_call_id=upstream_id,
-        ),
-        keyring=_keyring(),
-    )
-    return RequestFunctionCallItem(
-        arguments='{"path":"README.md"}',
-        call_id=call_id,
-        name="read_file",
-        type="function_call",
-    )
-
-
-def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
-    return seal_call_id(
-        CallID(
-            side=side,
-            upstream_tool_call_id=upstream_tool_call_id,
-        ),
-        keyring=_keyring(),
-    )
-
-
-def _sealed_main_output(
-    anchor: dict[str, object], upstream_id: str, output: str, *, tool_call_index: int = 0
-) -> RequestFunctionCallOutputItem:
-    _ = anchor
-    _ = tool_call_index
-    call_id = seal_call_id(
-        CallID(
-            side="main",
-            upstream_tool_call_id=upstream_id,
-        ),
-        keyring=_keyring(),
-    )
-    return RequestFunctionCallOutputItem(
-        call_id=call_id,
-        output=output,
-        type="function_call_output",
-    )
-
-
-def _fabricated_call(call_id: str) -> RequestFunctionCallItem:
-    return RequestFunctionCallItem(
-        arguments='{"path":"README.md"}',
-        call_id=call_id,
-        name="read_file",
-        type="function_call",
-    )
-
-
-def _fabricated_output(call_id: str, output: str) -> RequestFunctionCallOutputItem:
-    return RequestFunctionCallOutputItem(call_id=call_id, output=output, type="function_call_output")
-
-
-def _main_primitives(result) -> list[dict[str, object]]:
-    return [message.to_primitive() for message in result.sides[MAIN_SIDE]]
-
-
-def _side_primitives(result, side: Side) -> list[dict[str, object]]:
-    return [message.to_primitive() for message in result.sides.get(side, []) or []]
-
-
-def _append_patch_analogue_case(
-    *,
-    case_id: str,
-    tool_call_ids: tuple[str, ...],
-    tail_items: list[RequestInputItem],
-    expected_main: list[dict[str, object]],
-) -> None:
-    m = _assistant_value("m")
-    ACCEPT_CASES.append(
-        pytest.param(
-            _AcceptCase(
-                items=[
-                    _reasoning_patch_main(m, tool_call_ids=tool_call_ids),
-                    _assistant_item("m"),
-                    *tail_items,
-                ],
-                expected_main=expected_main,
-            ),
-            id=case_id,
-        )
-    )
-
-
-ACCEPT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
-DISCARD_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
-
-m = _assistant_value("m")
-patched = Message.from_primitive(_assistant_value("m", "up_0"))
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[_assistant_item("m"), _sealed_main_call(m, "up_0"), _sealed_main_output(m, "up_0", "fo_0")],
-            expected_main=[_assistant_value("m", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="baseline_explicit_single",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0", "up_1"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="baseline_explicit_multiple_in_order",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0", "up_1"),
-                _tool_value("up_1", "fo_1"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="baseline_explicit_multiple_output_chronology",
-    )
-)
-
-h = _assistant_value("hidden")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[_reasoning_hidden_main(h), _sealed_main_call(h, "up_0"), _sealed_main_output(h, "up_0", "fo_0")],
-            expected_main=[_assistant_value("hidden", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="baseline_hidden_anchor",
-    )
-)
-
-h = _assistant_value("")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[_reasoning_hidden_main(h), _sealed_main_call(h, "up_0"), _sealed_main_output(h, "up_0", "fo_0")],
-            expected_main=[_assistant_value("", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="baseline_hidden_empty_anchor",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[_assistant_value("m", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="baseline_patch_target_explicit_anchor",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[_assistant_item("m"), _sealed_main_call(m, "up_0"), _sealed_main_output(m, "up_0", "fo_0")],
-            expected_main=[_assistant_value("m", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="baseline_stripped_patch_same_as_explicit_anchor",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _plain_item("user", "u1"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_hidden_single",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _plain_value("user", "u2"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_hidden_multiple",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _assistant_item("pre"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_assistant_hidden",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _plain_item("user", "u1"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_patch_single",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _plain_value("user", "u2"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_patch_multiple",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("pre"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_plain_patch_assistant",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _assistant_item("pre"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_assistant_minibundle_hidden",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _assistant_item("pre"),
-                _sealed_main_call(h, "up_tx"),
-                _sealed_main_output(h, "up_tx", "fo_tx"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "up_tx"),
-                _tool_value("up_tx", "fo_tx"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_assistant_sealed_transplant_hidden",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("pre"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_assistant_minibundle_patch",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("pre"),
-                _sealed_main_call(m, "up_tx"),
-                _sealed_main_output(m, "up_tx", "fo_tx"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "up_tx"),
-                _tool_value("up_tx", "fo_tx"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_assistant_sealed_transplant_patch",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _plain_item("user", "u1"),
-                _assistant_item("pre"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_mixed_hidden_user_then_assistant_cluster",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _assistant_item("pre"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _plain_value("user", "u1"),
-                _assistant_value("", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_mixed_hidden_assistant_cluster_then_user",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _plain_item("user", "u1"),
-                _assistant_item("pre"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_mixed_patch_user_then_assistant_cluster",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("pre"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("pre", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _plain_value("user", "u1"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_mixed_patch_assistant_cluster_then_user",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _assistant_value("", "up_0", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_non_assistant_fallback_hidden_single",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _plain_value("user", "u1"),
-                _plain_value("user", "u2"),
-                _assistant_value("", "up_0", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="pre_anchor_non_assistant_fallback_hidden_multiple",
-    )
-)
-
-h = _assistant_value("hidden", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("hidden", "up_0", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="mixed_same_hidden_anchor_single",
-    )
-)
-
-h = _assistant_value("hidden", "up_0", "up_1")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0", tool_call_index=0),
-                _sealed_main_output(h, "up_0", "fo_0", tool_call_index=0),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(h, "up_1", tool_call_index=1),
-                _sealed_main_output(h, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("hidden", "up_0", "up_1", "fab_0", "fab_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="mixed_same_hidden_anchor_multiple",
-    )
-)
-
-h = _assistant_value("", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0"),
-                _sealed_main_output(h, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("", "up_0", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="mixed_same_hidden_empty_anchor_single",
-    )
-)
-
-h = _assistant_value("", "up_0", "up_1")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_hidden_main(h),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(h, "up_0", tool_call_index=0),
-                _sealed_main_output(h, "up_0", "fo_0", tool_call_index=0),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(h, "up_1", tool_call_index=1),
-                _sealed_main_output(h, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("", "up_0", "up_1", "fab_0", "fab_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="mixed_same_hidden_empty_anchor_multiple",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("rm_single"),
-                _assistant_item("m"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="mixed_same_explicit_anchor_single",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("rm_multi"),
-                _assistant_item("m"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0", "fab_1", "up_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="mixed_same_explicit_anchor_multiple",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_plain_single"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[_assistant_value("m", "up_0"), _tool_value("up_0", "fo_0"), _plain_value("user", "u1")],
-        ),
-        id="free_anchor_plain_nonassistant_single",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_plain_multi"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-                _plain_value("user", "u2"),
-            ],
-        ),
-        id="free_anchor_plain_nonassistant_multiple",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_plain_assistant"),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _sealed_main_call(post, "up_0"),
-                _sealed_main_output(post, "up_0", "fo_0"),
-            ],
-            expected_main=[_assistant_value("m"), _assistant_value("post", "up_0"), _tool_value("up_0", "fo_0")],
-        ),
-        id="free_anchor_turnover_plain_assistant_single",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_mini_single"),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(post, "up_0"),
-                _sealed_main_output(post, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="free_anchor_turnover_assistant_minibundle_single",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_mini_multi"),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(post, "up_0", tool_call_index=0),
-                _sealed_main_call(post, "up_1", tool_call_index=1),
-                _sealed_main_output(post, "up_1", "fo_1", tool_call_index=1),
-                _sealed_main_output(post, "up_0", "fo_0", tool_call_index=0),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post", "fab_0", "up_0", "up_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_1", "fo_1"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="free_anchor_turnover_assistant_minibundle_multiple_sealed",
-    )
-)
-
-m = _assistant_value("m")
-post2 = _assistant_value("post2")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_multi_cluster_single"),
-                _assistant_item("m"),
-                _assistant_item("post1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("post2"),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(post2, "up_0"),
-                _sealed_main_output(post2, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post1", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _assistant_value("post2", "fab_1", "up_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="free_anchor_turnover_multiple_assistant_anchors",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_mixed_1"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(post, "up_0"),
-                _sealed_main_output(post, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _plain_value("user", "u1"),
-                _assistant_value("post", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="free_anchor_user_then_new_assistant_anchor",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_mixed_2"),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(post, "up_0"),
-                _sealed_main_output(post, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="free_anchor_new_assistant_then_user",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("post", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="strict_anchor_mixed_cluster_assistant_then_user_single",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_mixed_3"),
-                _assistant_item("m"),
-                _assistant_item("post"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(post, "up_0", tool_call_index=0),
-                _sealed_main_call(post, "up_1", tool_call_index=1),
-                _sealed_main_output(post, "up_1", "fo_1", tool_call_index=1),
-                _sealed_main_output(post, "up_0", "fo_0", tool_call_index=0),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post", "fab_0", "up_0", "up_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_1", "fo_1"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="free_anchor_new_assistant_then_user_parallel_sealed",
-    )
-)
-
-m = _assistant_value("m")
-post2 = _assistant_value("post2")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_multi_cluster_interleaved"),
-                _assistant_item("m"),
-                _assistant_item("post1"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("post2"),
-                _plain_item("user", "u2"),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(post2, "up_0"),
-                _sealed_main_output(post2, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m"),
-                _assistant_value("post1", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _plain_value("user", "u1"),
-                _assistant_value("post2", "fab_1", "up_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u2"),
-            ],
-        ),
-        id="free_anchor_multiple_assistant_anchors_with_interleaved_plain",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_fallback_1"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="free_anchor_nonassistant_fallback_single",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_fallback_2"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-                _plain_value("user", "u2"),
-            ],
-        ),
-        id="free_anchor_nonassistant_fallback_multiple",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_fallback_3"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0", "up_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_1", "fo_1"),
-                _tool_value("up_0", "fo_0"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="free_anchor_nonassistant_fallback_parallel_sealed",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_closed_main("post_fallback_4"),
-                _assistant_item("m"),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-                _fabricated_call("fab_1"),
-                _fabricated_output("fab_1", "ffo_1"),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("m", "fab_0", "up_0", "fab_1", "up_1"),
-                _tool_value("fab_0", "ffo_0"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("fab_1", "ffo_1"),
-                _tool_value("up_1", "fo_1"),
-                _plain_value("user", "u1"),
-            ],
-        ),
-        id="free_anchor_nonassistant_fallback_mixed_multiple",
-    )
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_mixed_same_anchor_single",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_0", "fo_0"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_mixed_same_anchor_multiple",
-    tool_call_ids=("up_0", "up_1"),
-    tail_items=[
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0", tool_call_index=0),
-        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-        _fabricated_call("fab_1"),
-        _fabricated_output("fab_1", "ffo_1"),
-        _sealed_main_call(m, "up_1", tool_call_index=1),
-        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_0", "fo_0"),
-        _tool_value("fab_1", "ffo_1"),
-        _tool_value("up_1", "fo_1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_plain_cluster_nonassistant_single",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_plain_cluster_nonassistant_multiple",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _plain_item("user", "u2"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-        _plain_value("user", "u2"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_plain_cluster_assistant_single",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _assistant_item("post"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_assistant_cluster_miniturn_single",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _assistant_item("post"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_assistant_cluster_miniturn_parallel_sealed",
-    tool_call_ids=("up_0", "up_1"),
-    tail_items=[
-        _assistant_item("post"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0", tool_call_index=0),
-        _sealed_main_call(m, "up_1", tool_call_index=1),
-        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "up_1"),
-        _tool_value("up_1", "fo_1"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_assistant_cluster_multiple_assistants",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _assistant_item("post1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _assistant_item("post2"),
-        _fabricated_call("fab_1"),
-        _fabricated_output("fab_1", "ffo_1"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post1", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _assistant_value("post2", "fab_1"),
-        _tool_value("fab_1", "ffo_1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_mixed_cluster_user_then_assistant",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _assistant_item("post"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-        _assistant_value("post", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_mixed_cluster_assistant_then_user_parallel_sealed",
-    tool_call_ids=("up_0", "up_1"),
-    tail_items=[
-        _assistant_item("post"),
-        _plain_item("user", "u1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0", tool_call_index=0),
-        _sealed_main_call(m, "up_1", tool_call_index=1),
-        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "up_1"),
-        _tool_value("up_1", "fo_1"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _plain_value("user", "u1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_mixed_cluster_multiple_assistants_interleaved_plain",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _assistant_item("post1"),
-        _plain_item("user", "u1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _assistant_item("post2"),
-        _plain_item("user", "u2"),
-        _fabricated_call("fab_1"),
-        _fabricated_output("fab_1", "ffo_1"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0"),
-        _tool_value("up_0", "fo_0"),
-        _assistant_value("post1", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _plain_value("user", "u1"),
-        _assistant_value("post2", "fab_1"),
-        _tool_value("fab_1", "ffo_1"),
-        _plain_value("user", "u2"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_nonassistant_fallback_single",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_nonassistant_fallback_multiple",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _plain_item("user", "u2"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-        _plain_value("user", "u2"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_nonassistant_fallback_parallel_sealed",
-    tool_call_ids=("up_0", "up_1"),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0", tool_call_index=0),
-        _sealed_main_call(m, "up_1", tool_call_index=1),
-        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "up_1", "fab_0"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_1", "fo_1"),
-        _tool_value("up_0", "fo_0"),
-        _plain_value("user", "u1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_nonassistant_fallback_mixed_multiple",
-    tool_call_ids=("up_0", "up_1"),
-    tail_items=[
-        _plain_item("user", "u1"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-        _sealed_main_call(m, "up_0", tool_call_index=0),
-        _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-        _fabricated_call("fab_1"),
-        _fabricated_output("fab_1", "ffo_1"),
-        _sealed_main_call(m, "up_1", tool_call_index=1),
-        _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "up_1", "fab_0", "fab_1"),
-        _tool_value("fab_0", "ffo_0"),
-        _tool_value("up_0", "fo_0"),
-        _tool_value("fab_1", "ffo_1"),
-        _tool_value("up_1", "fo_1"),
-        _plain_value("user", "u1"),
-    ],
-)
-
-_append_patch_analogue_case(
-    case_id="strict_anchor_release_same_anchor_fabricated_continues",
-    tool_call_ids=("up_0",),
-    tail_items=[
-        _sealed_main_call(m, "up_0"),
-        _sealed_main_output(m, "up_0", "fo_0"),
-        _fabricated_call("fab_0"),
-        _fabricated_output("fab_0", "ffo_0"),
-    ],
-    expected_main=[
-        _assistant_value("m", "up_0", "fab_0"),
-        _tool_value("up_0", "fo_0"),
-        _tool_value("fab_0", "ffo_0"),
-    ],
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("post", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-            ],
-        ),
-        id="strict_anchor_turnover_after_release_fabricated",
-    )
-)
-
-m = _assistant_value("m")
-post = _assistant_value("post")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-                _assistant_item("post"),
-                _sealed_main_call(post, "up_1"),
-                _sealed_main_output(post, "up_1", "fo_1"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("post", "up_1"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="strict_anchor_turnover_after_release_sealed",
-    )
-)
+def _request(items: Sequence[RequestInputItem]) -> ResponseCreateRequest:
+    return ResponseCreateRequest(model="plap/test", input=list(items))
 
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0", "up_1")),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0", tool_call_index=0),
-                _sealed_main_output(m, "up_0", "fo_0", tool_call_index=0),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_1", tool_call_index=1),
-                _sealed_main_output(m, "up_1", "fo_1", tool_call_index=1),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0", "up_1"),
-                _tool_value("up_0", "fo_0"),
-                _tool_value("up_1", "fo_1"),
-                _assistant_value("post", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-            ],
-        ),
-        id="strict_anchor_partial_satisfaction_clusters_later_assistant",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _assistant_item("post"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("post", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-            ],
-        ),
-        id="free_anchor_unsettled_later_assistant_clusters",
-    )
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-                _assistant_item("post"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-            ],
-            expected_main=[
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("post", "fab_0"),
-                _tool_value("fab_0", "ffo_0"),
-            ],
-        ),
-        id="free_anchor_settled_later_assistant_new_anchor",
-    )
-)
-
-m1 = _assistant_value("m1")
-m2 = _assistant_value("m2")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m1"),
-                _sealed_main_call(m1, "up_0"),
-                _sealed_main_output(m1, "up_0", "fo_0"),
-                _assistant_item("m2"),
-                _sealed_main_call(m2, "up_1"),
-                _sealed_main_output(m2, "up_1", "fo_1"),
-            ],
-            expected_main=[
-                _assistant_value("m1", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("m2", "up_1"),
-                _tool_value("up_1", "fo_1"),
-            ],
-        ),
-        id="stripped_free_bundle_two_turns",
-    )
-)
-
-m1 = _assistant_value("m1")
-m2 = _assistant_value("m2")
-m3 = _assistant_value("m3")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _assistant_item("m1"),
-                _sealed_main_call(m1, "up_0"),
-                _sealed_main_output(m1, "up_0", "fo_0"),
-                _assistant_item("m2"),
-                _sealed_main_call(m2, "up_1"),
-                _sealed_main_output(m2, "up_1", "fo_1"),
-                _assistant_item("m3"),
-                _sealed_main_call(m3, "up_2"),
-                _sealed_main_output(m3, "up_2", "fo_2"),
-            ],
-            expected_main=[
-                _assistant_value("m1", "up_0"),
-                _tool_value("up_0", "fo_0"),
-                _assistant_value("m2", "up_1"),
-                _tool_value("up_1", "fo_1"),
-                _assistant_value("m3", "up_2"),
-                _tool_value("up_2", "fo_2"),
-            ],
-        ),
-        id="stripped_free_bundle_three_turns",
-    )
-)
-
-DISCARD_CASES.extend(
-    [
-        pytest.param(
-            _DiscardCase(
-                items=[
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=_sealed_call_id("reviewer", "up_0"),
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(
-                        call_id=_sealed_call_id("reviewer", "up_0"),
-                        output="fo_0",
-                        type="function_call_output",
-                    ),
-                ],
-                side="reviewer",
-                expected_side=[],
-            ),
-            id="discard_non_main_naked_reviewer_pair",
-        ),
-        pytest.param(
-            _DiscardCase(
-                items=[
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=_sealed_call_id("arbitrator", "up_0"),
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(
-                        call_id=_sealed_call_id("arbitrator", "up_0"),
-                        output="fo_0",
-                        type="function_call_output",
-                    ),
-                ],
-                side="arbitrator",
-                expected_side=[],
-            ),
-            id="discard_non_main_naked_arbitrator_pair",
-        ),
-        pytest.param(
-            _DiscardCase(
-                items=[
-                    _reasoning_closed_non_main(
-                        "reviewer",
-                        _assistant_value("review hidden", "up_existing"),
-                        _tool_value("up_existing", "existing result"),
-                    ),
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=_sealed_call_id("reviewer", "up_missing"),
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(
-                        call_id=_sealed_call_id("reviewer", "up_missing"),
-                        output="missing result",
-                        type="function_call_output",
-                    ),
-                ],
-                side="reviewer",
-                expected_side=[
-                    _assistant_value("review hidden", "up_existing"),
-                    _tool_value("up_existing", "existing result"),
-                ],
-            ),
-            id="discard_non_main_unmatched_reviewer_pair_with_existing_history",
-        ),
-        pytest.param(
-            _DiscardCase(
-                items=[
-                    _reasoning_closed_non_main(
-                        "arbitrator",
-                        _assistant_value("arb hidden", "up_existing"),
-                        _tool_value("up_existing", "existing result"),
-                    ),
-                    RequestFunctionCallItem(
-                        arguments='{"path":"README.md"}',
-                        call_id=_sealed_call_id("arbitrator", "up_missing"),
-                        name="read_file",
-                        type="function_call",
-                    ),
-                    RequestFunctionCallOutputItem(
-                        call_id=_sealed_call_id("arbitrator", "up_missing"),
-                        output="missing result",
-                        type="function_call_output",
-                    ),
-                ],
-                side="arbitrator",
-                expected_side=[
-                    _assistant_value("arb hidden", "up_existing"),
-                    _tool_value("up_existing", "existing result"),
-                ],
-            ),
-            id="discard_non_main_unmatched_arbitrator_pair_with_existing_history",
-        ),
-    ]
-)
-
-m = _assistant_value("m")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _sealed_reasoning(
-                    _reasoning_payload(
-                        machine=[],
-                        sides=_sides_update(
-                            main=[
-                                Message(
-                                    role="assistant",
-                                    content="prefix turn",
-                                    tool_calls=[_tool_call_model("pref_0")],
-                                ),
-                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                patched,
-                                MessagePatch(message=patched),
-                            ]
-                        ),
-                    )
-                ),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("prefix turn", "pref_0"),
-                _tool_value("pref_0", "prefix output"),
-                _assistant_value("m", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="extended_prefix_closed_tool_turn_before_patch_anchor",
-    )
-)
-
-h = _assistant_value("hidden")
-hidden_with_call = _assistant_value("hidden", "up_0")
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _sealed_reasoning(
-                    _reasoning_payload(
-                        machine=[],
-                        sides=_sides_update(
-                            main=[
-                                Message(
-                                    role="assistant",
-                                    content="prefix turn",
-                                    tool_calls=[_tool_call_model("pref_0")],
-                                ),
-                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                Message.from_primitive(hidden_with_call),
-                            ]
-                        ),
-                    )
-                ),
-                _sealed_main_call(hidden_with_call, "up_0"),
-                _sealed_main_output(hidden_with_call, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("prefix turn", "pref_0"),
-                _tool_value("pref_0", "prefix output"),
-                _assistant_value("hidden", "up_0"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="extended_prefix_closed_tool_turn_before_hidden_anchor",
-    )
-)
-
-m = _assistant_value("m")
-patched = Message.from_primitive(_assistant_value("m", "up_0", "up_hidden_1"))
-ACCEPT_CASES.append(
-    pytest.param(
-        _AcceptCase(
-            items=[
-                _sealed_reasoning(
-                    _reasoning_payload(
-                        machine=[],
-                        sides=_sides_update(
-                            main=[
-                                Message(
-                                    role="assistant",
-                                    content="prefix turn",
-                                    tool_calls=[_tool_call_model("pref_0")],
-                                ),
-                                Message(role="tool", tool_call_id="pref_0", content="prefix output"),
-                                patched,
-                                Message(role="tool", tool_call_id="up_hidden_1", content="hidden output"),
-                                MessagePatch(message=patched),
-                            ]
-                        ),
-                    )
-                ),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_main=[
-                _assistant_value("prefix turn", "pref_0"),
-                _tool_value("pref_0", "prefix output"),
-                _assistant_value("m", "up_0", "up_hidden_1"),
-                _tool_value("up_hidden_1", "hidden output"),
-                _tool_value("up_0", "fo_0"),
-            ],
-        ),
-        id="extended_patch_anchor_with_suffix_hidden_output_after_closed_prefix",
-    )
-)
-
-
-REJECT_CASES: list[pytest.ParamSpec] = []  # type: ignore[type-arg]
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_reason="fabricated_function_call_without_previous_assistant",
-        ),
-        id="reject_patch_anchor_fabricated_before_public_target",
-    )
-)
-
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_reason="fabricated_function_call_without_previous_assistant",
-        ),
-        id="reject_patch_anchor_missing_public_target_before_sealed_pair",
-    )
-)
-
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _sealed_main_call(m, "up_tx"),
-                _sealed_main_output(m, "up_tx", "fo_tx"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_reason="sealed_function_call_without_attachment_owner",
-        ),
-        id="reject_patch_anchor_sealed_transplant_without_previous_assistant",
-    )
-)
-
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _plain_item("user", "u1"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_reason="fabricated_function_call_without_previous_assistant",
-        ),
-        id="reject_patch_anchor_non_assistant_and_fabricated_before_public_target",
-    )
-)
-
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _plain_item("user", "u1"),
-                _plain_item("user", "u2"),
-                _fabricated_call("fab_0"),
-                _fabricated_output("fab_0", "ffo_0"),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-            ],
-            expected_reason="fabricated_function_call_without_previous_assistant",
-        ),
-        id="reject_patch_anchor_non_assistant_multiple_and_fabricated_before_public_target",
-    )
-)
-
-m1 = _assistant_value("m1")
-m2 = _assistant_value("m2")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_closed_main("retro_1"),
-                _assistant_item("m1"),
-                _sealed_main_call(m1, "up_0"),
-                _sealed_main_output(m1, "up_0", "fo_0"),
-                _sealed_reasoning(
-                    _reasoning_payload(
-                        machine=[{"op": "add", "path": "/retro_2", "value": True}],
-                        sides=_sides_update(),
-                    )
-                ),
-                _assistant_item("m2"),
-                _sealed_main_call(m2, "up_1"),
-                _sealed_main_output(m2, "up_1", "fo_1"),
-                _sealed_main_call(m1, "up_0"),
-            ],
-            expected_reason="duplicate_tool_call_id_in_history",
-        ),
-        id="reject_retroactive_reopen_older_explicit_anchor",
-    )
-)
-
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_reasoning_patch_main(m, tool_call_ids=("up_0",))],
-            expected_reason="main_message_patch_target_missing",
-        ),
-        id="reject_patch_target_missing_public_message",
-    )
-)
-
-m = _assistant_value("")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_sealed_main_call(m, "syn_0"), _sealed_main_output(m, "syn_0", "fo_0")],
-            expected_reason="sealed_function_call_without_attachment_owner",
-        ),
-        id="reject_naked_main_sealed_pair_without_anchor",
-    )
-)
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _reasoning_closed_main("next_reasoning_before_declared_output"),
-            ],
-            expected_reason="pending_tool_outputs_block_message",
-        ),
-        id="reject_later_reasoning_before_declared_output",
-    )
-)
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[
-                _reasoning_patch_main(m, tool_call_ids=("up_0",)),
-                _assistant_item("m"),
-                _sealed_main_call(m, "up_0"),
-                _sealed_main_output(m, "up_0", "fo_0"),
-                _fabricated_call("fab_0"),
-                _reasoning_closed_main("next_reasoning_before_fabricated_output"),
-            ],
-            expected_reason="pending_tool_outputs_block_message",
-        ),
-        id="reject_later_reasoning_before_fabricated_output",
-    )
-)
-
-m = _assistant_value("m")
-wrong_anchor = _assistant_value("wrong")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_assistant_item("m"), _sealed_main_call(wrong_anchor, "up_0")],
-            expected_reason="function_call_missing_function_call_output",
-        ),
-        id="reject_sealed_hash_mismatch",
-    )
-)
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_assistant_item("m"), _sealed_main_call(m, "wrong_up"), _sealed_main_output(m, "up_0", "fo_0")],
-            expected_reason="function_call_output_without_pending_function_call",
-        ),
-        id="reject_output_for_unseen_upstream_id",
-    )
-)
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_assistant_item("m"), _sealed_main_output(m, "up_0", "fo_0")],
-            expected_reason="function_call_output_without_pending_function_call",
-        ),
-        id="reject_output_without_pending_call",
-    )
-)
 
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_assistant_item("m"), _sealed_main_call(m, "up_0")],
-            expected_reason="function_call_missing_function_call_output",
-        ),
-        id="reject_pending_call_without_output",
-    )
-)
-
-m = _assistant_value("m")
-REJECT_CASES.append(
-    pytest.param(
-        _RejectCase(
-            items=[_assistant_item("m"), _sealed_main_call(m, "up_0"), _sealed_main_call(m, "up_0")],
-            expected_reason="duplicate_pending_function_call",
-        ),
-        id="reject_duplicate_pending_call_ids",
-    )
-)
+async def _ingest(items: Sequence[RequestInputItem]):
+    return await ingest_response_request(_request(items), keyring=_keyring(), side_codes=_side_codes())
 
 
-def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
-    owner_x = Message(role="assistant", content="owner", tool_calls=[_tool_call_model("x")])
-    owner_xy = Message(
+def _private_reasoning(message: Message, public_content: str) -> Message:
+    return Message(
         role="assistant",
-        content="owner",
-        tool_calls=[_tool_call_model("x"), _tool_call_model("y")],
+        content=public_content,
+        name=message.name,
+        refusal=message.refusal,
+        reasoning_content=message.reasoning_content,
     )
-    tool_x = Message(role="tool", tool_call_id="x", content="x result")
-    tool_y = Message(role="tool", tool_call_id="y", content="y result")
-    tool_z = Message(role="tool", tool_call_id="z", content="z result")
-    successor = Message(role="assistant", content="successor")
-    local_owner = Message(role="assistant", content="local owner", tool_calls=[_tool_call_model("local")])
-    local_output = Message(role="tool", tool_call_id="local", content="local result")
-    projected = Message(role="assistant", content="projected", reasoning_content="hidden")
-    projected_patch = MessagePatch(message=projected)
-    invalid = "reasoning_message_invalid"
-    return [
-        pytest.param(
-            _BaselineSettlementCase(baseline=(), main=(successor,), expected_main=(successor,)),
-            id="local_remainder_without_baseline_owner",
+
+
+def _assert_reason(exc_info: pytest.ExceptionInfo[PlapError], reason: str) -> None:
+    assert exc_info.value.private is not None
+    assert exc_info.value.private.reason == reason
+
+
+async def test_user_requires_checkpoint_and_checkpoint_starts_patch_chain() -> None:
+    checkpoint = _checkpoint("rs_checkpoint", durable={"step": 1})
+    patch = _patch(
+        "rs_patch",
+        previous_reasoning_id=checkpoint.id,
+        durable=[{"op": "add", "path": "/tool_step", "value": 2}],
+    )
+
+    result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _sealed_reasoning(patch)])
+
+    assert result.durable == {"step": 1, "tool_step": 2}
+    assert result.last_reasoning_id == patch.id
+    assert result.checkpoint_required is False
+
+
+async def test_patch_after_user_is_rejected() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_message("u", role="user"), _sealed_reasoning(_patch("rs_patch"))])
+
+    _assert_reason(exc_info, "reasoning_checkpoint_required")
+
+
+async def test_checkpoint_without_user_is_rejected() -> None:
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_sealed_reasoning(_checkpoint("rs_checkpoint"))])
+
+    _assert_reason(exc_info, "reasoning_checkpoint_unexpected")
+
+
+async def test_checkpoint_with_predecessor_is_rejected() -> None:
+    checkpoint = _checkpoint("rs_checkpoint", previous_reasoning_id="rs_old")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint)])
+
+    _assert_reason(exc_info, "reasoning_checkpoint_has_predecessor")
+
+
+async def test_patch_after_compaction_uses_null_reasoning_predecessor() -> None:
+    compaction = CompactionPayload(
+        id="cmp_root",
+        durable={"root": True},
+        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="old")]}),
+    )
+    patch = _patch(
+        "rs_patch",
+        previous_compaction_id=compaction.id,
+        durable=[{"op": "add", "path": "/next", "value": True}],
+    )
+
+    result = await _ingest([_sealed_compaction(compaction), _sealed_reasoning(patch)])
+
+    assert result.durable == {"root": True, "next": True}
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="old")]
+    assert result.last_compaction_id == compaction.id
+
+
+async def test_reasoning_with_compaction_predecessor_rejects_without_compaction() -> None:
+    root = _patch("rs_root", previous_compaction_id="cmp_missing")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_sealed_reasoning(root)])
+
+    _assert_reason(exc_info, "reasoning_previous_compaction_id_mismatch")
+
+
+async def test_reasoning_without_compaction_predecessor_rejects_after_compaction() -> None:
+    compaction = CompactionPayload(id="cmp_root", durable={}, sides=Sides())
+    root = _patch("rs_root")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_sealed_compaction(compaction), _sealed_reasoning(root)])
+
+    _assert_reason(exc_info, "reasoning_previous_compaction_id_mismatch")
+
+
+async def test_checkpoint_and_patch_keep_compaction_anchor() -> None:
+    compaction = CompactionPayload(id="cmp_root", durable={"root": True}, sides=Sides())
+    checkpoint = _checkpoint(
+        "rs_checkpoint",
+        previous_compaction_id=compaction.id,
+        durable={"turn": 1},
+    )
+    patch = _patch(
+        "rs_patch",
+        previous_reasoning_id=checkpoint.id,
+        previous_compaction_id=compaction.id,
+        durable=[{"op": "add", "path": "/tool", "value": True}],
+    )
+
+    result = await _ingest(
+        [
+            _sealed_compaction(compaction),
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _sealed_reasoning(patch),
+        ]
+    )
+
+    assert result.durable == {"turn": 1, "tool": True}
+    assert result.last_reasoning_id == patch.id
+    assert result.last_compaction_id == compaction.id
+
+
+async def test_checkpoint_without_compaction_anchor_rejects_after_compaction() -> None:
+    compaction = CompactionPayload(id="cmp_root", durable={}, sides=Sides())
+    checkpoint = _checkpoint("rs_checkpoint")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest(
+            [
+                _sealed_compaction(compaction),
+                _message("u", role="user"),
+                _sealed_reasoning(checkpoint),
+            ]
+        )
+
+    _assert_reason(exc_info, "reasoning_previous_compaction_id_mismatch")
+
+
+async def test_reasoning_anchored_to_old_compaction_rejects_after_new_compaction() -> None:
+    current = CompactionPayload(id="cmp_current", durable={}, sides=Sides())
+    stale = _patch("rs_stale", previous_compaction_id="cmp_old")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_sealed_compaction(current), _sealed_reasoning(stale)])
+
+    _assert_reason(exc_info, "reasoning_previous_compaction_id_mismatch")
+
+
+async def test_last_compaction_slice_uses_last_compaction_anchor() -> None:
+    first_compaction = CompactionPayload(id="cmp_first", durable={"generation": 1}, sides=Sides())
+    first_reasoning = _patch(
+        "rs_first",
+        previous_compaction_id=first_compaction.id,
+        durable=[{"op": "add", "path": "/discarded", "value": True}],
+    )
+    last_compaction = CompactionPayload(id="cmp_last", durable={"generation": 2}, sides=Sides())
+    last_reasoning = _patch(
+        "rs_last",
+        previous_compaction_id=last_compaction.id,
+        durable=[{"op": "add", "path": "/kept", "value": True}],
+    )
+
+    result = await _ingest(
+        [
+            _sealed_compaction(first_compaction),
+            _sealed_reasoning(first_reasoning),
+            _sealed_compaction(last_compaction),
+            _sealed_reasoning(last_reasoning),
+        ]
+    )
+
+    assert result.durable == {"generation": 2, "kept": True}
+    assert result.last_reasoning_id == last_reasoning.id
+    assert result.last_compaction_id == last_compaction.id
+
+
+async def test_checkpoint_replaces_non_main_state_but_preserves_main() -> None:
+    old_reviewer = Message(role="assistant", content="old reviewer")
+    root = _patch(
+        "rs_root",
+        active={MAIN_SIDE, "reviewer"},
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": old_reviewer.to_primitive()}]},
+        main=[Message(role="assistant", content="old main")],
+    )
+    checkpoint = _checkpoint(
+        "rs_checkpoint",
+        durable={"new": True},
+        active={MAIN_SIDE, "arbitrator"},
+        sides={"arbitrator": [Message(role="assistant", content="new arbitrator")]},
+        main=[Message(role="assistant", content="new main")],
+    )
+
+    result = await _ingest([_sealed_reasoning(root), _message("u", role="user"), _sealed_reasoning(checkpoint)])
+
+    assert result.durable == {"new": True}
+    assert result.sides.active == {MAIN_SIDE, "arbitrator"}
+    assert "reviewer" not in result.sides.messages
+    assert result.sides["arbitrator"] == [Message(role="assistant", content="new arbitrator")]
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="old main"),
+        Message(role="user", content="u"),
+        Message(role="assistant", content="new main"),
+    ]
+
+
+async def test_later_user_requires_another_checkpoint_root() -> None:
+    first = _checkpoint("rs_first", durable={"turn": 1})
+    second = _checkpoint("rs_second", durable={"turn": 2})
+
+    result = await _ingest(
+        [
+            _message("u1", role="user"),
+            _sealed_reasoning(first),
+            _message("u2", role="user"),
+            _sealed_reasoning(second),
+        ]
+    )
+
+    assert result.durable == {"turn": 2}
+    assert result.last_reasoning_id == second.id
+    assert result.checkpoint_required is False
+
+
+async def test_checkpoint_preserves_explicit_empty_non_main_side() -> None:
+    old = Message(role="assistant", content="old reviewer")
+    root = _patch(
+        "rs_root",
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": old.to_primitive()}]},
+    )
+    checkpoint = _checkpoint("rs_checkpoint", sides={"reviewer": []})
+
+    result = await _ingest([_sealed_reasoning(root), _message("u", role="user"), _sealed_reasoning(checkpoint)])
+
+    assert "reviewer" in result.sides.messages
+    assert result.sides["reviewer"] == []
+
+
+async def test_user_message_inside_reasoning_main_does_not_require_checkpoint() -> None:
+    root = _patch("rs_root", main=[Message(role="user", content="sealed user")])
+    continuation = _patch("rs_continuation", previous_reasoning_id=root.id)
+
+    result = await _ingest([_sealed_reasoning(root), _sealed_reasoning(continuation)])
+
+    assert result.checkpoint_required is False
+    assert result.last_reasoning_id == continuation.id
+
+
+def test_reasoning_state_variants_reject_main_side_state() -> None:
+    with pytest.raises(ValueError, match="may not contain main"):
+        ReasoningCheckpoint(durable={}, active={MAIN_SIDE}, sides={MAIN_SIDE: []})
+    with pytest.raises(ValueError, match="may not target main"):
+        ReasoningPatch(durable=[], sides={MAIN_SIDE: []})
+
+
+@pytest.mark.parametrize(
+    ("between", "expected"),
+    [
+        ([], [Message(role="assistant", content="edited", reasoning_content="private")]),
+        (
+            [_message("developer note", role="developer")],
+            [
+                Message(role="developer", content="developer note"),
+                Message(role="assistant", content="edited", reasoning_content="private"),
+            ],
         ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(),
-                main=(tool_x,),
-                expected_main=None,
-                expected_reason=invalid,
-            ),
-            id="reject_leading_output_without_baseline_owner",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy,),
-                main=(tool_x,),
-                expected_main=(owner_xy, tool_x),
-            ),
-            id="partial_baseline_settlement_without_remainder",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy,),
-                main=(tool_y, tool_x),
-                expected_main=(owner_xy, tool_y, tool_x),
-            ),
-            id="complete_baseline_settlement_preserves_output_order",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy,),
-                main=(tool_x, successor),
-                expected_main=None,
-                expected_reason=invalid,
-            ),
-            id="reject_partial_baseline_settlement_before_remainder",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy,),
-                main=(tool_x, tool_y, successor),
-                expected_main=(owner_xy, tool_x, tool_y, successor),
-            ),
-            id="complete_baseline_settlement_hands_off_to_remainder",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy, tool_x),
-                main=(tool_y,),
-                expected_main=(owner_xy, tool_x, tool_y),
-            ),
-            id="settle_remaining_baseline_sibling",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x, tool_x),
-                main=(tool_x,),
-                expected_main=None,
-                expected_reason=invalid,
-            ),
-            id="reject_already_settled_baseline_call",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_z,),
-                expected_main=None,
-                expected_reason=invalid,
-            ),
-            id="reject_unknown_baseline_call",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x, successor),
-                expected_main=(owner_x, tool_x, successor),
-            ),
-            id="complete_baseline_settlement_before_full_assistant",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x, projected, projected_patch),
-                expected_main=(owner_x, tool_x, projected),
-                active=frozenset({MAIN_SIDE}),
-                trailing_items=(_assistant_item("projected"),),
-            ),
-            id="complete_baseline_settlement_before_postfix_patch",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_xy,),
-                main=(tool_x, projected, projected_patch),
-                expected_main=None,
-                expected_reason=invalid,
-            ),
-            id="reject_partial_baseline_settlement_before_postfix_patch",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x, local_owner, local_output, successor),
-                expected_main=(owner_x, tool_x, local_owner, local_output, successor),
-            ),
-            id="complete_baseline_settlement_before_closed_local_prefix",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(),
-                main=(local_owner, local_output),
-                expected_main=(local_owner, local_output),
-            ),
-            id="local_anchor_owns_local_suffix",
+    ],
+)
+async def test_public_patch_uses_next_assistant_without_content_validation(
+    between: list[RequestInputItem],
+    expected: list[Message],
+) -> None:
+    private = Message(role="assistant", content="sealed", reasoning_content="private")
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+
+    result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), *between, _message("edited")])
+
+    assert result.sides[MAIN_SIDE] == [Message(role="user", content="u"), *expected]
+
+
+async def test_first_fabricated_assistant_consumes_public_patch() -> None:
+    private = Message(role="assistant", content="sealed", reasoning_content="private")
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("first"),
+            _message("second"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="first", reasoning_content="private"),
+        Message(role="assistant", content="second"),
+    ]
+
+
+async def test_public_patch_takes_content_and_refusal_from_public_assistant() -> None:
+    private = Message(
+        role="assistant",
+        content="sealed text",
+        refusal="sealed refusal",
+        reasoning_content="private",
+    )
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+    public = RequestMessageItem(
+        content=[
+            OutputTextContent(text="edited text", type="output_text"),
+            OutputRefusalContent(refusal="edited refusal", type="refusal"),
+        ],
+        role="assistant",
+        type="message",
+    )
+
+    result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), public])
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(
+            role="assistant",
+            content="edited text",
+            refusal="edited refusal",
+            reasoning_content="private",
         ),
     ]
 
 
-@pytest.mark.parametrize("case", _baseline_settlement_cases())
-async def test_baseline_settlement_truth_table(case: _BaselineSettlementCase) -> None:
-    first = _sealed_reasoning(
-        _reasoning_payload(
-            machine=[],
-            sides=_sides_update(active=set(), main=list(case.baseline)),
-        )
+async def test_equal_public_assistants_remain_distinct_occurrences() -> None:
+    private = Message(role="assistant", content="same", reasoning_content="private")
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("same"),
+            _message("same"),
+        ]
     )
-    second = _sealed_reasoning(
-        _reasoning_payload(
-            machine=[],
-            sides=_sides_update(
-                active=None if case.active is None else set(case.active),
-                main=list(case.main),
-            ),
-        )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="same", reasoning_content="private"),
+        Message(role="assistant", content="same"),
+    ]
+
+
+async def test_public_source_match_moves_live_source_past_plain_message() -> None:
+    source = Message(role="assistant", content="sealed", reasoning_content="private")
+    root = _patch("rs_root", main=[source])
+    relocated = _patch("rs_relocated", previous_reasoning_id=root.id, main=[MessagePatch(source)])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(root),
+            _message("developer note", role="developer"),
+            _sealed_reasoning(relocated),
+            _message("edited"),
+        ]
     )
-    request = _request([first, second, *case.trailing_items])
 
-    if case.expected_reason is not None:
-        with pytest.raises(PlapError) as exc_info:
-            await ingest_response_request(request, keyring=_keyring())
-        assert exc_info.value.private is not None
-        assert exc_info.value.private.reason == case.expected_reason
-        return
-
-    result = await ingest_response_request(request, keyring=_keyring())
-
-    assert case.expected_main is not None
-    assert result.sides[MAIN_SIDE] == list(case.expected_main)
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="developer", content="developer note"),
+        Message(role="assistant", content="edited", reasoning_content="private"),
+    ]
 
 
-@pytest.mark.parametrize("case", ACCEPT_CASES)
-async def test_truth_table_accepts(case: _AcceptCase) -> None:
-    result = await ingest_response_request(_request(case.items), keyring=_keyring())
+async def test_sliced_public_source_stages_from_message_patch() -> None:
+    source = Message(role="assistant", content="sealed", reasoning_content="private")
+    root = _patch("rs_root", main=[MessagePatch(source)])
 
-    assert _main_primitives(result) == case.expected_main
+    result = await _ingest([_sealed_reasoning(root), _message("edited")])
+
+    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="edited", reasoning_content="private")]
 
 
-@pytest.mark.parametrize("case", REJECT_CASES)
-async def test_truth_table_rejects(case: _RejectCase) -> None:
+async def test_public_bearing_patch_without_assistant_is_rejected() -> None:
+    source = Message(role="assistant", content="sealed", reasoning_content="private")
+    root = _patch("rs_root", main=[MessagePatch(source)])
+
     with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(_request(case.items), keyring=_keyring())
+        await _ingest([_sealed_reasoning(root)])
 
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == case.expected_reason
+    _assert_reason(exc_info, "main_message_patch_target_missing")
 
 
-@pytest.mark.parametrize("case", DISCARD_CASES)
-async def test_truth_table_discards_unmatched_non_main_pairs(case: _DiscardCase) -> None:
-    result = await ingest_response_request(_request(case.items), keyring=_keyring())
+async def test_public_patch_rehomes_declared_call_to_later_assistant() -> None:
+    private = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("up_0")],
+    )
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
 
-    assert _side_primitives(result, case.side) == case.expected_side
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("patch recipient"),
+            _message("call owner"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="patch recipient", reasoning_content="private"),
+        Message(role="assistant", content="call owner", tool_calls=[_tool_call("up_0")]),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_public_patch_attaches_declared_call_to_consuming_assistant() -> None:
+    private = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("up_0")],
+    )
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("public"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("up_0")],
+        ),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_direct_hidden_main_rehomes_call_to_later_assistant() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("later"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant"),
+        Message(role="assistant", content="later", tool_calls=[_tool_call("up_0")]),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_direct_hidden_and_later_public_assistant_are_distinct_positions() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed hidden",
+        reasoning_content="private",
+        tool_calls=[_tool_call("up_0")],
+    )
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("public"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="sealed hidden", reasoning_content="private"),
+        Message(role="assistant", content="public", tool_calls=[_tool_call("up_0")]),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_direct_hidden_main_owns_call_without_public_assistant() -> None:
+    hidden = Message(
+        role="assistant",
+        content="hidden text",
+        reasoning_content="private",
+        tool_calls=[_tool_call("up_0")],
+    )
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        hidden,
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_output_empty_patch_is_immediate_hidden_owner() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        hidden,
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_output_empty_patch_rehomes_call_to_later_assistant() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("later"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant"),
+        Message(role="assistant", content="later", tool_calls=[_tool_call("up_0")]),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_inactive_call_only_main_reactivates_through_hidden_patch() -> None:
+    hidden = Message(role="assistant", reasoning_content="private", tool_calls=[_tool_call("up_0")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    activated = _patch(
+        "rs_activated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(activated),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides[MAIN_SIDE] == [hidden, Message(role="tool", tool_call_id="up_0", content="result")]
+
+
+async def test_inactive_public_main_reactivates_through_public_patch() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("up_0")],
+    )
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    activated = _patch(
+        "rs_activated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(activated),
+            _message("public"),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("up_0")],
+        ),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_current_append_hidden_output_settles_local_assistant() -> None:
+    hidden = Message(role="assistant", reasoning_content="private", tool_calls=[_tool_call("server_0")])
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    root = _patch("rs_root", main=[hidden, hidden_output])
+
+    result = await _ingest([_sealed_reasoning(root)])
+
+    assert result.sides[MAIN_SIDE] == [hidden, hidden_output]
+
+
+async def test_current_append_hidden_output_survives_public_projection() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("server_0")],
+    )
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    root = _patch("rs_root", main=[hidden, hidden_output, MessagePatch(hidden)])
+
+    result = await _ingest([_sealed_reasoning(root), _message("public")])
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("server_0")],
+        ),
+        hidden_output,
+    ]
+
+
+async def test_persisted_hidden_output_settles_authenticated_tail() -> None:
+    hidden = Message(role="assistant", reasoning_content="private", tool_calls=[_tool_call("server_0")])
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    settled = _patch("rs_settled", previous_reasoning_id=parked.id, main=[hidden_output])
+
+    result = await _ingest([_sealed_reasoning(parked), _sealed_reasoning(settled)])
+
+    assert result.sides[MAIN_SIDE] == [hidden, hidden_output]
+
+
+async def test_partial_persisted_hidden_settlement_precedes_public_call() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("server_0"), _tool_call("client_0")],
+    )
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    activated = _patch(
+        "rs_activated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE},
+        main=[hidden_output, MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "client_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(activated),
+            _message("public"),
+            _function_call(call_id),
+            _function_output(call_id, "client result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("server_0"), _tool_call("client_0")],
+        ),
+        hidden_output,
+        Message(role="tool", tool_call_id="client_0", content="client result"),
+    ]
+
+
+async def test_sliced_patch_accepts_leading_hidden_output() -> None:
+    hidden = Message(
+        role="assistant",
+        content="sealed",
+        reasoning_content="private",
+        tool_calls=[_tool_call("server_0")],
+    )
+    hidden_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    root = _patch("rs_root", main=[hidden_output, MessagePatch(hidden)])
+
+    result = await _ingest([_sealed_reasoning(root), _message("public")])
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="public",
+            reasoning_content="private",
+            tool_calls=[_tool_call("server_0")],
+        ),
+        hidden_output,
+    ]
+
+
+async def test_closed_hidden_prefix_precedes_current_assistant() -> None:
+    prefix = Message(role="assistant", content="prefix", tool_calls=[_tool_call("server_0")])
+    prefix_output = Message(role="tool", tool_call_id="server_0", content="server result")
+    current = Message(role="assistant", content="current", reasoning_content="private")
+    root = _patch("rs_root", main=[prefix, prefix_output, current])
+
+    result = await _ingest([_sealed_reasoning(root)])
+
+    assert result.sides[MAIN_SIDE] == [prefix, prefix_output, current]
+
+
+async def test_hidden_timewarp_moves_complete_source_bundle_and_leaves_user_in_place() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    fabricated_call = _function_call("fab_0", name="fabricated")
+    checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
+    sealed_call = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            fabricated_call,
+            _function_output("fab_0", "fabricated result"),
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _function_call(sealed_call),
+            _function_output(sealed_call, "sealed result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(
+            role="assistant",
+            tool_calls=[_tool_call("up_0"), _tool_call("fab_0", name="fabricated")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+        Message(role="tool", tool_call_id="up_0", content="sealed result"),
+    ]
+
+
+async def test_hidden_timewarp_crosses_plain_message_without_user_boundary() -> None:
+    hidden = Message(role="assistant", reasoning_content="private", tool_calls=[_tool_call("up_0")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    relocated = _patch(
+        "rs_relocated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _message("developer note", role="developer"),
+            _sealed_reasoning(relocated),
+            _function_call(call_id),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="developer", content="developer note"),
+        hidden,
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_hidden_timewarp_moves_source_owned_fabricated_tool_work() -> None:
+    hidden = Message(role="assistant", reasoning_content="private", tool_calls=[_tool_call("up_0")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    relocated = _patch(
+        "rs_relocated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(hidden)],
+    )
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0", "fabricated result"),
+            _message("developer note", role="developer"),
+            _sealed_reasoning(relocated),
+            _function_call(call_id),
+            _function_output(call_id, "sealed result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="developer", content="developer note"),
+        Message(
+            role="assistant",
+            reasoning_content="private",
+            tool_calls=[_tool_call("up_0"), _tool_call("fab_0", name="fabricated")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+        Message(role="tool", tool_call_id="up_0", content="sealed result"),
+    ]
+
+
+async def test_hidden_source_mismatch_keeps_authenticated_tail() -> None:
+    original = Message(role="assistant", reasoning_content="original private")
+    other = Message(role="assistant", reasoning_content="other private")
+    root = _patch("rs_root", main=[original])
+    mismatch = _patch("rs_mismatch", previous_reasoning_id=root.id, main=[MessagePatch(other)])
+
+    result = await _ingest([_sealed_reasoning(root), _sealed_reasoning(mismatch)])
+
+    assert result.sides[MAIN_SIDE] == [original, other]
+
+
+async def test_source_mismatch_preserves_unrelated_authenticated_tail() -> None:
+    original = Message(role="assistant", content="original", reasoning_content="original private")
+    other = Message(role="assistant", content="other", reasoning_content="other private")
+    checkpoint = _checkpoint("rs_checkpoint", main=[original, MessagePatch(other)])
+
+    result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _message("edited")])
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        original,
+        _private_reasoning(other, "edited"),
+    ]
+
+
+async def test_plain_message_is_pushed_after_assistant_tool_bundle() -> None:
+    result = await _ingest(
+        [
+            _message("owner"),
+            _message("note", role="developer"),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
+        Message(role="tool", tool_call_id="fab_0", content="result"),
+        Message(role="developer", content="note"),
+    ]
+
+
+async def test_parallel_call_outputs_preserve_observed_chronology() -> None:
+    result = await _ingest(
+        [
+            _message("owner"),
+            _function_call("fab_1", name="first"),
+            _function_call("fab_2", name="second"),
+            _function_output("fab_2", "second result"),
+            _function_output("fab_1", "first result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="owner",
+            tool_calls=[_tool_call("fab_1", name="first"), _tool_call("fab_2", name="second")],
+        ),
+        Message(role="tool", tool_call_id="fab_2", content="second result"),
+        Message(role="tool", tool_call_id="fab_1", content="first result"),
+    ]
+
+
+async def test_fabricated_pair_attaches_to_inactive_main() -> None:
+    hidden = Message(role="assistant", content="hidden")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0", "fabricated result"),
+        ]
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[_tool_call("fab_0", name="fabricated")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+    ]
+
+
+async def test_fabricated_pair_preserves_other_parked_declaration() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("parked_0", name="parked")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0", "fabricated result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            tool_calls=[_tool_call("parked_0", name="parked"), _tool_call("fab_0", name="fabricated")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+    ]
+
+
+async def test_fabricated_pair_can_settle_matching_parked_declaration() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("parked_0", name="parked")])
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _function_call("parked_0", name="spoofed"),
+            _function_output("parked_0", "fabricated result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        hidden,
+        Message(role="tool", tool_call_id="parked_0", content="fabricated result"),
+    ]
+
+
+async def test_rehomed_declaration_stays_before_later_fabricated_call() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0", name="authenticated")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("later"),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0", "fabricated result"),
+            _function_call(call_id, name="spoofed"),
+            _function_output(call_id, "authenticated result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant"),
+        Message(
+            role="assistant",
+            content="later",
+            tool_calls=[_tool_call("up_0", name="authenticated"), _tool_call("fab_0", name="fabricated")],
+        ),
+        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
+        Message(role="tool", tool_call_id="up_0", content="authenticated result"),
+    ]
+
+
+async def test_sealed_transplant_attaches_to_inactive_main() -> None:
+    hidden = Message(role="assistant", content="hidden")
+    parked = _patch("rs_parked", active=set(), main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _function_call(call_id, name="transplanted"),
+            _function_output(call_id, "transplanted result"),
+        ]
+    )
+
+    assert result.sides.active == set()
+    assert result.sides[MAIN_SIDE] == [
+        Message(
+            role="assistant",
+            content="hidden",
+            tool_calls=[_tool_call("transplanted_0", name="transplanted")],
+        ),
+        Message(role="tool", tool_call_id="transplanted_0", content="transplanted result"),
+    ]
+
+
+async def test_rehoming_preserves_authenticated_declaration_metadata() -> None:
+    declared = ToolCall(id="up_0", name="authenticated", arguments='{"trusted":true}')
+    hidden = Message(role="assistant", tool_calls=[declared])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    spoofed = RequestFunctionCallItem(
+        arguments='{"trusted":false}',
+        call_id=call_id,
+        name="spoofed",
+        type="function_call",
+    )
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("later"),
+            spoofed,
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant"),
+        Message(role="assistant", content="later", tool_calls=[declared]),
+        Message(role="tool", tool_call_id="up_0", content="result"),
+    ]
+
+
+async def test_plain_message_may_cross_open_main_call() -> None:
+    result = await _ingest(
+        [
+            _message("owner"),
+            _function_call("fab_0", name="fabricated"),
+            _message("developer note", role="developer"),
+            _function_output("fab_0"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
+        Message(role="tool", tool_call_id="fab_0", content="result"),
+        Message(role="developer", content="developer note"),
+    ]
+
+
+async def test_assistant_may_cross_open_call_without_changing_its_owner() -> None:
+    result = await _ingest(
+        [
+            _message("first"),
+            _function_call("fab_1", name="first_call"),
+            _message("second"),
+            _function_output("fab_1", "first result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
+        Message(role="tool", tool_call_id="fab_1", content="first result"),
+        Message(role="assistant", content="second"),
+    ]
+
+
+async def test_sequential_closed_assistant_tool_bundles() -> None:
+    result = await _ingest(
+        [
+            _message("first"),
+            _function_call("fab_1", name="first_call"),
+            _function_output("fab_1", "first result"),
+            _message("second"),
+            _function_call("fab_2", name="second_call"),
+            _function_output("fab_2", "second result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
+        Message(role="tool", tool_call_id="fab_1", content="first result"),
+        Message(role="assistant", content="second", tool_calls=[_tool_call("fab_2", name="second_call")]),
+        Message(role="tool", tool_call_id="fab_2", content="second result"),
+    ]
+
+
+async def test_concurrently_open_calls_render_by_assistant_position() -> None:
+    result = await _ingest(
+        [
+            _message("first"),
+            _function_call("fab_1", name="first_call"),
+            _message("second"),
+            _function_call("fab_2", name="second_call"),
+            _function_output("fab_2", "second result"),
+            _function_output("fab_1", "first result"),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
+        Message(role="tool", tool_call_id="fab_1", content="first result"),
+        Message(role="assistant", content="second", tool_calls=[_tool_call("fab_2", name="second_call")]),
+        Message(role="tool", tool_call_id="fab_2", content="second result"),
+    ]
+
+
+async def test_user_may_cross_open_call_when_output_precedes_checkpoint() -> None:
+    checkpoint = _checkpoint("rs_checkpoint")
+
+    result = await _ingest(
+        [
+            _message("owner"),
+            _function_call("fab_0", name="fabricated"),
+            _message("new request", role="user"),
+            _function_output("fab_0"),
+            _sealed_reasoning(checkpoint),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
+        Message(role="tool", tool_call_id="fab_0", content="result"),
+        Message(role="user", content="new request"),
+    ]
+    assert result.last_reasoning_id == checkpoint.id
+
+
+async def test_reasoning_boundary_rejects_interleaved_open_calls() -> None:
+    root = _patch("rs_root")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest(
+            [
+                _message("first"),
+                _function_call("fab_1", name="first_call"),
+                _message("second"),
+                _sealed_reasoning(root),
+            ]
+        )
+
+    _assert_reason(exc_info, "pending_tool_outputs_block_message")
+
+
+async def test_main_sealed_transplant_attaches_to_nearest_assistant() -> None:
+    call_id = _sealed_call_id(MAIN_SIDE, "transplanted")
+
+    result = await _ingest(
+        [
+            _message("owner"),
+            _function_call(call_id, name="transplanted"),
+            _function_output(call_id),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="assistant", content="owner", tool_calls=[_tool_call("transplanted", name="transplanted")]),
+        Message(role="tool", tool_call_id="transplanted", content="result"),
+    ]
+
+
+async def test_stale_non_main_pair_is_discarded() -> None:
+    call_id = _sealed_call_id("reviewer", "stale")
+
+    result = await _ingest([_function_call(call_id), _function_output(call_id)])
+
+    assert result.sides.get("reviewer") is None
+
+
+async def test_main_timewarp_does_not_rehome_interleaved_non_main_pair() -> None:
+    source = Message(role="assistant", reasoning_content="private")
+    reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
+    root = _patch(
+        "rs_root",
+        active={"reviewer"},
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
+        main=[source],
+    )
+    relocated = _patch(
+        "rs_relocated",
+        previous_reasoning_id=root.id,
+        active={MAIN_SIDE},
+        main=[MessagePatch(source)],
+    )
+    reviewer_call = _sealed_call_id("reviewer", "review_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(root),
+            _function_call(reviewer_call),
+            _function_output(reviewer_call, "review result"),
+            _message("developer note", role="developer"),
+            _sealed_reasoning(relocated),
+        ]
+    )
+
+    assert result.sides[MAIN_SIDE] == [Message(role="developer", content="developer note"), source]
+    assert result.sides["reviewer"] == [
+        reviewer,
+        Message(role="tool", tool_call_id="review_0", content="review result"),
+    ]
+
+
+async def test_non_main_call_attachment_is_isolated_from_main_position() -> None:
+    reviewer = Message(role="assistant", content="review", tool_calls=[_tool_call("review_0")])
+    checkpoint = _checkpoint(
+        "rs_checkpoint",
+        active={MAIN_SIDE, "reviewer"},
+        sides={"reviewer": [reviewer]},
+    )
+    reviewer_call = _sealed_call_id("reviewer", "review_0")
+
+    result = await _ingest(
+        [
+            _message("u", role="user"),
+            _sealed_reasoning(checkpoint),
+            _message("main owner"),
+            _function_call(reviewer_call),
+            _function_output(reviewer_call, "review result"),
+            _function_call("fab_0", name="fabricated"),
+            _function_output("fab_0", "main result"),
+        ]
+    )
+
+    assert result.sides["reviewer"] == [
+        reviewer,
+        Message(role="tool", tool_call_id="review_0", content="review result"),
+    ]
+    assert result.sides[MAIN_SIDE] == [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="main owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
+        Message(role="tool", tool_call_id="fab_0", content="main result"),
+    ]
+
+
+async def test_inactive_non_main_declaration_remains_parked() -> None:
+    reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
+    root = _patch(
+        "rs_root",
+        active={MAIN_SIDE},
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
+    )
+
+    result = await _ingest([_sealed_reasoning(root)])
+
+    assert result.sides["reviewer"] == [reviewer]
+
+
+async def test_inactive_non_main_declaration_activates_and_settles_publicly() -> None:
+    reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
+    parked = _patch(
+        "rs_parked",
+        active={MAIN_SIDE},
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
+    )
+    activated = _patch(
+        "rs_activated",
+        previous_reasoning_id=parked.id,
+        active={MAIN_SIDE, "reviewer"},
+    )
+    call_id = _sealed_call_id("reviewer", "review_0")
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(parked),
+            _sealed_reasoning(activated),
+            _function_call(call_id),
+            _function_output(call_id, "review result"),
+        ]
+    )
+
+    assert result.sides.active == {MAIN_SIDE, "reviewer"}
+    assert result.sides["reviewer"] == [
+        reviewer,
+        Message(role="tool", tool_call_id="review_0", content="review result"),
+    ]
+
+
+async def test_inactive_non_main_declaration_rejects_public_call() -> None:
+    reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
+    root = _patch(
+        "rs_root",
+        active={MAIN_SIDE},
+        sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
+    )
+    call_id = _sealed_call_id("reviewer", "review_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_sealed_reasoning(root), _function_call(call_id)])
+
+    _assert_reason(exc_info, "inactive_side_function_call")
+
+
+async def test_active_declaration_requires_function_call_item() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint)])
+
+    _assert_reason(exc_info, "reasoning_tool_call_missing_function_call_item")
+
+
+async def test_open_call_requires_function_call_output() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _function_call(call_id)])
+
+    _assert_reason(exc_info, "function_call_missing_function_call_output")
+
+
+async def test_function_call_output_requires_open_call() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _function_output(call_id)])
+
+    _assert_reason(exc_info, "function_call_output_without_pending_function_call")
+
+
+async def test_duplicate_function_call_item_is_rejected() -> None:
+    hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest(
+            [
+                _message("u", role="user"),
+                _sealed_reasoning(checkpoint),
+                _function_call(call_id),
+                _function_call(call_id),
+            ]
+        )
+
+    _assert_reason(exc_info, "duplicate_pending_function_call")
+
+
+async def test_public_bearing_patch_rejects_function_call_before_public_assistant() -> None:
+    private = Message(role="assistant", content="answer", tool_calls=[_tool_call("up_0")])
+    checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
+    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+
+    with pytest.raises(PlapError) as exc_info:
+        await _ingest(
+            [
+                _message("u", role="user"),
+                _sealed_reasoning(checkpoint),
+                _function_call(call_id),
+                _function_output(call_id),
+            ]
+        )
+
+    _assert_reason(exc_info, "main_message_patch_target_missing")

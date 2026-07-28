@@ -21,7 +21,16 @@ from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
 from plap.plugins.core.loop import UsageLedger, response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
-from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, MessagePatch, Sides, ToolCall
+from plap.responses.ingest.models import (
+    MAIN_SIDE,
+    Ingested,
+    Message,
+    MessagePatch,
+    ReasoningCheckpoint,
+    ReasoningPatch,
+    Sides,
+    ToolCall,
+)
 from plap.responses.ingest.sealing import open_call_id, open_reasoning_payload
 from plap.responses.state import INTERRUPTED_TOOL_OUTPUT, State
 from plap.responses.store import PreparedRequest
@@ -113,7 +122,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
 
 def _ingested(*, active: set[str] | None = None) -> Ingested:
     return Ingested(
-        machine={},
+        durable={},
         sides=Sides(active={MAIN_SIDE} if active is None else active),
         last_reasoning_id=None,
     )
@@ -513,7 +522,7 @@ async def test_run_response_completes_simple_turn_without_midstream_flushes() ->
         request=request,
         client=client,
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
             last_reasoning_id=None,
         ),
@@ -646,12 +655,12 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
     assert response.usage.total_tokens == 36
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert payload.sides.main[0].is_assistant()
-    assert payload.sides.main[0].tool_calls[0].name == "bad"
-    assert payload.sides.main[1].is_tool()
-    assert payload.sides.main[1].content == RETRY_TOOL_PLACEHOLDER
-    assert payload.sides.main[2].role == "user"
-    assert "undeclared tool" in cast(str, payload.sides.main[2].content)
+    assert payload.main[0].is_assistant()
+    assert payload.main[0].tool_calls[0].name == "bad"
+    assert payload.main[1].is_tool()
+    assert payload.main[1].content == RETRY_TOOL_PLACEHOLDER
+    assert payload.main[2].role == "user"
+    assert "undeclared tool" in cast(str, payload.main[2].content)
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "fixed"
 
@@ -735,12 +744,12 @@ async def test_state_flush_persists_stubbed_open_tail_calls() -> None:
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
-    assert payload.sides.main[0].is_assistant()
-    assert payload.sides.main[0].tool_calls[0].id == "call_main"
-    assert payload.sides.main[1].is_tool()
-    assert payload.sides.main[1].tool_call_id == "call_main"
-    assert isinstance(payload.sides.main[1].content, str)
-    assert payload.sides.main[1].content
+    assert payload.main[0].is_assistant()
+    assert payload.main[0].tool_calls[0].id == "call_main"
+    assert payload.main[1].is_tool()
+    assert payload.main[1].tool_call_id == "call_main"
+    assert isinstance(payload.main[1].content, str)
+    assert payload.main[1].content
 
 
 async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
@@ -754,7 +763,7 @@ async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
     )
     state = _state(
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         )
@@ -767,11 +776,12 @@ async def test_state_flush_appends_cross_lane_stub_without_main_patch() -> None:
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
-    assert payload.sides.main == [
+    assert payload.main == [
         completed,
         Message(role="tool", tool_call_id="call_open", content=INTERRUPTED_TOOL_OUTPUT),
     ]
-    assert MAIN_SIDE not in payload.sides.patches
+    assert isinstance(payload.state, ReasoningPatch)
+    assert MAIN_SIDE not in payload.state.sides
 
 
 async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> None:
@@ -785,7 +795,7 @@ async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> 
     )
     state = _state(
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         )
@@ -798,8 +808,9 @@ async def test_state_flush_preserves_inactive_cross_lane_call_without_stub() -> 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
-    assert payload.sides.main == [completed]
-    assert MAIN_SIDE not in payload.sides.patches
+    assert payload.main == [completed]
+    assert isinstance(payload.state, ReasoningPatch)
+    assert MAIN_SIDE not in payload.state.sides
 
 
 async def test_state_flush_preserves_explicit_empty_side() -> None:
@@ -814,8 +825,9 @@ async def test_state_flush_preserves_explicit_empty_side() -> None:
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
-    assert "reviewer" in payload.sides.patches
-    assert payload.sides.patches["reviewer"] == []
+    assert isinstance(payload.state, ReasoningPatch)
+    assert "reviewer" in payload.state.sides
+    assert payload.state.sides["reviewer"] == []
 
 
 async def test_state_flush_rejects_persisted_main_mutation() -> None:
@@ -845,13 +857,62 @@ async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> No
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning_payload.sides.main[0] == state.main[0]
-    assert isinstance(reasoning_payload.sides.main[1], MessagePatch)
-    assert reasoning_payload.sides.main[1].message == state.main[0]
+    assert reasoning_payload.main[0] == state.main[0]
+    assert isinstance(reasoning_payload.main[1], MessagePatch)
+    assert reasoning_payload.main[1].message == state.main[0]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "hello"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
     assert response.output[2].call_id.startswith("call_")
+
+
+async def test_state_finalize_uses_direct_hidden_assistant_for_new_call_only_turn() -> None:
+    state = _state()
+    assistant = Message(
+        role="assistant",
+        reasoning_content="private",
+        tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
+    )
+    state.main = [assistant]
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert len(response.output) == 2
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert reasoning.main == [assistant]
+    assert isinstance(response.output[1], ResponseFunctionCallItem)
+
+
+async def test_state_finalize_emits_full_non_main_checkpoint_after_user() -> None:
+    state = _state(
+        ingested=Ingested(
+            durable={"base": True},
+            sides=Sides(
+                active={MAIN_SIDE},
+                messages={MAIN_SIDE: [Message(role="user", content="question")]},
+            ),
+            last_reasoning_id="rs_old",
+            checkpoint_required=True,
+        )
+    )
+    state.sides["reviewer"] = [Message(role="assistant", content="review state")]
+    state.activate("reviewer")
+    state.main = [Message(role="assistant", content="answer", reasoning_content="private")]
+
+    await state.finalize()
+
+    reasoning_item = state.coordinator.current_response().output[0]
+    assert isinstance(reasoning_item, ResponseReasoningItem)
+    payload = open_reasoning_payload(reasoning_item.encrypted_content, keyring=_keyring())
+    assert payload.previous_reasoning_id is None
+    assert isinstance(payload.state, ReasoningCheckpoint)
+    assert payload.state.durable == {"base": True}
+    assert payload.state.active == {MAIN_SIDE, "reviewer"}
+    assert payload.state.sides == {"reviewer": [Message(role="assistant", content="review state")]}
+    assert MAIN_SIDE not in payload.state.sides
+    assert payload.main == [state.main[0], MessagePatch(state.main[0])]
 
 
 async def test_state_finalize_keeps_inactive_main_output_private() -> None:
@@ -870,7 +931,7 @@ async def test_state_finalize_keeps_inactive_main_output_private() -> None:
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert payload.sides.main == state.main
+    assert payload.main == state.main
 
 
 async def test_run_response_emits_reactivated_persisted_main_call_without_main_completion() -> None:
@@ -886,7 +947,7 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
         channels,
         client=object(),
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         ),
@@ -900,8 +961,9 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
     assert len(response.output) == 3
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning.sides.active == {MAIN_SIDE}
-    assert reasoning.sides.main == [MessagePatch(message=assistant)]
+    assert isinstance(reasoning.state, ReasoningPatch)
+    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.main == [MessagePatch(message=assistant)]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "private answer"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
@@ -912,7 +974,7 @@ async def test_state_finalize_materializes_parked_text_tail_after_activation() -
     assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
     state = _state(
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         )
@@ -924,9 +986,33 @@ async def test_state_finalize_materializes_parked_text_tail_after_activation() -
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning.sides.main == [MessagePatch(message=assistant)]
+    assert reasoning.main == [MessagePatch(message=assistant)]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "delayed answer"
+
+
+async def test_state_finalize_repositions_persisted_call_only_tail_without_public_message() -> None:
+    assistant = Message(
+        role="assistant",
+        tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
+    )
+    state = _state(
+        ingested=Ingested(
+            durable={},
+            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            last_reasoning_id="rs_parked",
+        )
+    )
+    state.activate(MAIN_SIDE)
+
+    await state.finalize()
+
+    response = state.coordinator.current_response()
+    assert len(response.output) == 2
+    assert isinstance(response.output[0], ResponseReasoningItem)
+    reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
+    assert reasoning.main == [MessagePatch(assistant)]
+    assert isinstance(response.output[1], ResponseFunctionCallItem)
 
 
 async def test_state_finalize_materializes_partial_cross_lane_settlement() -> None:
@@ -940,7 +1026,7 @@ async def test_state_finalize_materializes_partial_cross_lane_settlement() -> No
     )
     state = _state(
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         )
@@ -953,7 +1039,7 @@ async def test_state_finalize_materializes_partial_cross_lane_settlement() -> No
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning.sides.main == [completed, MessagePatch(message=assistant)]
+    assert reasoning.main == [completed, MessagePatch(message=assistant)]
     assert isinstance(response.output[1], ResponseMessageItem)
     calls = [item for item in response.output if isinstance(item, ResponseFunctionCallItem)]
     assert [item.name for item in calls] == ["client_tool"]
@@ -967,7 +1053,7 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
     )
     state = _state(
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
             last_reasoning_id=None,
         )
@@ -981,7 +1067,7 @@ async def test_state_finalize_keeps_fully_settled_main_turn_hidden() -> None:
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning.sides.main == [completed]
+    assert reasoning.main == [completed]
 
 
 async def test_state_finalize_emits_active_side_calls_in_deterministic_order() -> None:
@@ -1022,10 +1108,10 @@ async def test_state_finalize_keeps_closed_assistant_with_user_tail_hidden() -> 
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert isinstance(payload.sides.main[0], Message)
-    assert payload.sides.main[0].content == "hidden assistant"
-    assert payload.sides.main[1].role == "user"
-    assert payload.sides.main[1].content == "tail"
+    assert isinstance(payload.main[0], Message)
+    assert payload.main[0].content == "hidden assistant"
+    assert payload.main[1].role == "user"
+    assert payload.main[1].content == "tail"
 
 
 async def test_run_response_finishes_all_public_calls_when_cancelled_during_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1036,7 +1122,7 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_fina
         channels,
         client=object(),
         ingested=Ingested(
-            machine={},
+            durable={},
             sides=Sides(
                 active=set(),
                 messages={

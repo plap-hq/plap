@@ -22,12 +22,27 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 5,
+        "version": 6,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
-        "machine": <JSONPatch>,
-        "sides": <SidesUpdate>,
+        "previous_compaction_id": <string|null>,
+        "state": {
+            "type": "checkpoint",
+            "durable": <object>,
+            "active": [<side>, ...],
+            "sides": {
+                <non-main-side>: [<message>, ...],
+            },
+        } | {
+            "type": "patch",
+            "durable": <JSONPatch>,
+            "active": [<side>, ...] | null,
+            "sides": {
+                <non-main-side>: <JSONPatch>,
+            },
+        },
+        "main": [<message>..., <optional-postfix-message-patch>],
     }
 
 - Compaction envelope:
@@ -36,7 +51,7 @@ Reasoning and compaction payloads
         "version": 4,
         "type": "compaction",
         "id": <string>,
-        "machine": <object>,
+        "durable": <object>,
         "sides": <Sides>,
     }
 
@@ -49,15 +64,11 @@ Reasoning and compaction payloads
         },
     }
 
-- Incremental side update:
-
-    {
-        "active": [<side>, ...] | null,
-        "main": [<message>..., <optional-postfix-message-patch>],
-        "patches": {
-            <non-main-side>: <JSONPatch>,
-        },
-    }
+- Reasoning checkpoints replace durable state, active membership, and every non-main
+  side. Reasoning patches apply deltas to those fields. Main always uses the
+  common append-only `main` lane and is never checkpointed by reasoning.
+- `previous_compaction_id` is null before any compaction and otherwise equals
+  the latest replayed compaction ID for every checkpoint and patch.
 
 - The JSON bytes are compressed with zstd, then encrypted with
   PyNaCl `nacl.secret.Aead`, which uses XChaCha20-Poly1305-IETF.
@@ -151,7 +162,7 @@ REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
 COMPACTION_PAYLOAD_FORMAT_VERSION = 4
-REASONING_PAYLOAD_FORMAT_VERSION = 5
+REASONING_PAYLOAD_FORMAT_VERSION = 6
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
@@ -440,7 +451,7 @@ def _compaction_from_json(value: object) -> CompactionPayload:
         return CompactionPayload.from_primitive(
             {
                 "id": value.get("id"),
-                "machine": value.get("machine"),
+                "durable": value.get("durable"),
                 "sides": value.get("sides"),
             }
         )
@@ -466,8 +477,9 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
             {
                 "id": value.get("id"),
                 "previous_reasoning_id": value.get("previous_reasoning_id"),
-                "machine": value.get("machine"),
-                "sides": value.get("sides"),
+                "previous_compaction_id": value.get("previous_compaction_id"),
+                "state": value.get("state"),
+                "main": value.get("main"),
             }
         )
     except (TypeError, ValueError) as exc:

@@ -136,27 +136,27 @@ def _advisor_error(
     )
 
 
-def _advisor_machine(state: State) -> dict[str, object]:
-    raw = state.machine.to_primitive().get(ADVISOR_SIDE)
+def _advisor_durable(state: State) -> dict[str, object]:
+    raw = state.durable.to_primitive().get(ADVISOR_SIDE)
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
 
 
 def _advisor_note(state: State) -> str | None:
-    value = _advisor_machine(state).get("note")
+    value = _advisor_durable(state).get("note")
     if not isinstance(value, str) or not value:
         return None
     return value
 
 
 def _set_advisor_note(state: State, note: str | None) -> None:
-    machine = _advisor_machine(state)
+    durable = _advisor_durable(state)
     if note is None:
-        machine.pop("note", None)
+        durable.pop("note", None)
     else:
-        machine["note"] = note
-    state.machine = state.machine.model_copy(update={ADVISOR_SIDE: machine}, deep=True)
+        durable["note"] = note
+    state.durable = state.durable.model_copy(update={ADVISOR_SIDE: durable}, deep=True)
 
 
 def _is_advisor_artifact(msg: ChatMessage) -> bool:

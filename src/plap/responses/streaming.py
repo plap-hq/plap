@@ -43,8 +43,7 @@ from plap.responses.contracts import (
     ResponseUsage,
     SummaryTextContent,
 )
-from plap.responses.ingest.models import ReasoningPayload, SidesUpdate
-from plap.responses.ingest.patch import JSONPatch
+from plap.responses.ingest.models import MainUpdate, ReasoningCheckpoint, ReasoningPayload, ReasoningState
 from plap.responses.ingest.sealing import seal_reasoning_payload
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.summary import SummaryDelta, SummaryDone
@@ -110,16 +109,19 @@ def _new_reasoning_id() -> str:
 class _Lineage:
     item_id: str
     previous_reasoning_id: str | None
+    previous_compaction_id: str | None
 
 
 @dataclass(slots=True)
 class _Chain:
     last_reasoning_id: str | None = None
+    last_compaction_id: str | None = None
 
-    def next_reasoning(self) -> _Lineage:
+    def next_reasoning(self, state: ReasoningState) -> _Lineage:
         return _Lineage(
             item_id=_new_reasoning_id(),
-            previous_reasoning_id=self.last_reasoning_id,
+            previous_reasoning_id=None if isinstance(state, ReasoningCheckpoint) else self.last_reasoning_id,
+            previous_compaction_id=self.last_compaction_id,
         )
 
     def record_reasoning(self, item_id: str) -> None:
@@ -130,8 +132,8 @@ class _Chain:
 class _Draft:
     output_index: int
     lineage: _Lineage
-    machine: JSONPatch
-    sides: SidesUpdate
+    state: ReasoningState
+    main: list[MainUpdate]
     summary_parts: list[SummaryTextContent] = field(default_factory=list)
     summary_pending: str = ""
 
@@ -147,6 +149,7 @@ class StreamCoordinator:
         response_id: str | None = None,
         sealing_keyring: SealingKeyring | None = None,
         last_reasoning_id: str | None = None,
+        last_compaction_id: str | None = None,
     ) -> None:
         if (prepared is None) != (response_store is None):
             raise ValueError("prepared and response_store must either both be provided or both be omitted")
@@ -156,7 +159,7 @@ class StreamCoordinator:
         self._sealing_keyring = sealing_keyring
         self._response = _new_response(request, response_id=response_id)
         self._items: list[ResponseOutputItem] = []
-        self._chain = _Chain(last_reasoning_id=last_reasoning_id)
+        self._chain = _Chain(last_reasoning_id=last_reasoning_id, last_compaction_id=last_compaction_id)
         self._draft: _Draft | None = None
         self._sequence_number = 0
 
@@ -243,16 +246,17 @@ class StreamCoordinator:
         self,
         *,
         lineage: _Lineage,
-        machine: JSONPatch,
-        sides: SidesUpdate,
+        state: ReasoningState,
+        main: list[MainUpdate],
         summary: Sequence[SummaryTextContent],
         status: str,
     ) -> ResponseReasoningItem:
         payload = ReasoningPayload(
             id=lineage.item_id,
             previous_reasoning_id=lineage.previous_reasoning_id,
-            machine=machine,
-            sides=sides,
+            previous_compaction_id=lineage.previous_compaction_id,
+            state=state,
+            main=main,
         )
         return ResponseReasoningItem(
             encrypted_content=seal_reasoning_payload(payload, keyring=self._require_sealing_keyring()),
@@ -265,8 +269,8 @@ class StreamCoordinator:
     def _draft_item(self, *, draft: _Draft, status: str) -> ResponseReasoningItem:
         return self._reasoning_item(
             lineage=draft.lineage,
-            machine=draft.machine,
-            sides=draft.sides,
+            state=draft.state,
+            main=draft.main,
             summary=list(draft.summary_parts),
             status=status,
         )
@@ -439,16 +443,16 @@ class StreamCoordinator:
     async def begin_reasoning(
         self,
         *,
-        machine: JSONPatch,
-        sides: SidesUpdate,
+        state: ReasoningState,
+        main: list[MainUpdate],
     ) -> str:
         if self._draft is not None:
             raise RuntimeError("reasoning item is already active")
-        lineage = self._chain.next_reasoning()
+        lineage = self._chain.next_reasoning(state)
         item = self._reasoning_item(
             lineage=lineage,
-            machine=machine,
-            sides=sides,
+            state=state,
+            main=main,
             summary=(),
             status="in_progress",
         )
@@ -456,8 +460,8 @@ class StreamCoordinator:
         self._draft = _Draft(
             output_index=output_index,
             lineage=lineage,
-            machine=machine,
-            sides=sides,
+            state=state,
+            main=main,
         )
         await self._publish(
             ResponseOutputItemAddedEvent(item=item, output_index=output_index, sequence_number=0, type="response.output_item.added")
@@ -467,12 +471,14 @@ class StreamCoordinator:
     async def replace_reasoning(
         self,
         *,
-        machine: JSONPatch,
-        sides: SidesUpdate,
+        state: ReasoningState,
+        main: list[MainUpdate],
     ) -> None:
         draft = self._active_draft()
-        draft.machine = machine
-        draft.sides = sides
+        if type(state) is not type(draft.state):
+            raise RuntimeError("reasoning state type cannot change while an item is active")
+        draft.state = state
+        draft.main = main
         item = self._draft_item(draft=draft, status="in_progress")
         await self._replace_item(output_index=draft.output_index, item=item)
 
@@ -536,13 +542,15 @@ class StreamCoordinator:
     async def finish_reasoning(
         self,
         *,
-        machine: JSONPatch,
-        sides: SidesUpdate,
+        state: ReasoningState,
+        main: list[MainUpdate],
     ) -> str:
         draft = self._active_draft()
         self._assert_no_pending_summary(draft)
-        draft.machine = machine
-        draft.sides = sides
+        if type(state) is not type(draft.state):
+            raise RuntimeError("reasoning state type cannot change while an item is active")
+        draft.state = state
+        draft.main = main
         item = self._draft_item(draft=draft, status="completed")
         await self._replace_item(output_index=draft.output_index, item=item)
         await self._publish(

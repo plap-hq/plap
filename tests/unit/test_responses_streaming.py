@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import uuid4
 
+import pytest
 from pydantic import TypeAdapter
 
 from plap.keyring import SealingKeyring
@@ -13,7 +14,7 @@ from plap.responses.contracts import (
     ResponseStreamEvent,
     SummaryTextContent,
 )
-from plap.responses.ingest.models import Message, SidesUpdate
+from plap.responses.ingest.models import Message, ReasoningCheckpoint, ReasoningPatch
 from plap.responses.ingest.sealing import open_reasoning_payload
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -90,8 +91,18 @@ def _prepared() -> PreparedRequest:
     )
 
 
-def _reasoning_sides(label: str) -> SidesUpdate:
-    return SidesUpdate(main=[Message(role="assistant", content=label)], patches={})
+def _reasoning_args(label: str) -> dict[str, object]:
+    return {
+        "state": ReasoningPatch(durable=[]),
+        "main": [Message(role="assistant", content=label)],
+    }
+
+
+def _checkpoint_args(label: str) -> dict[str, object]:
+    return {
+        "state": ReasoningCheckpoint(durable={"checkpoint": True}, active={"main"}, sides={}),
+        "main": [Message(role="assistant", content=label)],
+    }
 
 
 def _last_output_item(coordinator: StreamCoordinator):
@@ -110,53 +121,52 @@ async def test_begin_then_finish_reasoning_chains_previous_reasoning_id() -> Non
     channels = _RecordingChannels()
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
-    first_id = await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("first"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("first"))
+    first_id = await coordinator.begin_reasoning(**_reasoning_args("first"))
+    await coordinator.finish_reasoning(**_reasoning_args("first"))
     first_item = _last_output_item(coordinator)
     first_payload = _open_reasoning_item(first_item)
 
-    second_id = await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("second"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("second"))
+    second_id = await coordinator.begin_reasoning(**_reasoning_args("second"))
+    await coordinator.finish_reasoning(**_reasoning_args("second"))
     second_item = _last_output_item(coordinator)
     second_payload = _open_reasoning_item(second_item)
 
     assert first_id == first_item.id == first_payload.id
     assert first_payload.previous_reasoning_id is None
+    assert first_payload.previous_compaction_id is None
     assert second_id == second_item.id == second_payload.id
     assert second_payload.previous_reasoning_id == first_payload.id
+    assert second_payload.previous_compaction_id is None
 
 
 async def test_reasoning_item_lineage_stays_stable_across_replace_and_finish() -> None:
     channels = _RecordingChannels()
-    coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
-
-    reasoning_id = await coordinator.begin_reasoning(
-        machine=[],
-        sides=_reasoning_sides("draft"),
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        sealing_keyring=_keyring(),
+        last_compaction_id="cmp_seed",
     )
+
+    reasoning_id = await coordinator.begin_reasoning(**_reasoning_args("draft"))
     begun = _open_reasoning_item(_last_output_item(coordinator))
 
-    await coordinator.replace_reasoning(
-        machine=[],
-        sides=_reasoning_sides("draft replace"),
-    )
+    await coordinator.replace_reasoning(**_reasoning_args("draft replace"))
     replaced = _open_reasoning_item(_last_output_item(coordinator))
 
     await coordinator.summary_delta(SummaryDelta(text="summary part"))
     await coordinator.summary_done(SummaryDone())
-    await coordinator.finish_reasoning(
-        machine=[],
-        sides=_reasoning_sides("draft final"),
-    )
+    await coordinator.finish_reasoning(**_reasoning_args("draft final"))
     finished_item = _last_output_item(coordinator)
     finished = _open_reasoning_item(finished_item)
 
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("next"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("next"))
+    await coordinator.begin_reasoning(**_reasoning_args("next"))
+    await coordinator.finish_reasoning(**_reasoning_args("next"))
     next_payload = _open_reasoning_item(_last_output_item(coordinator))
 
     assert begun.id == replaced.id == finished.id == finished_item.id == reasoning_id
     assert begun.previous_reasoning_id == replaced.previous_reasoning_id == finished.previous_reasoning_id
+    assert begun.previous_compaction_id == replaced.previous_compaction_id == finished.previous_compaction_id == "cmp_seed"
     assert finished_item.summary == [SummaryTextContent(text="summary part", type="summary_text")]
     assert next_payload.previous_reasoning_id == finished.id
 
@@ -165,7 +175,7 @@ async def test_reasoning_summary_deltas_publish_expected_event_types() -> None:
     channels = _RecordingChannels()
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
+    await coordinator.begin_reasoning(**_reasoning_args("draft"))
     await coordinator.summary_delta(SummaryDelta(text="part"))
     await coordinator.summary_done(SummaryDone())
 
@@ -182,11 +192,11 @@ async def test_finish_reasoning_rejects_pending_summary_text() -> None:
     channels = _RecordingChannels()
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
+    await coordinator.begin_reasoning(**_reasoning_args("draft"))
     await coordinator.summary_delta(SummaryDelta(text="part"))
 
     try:
-        await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("draft final"))
+        await coordinator.finish_reasoning(**_reasoning_args("draft final"))
     except RuntimeError as exc:
         assert "pending" in str(exc)
     else:  # pragma: no cover
@@ -200,20 +210,45 @@ async def test_begin_then_finish_reasoning_uses_seeded_chain_state() -> None:
         channels=channels,
         sealing_keyring=_keyring(),
         last_reasoning_id="rs_seed",
+        last_compaction_id="cmp_seed",
     )
 
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("seeded"))
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("seeded"))
+    await coordinator.begin_reasoning(**_reasoning_args("seeded"))
+    await coordinator.finish_reasoning(**_reasoning_args("seeded"))
     payload = _open_reasoning_item(_last_output_item(coordinator))
 
     assert payload.previous_reasoning_id == "rs_seed"
+    assert payload.previous_compaction_id == "cmp_seed"
+
+
+async def test_checkpoint_resets_seeded_chain_and_next_patch_chains_to_checkpoint() -> None:
+    channels = _RecordingChannels()
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        sealing_keyring=_keyring(),
+        last_reasoning_id="rs_seed",
+        last_compaction_id="cmp_seed",
+    )
+
+    await coordinator.begin_reasoning(**_checkpoint_args("checkpoint"))
+    checkpoint_id = await coordinator.finish_reasoning(**_checkpoint_args("checkpoint"))
+    checkpoint = _open_reasoning_item(_last_output_item(coordinator))
+    await coordinator.begin_reasoning(**_reasoning_args("patch"))
+    await coordinator.finish_reasoning(**_reasoning_args("patch"))
+    patch = _open_reasoning_item(_last_output_item(coordinator))
+
+    assert checkpoint.previous_reasoning_id is None
+    assert checkpoint.previous_compaction_id == "cmp_seed"
+    assert patch.previous_reasoning_id == checkpoint_id
+    assert patch.previous_compaction_id == "cmp_seed"
 
 
 async def test_cancelled_flushes_active_reasoning_item_without_completing_chain() -> None:
     channels = _RecordingChannels()
     coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
 
-    reasoning_id = await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
+    reasoning_id = await coordinator.begin_reasoning(**_reasoning_args("draft"))
     await coordinator.summary_delta(SummaryDelta(text="part"))
     await coordinator.summary_done(SummaryDone())
     await coordinator.cancelled()
@@ -228,6 +263,37 @@ async def test_cancelled_flushes_active_reasoning_item_without_completing_chain(
     assert payload.previous_reasoning_id is None
 
 
+async def test_cancelled_checkpoint_preserves_variant_and_null_predecessor() -> None:
+    channels = _RecordingChannels()
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        sealing_keyring=_keyring(),
+        last_reasoning_id="rs_seed",
+        last_compaction_id="cmp_seed",
+    )
+
+    await coordinator.begin_reasoning(**_checkpoint_args("draft"))
+    await coordinator.replace_reasoning(**_checkpoint_args("replacement"))
+    await coordinator.cancelled()
+    payload = _open_reasoning_item(_last_output_item(coordinator))
+
+    assert isinstance(payload.state, ReasoningCheckpoint)
+    assert payload.previous_reasoning_id is None
+    assert payload.previous_compaction_id == "cmp_seed"
+    assert payload.main == [Message(role="assistant", content="replacement")]
+
+
+async def test_active_reasoning_draft_cannot_change_variant() -> None:
+    channels = _RecordingChannels()
+    coordinator = StreamCoordinator(request=_request(), channels=channels, sealing_keyring=_keyring())
+
+    await coordinator.begin_reasoning(**_checkpoint_args("checkpoint"))
+
+    with pytest.raises(RuntimeError, match="state type cannot change"):
+        await coordinator.replace_reasoning(**_reasoning_args("patch"))
+
+
 async def test_summary_done_does_not_write_store() -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
@@ -239,7 +305,7 @@ async def test_summary_done_does_not_write_store() -> None:
         sealing_keyring=_keyring(),
     )
 
-    await coordinator.begin_reasoning(machine=[], sides=_reasoning_sides("draft"))
+    await coordinator.begin_reasoning(**_reasoning_args("draft"))
     assert store.append_calls == 1
 
     await coordinator.summary_delta(SummaryDelta(text="part"))
@@ -247,7 +313,7 @@ async def test_summary_done_does_not_write_store() -> None:
 
     assert store.replace_calls == 0
 
-    await coordinator.finish_reasoning(machine=[], sides=_reasoning_sides("done"))
+    await coordinator.finish_reasoning(**_reasoning_args("done"))
 
     assert store.replace_calls == 1
 

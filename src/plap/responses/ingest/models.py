@@ -223,137 +223,217 @@ class Sides:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SidesUpdate:
-    active: set[Side] | None = None
-    main: list[MainUpdate] = field(default_factory=list)
-    patches: dict[Side, JSONPatch] = field(default_factory=dict)
+def split_main_updates(
+    updates: list[MainUpdate],
+) -> tuple[list[Message], list[Message], Message | None, list[Message], list[Message], MessagePatch | None]:
+    patch_indices = [index for index, update in enumerate(updates) if isinstance(update, MessagePatch)]
+    if len(patch_indices) > 1:
+        raise ValueError("reasoning main may contain at most one message patch")
+    patch: MessagePatch | None = None
+    if patch_indices:
+        candidate = updates[patch_indices[0]]
+        if not isinstance(candidate, MessagePatch):  # pragma: no cover - narrowed by patch_indices
+            raise TypeError("expected message patch")
+        patch = candidate
+    if patch_indices and patch_indices[0] != len(updates) - 1:
+        raise ValueError("message patch must be the final main update")
 
-    def split_main(
-        self,
-    ) -> tuple[list[Message], list[Message], Message | None, list[Message], list[Message], MessagePatch | None]:
-        patch_indices = [index for index, update in enumerate(self.main) if isinstance(update, MessagePatch)]
-        if len(patch_indices) > 1:
-            raise ValueError("sides update main may contain at most one message patch")
-        patch: MessagePatch | None = None
-        if patch_indices:
-            candidate = self.main[patch_indices[0]]
-            if not isinstance(candidate, MessagePatch):  # pragma: no cover - narrowed by patch_indices
-                raise TypeError("expected message patch")
-            patch = candidate
-        if patch_indices and patch_indices[0] != len(self.main) - 1:
-            raise ValueError("message patch must be the final main update")
-
-        messages = [update for update in self.main if isinstance(update, Message)]
-        leading_end = 0
-        while leading_end < len(messages) and messages[leading_end].is_tool():
-            leading_end += 1
-        leading_outputs = messages[:leading_end]
-        local = messages[leading_end:]
-        prefix, anchor, suffix, after = split_tail(local)
-        if anchor is None:
-            _validate_closed_prefix_messages(after, label="sides update main")
-            if patch is not None and after:
-                raise ValueError("message patch target may not have a trailing non-assistant tail")
-            return leading_outputs, [], None, [], after, patch
-
-        anchor_index = next(index for index, update in enumerate(local) if update is anchor)
-        _validate_closed_prefix_messages(prefix, label="sides update main prefix")
-        pending_anchor_call_ids = _anchor_open_call_ids(anchor)
-        for offset, update in enumerate(suffix, start=leading_end + anchor_index + 1):
-            if update.tool_call_id is None:
-                raise ValueError(f"sides update main[{offset}] must be a tool message with tool_call_id after the anchor")
-            if update.tool_call_id not in pending_anchor_call_ids:
-                raise ValueError(f"sides update main[{offset}] does not match an unresolved anchor tool call")
-            pending_anchor_call_ids.remove(update.tool_call_id)
-        if pending_anchor_call_ids and after:
-            raise ValueError("sides update main with unresolved anchor tool calls may not have trailing non-assistant tail")
-        for offset, update in enumerate(after, start=leading_end + anchor_index + 1 + len(suffix)):
-            if update.is_assistant() or update.is_tool():
-                raise ValueError(f"sides update main[{offset}] must be a closed non-assistant tail message")
+    messages = [update for update in updates if isinstance(update, Message)]
+    leading_end = 0
+    while leading_end < len(messages) and messages[leading_end].is_tool():
+        leading_end += 1
+    leading_outputs = messages[:leading_end]
+    local = messages[leading_end:]
+    prefix, anchor, suffix, after = split_tail(local)
+    if anchor is None:
+        _validate_closed_prefix_messages(after, label="reasoning main")
         if patch is not None and after:
             raise ValueError("message patch target may not have a trailing non-assistant tail")
-        return leading_outputs, prefix, anchor, suffix, after, patch
+        return leading_outputs, [], None, [], after, patch
+
+    anchor_index = next(index for index, update in enumerate(local) if update is anchor)
+    _validate_closed_prefix_messages(prefix, label="reasoning main prefix")
+    pending_anchor_call_ids = _anchor_open_call_ids(anchor)
+    for offset, update in enumerate(suffix, start=leading_end + anchor_index + 1):
+        if update.tool_call_id is None:
+            raise ValueError(f"reasoning main[{offset}] must be a tool message with tool_call_id after the anchor")
+        if update.tool_call_id not in pending_anchor_call_ids:
+            raise ValueError(f"reasoning main[{offset}] does not match an unresolved anchor tool call")
+        pending_anchor_call_ids.remove(update.tool_call_id)
+    if pending_anchor_call_ids and after:
+        raise ValueError("reasoning main with unresolved anchor tool calls may not have trailing non-assistant tail")
+    for offset, update in enumerate(after, start=leading_end + anchor_index + 1 + len(suffix)):
+        if update.is_assistant() or update.is_tool():
+            raise ValueError(f"reasoning main[{offset}] must be a closed non-assistant tail message")
+    if patch is not None and after:
+        raise ValueError("message patch target may not have a trailing non-assistant tail")
+    return leading_outputs, prefix, anchor, suffix, after, patch
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningCheckpoint:
+    durable: dict[str, JSONValue]
+    active: set[Side]
+    sides: dict[Side, list[Message]]
 
     def __post_init__(self) -> None:
-        self.split_main()
-        if self.active is not None:
-            object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
-        normalized: dict[Side, JSONPatch] = {}
-        for raw_side, patch in self.patches.items():
-            side = _required_side(raw_side, label="sides update patches key")
+        object.__setattr__(self, "durable", dict(self.durable))
+        object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
+        normalized: dict[Side, list[Message]] = {}
+        for raw_side, messages in self.sides.items():
+            side = _required_side(raw_side, label="reasoning checkpoint sides key")
             if side == MAIN_SIDE:
-                raise ValueError("sides update patches may not target main")
-            normalized[side] = _required_patch(patch, label=f"sides update patches.{side}")
-        object.__setattr__(self, "patches", normalized)
+                raise ValueError("reasoning checkpoint sides may not contain main")
+            normalized[side] = list(messages)
+        object.__setattr__(self, "sides", normalized)
 
     def to_primitive(self) -> dict[str, object]:
-        value: dict[str, object] = {
-            "active": None if self.active is None else sorted(self.active),
-            "main": [message.to_primitive() for message in self.main],
-            "patches": {side: list(patch) for side, patch in sorted(self.patches.items())},
+        return {
+            "type": "checkpoint",
+            "durable": dict(self.durable),
+            "active": sorted(self.active),
+            "sides": {side: [message.to_primitive() for message in self.sides[side]] for side in sorted(self.sides)},
         }
-        return value
 
     @classmethod
-    def from_primitive(cls, value: object) -> SidesUpdate:
-        item = _required_mapping(value, label="sides update")
-        allowed = {"active", "main", "patches"}
+    def from_primitive(cls, value: object) -> ReasoningCheckpoint:
+        item = _required_mapping(value, label="reasoning checkpoint")
+        allowed = {"type", "durable", "active", "sides"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
-            raise ValueError(f"sides update contains unknown keys: {names}")
-        patches_value = _required_mapping(item.get("patches", {}), label="sides update patches")
-        active_value = item.get("active")
+            raise ValueError(f"reasoning checkpoint contains unknown keys: {names}")
+        if item.get("type") != "checkpoint":
+            raise ValueError("reasoning checkpoint type must be 'checkpoint'")
+        durable = _required_mapping(item.get("durable"), label="reasoning checkpoint durable state")
+        sides = _required_mapping(item.get("sides"), label="reasoning checkpoint sides")
         return cls(
-            active=None if active_value is None else _required_side_set(active_value, label="sides update active"),
-            main=_required_main_update_list(item.get("main", []), label="sides update main"),
-            patches={
-                _required_side(side, label="sides update patches key"): _required_patch(
-                    patch,
-                    label=f"sides update patches.{side}",
+            durable=dict(durable),
+            active=_required_side_set(item.get("active"), label="reasoning checkpoint active"),
+            sides={
+                _required_side(side, label="reasoning checkpoint sides key"): _required_message_list(
+                    messages,
+                    label=f"reasoning checkpoint sides.{side}",
                 )
-                for side, patch in patches_value.items()
+                for side, messages in sides.items()
             },
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningPatch:
+    durable: JSONPatch
+    active: set[Side] | None = None
+    sides: dict[Side, JSONPatch] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "durable", _required_patch(self.durable, label="reasoning durable patch"))
+        if self.active is not None:
+            object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
+        normalized: dict[Side, JSONPatch] = {}
+        for raw_side, patch in self.sides.items():
+            side = _required_side(raw_side, label="reasoning patch sides key")
+            if side == MAIN_SIDE:
+                raise ValueError("reasoning patch sides may not target main")
+            normalized[side] = _required_patch(patch, label=f"reasoning patch sides.{side}")
+        object.__setattr__(self, "sides", normalized)
+
+    def to_primitive(self) -> dict[str, object]:
+        return {
+            "type": "patch",
+            "durable": list(self.durable),
+            "active": None if self.active is None else sorted(self.active),
+            "sides": {side: list(patch) for side, patch in sorted(self.sides.items())},
+        }
+
+    @classmethod
+    def from_primitive(cls, value: object) -> ReasoningPatch:
+        item = _required_mapping(value, label="reasoning patch")
+        allowed = {"type", "durable", "active", "sides"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"reasoning patch contains unknown keys: {names}")
+        if item.get("type") != "patch":
+            raise ValueError("reasoning patch type must be 'patch'")
+        sides = _required_mapping(item.get("sides"), label="reasoning patch sides")
+        active = item.get("active")
+        return cls(
+            durable=_required_patch(item.get("durable"), label="reasoning durable patch"),
+            active=None if active is None else _required_side_set(active, label="reasoning patch active"),
+            sides={
+                _required_side(side, label="reasoning patch sides key"): _required_patch(
+                    patch,
+                    label=f"reasoning patch sides.{side}",
+                )
+                for side, patch in sides.items()
+            },
+        )
+
+
+type ReasoningState = ReasoningCheckpoint | ReasoningPatch
+
+
+def _reasoning_state_from_primitive(value: object) -> ReasoningState:
+    item = _required_mapping(value, label="reasoning state")
+    state_type = item.get("type")
+    if state_type == "checkpoint":
+        return ReasoningCheckpoint.from_primitive(item)
+    if state_type == "patch":
+        return ReasoningPatch.from_primitive(item)
+    raise ValueError("reasoning state type must be 'checkpoint' or 'patch'")
 
 
 @dataclass(frozen=True, slots=True)
 class ReasoningPayload:
     id: str
     previous_reasoning_id: str | None
-    machine: JSONPatch
-    sides: SidesUpdate
+    previous_compaction_id: str | None
+    state: ReasoningState
+    main: list[MainUpdate] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
+        _optional_non_empty_string(self.previous_compaction_id, label="reasoning payload previous_compaction_id")
+        normalized = list(self.main)
+        split_main_updates(normalized)
+        object.__setattr__(self, "main", normalized)
 
     def to_primitive(self) -> dict[str, object]:
         return {
             "id": self.id,
             "previous_reasoning_id": self.previous_reasoning_id,
-            "machine": list(self.machine),
-            "sides": self.sides.to_primitive(),
+            "previous_compaction_id": self.previous_compaction_id,
+            "state": self.state.to_primitive(),
+            "main": [update.to_primitive() for update in self.main],
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> ReasoningPayload:
         item = _required_mapping(value, label="reasoning payload")
+        allowed = {"id", "previous_reasoning_id", "previous_compaction_id", "state", "main"}
+        unknown = set(item) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"reasoning payload contains unknown keys: {names}")
         return cls(
             id=_required_string(item.get("id"), label="reasoning payload id"),
             previous_reasoning_id=_optional_non_empty_string(
                 item.get("previous_reasoning_id"), label="reasoning payload previous_reasoning_id"
             ),
-            machine=_required_patch(item.get("machine"), label="reasoning payload machine"),
-            sides=SidesUpdate.from_primitive(item.get("sides")),
+            previous_compaction_id=_optional_non_empty_string(
+                item.get("previous_compaction_id"), label="reasoning payload previous_compaction_id"
+            ),
+            state=_reasoning_state_from_primitive(item.get("state")),
+            main=_required_main_update_list(item.get("main", []), label="reasoning main"),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
     id: str
-    machine: dict[str, JSONValue]
+    durable: dict[str, JSONValue]
     sides: Sides
 
     def __post_init__(self) -> None:
@@ -362,19 +442,19 @@ class CompactionPayload:
     def to_primitive(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "machine": dict(self.machine),
+            "durable": dict(self.durable),
             "sides": self.sides.to_primitive(),
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> CompactionPayload:
         item = _required_mapping(value, label="compaction payload")
-        machine_value = item.get("machine")
-        if not isinstance(machine_value, Mapping):
-            raise TypeError("compaction payload machine must be an object")
+        durable_value = item.get("durable")
+        if not isinstance(durable_value, Mapping):
+            raise TypeError("compaction payload durable state must be an object")
         return cls(
             id=_required_string(item.get("id"), label="compaction payload id"),
-            machine=dict(machine_value),
+            durable=dict(durable_value),
             sides=Sides.from_primitive(item.get("sides")),
         )
 
@@ -390,6 +470,8 @@ class CallID:
 
 @dataclass(slots=True)
 class Ingested:
-    machine: dict[str, JSONValue]
+    durable: dict[str, JSONValue]
     sides: Sides
     last_reasoning_id: str | None
+    last_compaction_id: str | None = None
+    checkpoint_required: bool = False

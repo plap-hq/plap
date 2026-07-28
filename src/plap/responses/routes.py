@@ -125,6 +125,7 @@ async def _prepare_create(
             response_store=response_store,
             sealing_keyring=sealing_keyring,
             last_reasoning_id=ingested.last_reasoning_id,
+            last_compaction_id=ingested.last_compaction_id,
         )
         span.set_attribute("plap.response.id", coordinator.response_id)
         span.set_attribute("plap.response.model", prepared.response_request.model)

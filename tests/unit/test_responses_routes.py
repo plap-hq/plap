@@ -11,8 +11,27 @@ from plap.bus import EventBus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
-from plap.responses.contracts import ResponseCreateRequest
-from plap.responses.ingest.models import MAIN_SIDE, Ingested, Sides
+from plap.responses.contracts import (
+    RequestCompactionItem,
+    RequestMessageItem,
+    RequestReasoningItem,
+    ResponseCreateRequest,
+    ResponseReasoningItem,
+)
+from plap.responses.ingest.models import (
+    MAIN_SIDE,
+    CompactionPayload,
+    Ingested,
+    ReasoningCheckpoint,
+    ReasoningPatch,
+    ReasoningPayload,
+    Sides,
+)
+from plap.responses.ingest.sealing import (
+    open_reasoning_payload,
+    seal_compaction_payload,
+    seal_reasoning_payload,
+)
 from plap.responses.routes import _prepare_create, _run_stream
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
@@ -42,6 +61,12 @@ class _RecordingStore:
     async def begin_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
         self.begin_calls += 1
+
+    async def append_output_item(self, prepared: PreparedRequest, response_id: str, output_index: int, item: object) -> None:
+        _ = prepared, response_id, output_index, item
+
+    async def replace_output_item(self, prepared: PreparedRequest, response_id: str, output_index: int, item: object) -> None:
+        _ = prepared, response_id, output_index, item
 
 
 def _auth_context() -> AuthContext:
@@ -159,13 +184,141 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     assert store.begin_calls == 0
     assert prepared.response_request is request
     assert prepared.execution_request is request
-    assert ingested.machine == {}
+    assert ingested.durable == {}
     assert ingested.sides.messages.keys() == {"main"}
     assert ingested.sides["main"][0].role == "user"
     assert ingested.sides["main"][0].content == "hello"
     assert ingested.sides.active == {MAIN_SIDE}
     assert ingested.last_reasoning_id is None
+    assert ingested.last_compaction_id is None
     assert coordinator.current_response().model == request.model
+
+
+async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage() -> None:
+    keyring = _keyring()
+    stored = ReasoningPayload(
+        id="rs_stored",
+        previous_reasoning_id=None,
+        previous_compaction_id=None,
+        state=ReasoningPatch(durable=[]),
+    )
+    execution_request = ResponseCreateRequest(
+        model="plap/test",
+        input=[
+            RequestReasoningItem(
+                encrypted_content=seal_reasoning_payload(stored, keyring=keyring),
+                id=stored.id,
+                summary=[],
+                type="reasoning",
+            ),
+            RequestMessageItem(content="new turn", role="user", type="message"),
+        ],
+    )
+    response_request = _request()
+    prepared = PreparedRequest(
+        scope_id=uuid4(),
+        response_request=response_request,
+        execution_request=execution_request,
+        current_input_items=[],
+        stored_input_items=[],
+        parent_response_id=None,
+        conversation_id=None,
+        persist_response=True,
+    )
+    store = _RecordingStore(prepared)
+    registry = svcs.Registry()
+    registry.register_value(AuthContext, _auth_context())
+    registry.register_value(CueBox, _loaded())
+    registry.register_value(SealingKeyring, keyring)
+    registry.register_value(ResponseStore, store)
+    container = svcs.Container(registry)
+
+    _, ingested, coordinator = await _prepare_create(
+        svcs=container,
+        auth_context=_auth_context(),
+        request=response_request,
+        channels=_RecordingChannels(),
+    )
+    checkpoint = ReasoningCheckpoint(durable={"turn": 2}, active={MAIN_SIDE}, sides={})
+    checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
+    await coordinator.finish_reasoning(state=checkpoint, main=[])
+    patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])
+    await coordinator.begin_reasoning(state=patch, main=[])
+    await coordinator.finish_reasoning(state=patch, main=[])
+    output = coordinator.current_response().output
+    checkpoint_item = output[-2]
+    patch_item = output[-1]
+
+    assert ingested.last_reasoning_id == stored.id
+    assert ingested.checkpoint_required is True
+    assert isinstance(checkpoint_item, ResponseReasoningItem)
+    assert isinstance(patch_item, ResponseReasoningItem)
+    checkpoint_payload = open_reasoning_payload(checkpoint_item.encrypted_content, keyring=keyring)
+    patch_payload = open_reasoning_payload(patch_item.encrypted_content, keyring=keyring)
+    assert checkpoint_payload.previous_reasoning_id is None
+    assert checkpoint_payload.previous_compaction_id is None
+    assert patch_payload.previous_reasoning_id == checkpoint_id
+    assert patch_payload.previous_compaction_id is None
+
+
+async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() -> None:
+    keyring = _keyring()
+    compaction = CompactionPayload(id="cmp_stored", durable={"generation": 1}, sides=Sides())
+    execution_request = ResponseCreateRequest(
+        model="plap/test",
+        input=[
+            RequestCompactionItem(
+                encrypted_content=seal_compaction_payload(compaction, keyring=keyring),
+                id=compaction.id,
+                type="compaction",
+            ),
+            RequestMessageItem(content="new turn", role="user", type="message"),
+        ],
+    )
+    response_request = _request()
+    prepared = PreparedRequest(
+        scope_id=uuid4(),
+        response_request=response_request,
+        execution_request=execution_request,
+        current_input_items=[],
+        stored_input_items=[],
+        parent_response_id=None,
+        conversation_id=None,
+        persist_response=True,
+    )
+    store = _RecordingStore(prepared)
+    registry = svcs.Registry()
+    registry.register_value(AuthContext, _auth_context())
+    registry.register_value(CueBox, _loaded())
+    registry.register_value(SealingKeyring, keyring)
+    registry.register_value(ResponseStore, store)
+    container = svcs.Container(registry)
+
+    _, ingested, coordinator = await _prepare_create(
+        svcs=container,
+        auth_context=_auth_context(),
+        request=response_request,
+        channels=_RecordingChannels(),
+    )
+    checkpoint = ReasoningCheckpoint(durable={"generation": 2}, active={MAIN_SIDE}, sides={})
+    checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
+    await coordinator.finish_reasoning(state=checkpoint, main=[])
+    patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])
+    await coordinator.begin_reasoning(state=patch, main=[])
+    await coordinator.finish_reasoning(state=patch, main=[])
+    checkpoint_item, patch_item = coordinator.current_response().output[-2:]
+
+    assert ingested.last_reasoning_id is None
+    assert ingested.last_compaction_id == compaction.id
+    assert ingested.checkpoint_required is True
+    assert isinstance(checkpoint_item, ResponseReasoningItem)
+    assert isinstance(patch_item, ResponseReasoningItem)
+    checkpoint_payload = open_reasoning_payload(checkpoint_item.encrypted_content, keyring=keyring)
+    patch_payload = open_reasoning_payload(patch_item.encrypted_content, keyring=keyring)
+    assert checkpoint_payload.previous_reasoning_id is None
+    assert checkpoint_payload.previous_compaction_id == compaction.id
+    assert patch_payload.previous_reasoning_id == checkpoint_id
+    assert patch_payload.previous_compaction_id == compaction.id
 
 
 async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +338,7 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     await _run_stream(
         prepared=_prepared(),
-        ingested=Ingested(machine={}, sides=Sides(), last_reasoning_id=None),
+        ingested=Ingested(durable={}, sides=Sides(), last_reasoning_id=None),
         coordinator=_coordinator(),
         svcs=container,
     )
