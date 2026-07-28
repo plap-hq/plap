@@ -249,7 +249,6 @@ from plap.responses.contracts import (
 )
 from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CallID,
     CompactedMainTail,
     CompactionPayload,
@@ -272,7 +271,7 @@ def _keyring() -> SealingKeyring:
 
 
 def _side_codes() -> dict[str, int]:
-    return {MAIN_SIDE: 0, "reviewer": 1, "arbitrator": 2}
+    return {"main": 0, "reviewer": 1024, "arbitrator": 1025}
 
 
 def _tool_call(call_id: str, *, name: str = "read_file") -> ToolCall:
@@ -320,7 +319,7 @@ def _checkpoint(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             durable={} if durable is None else durable,
-            active={MAIN_SIDE} if active is None else active,
+            active={"main"} if active is None else active,
             sides={} if sides is None else sides,
         ),
         main=[] if main is None else main,
@@ -432,7 +431,7 @@ async def test_patch_after_compaction_uses_null_reasoning_predecessor() -> None:
     compaction = CompactionPayload(
         id="cmp_root",
         durable={"root": True},
-        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="old")]}),
+        sides=Sides(messages={"main": [Message(role="assistant", content="old")]}),
     )
     patch = _patch(
         "rs_patch",
@@ -443,7 +442,7 @@ async def test_patch_after_compaction_uses_null_reasoning_predecessor() -> None:
     result = await _ingest([_sealed_compaction(compaction), _sealed_reasoning(patch)])
 
     assert result.durable == {"root": True, "next": True}
-    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="old")]
+    assert result.sides["main"] == [Message(role="assistant", content="old")]
     assert result.main_tail == CompactedMainTail(source=Message(role="assistant", content="old"))
     assert result.last_compaction_id == compaction.id
 
@@ -553,14 +552,14 @@ async def test_checkpoint_replaces_non_main_state_but_preserves_main() -> None:
     old_reviewer = Message(role="assistant", content="old reviewer")
     root = _patch(
         "rs_root",
-        active={MAIN_SIDE, "reviewer"},
+        active={"main", "reviewer"},
         sides={"reviewer": [{"op": "add", "path": "/0", "value": old_reviewer.to_primitive()}]},
         main=[Message(role="assistant", content="old main")],
     )
     checkpoint = _checkpoint(
         "rs_checkpoint",
         durable={"new": True},
-        active={MAIN_SIDE, "arbitrator"},
+        active={"main", "arbitrator"},
         sides={"arbitrator": [Message(role="assistant", content="new arbitrator")]},
         main=[Message(role="assistant", content="new main")],
     )
@@ -568,10 +567,10 @@ async def test_checkpoint_replaces_non_main_state_but_preserves_main() -> None:
     result = await _ingest([_sealed_reasoning(root), _message("u", role="user"), _sealed_reasoning(checkpoint)])
 
     assert result.durable == {"new": True}
-    assert result.sides.active == {MAIN_SIDE, "arbitrator"}
+    assert result.sides.active == {"main", "arbitrator"}
     assert "reviewer" not in result.sides.messages
     assert result.sides["arbitrator"] == [Message(role="assistant", content="new arbitrator")]
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="old main"),
         Message(role="user", content="u"),
         Message(role="assistant", content="new main"),
@@ -622,9 +621,9 @@ async def test_user_message_inside_reasoning_main_does_not_require_checkpoint() 
 
 def test_reasoning_state_variants_reject_main_side_state() -> None:
     with pytest.raises(ValueError, match="may not contain main"):
-        ReasoningCheckpoint(durable={}, active={MAIN_SIDE}, sides={MAIN_SIDE: []})
+        ReasoningCheckpoint(durable={}, active={"main"}, sides={"main": []})
     with pytest.raises(ValueError, match="may not target main"):
-        ReasoningPatch(durable=[], sides={MAIN_SIDE: []})
+        ReasoningPatch(durable=[], sides={"main": []})
 
 
 @pytest.mark.parametrize(
@@ -649,7 +648,7 @@ async def test_public_patch_uses_next_assistant_without_content_validation(
 
     result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), *between, _message("edited")])
 
-    assert result.sides[MAIN_SIDE] == [Message(role="user", content="u"), *expected]
+    assert result.sides["main"] == [Message(role="user", content="u"), *expected]
     assert result.main_tail == PublicMainTail(source=private)
 
 
@@ -666,7 +665,7 @@ async def test_first_fabricated_assistant_consumes_public_patch() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant", content="first", reasoning_content="private"),
         Message(role="assistant", content="second"),
@@ -692,7 +691,7 @@ async def test_public_patch_takes_content_and_refusal_from_public_assistant() ->
 
     result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), public])
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(
             role="assistant",
@@ -716,7 +715,7 @@ async def test_equal_public_assistants_remain_distinct_occurrences() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant", content="same", reasoning_content="private"),
         Message(role="assistant", content="same"),
@@ -743,7 +742,7 @@ async def test_public_source_match_moves_live_source_past_plain_message() -> Non
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="developer", content="developer note"),
         Message(role="assistant", content="edited", reasoning_content="private"),
     ]
@@ -767,7 +766,7 @@ async def test_repeated_public_timewarp_replaces_projection_on_one_bundle() -> N
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="final projection", reasoning_content="private")]
+    assert result.sides["main"] == [Message(role="assistant", content="final projection", reasoning_content="private")]
     assert result.main_tail == PublicMainTail(source=source)
 
 
@@ -785,7 +784,7 @@ async def test_repeated_public_timewarp_with_same_projection_does_not_duplicate_
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="projection", reasoning_content="private")]
+    assert result.sides["main"] == [Message(role="assistant", content="projection", reasoning_content="private")]
     assert result.main_tail == PublicMainTail(source=source)
 
 
@@ -795,7 +794,7 @@ async def test_sliced_public_source_stages_from_message_patch() -> None:
 
     result = await _ingest([_sealed_reasoning(root), _message("edited")])
 
-    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="edited", reasoning_content="private")]
+    assert result.sides["main"] == [Message(role="assistant", content="edited", reasoning_content="private")]
 
 
 async def test_public_bearing_patch_without_assistant_is_rejected() -> None:
@@ -816,7 +815,7 @@ async def test_public_patch_rehomes_declared_call_to_later_assistant() -> None:
         tool_calls=[_tool_call("up_0")],
     )
     checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -829,7 +828,7 @@ async def test_public_patch_rehomes_declared_call_to_later_assistant() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant", content="patch recipient", reasoning_content="private"),
         Message(role="assistant", content="call owner", tool_calls=[_tool_call("up_0")]),
@@ -845,7 +844,7 @@ async def test_public_patch_attaches_declared_call_to_consuming_assistant() -> N
         tool_calls=[_tool_call("up_0")],
     )
     checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -857,7 +856,7 @@ async def test_public_patch_attaches_declared_call_to_consuming_assistant() -> N
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(
             role="assistant",
@@ -872,7 +871,7 @@ async def test_public_patch_attaches_declared_call_to_consuming_assistant() -> N
 async def test_direct_hidden_main_rehomes_call_to_later_assistant() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -884,7 +883,7 @@ async def test_direct_hidden_main_rehomes_call_to_later_assistant() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant"),
         Message(role="assistant", content="later", tool_calls=[_tool_call("up_0")]),
@@ -900,7 +899,7 @@ async def test_direct_hidden_and_later_public_assistant_are_distinct_positions()
         tool_calls=[_tool_call("up_0")],
     )
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -912,7 +911,7 @@ async def test_direct_hidden_and_later_public_assistant_are_distinct_positions()
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant", content="sealed hidden", reasoning_content="private"),
         Message(role="assistant", content="public", tool_calls=[_tool_call("up_0")]),
@@ -928,7 +927,7 @@ async def test_direct_hidden_main_owns_call_without_public_assistant() -> None:
         tool_calls=[_tool_call("up_0")],
     )
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -939,7 +938,7 @@ async def test_direct_hidden_main_owns_call_without_public_assistant() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         hidden,
         Message(role="tool", tool_call_id="up_0", content="result"),
@@ -950,7 +949,7 @@ async def test_direct_hidden_main_owns_call_without_public_assistant() -> None:
 async def test_output_empty_patch_is_immediate_hidden_owner() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -961,7 +960,7 @@ async def test_output_empty_patch_is_immediate_hidden_owner() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         hidden,
         Message(role="tool", tool_call_id="up_0", content="result"),
@@ -971,7 +970,7 @@ async def test_output_empty_patch_is_immediate_hidden_owner() -> None:
 async def test_output_empty_patch_rehomes_call_to_later_assistant() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -983,7 +982,7 @@ async def test_output_empty_patch_rehomes_call_to_later_assistant() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant"),
         Message(role="assistant", content="later", tool_calls=[_tool_call("up_0")]),
@@ -997,10 +996,10 @@ async def test_inactive_call_only_main_reactivates_through_hidden_patch() -> Non
     activated = _patch(
         "rs_activated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1011,8 +1010,8 @@ async def test_inactive_call_only_main_reactivates_through_hidden_patch() -> Non
         ]
     )
 
-    assert result.sides.active == {MAIN_SIDE}
-    assert result.sides[MAIN_SIDE] == [hidden, Message(role="tool", tool_call_id="up_0", content="result")]
+    assert result.sides.active == {"main"}
+    assert result.sides["main"] == [hidden, Message(role="tool", tool_call_id="up_0", content="result")]
 
 
 async def test_inactive_public_main_reactivates_through_public_patch() -> None:
@@ -1026,10 +1025,10 @@ async def test_inactive_public_main_reactivates_through_public_patch() -> None:
     activated = _patch(
         "rs_activated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1041,8 +1040,8 @@ async def test_inactive_public_main_reactivates_through_public_patch() -> None:
         ]
     )
 
-    assert result.sides.active == {MAIN_SIDE}
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides.active == {"main"}
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1060,7 +1059,7 @@ async def test_current_append_hidden_output_settles_local_assistant() -> None:
 
     result = await _ingest([_sealed_reasoning(root)])
 
-    assert result.sides[MAIN_SIDE] == [hidden, hidden_output]
+    assert result.sides["main"] == [hidden, hidden_output]
 
 
 async def test_current_append_hidden_output_survives_public_projection() -> None:
@@ -1075,7 +1074,7 @@ async def test_current_append_hidden_output_survives_public_projection() -> None
 
     result = await _ingest([_sealed_reasoning(root), _message("public")])
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1094,7 +1093,7 @@ async def test_persisted_hidden_output_settles_authenticated_tail() -> None:
 
     result = await _ingest([_sealed_reasoning(parked), _sealed_reasoning(settled)])
 
-    assert result.sides[MAIN_SIDE] == [hidden, hidden_output]
+    assert result.sides["main"] == [hidden, hidden_output]
 
 
 async def test_fully_settled_parked_turn_accepts_explicit_later_publication() -> None:
@@ -1110,7 +1109,7 @@ async def test_fully_settled_parked_turn_accepts_explicit_later_publication() ->
     published = _patch(
         "rs_published",
         previous_reasoning_id=settled.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
 
@@ -1123,7 +1122,7 @@ async def test_fully_settled_parked_turn_accepts_explicit_later_publication() ->
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1147,10 +1146,10 @@ async def test_partially_settled_parked_turn_publishes_only_remaining_call() -> 
     published = _patch(
         "rs_published",
         previous_reasoning_id=settled.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "client_0")
+    call_id = _sealed_call_id("main", "client_0")
 
     result = await _ingest(
         [
@@ -1163,7 +1162,7 @@ async def test_partially_settled_parked_turn_publishes_only_remaining_call() -> 
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1187,10 +1186,10 @@ async def test_partial_persisted_hidden_settlement_precedes_public_call() -> Non
     activated = _patch(
         "rs_activated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[hidden_output, MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "client_0")
+    call_id = _sealed_call_id("main", "client_0")
 
     result = await _ingest(
         [
@@ -1202,7 +1201,7 @@ async def test_partial_persisted_hidden_settlement_precedes_public_call() -> Non
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1226,7 +1225,7 @@ async def test_sliced_patch_accepts_leading_hidden_output() -> None:
 
     result = await _ingest([_sealed_reasoning(root), _message("public")])
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="public",
@@ -1245,7 +1244,7 @@ async def test_closed_hidden_prefix_precedes_current_assistant() -> None:
 
     result = await _ingest([_sealed_reasoning(root)])
 
-    assert result.sides[MAIN_SIDE] == [prefix, prefix_output, current]
+    assert result.sides["main"] == [prefix, prefix_output, current]
 
 
 async def test_hidden_timewarp_moves_complete_source_bundle_and_leaves_user_in_place() -> None:
@@ -1253,7 +1252,7 @@ async def test_hidden_timewarp_moves_complete_source_bundle_and_leaves_user_in_p
     parked = _patch("rs_parked", active=set(), main=[hidden])
     fabricated_call = _function_call("fab_0", name="fabricated")
     checkpoint = _checkpoint("rs_checkpoint", main=[MessagePatch(hidden)])
-    sealed_call = _sealed_call_id(MAIN_SIDE, "up_0")
+    sealed_call = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1267,7 +1266,7 @@ async def test_hidden_timewarp_moves_complete_source_bundle_and_leaves_user_in_p
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(
             role="assistant",
@@ -1284,10 +1283,10 @@ async def test_hidden_timewarp_crosses_plain_message_without_user_boundary() -> 
     relocated = _patch(
         "rs_relocated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1299,7 +1298,7 @@ async def test_hidden_timewarp_crosses_plain_message_without_user_boundary() -> 
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="developer", content="developer note"),
         hidden,
         Message(role="tool", tool_call_id="up_0", content="result"),
@@ -1312,10 +1311,10 @@ async def test_hidden_timewarp_moves_source_owned_fabricated_tool_work() -> None
     relocated = _patch(
         "rs_relocated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(hidden)],
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1329,7 +1328,7 @@ async def test_hidden_timewarp_moves_source_owned_fabricated_tool_work() -> None
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="developer", content="developer note"),
         Message(
             role="assistant",
@@ -1349,7 +1348,7 @@ async def test_hidden_source_mismatch_keeps_authenticated_tail() -> None:
 
     result = await _ingest([_sealed_reasoning(root), _sealed_reasoning(mismatch)])
 
-    assert result.sides[MAIN_SIDE] == [original, other]
+    assert result.sides["main"] == [original, other]
 
 
 async def test_source_mismatch_preserves_unrelated_authenticated_tail() -> None:
@@ -1359,7 +1358,7 @@ async def test_source_mismatch_preserves_unrelated_authenticated_tail() -> None:
 
     result = await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _message("edited")])
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         original,
         _private_reasoning(other, "edited"),
@@ -1376,7 +1375,7 @@ async def test_plain_message_is_pushed_after_assistant_tool_bundle() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
         Message(role="tool", tool_call_id="fab_0", content="result"),
         Message(role="developer", content="note"),
@@ -1394,7 +1393,7 @@ async def test_parallel_call_outputs_preserve_observed_chronology() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="owner",
@@ -1418,7 +1417,7 @@ async def test_fabricated_pair_attaches_to_inactive_main() -> None:
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1440,7 +1439,7 @@ async def test_fabricated_pair_preserves_other_parked_declaration() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             tool_calls=[_tool_call("parked_0", name="parked"), _tool_call("fab_0", name="fabricated")],
@@ -1461,7 +1460,7 @@ async def test_fabricated_pair_can_settle_matching_parked_declaration() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         hidden,
         Message(role="tool", tool_call_id="parked_0", content="fabricated result"),
     ]
@@ -1470,7 +1469,7 @@ async def test_fabricated_pair_can_settle_matching_parked_declaration() -> None:
 async def test_rehomed_declaration_stays_before_later_fabricated_call() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0", name="authenticated")])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     result = await _ingest(
         [
@@ -1484,7 +1483,7 @@ async def test_rehomed_declaration_stays_before_later_fabricated_call() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant"),
         Message(
@@ -1500,7 +1499,7 @@ async def test_rehomed_declaration_stays_before_later_fabricated_call() -> None:
 async def test_sealed_transplant_attaches_to_inactive_main() -> None:
     hidden = Message(role="assistant", content="hidden")
     parked = _patch("rs_parked", active=set(), main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+    call_id = _sealed_call_id("main", "transplanted_0")
 
     result = await _ingest(
         [
@@ -1511,7 +1510,7 @@ async def test_sealed_transplant_attaches_to_inactive_main() -> None:
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1525,7 +1524,7 @@ async def test_rehoming_preserves_authenticated_declaration_metadata() -> None:
     declared = ToolCall(id="up_0", name="authenticated", arguments='{"trusted":true}')
     hidden = Message(role="assistant", tool_calls=[declared])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
     spoofed = RequestFunctionCallItem(
         arguments='{"trusted":false}',
         call_id=call_id,
@@ -1543,7 +1542,7 @@ async def test_rehoming_preserves_authenticated_declaration_metadata() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant"),
         Message(role="assistant", content="later", tool_calls=[declared]),
@@ -1561,7 +1560,7 @@ async def test_plain_message_may_cross_open_main_call() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
         Message(role="tool", tool_call_id="fab_0", content="result"),
         Message(role="developer", content="developer note"),
@@ -1578,7 +1577,7 @@ async def test_assistant_may_cross_open_call_without_changing_its_owner() -> Non
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
         Message(role="tool", tool_call_id="fab_1", content="first result"),
         Message(role="assistant", content="second"),
@@ -1597,7 +1596,7 @@ async def test_sequential_closed_assistant_tool_bundles() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
         Message(role="tool", tool_call_id="fab_1", content="first result"),
         Message(role="assistant", content="second", tool_calls=[_tool_call("fab_2", name="second_call")]),
@@ -1617,7 +1616,7 @@ async def test_concurrently_open_calls_render_by_assistant_position() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="first", tool_calls=[_tool_call("fab_1", name="first_call")]),
         Message(role="tool", tool_call_id="fab_1", content="first result"),
         Message(role="assistant", content="second", tool_calls=[_tool_call("fab_2", name="second_call")]),
@@ -1638,7 +1637,7 @@ async def test_user_may_cross_open_call_when_output_precedes_checkpoint() -> Non
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
         Message(role="tool", tool_call_id="fab_0", content="result"),
         Message(role="user", content="new request"),
@@ -1663,7 +1662,7 @@ async def test_reasoning_boundary_rejects_interleaved_open_calls() -> None:
 
 
 async def test_main_sealed_transplant_attaches_to_nearest_assistant() -> None:
-    call_id = _sealed_call_id(MAIN_SIDE, "transplanted")
+    call_id = _sealed_call_id("main", "transplanted")
 
     result = await _ingest(
         [
@@ -1673,7 +1672,7 @@ async def test_main_sealed_transplant_attaches_to_nearest_assistant() -> None:
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="owner", tool_calls=[_tool_call("transplanted", name="transplanted")]),
         Message(role="tool", tool_call_id="transplanted", content="result"),
     ]
@@ -1699,7 +1698,7 @@ async def test_main_timewarp_does_not_rehome_interleaved_non_main_pair() -> None
     relocated = _patch(
         "rs_relocated",
         previous_reasoning_id=root.id,
-        active={MAIN_SIDE},
+        active={"main"},
         main=[MessagePatch(source)],
     )
     reviewer_call = _sealed_call_id("reviewer", "review_0")
@@ -1714,7 +1713,7 @@ async def test_main_timewarp_does_not_rehome_interleaved_non_main_pair() -> None
         ]
     )
 
-    assert result.sides[MAIN_SIDE] == [Message(role="developer", content="developer note"), source]
+    assert result.sides["main"] == [Message(role="developer", content="developer note"), source]
     assert result.sides["reviewer"] == [
         reviewer,
         Message(role="tool", tool_call_id="review_0", content="review result"),
@@ -1725,7 +1724,7 @@ async def test_non_main_call_attachment_is_isolated_from_main_position() -> None
     reviewer = Message(role="assistant", content="review", tool_calls=[_tool_call("review_0")])
     checkpoint = _checkpoint(
         "rs_checkpoint",
-        active={MAIN_SIDE, "reviewer"},
+        active={"main", "reviewer"},
         sides={"reviewer": [reviewer]},
     )
     reviewer_call = _sealed_call_id("reviewer", "review_0")
@@ -1746,7 +1745,7 @@ async def test_non_main_call_attachment_is_isolated_from_main_position() -> None
         reviewer,
         Message(role="tool", tool_call_id="review_0", content="review result"),
     ]
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="u"),
         Message(role="assistant", content="main owner", tool_calls=[_tool_call("fab_0", name="fabricated")]),
         Message(role="tool", tool_call_id="fab_0", content="main result"),
@@ -1757,7 +1756,7 @@ async def test_inactive_non_main_declaration_remains_parked() -> None:
     reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
     root = _patch(
         "rs_root",
-        active={MAIN_SIDE},
+        active={"main"},
         sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
     )
 
@@ -1770,13 +1769,13 @@ async def test_inactive_non_main_declaration_activates_and_settles_publicly() ->
     reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
     parked = _patch(
         "rs_parked",
-        active={MAIN_SIDE},
+        active={"main"},
         sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
     )
     activated = _patch(
         "rs_activated",
         previous_reasoning_id=parked.id,
-        active={MAIN_SIDE, "reviewer"},
+        active={"main", "reviewer"},
     )
     call_id = _sealed_call_id("reviewer", "review_0")
 
@@ -1789,7 +1788,7 @@ async def test_inactive_non_main_declaration_activates_and_settles_publicly() ->
         ]
     )
 
-    assert result.sides.active == {MAIN_SIDE, "reviewer"}
+    assert result.sides.active == {"main", "reviewer"}
     assert result.sides["reviewer"] == [
         reviewer,
         Message(role="tool", tool_call_id="review_0", content="review result"),
@@ -1800,7 +1799,7 @@ async def test_inactive_non_main_declaration_rejects_public_call() -> None:
     reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])
     root = _patch(
         "rs_root",
-        active={MAIN_SIDE},
+        active={"main"},
         sides={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
     )
     call_id = _sealed_call_id("reviewer", "review_0")
@@ -1824,7 +1823,7 @@ async def test_active_declaration_requires_function_call_item() -> None:
 async def test_open_call_requires_function_call_output() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     with pytest.raises(PlapError) as exc_info:
         await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _function_call(call_id)])
@@ -1835,7 +1834,7 @@ async def test_open_call_requires_function_call_output() -> None:
 async def test_function_call_output_requires_open_call() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     with pytest.raises(PlapError) as exc_info:
         await _ingest([_message("u", role="user"), _sealed_reasoning(checkpoint), _function_output(call_id)])
@@ -1846,7 +1845,7 @@ async def test_function_call_output_requires_open_call() -> None:
 async def test_duplicate_function_call_item_is_rejected() -> None:
     hidden = Message(role="assistant", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[hidden])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     with pytest.raises(PlapError) as exc_info:
         await _ingest(
@@ -1864,7 +1863,7 @@ async def test_duplicate_function_call_item_is_rejected() -> None:
 async def test_public_bearing_patch_rejects_function_call_before_public_assistant() -> None:
     private = Message(role="assistant", content="answer", tool_calls=[_tool_call("up_0")])
     checkpoint = _checkpoint("rs_checkpoint", main=[private, MessagePatch(private)])
-    call_id = _sealed_call_id(MAIN_SIDE, "up_0")
+    call_id = _sealed_call_id("main", "up_0")
 
     with pytest.raises(PlapError) as exc_info:
         await _ingest(

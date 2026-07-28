@@ -1,10 +1,11 @@
 package plap
 
+#RegisteredSides: {
+  advisor: 1024
+}
+
 #Config: {
   advisor?: #FieldConfig
-  sides: {
-    advisor: 1
-  }
   overlays: {
     model?: {
       [string]: {

@@ -22,7 +22,6 @@ from plap.plugins.core.loop import UsageLedger, response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CompactedMainTail,
     HiddenMainTail,
     Ingested,
@@ -102,7 +101,7 @@ def _keyring() -> SealingKeyring:
 
 
 def _side_codes() -> dict[str, int]:
-    return {MAIN_SIDE: 0, "defender": 1, "reviewer": 2}
+    return {"main": 0, "defender": 1024, "reviewer": 1025}
 
 
 def _request(**updates: object) -> ResponseCreateRequest:
@@ -126,7 +125,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
 def _ingested(*, active: set[str] | None = None) -> Ingested:
     return Ingested(
         durable={},
-        sides=Sides(active={MAIN_SIDE} if active is None else active),
+        sides=Sides(active={"main"} if active is None else active),
         main_tail=None,
         last_reasoning_id=None,
     )
@@ -527,7 +526,7 @@ async def test_run_response_completes_simple_turn_without_midstream_staging() ->
         client=client,
         ingested=Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            sides=Sides(messages={"main": [Message(role="user", content="hello")]}),
             main_tail=None,
             last_reasoning_id=None,
         ),
@@ -736,7 +735,7 @@ async def test_state_stage_persists_stubbed_open_tail_calls() -> None:
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides[MAIN_SIDE] = [
+    state.sides["main"] = [
         Message(
             role="assistant",
             content="thinking",
@@ -769,13 +768,13 @@ async def test_state_stage_appends_cross_lane_stub_without_main_patch() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides[MAIN_SIDE].append(completed)
+    state.sides["main"].append(completed)
 
     await state.stage()
 
@@ -787,7 +786,7 @@ async def test_state_stage_appends_cross_lane_stub_without_main_patch() -> None:
         Message(role="tool", tool_call_id="call_open", content=INTERRUPTED_TOOL_OUTPUT),
     ]
     assert isinstance(payload.state, ReasoningPatch)
-    assert MAIN_SIDE not in payload.state.sides
+    assert "main" not in payload.state.sides
 
 
 async def test_state_stage_preserves_inactive_cross_lane_call_without_stub() -> None:
@@ -802,13 +801,13 @@ async def test_state_stage_preserves_inactive_cross_lane_call_without_stub() -> 
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides[MAIN_SIDE].append(completed)
+    state.sides["main"].append(completed)
 
     await state.stage()
 
@@ -817,7 +816,7 @@ async def test_state_stage_preserves_inactive_cross_lane_call_without_stub() -> 
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [completed]
     assert isinstance(payload.state, ReasoningPatch)
-    assert MAIN_SIDE not in payload.state.sides
+    assert "main" not in payload.state.sides
 
 
 async def test_state_stage_preserves_explicit_empty_side() -> None:
@@ -837,16 +836,29 @@ async def test_state_stage_preserves_explicit_empty_side() -> None:
     assert payload.state.sides["reviewer"] == []
 
 
+@pytest.mark.parametrize("operation", ["stage", "commit"])
+@pytest.mark.parametrize("location", ["active", "messages"])
+async def test_state_emission_rejects_unconfigured_sides(operation: str, location: str) -> None:
+    state = _state()
+    if location == "active":
+        state.sides.active.add("unknown")
+    else:
+        state.sides["unknown"] = []
+
+    with pytest.raises(ValueError, match="state contains unconfigured sides: unknown"):
+        await getattr(state, operation)()
+
+
 async def test_state_stage_rejects_persisted_main_mutation() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="original")]}),
+            sides=Sides(messages={"main": [Message(role="user", content="original")]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides[MAIN_SIDE] = [Message(role="user", content="wrong lane")]
+    state.sides["main"] = [Message(role="user", content="wrong lane")]
 
     with pytest.raises(RuntimeError, match="replace only the current response suffix"):
         await state.stage()
@@ -859,13 +871,13 @@ async def test_state_stage_accepts_replaced_current_response_suffix() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [base]}),
+            sides=Sides(messages={"main": [base]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides[MAIN_SIDE] = [base, first, second]
-    state.sides[MAIN_SIDE] = [base, second, first]
+    state.sides["main"] = [base, first, second]
+    state.sides["main"] = [base, second, first]
 
     await state.stage()
 
@@ -874,7 +886,7 @@ async def test_state_stage_accepts_replaced_current_response_suffix() -> None:
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [second, first]
     assert isinstance(payload.state, ReasoningPatch)
-    assert MAIN_SIDE not in payload.state.sides
+    assert "main" not in payload.state.sides
 
 
 async def test_state_stage_accepts_cleared_current_response_suffix() -> None:
@@ -882,13 +894,13 @@ async def test_state_stage_accepts_cleared_current_response_suffix() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [base]}),
+            sides=Sides(messages={"main": [base]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides[MAIN_SIDE].append(Message(role="developer", content="discarded draft"))
-    state.sides[MAIN_SIDE] = [base]
+    state.sides["main"].append(Message(role="developer", content="discarded draft"))
+    state.sides["main"] = [base]
 
     await state.stage()
 
@@ -909,12 +921,12 @@ async def test_state_stage_rejects_changes_within_persisted_main_prefix() -> Non
         state = _state(
             ingested=Ingested(
                 durable={},
-                sides=Sides(messages={MAIN_SIDE: [first, second]}),
+                sides=Sides(messages={"main": [first, second]}),
                 main_tail=None,
                 last_reasoning_id=None,
             )
         )
-        state.sides[MAIN_SIDE] = replacement
+        state.sides["main"] = replacement
 
         with pytest.raises(RuntimeError, match="replace only the current response suffix"):
             await state.stage()
@@ -925,12 +937,12 @@ async def test_state_stage_rejects_nested_persisted_main_mutation() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [base]}),
+            sides=Sides(messages={"main": [base]}),
             main_tail=PublicMainTail(source=None),
             last_reasoning_id=None,
         )
     )
-    state.sides[MAIN_SIDE][0].tool_calls.append(ToolCall(id="changed", name="changed", arguments="{}"))
+    state.sides["main"][0].tool_calls.append(ToolCall(id="changed", name="changed", arguments="{}"))
 
     with pytest.raises(RuntimeError, match="replace only the current response suffix"):
         await state.stage()
@@ -941,7 +953,7 @@ async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides[MAIN_SIDE] = [
+    state.sides["main"] = [
         Message(
             role="assistant",
             content="hello",
@@ -955,9 +967,9 @@ async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning_payload.main[0] == state.sides[MAIN_SIDE][0]
+    assert reasoning_payload.main[0] == state.sides["main"][0]
     assert isinstance(reasoning_payload.main[1], MessagePatch)
-    assert reasoning_payload.main[1].message == state.sides[MAIN_SIDE][0]
+    assert reasoning_payload.main[1].message == state.sides["main"][0]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "hello"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
@@ -971,7 +983,7 @@ async def test_state_commit_uses_direct_hidden_assistant_for_new_call_only_turn(
         reasoning_content="private",
         tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
     )
-    state.sides[MAIN_SIDE] = [assistant]
+    state.sides["main"] = [assistant]
 
     await state.commit()
 
@@ -988,8 +1000,8 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
         ingested=Ingested(
             durable={"base": True},
             sides=Sides(
-                active={MAIN_SIDE},
-                messages={MAIN_SIDE: [Message(role="user", content="question")]},
+                active={"main"},
+                messages={"main": [Message(role="user", content="question")]},
             ),
             main_tail=None,
             last_reasoning_id="rs_old",
@@ -997,8 +1009,8 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
         )
     )
     state.sides["reviewer"] = [Message(role="assistant", content="review state")]
-    state.activate("reviewer")
-    state.sides[MAIN_SIDE].append(Message(role="assistant", content="answer", reasoning_content="private"))
+    state.sides.active.add("reviewer")
+    state.sides["main"].append(Message(role="assistant", content="answer", reasoning_content="private"))
 
     await state.commit()
 
@@ -1008,15 +1020,15 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
     assert payload.previous_reasoning_id is None
     assert isinstance(payload.state, ReasoningCheckpoint)
     assert payload.state.durable == {"base": True}
-    assert payload.state.active == {MAIN_SIDE, "reviewer"}
+    assert payload.state.active == {"main", "reviewer"}
     assert payload.state.sides == {"reviewer": [Message(role="assistant", content="review state")]}
-    assert MAIN_SIDE not in payload.state.sides
-    assert payload.main == [state.sides[MAIN_SIDE][-1], MessagePatch(state.sides[MAIN_SIDE][-1])]
+    assert "main" not in payload.state.sides
+    assert payload.main == [state.sides["main"][-1], MessagePatch(state.sides["main"][-1])]
 
 
 async def test_state_commit_keeps_inactive_main_output_private() -> None:
     state = _state(ingested=_ingested(active=set()))
-    state.sides[MAIN_SIDE] = [
+    state.sides["main"] = [
         Message(
             role="assistant",
             content="private answer",
@@ -1030,7 +1042,7 @@ async def test_state_commit_keeps_inactive_main_output_private() -> None:
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert payload.main == state.sides[MAIN_SIDE]
+    assert payload.main == state.sides["main"]
 
 
 async def test_run_response_emits_reactivated_persisted_main_call_without_main_completion() -> None:
@@ -1047,12 +1059,12 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
         client=object(),
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         ),
     )
-    state.activate(MAIN_SIDE)
+    state.sides.active.add("main")
 
     await run_response(state=state)
 
@@ -1062,12 +1074,12 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert isinstance(reasoning.state, ReasoningPatch)
-    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.state.active == {"main"}
     assert reasoning.main == [MessagePatch(message=assistant)]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "private answer"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
-    assert open_call_id(response.output[2].call_id, keyring=_keyring(), side_codes=_side_codes()).side == MAIN_SIDE
+    assert open_call_id(response.output[2].call_id, keyring=_keyring(), side_codes=_side_codes()).side == "main"
 
 
 async def test_state_commit_materializes_parked_text_tail_after_activation() -> None:
@@ -1075,12 +1087,12 @@ async def test_state_commit_materializes_parked_text_tail_after_activation() -> 
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
-    state.activate(MAIN_SIDE)
+    state.sides.active.add("main")
 
     await state.commit()
 
@@ -1098,7 +1110,7 @@ async def test_state_commit_does_not_republish_active_public_tail() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [public]}),
+            sides=Sides(active={"main"}, messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
@@ -1115,12 +1127,12 @@ async def test_state_commit_does_not_republish_reactivated_public_tail() -> None
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [public]}),
+            sides=Sides(active=set(), messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
     )
-    state.activate(MAIN_SIDE)
+    state.sides.active.add("main")
 
     await state.commit()
 
@@ -1129,7 +1141,7 @@ async def test_state_commit_does_not_republish_reactivated_public_tail() -> None
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert isinstance(reasoning.state, ReasoningPatch)
-    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.state.active == {"main"}
     assert reasoning.main == []
 
 
@@ -1140,12 +1152,12 @@ async def test_state_commit_publishes_new_active_tail_after_public_history() -> 
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [public]}),
+            sides=Sides(active={"main"}, messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
     )
-    state.sides[MAIN_SIDE].append(current)
+    state.sides["main"].append(current)
 
     await state.commit()
 
@@ -1162,13 +1174,13 @@ async def test_state_commit_does_not_publish_reactivated_compacted_tail() -> Non
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [snapshot]}),
+            sides=Sides(active=set(), messages={"main": [snapshot]}),
             main_tail=CompactedMainTail(source=snapshot),
             last_reasoning_id=None,
             last_compaction_id="cmp_history",
         )
     )
-    state.activate(MAIN_SIDE)
+    state.sides.active.add("main")
 
     await state.commit()
 
@@ -1177,7 +1189,7 @@ async def test_state_commit_does_not_publish_reactivated_compacted_tail() -> Non
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert isinstance(reasoning.state, ReasoningPatch)
-    assert reasoning.state.active == {MAIN_SIDE}
+    assert reasoning.state.active == {"main"}
     assert reasoning.main == []
 
 
@@ -1189,12 +1201,12 @@ async def test_state_commit_repositions_persisted_call_only_tail_without_public_
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id="rs_parked",
         )
     )
-    state.activate(MAIN_SIDE)
+    state.sides.active.add("main")
 
     await state.commit()
 
@@ -1218,13 +1230,13 @@ async def test_state_commit_materializes_partial_cross_lane_settlement() -> None
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides[MAIN_SIDE].append(completed)
+    state.sides["main"].append(completed)
 
     await state.commit()
 
@@ -1246,13 +1258,13 @@ async def test_state_commit_keeps_fully_settled_main_turn_hidden() -> None:
     state = _state(
         ingested=Ingested(
             durable={},
-            sides=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [assistant]}),
+            sides=Sides(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides[MAIN_SIDE].append(completed)
+    state.sides["main"].append(completed)
 
     await state.commit()
 
@@ -1264,8 +1276,8 @@ async def test_state_commit_keeps_fully_settled_main_turn_hidden() -> None:
 
 
 async def test_state_commit_emits_active_side_calls_in_deterministic_order() -> None:
-    state = _state(ingested=_ingested(active={MAIN_SIDE, "reviewer", "defender"}))
-    state.sides[MAIN_SIDE] = [
+    state = _state(ingested=_ingested(active={"main", "reviewer", "defender"}))
+    state.sides["main"] = [
         Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")]),
     ]
     state.sides["reviewer"] = [
@@ -1279,7 +1291,7 @@ async def test_state_commit_emits_active_side_calls_in_deterministic_order() -> 
 
     calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
     assert [open_call_id(item.call_id, keyring=_keyring(), side_codes=_side_codes()).side for item in calls] == [
-        MAIN_SIDE,
+        "main",
         "defender",
         "reviewer",
     ]
@@ -1290,7 +1302,7 @@ async def test_state_commit_keeps_closed_assistant_with_user_tail_hidden() -> No
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides[MAIN_SIDE] = [
+    state.sides["main"] = [
         Message(role="assistant", content="hidden assistant"),
         Message(role="user", content="tail"),
     ]
@@ -1319,7 +1331,7 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_comm
             sides=Sides(
                 active=set(),
                 messages={
-                    MAIN_SIDE: [Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")])],
+                    "main": [Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")])],
                     "reviewer": [
                         Message(
                             role="assistant",
@@ -1337,8 +1349,8 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_comm
             last_reasoning_id=None,
         ),
     )
-    state.activate(MAIN_SIDE)
-    state.activate("reviewer")
+    state.sides.active.add("main")
+    state.sides.active.add("reviewer")
     first_call_emitted = anyio.Event()
     release_commit = anyio.Event()
     original_emit = StreamCoordinator.emit

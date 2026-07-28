@@ -14,7 +14,6 @@ from plap.llms.completions.chat import ChatToolCall
 from plap.responses.contracts import ResponseFunctionCallItem, ResponseMessageItem
 from plap.responses.ingest import content
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CallID,
     HiddenMainTail,
     Ingested,
@@ -79,7 +78,7 @@ class State:
     ) -> State:
         base_durable = DurableState.from_primitive(ingested.durable)
         base_sides = deepcopy(ingested.sides)
-        base_sides.setdefault(MAIN_SIDE)
+        base_sides.setdefault("main")
         return cls(
             prepared=prepared,
             svcs=svcs,
@@ -169,8 +168,8 @@ class State:
         return items
 
     def _main_suffix(self, sides: Sides) -> list[Message]:
-        base = self._base_sides[MAIN_SIDE]
-        current = sides[MAIN_SIDE]
+        base = self._base_sides["main"]
+        current = sides["main"]
         if len(current) < len(base) or current[: len(base)] != base:
             raise RuntimeError("persisted main history is immutable; replace only the current response suffix")
         return current[len(base) :]
@@ -187,13 +186,13 @@ class State:
             return ReasoningCheckpoint(
                 durable=durable.to_primitive(),
                 active=set(sides.active),
-                sides={side: deepcopy(messages) for side, messages in sides.items() if side != MAIN_SIDE},
+                sides={side: deepcopy(messages) for side, messages in sides.items() if side != "main"},
             )
 
         durable_patch = diff(self._base_durable.to_primitive(), durable.to_primitive())
         patches: dict[str, JSONPatch] = {}
         for side in sorted(set(self._base_sides.messages) | set(sides.messages)):
-            if side == MAIN_SIDE:
+            if side == "main":
                 continue
             base_present = side in self._base_sides.messages
             current_present = side in sides.messages
@@ -208,13 +207,20 @@ class State:
         active = None if self._base_sides.active == sides.active else set(sides.active)
         return ReasoningPatch(durable=durable_patch, active=active, sides=patches)
 
+    def _validate_sides(self) -> None:
+        unknown = (self.sides.active | set(self.sides.messages)) - set(self._side_codes)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"state contains unconfigured sides: {names}")
+
     def _validate_main(self) -> None:
+        self._validate_sides()
         self._main_suffix(self.sides)
-        self._split_tail(self.sides[MAIN_SIDE], label="main history")
+        self._split_tail(self.sides["main"], label="main history")
 
     def _logical_main(self, *, sides: Sides | None = None) -> Message | None:
         current_sides = self.sides if sides is None else sides
-        _, anchor, suffix, after, open_calls = self._split_tail(current_sides[MAIN_SIDE], label="main history")
+        _, anchor, suffix, after, open_calls = self._split_tail(current_sides["main"], label="main history")
         if anchor is None or after:
             return None
         if suffix and not open_calls:
@@ -227,7 +233,7 @@ class State:
         sides: Sides,
         main: list[Message],
     ) -> tuple[Message | None, Message | None]:
-        if MAIN_SIDE not in sides.active:
+        if "main" not in sides.active:
             return None, None
         visible = self._logical_main(sides=sides)
         if visible is None:
@@ -272,11 +278,11 @@ class State:
         shadow_durable = self.durable.model_copy(deep=True)
         shadow_sides = deepcopy(self.sides)
         for side in list(shadow_sides.messages):
-            if side != MAIN_SIDE and side in shadow_sides.active:
+            if side != "main" and side in shadow_sides.active:
                 shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
-        if MAIN_SIDE in shadow_sides.active:
-            open_calls = self._split_tail(shadow_sides[MAIN_SIDE], label="main history")[4]
-            shadow_sides[MAIN_SIDE].extend(
+        if "main" in shadow_sides.active:
+            open_calls = self._split_tail(shadow_sides["main"], label="main history")[4]
+            shadow_sides["main"].extend(
                 Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls
             )
         return shadow_durable, shadow_sides, self._main_suffix(shadow_sides)
@@ -284,21 +290,11 @@ class State:
     def _commit_snapshot(self) -> tuple[DurableState, Sides, list[Message]]:
         self._validate_main()
         for side, messages in self.sides.items():
-            if side == MAIN_SIDE:
+            if side == "main":
                 continue
             self._split_tail(messages, label=f"{side} side")
         sides = deepcopy(self.sides)
         return self.durable.model_copy(deep=True), sides, self._main_suffix(sides)
-
-    def activate(self, side: Side) -> None:
-        if side not in self._side_codes:
-            raise ValueError(f"cannot activate unconfigured side {side!r}")
-        self.sides.active.add(side)
-
-    def deactivate(self, side: Side) -> None:
-        if side not in self._side_codes:
-            raise ValueError(f"cannot deactivate unconfigured side {side!r}")
-        self.sides.active.discard(side)
 
     def open_calls(self, side: Side) -> list[ChatToolCall]:
         return self._split_tail(self.sides.get(side, []) or [], label=f"{side} history")[4]
@@ -325,8 +321,8 @@ class State:
         visible_calls: list[ResponseFunctionCallItem] = []
         main_open_calls: list[ChatToolCall] = []
         if visible_main is not None:
-            main_open_calls = self._split_tail(sides[MAIN_SIDE], label="main history")[4]
-            visible_calls.extend(self._function_items(MAIN_SIDE, main_open_calls))
+            main_open_calls = self._split_tail(sides["main"], label="main history")[4]
+            visible_calls.extend(self._function_items("main", main_open_calls))
         main_update = self._main_update(
             main,
             visible_main,
@@ -338,7 +334,7 @@ class State:
         state = self._build_update(durable=durable, sides=sides)
 
         for side in sorted(sides.messages):
-            if side == MAIN_SIDE or side not in sides.active:
+            if side == "main" or side not in sides.active:
                 continue
             messages = sides[side]
             visible_calls.extend(self._function_items(side, self._split_tail(messages, label=f"{side} side")[4]))

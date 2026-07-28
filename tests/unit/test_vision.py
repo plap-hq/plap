@@ -30,7 +30,7 @@ from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages, run_images
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem
-from plap.responses.ingest.models import MAIN_SIDE, Ingested, Message, Sides
+from plap.responses.ingest.models import Ingested, Message, Sides
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -150,7 +150,7 @@ def _image_message(url: str, *, detail: str | None = None) -> Message:
 def _ingested(url: str = "https://example.com/cat.png") -> Ingested:
     return Ingested(
         durable={},
-        sides=Sides(messages={MAIN_SIDE: [_image_message(url)]}),
+        sides=Sides(messages={"main": [_image_message(url)]}),
         main_tail=None,
         last_reasoning_id=None,
     )
@@ -254,7 +254,7 @@ def _state(
         svcs=_svcs(client, config or _config()),
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
-        side_codes={MAIN_SIDE: 0},
+        side_codes={"main": 0},
     )
     return state, store, channels
 
@@ -292,7 +292,7 @@ def _delta(
 async def test_vision_delegates_without_work_when_main_is_inactive() -> None:
     client = _Client(streams=[], completes=[])
     state, _, _ = _state(client)
-    state.deactivate(MAIN_SIDE)
+    state.sides.active.discard("main")
     delegated = 0
 
     async def next_handler(**kwargs):
@@ -750,7 +750,7 @@ async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> No
             return result
         for call in accepted.message.tool_calls:
             if call.name == "internal":
-                state.sides[MAIN_SIDE].append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
+                state.sides["main"].append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
         return result
 
     image_id = _image_id(_image("https://example.com/cat.png"))

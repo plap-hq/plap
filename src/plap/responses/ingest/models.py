@@ -39,8 +39,6 @@ def _required_patch(value: object, *, label: str) -> JSONPatch:
 
 type Side = str
 
-MAIN_SIDE: Side = "main"
-
 
 def _validate_main_source(source: Message) -> None:
     if not source.is_assistant():
@@ -190,7 +188,7 @@ def split_tail(items: list[Message]) -> tuple[list[Message], Message | None, lis
 
 @dataclass(slots=True)
 class Sides:
-    active: set[Side] = field(default_factory=lambda: {MAIN_SIDE})
+    active: set[Side] = field(default_factory=lambda: {"main"})
     messages: dict[Side, list[Message]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -307,7 +305,7 @@ class ReasoningCheckpoint:
         normalized: dict[Side, list[Message]] = {}
         for raw_side, messages in self.sides.items():
             side = _required_side(raw_side, label="reasoning checkpoint sides key")
-            if side == MAIN_SIDE:
+            if side == "main":
                 raise ValueError("reasoning checkpoint sides may not contain main")
             normalized[side] = list(messages)
         object.__setattr__(self, "sides", normalized)
@@ -358,7 +356,7 @@ class ReasoningPatch:
         normalized: dict[Side, JSONPatch] = {}
         for raw_side, patch in self.sides.items():
             side = _required_side(raw_side, label="reasoning patch sides key")
-            if side == MAIN_SIDE:
+            if side == "main":
                 raise ValueError("reasoning patch sides may not target main")
             normalized[side] = _required_patch(patch, label=f"reasoning patch sides.{side}")
         object.__setattr__(self, "sides", normalized)

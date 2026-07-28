@@ -44,7 +44,6 @@ from plap.responses.ingest.ingest import (
     ingest_response_request as _ingest_response_request_impl,
 )
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CallID,
     CompactionPayload,
     Message,
@@ -89,10 +88,10 @@ def _keyring() -> SealingKeyring:
 
 def _side_codes() -> dict[str, int]:
     return {
-        MAIN_SIDE: 0,
-        "defender": 1,
-        "reviewer": 2,
-        "arbitrator": 3,
+        "main": 0,
+        "defender": 1024,
+        "reviewer": 1025,
+        "arbitrator": 1026,
     }
 
 
@@ -160,7 +159,7 @@ def _reasoning_payload(
     state = (
         ReasoningCheckpoint(
             durable={},
-            active={MAIN_SIDE} if sides.active is None else sides.active,
+            active={"main"} if sides.active is None else sides.active,
             sides={},
         )
         if checkpoint
@@ -189,7 +188,7 @@ def _checkpoint_payload(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             durable=durable,
-            active={MAIN_SIDE} if sides.active is None else sides.active,
+            active={"main"} if sides.active is None else sides.active,
             sides={} if snapshots is None else snapshots,
         ),
         main=sides.main,
@@ -259,12 +258,12 @@ def _parallel_active_calls() -> tuple[ReasoningPayload, str, str]:
     payload = _reasoning_payload(
         durable=[],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             main=[main_assistant],
             patches={"reviewer": [{"op": "add", "path": "/0", "value": reviewer_assistant.to_primitive()}]},
         ),
     )
-    return payload, _sealed_call_id(MAIN_SIDE, "up_main_0"), _sealed_call_id("reviewer", "up_reviewer_0")
+    return payload, _sealed_call_id("main", "up_main_0"), _sealed_call_id("reviewer", "up_reviewer_0")
 
 
 def test_normalize_input_items_wraps_string_as_user_message() -> None:
@@ -633,12 +632,12 @@ def test_sides_assignment_is_replaceable_and_copies_assigned_lists() -> None:
     second = Message(role="assistant", content="second")
 
     replacement = [first]
-    sides[MAIN_SIDE] = replacement
+    sides["main"] = replacement
     replacement.append(second)
 
-    assert sides[MAIN_SIDE] == [first]
-    sides[MAIN_SIDE].append(second)
-    assert sides[MAIN_SIDE] == [first, second]
+    assert sides["main"] == [first]
+    sides["main"].append(second)
+    assert sides["main"] == [first, second]
 
 
 def test_sides_update_main_accepts_terminal_patch_after_hidden_tool_messages() -> None:
@@ -887,7 +886,7 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
         durable={"active": ["reviewer"]},
         sides=Sides(
             messages={
-                MAIN_SIDE: [Message(role="assistant", content="main snapshot")],
+                "main": [Message(role="assistant", content="main snapshot")],
                 "reviewer": [Message(role="assistant", content="review snapshot")],
             }
         ),
@@ -934,7 +933,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
     compaction = _compaction_payload(
         payload_id="cmp_root",
         durable={"active": []},
-        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot")]}),
+        sides=Sides(messages={"main": [Message(role="assistant", content="snapshot")]}),
     )
     first = _reasoning_payload(
         payload_id="rs_first",
@@ -961,7 +960,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
     )
 
     assert result.durable == {"active": ["reviewer"], "meta": {"step": 1}}
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="snapshot"),
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
@@ -1017,7 +1016,7 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [Message(role="assistant", content="main hidden")]
+    assert result.sides["main"] == [Message(role="assistant", content="main hidden")]
 
 
 async def test_ingest_response_request_materializes_new_postfix_message_patch() -> None:
@@ -1038,7 +1037,7 @@ async def test_ingest_response_request_materializes_new_postfix_message_patch() 
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [assistant]
+    assert result.sides["main"] == [assistant]
 
 
 async def test_ingest_response_request_materializes_text_and_refusal_from_sealed_message() -> None:
@@ -1071,7 +1070,7 @@ async def test_ingest_response_request_materializes_text_and_refusal_from_sealed
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [assistant]
+    assert result.sides["main"] == [assistant]
 
 
 async def test_ingest_response_request_materializes_parked_postfix_message_patch() -> None:
@@ -1082,7 +1081,7 @@ async def test_ingest_response_request_materializes_parked_postfix_message_patch
     )
     published = _reasoning_payload(
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         previous_reasoning_id=parked.id,
     )
 
@@ -1098,8 +1097,8 @@ async def test_ingest_response_request_materializes_parked_postfix_message_patch
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {MAIN_SIDE}
-    assert result.sides[MAIN_SIDE] == [assistant]
+    assert result.sides.active == {"main"}
+    assert result.sides["main"] == [assistant]
 
 
 async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_turn() -> None:
@@ -1110,7 +1109,7 @@ async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_t
     )
     published = _checkpoint_payload(
         durable={},
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1127,7 +1126,7 @@ async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_t
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1142,7 +1141,7 @@ async def test_ingest_response_request_timewarp_preserves_equal_fabricated_assis
     )
     published = _checkpoint_payload(
         durable={},
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1159,7 +1158,7 @@ async def test_ingest_response_request_timewarp_preserves_equal_fabricated_assis
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         assistant,
         assistant,
@@ -1174,7 +1173,7 @@ async def test_ingest_response_request_timewarp_preserves_fabricated_assistant_m
     )
     published = _reasoning_payload(
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         previous_reasoning_id=parked.id,
     )
 
@@ -1193,7 +1192,7 @@ async def test_ingest_response_request_timewarp_preserves_fabricated_assistant_m
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="fabricated answer",
@@ -1234,7 +1233,7 @@ async def test_ingest_response_request_timewarps_across_irrelevant_reasoning_cha
             payload_id="rs_10",
             previous_reasoning_id=payloads[-1].id,
             durable=[],
-            sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+            sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         )
     )
 
@@ -1252,7 +1251,7 @@ async def test_ingest_response_request_timewarps_across_irrelevant_reasoning_cha
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1272,9 +1271,9 @@ async def test_ingest_response_request_timewarps_parked_call_without_interruptio
     )
     published = _checkpoint_payload(
         durable={},
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_main_0")
+    call_id = _sealed_call_id("main", "up_main_0")
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -1292,7 +1291,7 @@ async def test_ingest_response_request_timewarps_parked_call_without_interruptio
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1317,11 +1316,11 @@ async def test_ingest_response_request_timewarps_partial_hidden_settlement() -> 
     published = _checkpoint_payload(
         durable={},
         sides=_sides_update(
-            active={MAIN_SIDE},
+            active={"main"},
             main=[hidden_output, MessagePatch(message=assistant)],
         ),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_main_1")
+    call_id = _sealed_call_id("main", "up_main_1")
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -1339,7 +1338,7 @@ async def test_ingest_response_request_timewarps_partial_hidden_settlement() -> 
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1366,9 +1365,9 @@ async def test_ingest_response_request_timewarps_hidden_settlement_from_user_che
     settled = _checkpoint_payload(
         payload_id="rs_settled",
         durable={},
-        sides=_sides_update(active={MAIN_SIDE}, main=[hidden_output, MessagePatch(message=assistant)]),
+        sides=_sides_update(active={"main"}, main=[hidden_output, MessagePatch(message=assistant)]),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_main_1")
+    call_id = _sealed_call_id("main", "up_main_1")
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -1386,7 +1385,7 @@ async def test_ingest_response_request_timewarps_hidden_settlement_from_user_che
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1407,7 +1406,7 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
         payload_id="rs_first_published",
         previous_reasoning_id=first_parked.id,
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=first)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=first)]),
     )
     second_parked = _reasoning_payload(
         payload_id="rs_second_parked",
@@ -1419,7 +1418,7 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
         payload_id="rs_second_published",
         previous_reasoning_id=second_parked.id,
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=second)]),
+        sides=_sides_update(active={"main"}, main=[MessagePatch(message=second)]),
     )
 
     result = await ingest_response_request(
@@ -1439,7 +1438,7 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="first fabricated"),
         first,
         Message(role="assistant", content="second fabricated"),
@@ -1456,7 +1455,7 @@ async def test_ingest_response_request_preserves_equal_message_multiplicity_befo
     second = _reasoning_payload(
         durable=[],
         sides=_sides_update(
-            active={MAIN_SIDE},
+            active={"main"},
             main=[assistant, MessagePatch(message=assistant)],
         ),
         previous_reasoning_id=first.id,
@@ -1474,14 +1473,14 @@ async def test_ingest_response_request_preserves_equal_message_multiplicity_befo
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [assistant, assistant]
+    assert result.sides["main"] == [assistant, assistant]
 
 
 async def test_ingest_response_request_does_not_deduplicate_unpatched_equal_assistant() -> None:
     hidden = Message(role="assistant", content="same", reasoning_content="hidden")
     payload = _reasoning_payload(
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[hidden]),
+        sides=_sides_update(active={"main"}, main=[hidden]),
     )
 
     result = await ingest_response_request(
@@ -1495,7 +1494,7 @@ async def test_ingest_response_request_does_not_deduplicate_unpatched_equal_assi
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [hidden, Message(role="assistant", content="same")]
+    assert result.sides["main"] == [hidden, Message(role="assistant", content="same")]
 
 
 async def test_ingest_response_request_preserves_unrelated_tail_for_postfix_source_mismatch() -> None:
@@ -1517,7 +1516,7 @@ async def test_ingest_response_request_preserves_unrelated_tail_for_postfix_sour
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         assistant,
         Message(role="assistant", content="edited public", reasoning_content="other hidden"),
     ]
@@ -1542,7 +1541,7 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     )
 
     assert result.durable == {"active": ["reviewer"], "meta": {"step": 2}}
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
     ]
@@ -1568,7 +1567,7 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
 
 def test_sides_update_rejects_main_patch() -> None:
     with pytest.raises(ValueError, match="may not target main"):
-        _sides_update(patches={MAIN_SIDE: []})
+        _sides_update(patches={"main": []})
 
 
 async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
@@ -1623,7 +1622,7 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
     payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -1710,7 +1709,7 @@ async def test_ingest_response_request_parks_inactive_call_across_reasoning() ->
     )
 
     assert result.durable == {"step": 2}
-    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides.active == {"main"}
     assert result.sides["reviewer"] == [assistant]
 
 
@@ -1756,7 +1755,7 @@ async def test_ingest_response_request_replays_call_after_side_activation() -> N
     )
     activated = _reasoning_payload(
         durable=[],
-        sides=_sides_update(active={MAIN_SIDE, "reviewer"}),
+        sides=_sides_update(active={"main", "reviewer"}),
         previous_reasoning_id=parked.id,
     )
     call_id = _sealed_call_id("reviewer", "up_reviewer_0")
@@ -1774,7 +1773,7 @@ async def test_ingest_response_request_replays_call_after_side_activation() -> N
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {MAIN_SIDE, "reviewer"}
+    assert result.sides.active == {"main", "reviewer"}
     assert result.sides["reviewer"][-1] == Message(
         role="tool",
         tool_call_id="up_reviewer_0",
@@ -1822,7 +1821,7 @@ async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_s
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE][-1] == Message(role="tool", tool_call_id="up_main_0", content="main result")
+    assert result.sides["main"][-1] == Message(role="tool", tool_call_id="up_main_0", content="main result")
     assert result.sides["reviewer"][-1] == Message(
         role="tool",
         tool_call_id="up_reviewer_0",
@@ -1846,8 +1845,8 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {MAIN_SIDE, "reviewer"}
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides.active == {"main", "reviewer"}
+    assert result.sides["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
         Message(role="user", content="new request"),
@@ -1876,8 +1875,8 @@ async def test_ingest_response_request_fabricated_assistant_interrupts_parked_ma
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {MAIN_SIDE}
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides.active == {"main"}
+    assert result.sides["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
         Message(role="assistant", content="imported answer"),
@@ -1904,7 +1903,7 @@ async def test_ingest_response_request_fabricated_pair_attaches_to_inactive_main
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1938,7 +1937,7 @@ async def test_ingest_response_request_fabricated_pair_preserves_other_parked_ca
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1975,7 +1974,7 @@ async def test_ingest_response_request_fabricated_pair_settles_matching_parked_c
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         assistant,
         Message(role="tool", tool_call_id="parked_0", content="fabricated result"),
     ]
@@ -1987,7 +1986,7 @@ async def test_ingest_response_request_sealed_transplant_attaches_to_inactive_ma
         durable=[],
         sides=_sides_update(active=set(), main=[assistant]),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+    call_id = _sealed_call_id("main", "transplanted_0")
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -2002,7 +2001,7 @@ async def test_ingest_response_request_sealed_transplant_attaches_to_inactive_ma
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -2022,7 +2021,7 @@ async def test_ingest_response_request_sealed_transplant_preserves_other_parked_
         durable=[],
         sides=_sides_update(active=set(), main=[assistant]),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "transplanted_0")
+    call_id = _sealed_call_id("main", "transplanted_0")
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -2037,7 +2036,7 @@ async def test_ingest_response_request_sealed_transplant_preserves_other_parked_
     )
 
     assert result.sides.active == set()
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -2060,7 +2059,7 @@ async def test_ingest_response_request_rejects_sealed_replay_of_inactive_main_pa
         durable=[],
         sides=_sides_update(active=set(), main=[assistant]),
     )
-    call_id = _sealed_call_id(MAIN_SIDE, "parked_0")
+    call_id = _sealed_call_id("main", "parked_0")
 
     with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
@@ -2095,12 +2094,12 @@ async def test_ingest_response_request_materializes_partially_settled_baseline()
     published = _reasoning_payload(
         durable=[],
         sides=_sides_update(
-            active={MAIN_SIDE},
+            active={"main"},
             main=[hidden_output, MessagePatch(message=assistant)],
         ),
         previous_reasoning_id=parked.id,
     )
-    call_id = _sealed_call_id_for_message(MAIN_SIDE, "up_main_1", assistant, tool_call_index=1)
+    call_id = _sealed_call_id_for_message("main", "up_main_1", assistant, tool_call_index=1)
 
     result = await ingest_response_request(
         ResponseCreateRequest(
@@ -2121,7 +2120,7 @@ async def test_ingest_response_request_materializes_partially_settled_baseline()
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         assistant,
         hidden_output,
         Message(role="tool", tool_call_id="up_main_1", content="client result"),
@@ -2153,7 +2152,7 @@ async def test_ingest_response_request_keeps_fully_settled_baseline_hidden() -> 
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [assistant, hidden_output]
+    assert result.sides["main"] == [assistant, hidden_output]
 
 
 async def test_ingest_response_request_user_does_not_satisfy_open_main_call() -> None:
@@ -2162,7 +2161,7 @@ async def test_ingest_response_request_user_does_not_satisfy_open_main_call() ->
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(durable=[], sides=_sides_update(main=[assistant]))
-    call_id = _sealed_call_id(MAIN_SIDE, "up_main_0")
+    call_id = _sealed_call_id("main", "up_main_0")
 
     with pytest.raises(PlapError) as exc_info:
         await ingest_response_request(
@@ -2215,7 +2214,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
     ]
@@ -2251,7 +2250,7 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(
             role="assistant",
             content="main hidden",
@@ -2301,7 +2300,7 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
     payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -2329,7 +2328,7 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
     payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -2364,7 +2363,7 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
     payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -2399,7 +2398,7 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
     first_payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -2453,7 +2452,7 @@ async def test_ingest_response_request_rejects_durable_only_reasoning_while_wait
     first_payload = _reasoning_payload(
         durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
-            active={MAIN_SIDE, "reviewer"},
+            active={"main", "reviewer"},
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -2516,8 +2515,8 @@ async def test_ingest_response_request_accepts_standalone_main_message() -> None
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [Message(role="user", content="hello")]
-    assert result.sides.active == {MAIN_SIDE}
+    assert result.sides["main"] == [Message(role="user", content="hello")]
+    assert result.sides.active == {"main"}
 
 
 async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
@@ -2582,7 +2581,7 @@ async def test_ingest_response_request_accepts_closed_anchor_then_stripped_hidde
         keyring=_keyring(),
     )
 
-    assert result.sides[MAIN_SIDE] == [
+    assert result.sides["main"] == [
         Message(role="assistant", content="m", tool_calls=[ToolCall(id="syn_0", name="read_file", arguments='{"path":"README.md"}')]),
         Message(role="tool", tool_call_id="syn_0", content="fo_0"),
     ]

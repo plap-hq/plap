@@ -52,10 +52,6 @@ config: #Config & {
     deprecated: *false | bool
   }
   reasoning_to_output: *1.0 | number
-  sides: {
-    main: 0
-    advisor: 1
-  }
 
   overlays: {
     "model": {

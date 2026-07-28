@@ -28,7 +28,6 @@ from plap.responses.ingest.errors import (
 )
 from plap.responses.ingest.main import CallPhase, MainReplay
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CallID,
     CompactionPayload,
     Ingested,
@@ -332,8 +331,8 @@ class _Replay:
 
     def _sync_main(self) -> None:
         messages = self.main.current_messages()
-        if messages or MAIN_SIDE in self.sides.messages:
-            self.sides[MAIN_SIDE] = messages
+        if messages or "main" in self.sides.messages:
+            self.sides["main"] = messages
 
     def _rebuild_non_main_calls(self, side: Side) -> None:
         self.calls_by_side[side] = _SideCalls.rebuild(self.sides.get(side, []) or [])
@@ -341,7 +340,7 @@ class _Replay:
     def _rebuild_all_non_main_calls(self) -> None:
         self.calls_by_side = {}
         for side in self.sides.messages:
-            if side != MAIN_SIDE:
+            if side != "main":
                 self._rebuild_non_main_calls(side)
 
     def _validate_sides(self) -> None:
@@ -356,7 +355,7 @@ class _Replay:
     def _validate_call_boundary(self, *, allow_deferred_main: bool) -> None:
         self.main.assert_no_pending_patch()
         main_calls = self._main_calls()
-        if main_calls.has_open() or (MAIN_SIDE in self.sides.active and main_calls.has_declared() and not allow_deferred_main):
+        if main_calls.has_open() or ("main" in self.sides.active and main_calls.has_declared() and not allow_deferred_main):
             raise _tool_replay_error(
                 reason="pending_tool_outputs_block_message",
                 private_message="reasoning cannot appear before active main function calls are closed",
@@ -403,7 +402,7 @@ class _Replay:
         self.durable = dict(payload.durable)
         self.sides = Sides.from_primitive(payload.sides.to_primitive())
         self._validate_sides()
-        self.main.load_snapshot(self.sides.get(MAIN_SIDE) or [])
+        self.main.load_snapshot(self.sides.get("main") or [])
         self._rebuild_all_non_main_calls()
         calls = [self._main_calls(), *self.calls_by_side.values()]
         if any(side_calls.has_unfinished() for side_calls in calls):
@@ -418,11 +417,11 @@ class _Replay:
 
     def _apply_checkpoint(self, state: ReasoningCheckpoint) -> None:
         self._sync_main()
-        main_present = MAIN_SIDE in self.sides.messages
+        main_present = "main" in self.sides.messages
         main_messages = self.main.current_messages()
         messages = {side: list(side_messages) for side, side_messages in state.sides.items()}
         if main_present or main_messages:
-            messages[MAIN_SIDE] = main_messages
+            messages["main"] = main_messages
         self.durable = dict(state.durable)
         self.sides = Sides(active=set(state.active), messages=messages)
         self._rebuild_all_non_main_calls()
@@ -479,12 +478,12 @@ class _Replay:
     def _activate_main_for_message(self, message: Message) -> None:
         if message.role not in {"user", "assistant"}:
             return
-        if MAIN_SIDE not in self.sides.active:
+        if "main" not in self.sides.active:
             if message.role == "user" and self._main_calls().has_declared():
                 self.deferred_main_interrupt = True
             else:
                 self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
-        self.sides.active.add(MAIN_SIDE)
+        self.sides.active.add("main")
         if message.role == "user":
             self.checkpoint_required = True
 
@@ -494,7 +493,7 @@ class _Replay:
             self.main.append_message(item.message)
         elif isinstance(item, _DecodedSealedFunctionCall):
             phase = self.main.phases().get(item.call_id.upstream_tool_call_id)
-            if MAIN_SIDE not in self.sides.active and phase == CallPhase.DECLARED:
+            if "main" not in self.sides.active and phase == CallPhase.DECLARED:
                 raise _tool_replay_error(
                     reason="inactive_side_function_call",
                     private_message="public function_call belongs to an inactive side",
@@ -515,7 +514,7 @@ class _Replay:
             self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
             self.deferred_main_interrupt = False
         self.main.assert_no_pending_patch()
-        self._main_calls().validate_completion(active=MAIN_SIDE in self.sides.active)
+        self._main_calls().validate_completion(active="main" in self.sides.active)
         for side, side_calls in self.calls_by_side.items():
             side_calls.validate_completion(active=side in self.sides.active)
 
@@ -539,13 +538,13 @@ class _Replay:
             self._step_reasoning(item.payload)
             return
         if isinstance(item, _DecodedSealedFunctionCall):
-            if item.call_id.side == MAIN_SIDE:
+            if item.call_id.side == "main":
                 self._step_main_item(item)
             else:
                 self._step_non_main_function_call(item.call_id)
             return
         if isinstance(item, _DecodedSealedFunctionCallOutput):
-            if item.call_id.side == MAIN_SIDE:
+            if item.call_id.side == "main":
                 self._step_main_item(item)
             else:
                 self._step_non_main_function_call_output(item.item, item.call_id)

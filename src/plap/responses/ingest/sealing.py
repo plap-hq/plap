@@ -109,8 +109,10 @@ Sealed call ids
 - `side_code_be_u16` is the side code as an unsigned 16-bit big-endian integer.
 
  - Side codes come from `config.sides` in the loaded CUE config.
+ - Codes `0..1023` are reserved for well-known core sides.
+ - Codes `1024..49151` are assigned to registered plugins.
+ - Codes `49152..65535` are available for private or experimental plugins.
  - Only configured sides may be encoded or decoded.
- - Other `u16` values are unassigned.
 
 - `encoded_upstream_tool_call_id` decodes to the required, non-empty UTF-8
   `upstream_tool_call_id`.

@@ -15,7 +15,6 @@ from plap.llms.retry import RetryValidator, retry_on_tool_choice_mismatch, retry
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.core.request import build_config_request, build_response_request
-from plap.responses.ingest.models import MAIN_SIDE
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
 
@@ -67,14 +66,14 @@ def _last_service_tier(latest_snapshot: object | None) -> str | None:
 
 
 def _should_loop(state: State, result: StreamResult) -> bool:
-    if MAIN_SIDE not in state.sides.active:
+    if "main" not in state.sides.active:
         return False
     if result.accepted is None or result.budget_exhausted:
         return False
-    oc = state.open_calls(MAIN_SIDE)
+    oc = state.open_calls("main")
     if oc:
         return False
-    history = state.sides[MAIN_SIDE]
+    history = state.sides["main"]
     return bool(history) and not history[-1].is_assistant()
 
 
@@ -120,12 +119,12 @@ async def stream_response(
     hidden_results_accounted = 0
     budget_exhausted = False
     latest_snapshot = None
-    prefix = list(state.sides[MAIN_SIDE])
+    prefix = list(state.sides["main"])
     chat_completion_client = await state.svcs.aget(IChatCompletionClient)
 
     logger.info(
         "response.runtime.turn",
-        side=MAIN_SIDE,
+        side="main",
         main_model=request.model,
         tool_count=len(request.tools),
     )
@@ -194,7 +193,7 @@ async def stream_response(
             try:
                 async for snapshot in source:
                     latest_snapshot = snapshot
-                    state.sides[MAIN_SIDE] = [*prefix, *snapshot.messages]
+                    state.sides["main"] = [*prefix, *snapshot.messages]
 
                     delta = snapshot.delta
                     if delta is not None and delta.reasoning_delta is not None:
@@ -206,7 +205,7 @@ async def stream_response(
 
     except RetryLimitExceededError:
         if latest_snapshot is not None:
-            state.sides[MAIN_SIDE] = [*prefix, *latest_snapshot.messages]
+            state.sides["main"] = [*prefix, *latest_snapshot.messages]
         accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
         usage = None if accepted is None else accepted.usage
         logger.info(
@@ -291,7 +290,7 @@ async def finish_response(state: State, config: CueBox, result: StreamResult | N
 
 @bus.emit("response.loop")
 async def loop_response(state: State, config: CueBox, ledger: UsageLedger) -> StreamResult | None:
-    if MAIN_SIDE not in state.sides.active or state.open_calls(MAIN_SIDE):
+    if "main" not in state.sides.active or state.open_calls("main"):
         return None
     request = await response_request(state=state, config=config)
     return await stream_response(state=state, config=config, request=request, ledger=ledger)

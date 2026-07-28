@@ -34,7 +34,6 @@ from plap.plugins.advisor.markdown import (
 from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.core.loop import StreamResult, response_request
 from plap.plugins.core.request import apply_float_transform, apply_int_transform
-from plap.responses.ingest.models import MAIN_SIDE
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
 
@@ -228,7 +227,7 @@ def _rebuild_advisor_side(state: State) -> None:
         if call_id is not None:
             existing_blocks[call_id] = list(current_block)
 
-    history = list(state.sides[MAIN_SIDE])
+    history = state.sides["main"]
     new_side: list[ChatMessage] = []
     current_msgs: list[ChatMessage] = []
     buffered_msgs: list[ChatMessage] = []
@@ -463,7 +462,7 @@ async def _maybe_advise_after_tool_call(
     ledger: UsageLedger,
     main_request: ChatCompletionRequest,
 ) -> None:
-    history = list(state.sides[MAIN_SIDE])
+    history = state.sides["main"]
     if not history or not history[-1].is_tool():
         return
     phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
@@ -481,7 +480,7 @@ async def _maybe_advise_after_tool_call(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 async def _maybe_advise_before_tool_call(
@@ -495,7 +494,7 @@ async def _maybe_advise_before_tool_call(
     accepted = result.accepted
     if accepted is None or accepted.finish_reason != ChatFinishReason.TOOL_CALLS:
         return
-    open_calls = state.open_calls(MAIN_SIDE)
+    open_calls = state.open_calls("main")
     if not open_calls:
         return
     phase_instruction = _phase_instruction(state, "before_tool_call", main_request)
@@ -511,7 +510,7 @@ async def _maybe_advise_before_tool_call(
     )
     if advice is None:
         return
-    state.sides[MAIN_SIDE].extend(
+    state.sides["main"].extend(
         ChatMessage(
             role="tool",
             name=call.name,
@@ -526,7 +525,7 @@ async def _maybe_advise_before_tool_call(
     text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+    state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 async def _maybe_advise_before_return(
@@ -540,7 +539,7 @@ async def _maybe_advise_before_return(
     accepted = result.accepted
     if accepted is None or accepted.finish_reason != ChatFinishReason.STOP or accepted.message.tool_calls:
         return
-    if state.open_calls(MAIN_SIDE):
+    if state.open_calls("main"):
         return
     phase_instruction = _phase_instruction(state, "before_return", main_request)
     logger.info("response.advisor.phase", phase="before_return", main_model=main_request.model)
@@ -557,7 +556,7 @@ async def _maybe_advise_before_return(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides[MAIN_SIDE].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
+        state.sides["main"].append(ChatMessage(role="developer", content=advice, reasoning_content=_advisor_sentinel(call_id)))
 
 
 @bus.listen("config.collect")
@@ -568,7 +567,7 @@ async def collect(paths: tuple[str, ...], *, next):
 
 @bus.listen("response.loop")
 async def advise_response(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
-    if MAIN_SIDE not in state.sides.active or state.open_calls(MAIN_SIDE):
+    if "main" not in state.sides.active or state.open_calls("main"):
         return await next(state=state, config=config, ledger=ledger)
     main_request = await response_request(state=state, config=config)
     await _maybe_advise_after_tool_call(state=state, config=config, ledger=ledger, main_request=main_request)

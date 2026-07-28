@@ -28,7 +28,7 @@ from plap.plugins.advisor import advise_response
 from plap.plugins.core.ledger import UsageLedger
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
-from plap.responses.ingest.models import MAIN_SIDE, HiddenMainTail, Ingested, Message, Sides
+from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Sides
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -275,7 +275,7 @@ def _state(
         ingested=ingested
         or Ingested(
             durable={},
-            sides=Sides(messages={MAIN_SIDE: [Message(role="user", content="hello")]}),
+            sides=Sides(messages={"main": [Message(role="user", content="hello")]}),
             main_tail=None,
             last_reasoning_id=None,
         ),
@@ -283,7 +283,7 @@ def _state(
         svcs=_svcs(client),
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
-        side_codes={MAIN_SIDE: 0, _ADVISOR_SIDE: 1},
+        side_codes={"main": 0, _ADVISOR_SIDE: 1024},
     )
 
 
@@ -296,7 +296,7 @@ def _after_tool_ingested() -> Ingested:
         durable={},
         sides=Sides(
             messages={
-                MAIN_SIDE: [
+                "main": [
                     Message(role="user", content="hello"),
                     assistant,
                     Message(role="tool", tool_call_id="call_read", content="file contents"),
@@ -349,7 +349,7 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
 async def test_advisor_delegates_without_work_when_main_is_inactive() -> None:
     client = _Client(main=[], advisor=[])
     state = _state(client)
-    state.deactivate(MAIN_SIDE)
+    state.sides.active.discard("main")
     delegated = 0
 
     async def next_handler(**kwargs):

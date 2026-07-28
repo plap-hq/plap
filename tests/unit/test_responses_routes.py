@@ -19,7 +19,6 @@ from plap.responses.contracts import (
     ResponseReasoningItem,
 )
 from plap.responses.ingest.models import (
-    MAIN_SIDE,
     CompactionPayload,
     Ingested,
     ReasoningCheckpoint,
@@ -204,7 +203,7 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     assert ingested.sides.messages.keys() == {"main"}
     assert ingested.sides["main"][0].role == "user"
     assert ingested.sides["main"][0].content == "hello"
-    assert ingested.sides.active == {MAIN_SIDE}
+    assert ingested.sides.active == {"main"}
     assert ingested.last_reasoning_id is None
     assert ingested.last_compaction_id is None
     assert coordinator.current_response().model == request.model
@@ -255,7 +254,7 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
         request=response_request,
         channels=_RecordingChannels(),
     )
-    checkpoint = ReasoningCheckpoint(durable={"turn": 2}, active={MAIN_SIDE}, sides={})
+    checkpoint = ReasoningCheckpoint(durable={"turn": 2}, active={"main"}, sides={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
     patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])
@@ -316,7 +315,7 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
         request=response_request,
         channels=_RecordingChannels(),
     )
-    checkpoint = ReasoningCheckpoint(durable={"generation": 2}, active={MAIN_SIDE}, sides={})
+    checkpoint = ReasoningCheckpoint(durable={"generation": 2}, active={"main"}, sides={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
     patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])

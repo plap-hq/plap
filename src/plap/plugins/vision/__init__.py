@@ -28,7 +28,7 @@ from plap.plugins.core.ledger import UsageLedger
 from plap.plugins.core.loop import StreamResult
 from plap.plugins.core.request import apply_float_transform, apply_int_transform
 from plap.responses.contracts import ResponseCreateRequest
-from plap.responses.ingest.models import MAIN_SIDE, Message
+from plap.responses.ingest.models import Message
 from plap.responses.state import State
 
 VISION_TOOL_NAME = "vision"
@@ -323,7 +323,7 @@ async def _vision_tool_output(
 def _vision_validator(state: State) -> RetryValidator:
     async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
         _ = request
-        _transcript, known_image_ids = _vision_context(state.sides[MAIN_SIDE])
+        _transcript, known_image_ids = _vision_context(state.sides["main"])
         for call in result.message.tool_calls:
             if call.name != VISION_TOOL_NAME:
                 continue
@@ -372,7 +372,7 @@ async def validate_images(
 
 @bus.listen("response.loop")
 async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
-    if MAIN_SIDE not in state.sides.active:
+    if "main" not in state.sides.active:
         return await next(state=state, config=config, ledger=ledger)
     result = await next(state=state, config=config, ledger=ledger)
     if result is None:
@@ -380,7 +380,7 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
     accepted = result.accepted
     if accepted is None or accepted.finish_reason != "tool_calls":
         return result
-    history = list(state.sides[MAIN_SIDE])
+    history = state.sides["main"]
     image_calls = [call for call in accepted.message.tool_calls if call.name == VISION_TOOL_NAME]
     for call in image_calls:
         ids, prompt = _tool_args(call)
@@ -393,6 +393,5 @@ async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next)
             prompt=prompt,
             tool_call_id=call.id,
         )
-        state.sides[MAIN_SIDE].append(tool_message)
-        history = [*history, tool_message]
+        state.sides["main"].append(tool_message)
     return result

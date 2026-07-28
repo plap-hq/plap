@@ -70,6 +70,30 @@ package plap
   public_usage: #PublicUsageConfig
 }
 
+#WellKnownSideCode: uint16 & <1024
+#RegisteredSideCode: uint16 & >=1024 & <49152
+#PrivateSideCode: uint16 & >=49152
+
+#WellKnownSides: {
+  main: 0
+}
+
+#RegisteredSides: {}
+
+#PrivateSides: {}
+
+#SideCodes: {
+  for name, code in #WellKnownSides {
+    "\(name)": code & #WellKnownSideCode
+  }
+  for name, code in #RegisteredSides {
+    "\(name)": code & #RegisteredSideCode
+  }
+  for name, code in #PrivateSides {
+    "\(name)": code & #PrivateSideCode
+  }
+}
+
 #Config: {
   database_url!: string
   api_key_pepper!: string
@@ -82,10 +106,7 @@ package plap
   model_info!: #ModelInfoConfig
   main?: #FieldConfig
   reasoning_to_output: *1.0 | number
-  sides!: {
-    main: 0
-    [string]: uint16
-  }
+  sides: #SideCodes
   _sidesByCode: {
     for name, code in sides {
       "\(code)": name
