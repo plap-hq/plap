@@ -32,7 +32,7 @@ from plap.responses.ingest.sealing import (
     seal_compaction_payload,
     seal_reasoning_payload,
 )
-from plap.responses.routes import _prepare_create, _run_stream
+from plap.responses.routes import _model_object, _prepare_create, _run_stream
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 
@@ -102,6 +102,22 @@ def _loaded() -> CueBox:
 
 def _request() -> ResponseCreateRequest:
     return ResponseCreateRequest(model="plap/test", input="hello")
+
+
+def test_model_object_uses_configured_creation_time() -> None:
+    config = CueBox(
+        {
+            "model_info": {
+                "created": 1777849810,
+                "provider": "plap",
+            }
+        },
+        frozen_box=True,
+    )
+
+    model = _model_object(config, model="plap/test")
+
+    assert model.created == config.model_info.created
 
 
 def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:

@@ -183,7 +183,7 @@ def _resolved_model_config(
 def _model_object(config: CueBox, *, model: str) -> ModelObject:
     return ModelObject(
         id=model,
-        created=0,
+        created=int(config.model_info.created),
         owned_by=str(config.model_info.provider),
     )
 
@@ -465,8 +465,20 @@ async def list_input_items(
             limit=limit,
             order=order,
         )
-        projection = ResponseProjection.from_query(include)
-        return projection.input_items_page(page)
+    projection = ResponseProjection.from_query(include)
+    return projection.input_items_page(page)
+
+
+def build_error_event(*, public: PublicError) -> ResponseErrorEvent:
+    # Validation failed before a response coordinator existed, so this error
+    # begins its own one-event sequence.
+    return ResponseErrorEvent(
+        code=public.code,
+        message=public.message,
+        param=public.param,
+        sequence_number=1,
+        type="error",
+    )
 
 
 @websocket("/v1/responses", dependencies={"auth_context": Provide(provide_socket_auth_context, sync_to_thread=False)})
@@ -540,16 +552,6 @@ async def responses_socket(
                     task_group.cancel_scope.cancel()
                     with anyio.CancelScope(shield=True):
                         await channels.unsubscribe(subscriber, coordinator.channel)
-
-
-def build_error_event(*, public: PublicError) -> ResponseErrorEvent:
-    return ResponseErrorEvent(
-        code=public.code,
-        message=public.message,
-        param=public.param,
-        sequence_number=1,
-        type="error",
-    )
 
 
 RESPONSE_ROUTE_HANDLERS = [

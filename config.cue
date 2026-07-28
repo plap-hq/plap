@@ -25,6 +25,7 @@ config: #Config & {
   model_info: #ModelInfoConfig & {
     display_name: *"Plap" | string
     description: *"plap responses model" | string
+    created: *0 | uint
     mode: *"responses" | string
     input_modalities: *["text"] | [...string]
     output_modalities: ["text"]
@@ -62,6 +63,7 @@ config: #Config & {
         display_name: "Wisp"
         model_info: display_name: "Wisp"
         model_info: description: "It's bigger."
+        model_info: created: 1777849810
         model_info: input_modalities: ["text", "image"]
         main: #FieldConfig & {
           model: *"crof/mimo-v2.5-pro,openrouter/xiaomi/mimo-v2.5-pro:xiaomi,openrouter/xiaomi/mimo-v2.5-pro:novita" | string
@@ -121,6 +123,7 @@ config: #Config & {
         display_name: "Mote"
         model_info: display_name: "Mote"
         model_info: description: "It's smaller."
+        model_info: created: 1783268995
         model_info: input_modalities: ["text", "image"]
         main: #FieldConfig & {
           model: *"openrouter/xiaomi/mimo-v2.5:xiaomi,openrouter/xiaomi/mimo-v2.5:digitalocean" | string

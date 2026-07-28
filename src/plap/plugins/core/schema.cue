@@ -46,6 +46,7 @@ package plap
 #ModelInfoConfig: {
   display_name!: string
   description!: string
+  created!: uint
   mode!: string
   input_modalities!: [...string]
   output_modalities!: [...string]
