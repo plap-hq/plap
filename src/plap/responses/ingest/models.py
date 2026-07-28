@@ -20,14 +20,6 @@ def _required_string(value: object, *, label: str) -> str:
     return value
 
 
-def _optional_string(value: object, *, label: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError(f"{label} must be a string")
-    return value
-
-
 def _optional_non_empty_string(value: object, *, label: str) -> str | None:
     if value is None:
         return None

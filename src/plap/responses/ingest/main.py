@@ -173,14 +173,14 @@ class MainReplay:
         self,
         message: Message,
         *,
-        authenticated: bool = True,
-        public: bool = False,
+        source: Message | None,
+        public: Message | None = None,
         snapshot: bool = False,
     ) -> _AssistantBundle:
         bundle = _AssistantBundle(
             private=message,
-            source=message if authenticated else None,
-            public=message if public else None,
+            source=source,
+            public=public,
             snapshot=snapshot,
         )
         for tool_call in message.tool_calls:
@@ -225,7 +225,7 @@ class MainReplay:
             self._apply_hidden_output(owner[0], message)
             return None
         if message.is_assistant():
-            bundle = self._new_bundle(message, snapshot=snapshot)
+            bundle = self._new_bundle(message, source=message, snapshot=snapshot)
             self.nodes.append(bundle)
             self.authenticated_tail = bundle
             return bundle
@@ -241,7 +241,7 @@ class MainReplay:
                 raise RuntimeError("authenticated main source is not present")
             bundle = source
         else:
-            bundle = self._new_bundle(patch.message)
+            bundle = self._new_bundle(patch.message, source=patch.message)
         self.authenticated_tail = bundle
         return bundle
 
@@ -332,7 +332,7 @@ class MainReplay:
             self.pending_public = None
             return
         if message.is_assistant():
-            self.nodes.append(self._new_bundle(message, authenticated=False, public=True))
+            self.nodes.append(self._new_bundle(message, source=None, public=message))
             return
         self.nodes.append(message)
 

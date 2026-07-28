@@ -153,8 +153,20 @@ from cryptography.hazmat.primitives.ciphers.aead import AESSIV
 from nacl.exceptions import CryptoError
 from nacl.secret import Aead
 
-from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
+from plap.errors import PlapError
 from plap.keyring import SealingKeyring, associated_data, purpose_label
+from plap.responses.ingest.errors import (
+    compaction_replay_error as _compaction_replay_error,
+)
+from plap.responses.ingest.errors import (
+    input_replay_error as _input_replay_error,
+)
+from plap.responses.ingest.errors import (
+    reasoning_replay_error as _reasoning_replay_error,
+)
+from plap.responses.ingest.errors import (
+    tool_replay_error as _tool_replay_error,
+)
 from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload, Side
 
 COMPACTION_PURPOSE = "responses.ingest.compaction"
@@ -176,82 +188,6 @@ _PACKED_META_RESERVED_MASK = 0xF8
 _PACKED_META_UNUSED_MASK = 0x07
 _BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _BASE64URL_BY_CHAR = {char: index for index, char in enumerate(_BASE64URL_ALPHABET)}
-
-
-def _tool_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=400,
-            type="invalid_request_error",
-            code="invalid_tool_replay",
-            message="Tool replay data is invalid.",
-            param="input",
-        ),
-        private=PrivateError(
-            event="response.invalid_request",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
-            cause=cause,
-        ),
-    )
-
-
-def _compaction_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=400,
-            type="invalid_request_error",
-            code="invalid_compaction_replay",
-            message="Compaction replay data is invalid.",
-            param="input",
-        ),
-        private=PrivateError(
-            event="response.invalid_request",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
-            cause=cause,
-        ),
-    )
-
-
-def _reasoning_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=400,
-            type="invalid_request_error",
-            code="invalid_reasoning_replay",
-            message="Reasoning replay data is invalid.",
-            param="input",
-        ),
-        private=PrivateError(
-            event="response.invalid_request",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
-            cause=cause,
-        ),
-    )
-
-
-def _input_replay_error(*, reason: str, private_message: str, cause: BaseException | None = None) -> PlapError:
-    return PlapError(
-        public=PublicError(
-            status_code=400,
-            type="invalid_request_error",
-            code="invalid_input_replay",
-            message="Input replay items are invalid.",
-            param="input",
-        ),
-        private=PrivateError(
-            event="response.invalid_request",
-            reason=reason,
-            message=private_message,
-            level=ErrorLevel.WARNING,
-            cause=cause,
-        ),
-    )
 
 
 def _aad(purpose: str) -> bytes:
