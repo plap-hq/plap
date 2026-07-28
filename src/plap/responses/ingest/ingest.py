@@ -28,7 +28,6 @@ from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
     CompactionPayload,
-    GuardedPatch,
     Ingested,
     Message,
     MessagePatch,
@@ -39,9 +38,8 @@ from plap.responses.ingest.models import (
     ToolCall,
     split_tail,
 )
-from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
+from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
-from plap.responses.ingest.shape import shape
 
 INTERRUPTED_TOOL_OUTPUT = "Tool call aborted by user."
 
@@ -996,13 +994,6 @@ class _Replay:
             self._rebuild_non_main_calls(side)
         self.main.validate()
 
-    def _validate_side_patch(self, side: Side, shape: JSONValue) -> None:
-        if self.sides.shape(side) != shape:
-            raise _reasoning_replay_error(
-                reason="reasoning_sides_shape_mismatch",
-                private_message=f"reasoning {side} shape does not match replay history",
-            )
-
     def _validate_sides(self) -> None:
         unknown = (self.sides.active | set(self.sides.messages)) - self.allowed_sides
         if unknown:
@@ -1043,18 +1034,10 @@ class _Replay:
         self._validate_reasoning(payload)
         self.main.commit_before_reasoning()
         self._sync_main()
-        for side, guarded in payload.sides.patches.items():
-            self._validate_side_patch(side, guarded.shape)
         self.machine = _apply_machine_patch(self.machine, payload.machine)
-        for side, guarded in payload.sides.patches.items():
-            patch = guarded.patch
-            if patch is None:
-                continue
-            if side == MAIN_SIDE:
-                next_main = [] if not patch else _apply_side_patch(self.sides.get(MAIN_SIDE, []) or [], patch, side=side)
-                self.sides[MAIN_SIDE] = next_main
-                continue
-            self.sides[side] = [] if not patch else _apply_side_patch(self.sides.get(side, []) or [], patch, side=side)
+        for side, patch in payload.sides.patches.items():
+            current = self.sides.get(side, []) or []
+            self.sides[side] = list(current) if not patch else _apply_side_patch(current, patch, side=side)
             self._rebuild_non_main_calls(side)
         if payload.sides.active is not None:
             self.sides.active = set(payload.sides.active)
@@ -1177,35 +1160,6 @@ def _replace_compaction_main(item: _DecodedCompaction, main: list[Message]) -> _
     return _DecodedCompaction(payload=replace(item.payload, sides=sides))
 
 
-def _main_guard_result(messages: list[Message], guarded: GuardedPatch) -> list[Message]:
-    patch = guarded.patch
-    if patch is None:
-        return list(messages)
-    if not patch:
-        return []
-    return _apply_side_patch(messages, patch, side=MAIN_SIDE)
-
-
-def _replace_guard_with_tail_removal(
-    item: _DecodedReasoning,
-    *,
-    tail_length: int,
-    post_patch_length: int,
-) -> _DecodedReasoning:
-    guarded = item.payload.sides.patches[MAIN_SIDE]
-    removals = [{"op": "remove", "path": f"/{index}"} for index in range(post_patch_length - 1, post_patch_length - tail_length - 1, -1)]
-    patch = [] if guarded.patch is None else list(guarded.patch)
-    patches = dict(item.payload.sides.patches)
-    patches[MAIN_SIDE] = GuardedPatch(shape=guarded.shape, patch=[*patch, *removals])
-    return _replace_reasoning_sides(item, replace(item.payload.sides, patches=patches))
-
-
-def _replace_main_guard(item: _DecodedReasoning, guarded: GuardedPatch) -> _DecodedReasoning:
-    patches = dict(item.payload.sides.patches)
-    patches[MAIN_SIDE] = guarded
-    return _replace_reasoning_sides(item, replace(item.payload.sides, patches=patches))
-
-
 def _is_standalone_main_item(item: _DecodedInput) -> bool:
     if isinstance(item, _DecodedMessage | _DecodedFabricatedFunctionCall | _DecodedFabricatedFunctionCallOutput):
         return True
@@ -1214,97 +1168,7 @@ def _is_standalone_main_item(item: _DecodedInput) -> bool:
     return False
 
 
-def _replay_normalized_prefix(
-    items: list[_DecodedInput],
-    *,
-    replacements: dict[int, _DecodedInput],
-    stop: int,
-    allowed_sides: set[Side],
-) -> tuple[list[Message], bool]:
-    replay = _Replay(machine={}, sides=Sides(), allowed_sides=allowed_sides)
-    replay._validate_sides()
-    for item_index, item in enumerate(items[:stop]):
-        replay.step(replacements.get(item_index, item))
-    replay.main.validate()
-    return replay.main.current_messages(), MAIN_SIDE in replay.sides.messages
-
-
-def _main_shape(messages: list[Message], *, present: bool) -> JSONValue:
-    return shape(messages) if present else None
-
-
-def _validate_authenticated_guard(messages: list[Message], *, present: bool, guarded: GuardedPatch) -> None:
-    if _main_shape(messages, present=present) != guarded.shape:
-        raise _reasoning_replay_error(
-            reason="reasoning_sides_shape_mismatch",
-            private_message="reasoning main shape does not match authenticated replay history",
-        )
-
-
-def _compile_guarded_main_transition(
-    item: _DecodedReasoning,
-    *,
-    actual_before: list[Message],
-    actual_before_present: bool,
-    actual_after: list[Message],
-) -> _DecodedReasoning:
-    source = [message.to_primitive() for message in actual_before]
-    target = [message.to_primitive() for message in actual_after]
-    compiled = diff(source, target)
-    guarded = GuardedPatch(
-        shape=_main_shape(actual_before, present=actual_before_present),
-        patch=compiled if compiled else None,
-    )
-    rebuilt = list(actual_before) if guarded.patch is None else _apply_side_patch(actual_before, guarded.patch, side=MAIN_SIDE)
-    if rebuilt != actual_after:  # pragma: no cover - diff must reproduce its target
-        raise RuntimeError("compiled main guard did not reproduce its normalized target")
-    return _replace_main_guard(item, guarded)
-
-
-def _lift_guard_over_interposition(
-    items: list[_DecodedInput],
-    *,
-    item_index: int,
-    item: _DecodedReasoning,
-    trusted_before: list[Message],
-    trusted_after: list[Message],
-    source_message: Message,
-    source_replacements: dict[int, _DecodedInput],
-    allowed_sides: set[Side],
-) -> tuple[_DecodedReasoning, list[Message]] | None:
-    before_tail = _logical_tail_bundle(trusted_before)
-    after_tail = _logical_tail_bundle(trusted_after)
-    if before_tail is None or before_tail[0] != source_message or after_tail is None:
-        return None
-
-    trusted_prefix_before = trusted_before[: -len(before_tail)]
-    trusted_prefix_after = trusted_after[: -len(after_tail)]
-    actual_before, actual_before_present = _replay_normalized_prefix(
-        items,
-        replacements=source_replacements,
-        stop=item_index,
-        allowed_sides=allowed_sides,
-    )
-    if actual_before[: len(trusted_prefix_before)] != trusted_prefix_before:
-        return None
-    interposition = actual_before[len(trusted_prefix_before) :]
-    actual_after = [*trusted_prefix_after, *interposition]
-    return (
-        _compile_guarded_main_transition(
-            item,
-            actual_before=actual_before,
-            actual_before_present=actual_before_present,
-            actual_after=actual_after,
-        ),
-        after_tail,
-    )
-
-
-def _normalize_timewarped_patches(
-    items: list[_DecodedInput],
-    *,
-    allowed_sides: set[Side],
-) -> list[_DecodedInput]:
+def _normalize_timewarped_patches(items: list[_DecodedInput]) -> list[_DecodedInput]:
     """Compile cross-reasoning patches into ordinary local postfix patches.
 
     Source selection follows only the authenticated main lane reconstructed from
@@ -1313,11 +1177,9 @@ def _normalize_timewarped_patches(
     messages and therefore cannot be shifted or impersonated by fabrication.
     """
     trusted_main: list[Message] = []
-    trusted_main_present = False
     source_message: Message | None = None
     source_bundle: list[Message] = []
     source_replacements: dict[int, _DecodedInput] = {}
-    committed_replacements: dict[int, _DecodedInput] = {}
     interposed = False
     normalized = list(items)
 
@@ -1329,7 +1191,6 @@ def _normalize_timewarped_patches(
 
         if isinstance(item, _DecodedCompaction):
             trusted_main = list(item.payload.sides.get(MAIN_SIDE) or [])
-            trusted_main_present = MAIN_SIDE in item.payload.sides.messages
             tail = _logical_tail_bundle(trusted_main)
             if tail is None:
                 source_message = None
@@ -1348,78 +1209,6 @@ def _normalize_timewarped_patches(
         if not isinstance(item, _DecodedReasoning):
             continue
 
-        guarded = item.payload.sides.patches.get(MAIN_SIDE)
-        if guarded is not None:
-            had_source = source_message is not None
-            trusted_before = trusted_main
-            trusted_before_present = trusted_main_present
-            if not had_source:
-                trusted_before, trusted_before_present = _replay_normalized_prefix(
-                    items,
-                    replacements=committed_replacements,
-                    stop=item_index,
-                    allowed_sides=allowed_sides,
-                )
-            _validate_authenticated_guard(trusted_before, present=trusted_before_present, guarded=guarded)
-            trusted_after = _main_guard_result(trusted_before, guarded)
-            trusted_main_present = True if guarded.patch is not None else trusted_before_present
-            tail = _logical_tail_bundle(trusted_after)
-            if tail is None:
-                source_message = None
-                source_bundle = []
-                source_replacements = {}
-                interposed = False
-            elif not had_source:
-                source_message = tail[0]
-                source_bundle = tail
-                source_replacements = {
-                    item_index: _replace_guard_with_tail_removal(
-                        item,
-                        tail_length=len(tail),
-                        post_patch_length=len(trusted_after),
-                    ),
-                }
-                interposed = False
-            elif interposed:
-                lifted = _lift_guard_over_interposition(
-                    items,
-                    item_index=item_index,
-                    item=item,
-                    trusted_before=trusted_before,
-                    trusted_after=trusted_after,
-                    source_message=source_message,
-                    source_replacements={**committed_replacements, **source_replacements},
-                    allowed_sides=allowed_sides,
-                )
-                if lifted is None:
-                    source_message = None
-                    source_bundle = []
-                    source_replacements = {}
-                    interposed = False
-                else:
-                    replacement, tail = lifted
-                    source_message = tail[0]
-                    source_bundle = tail
-                    source_replacements[item_index] = replacement
-            else:
-                source_message = tail[0]
-                source_bundle = tail
-                source_replacements = {
-                    item_index: _replace_guard_with_tail_removal(
-                        item,
-                        tail_length=len(tail),
-                        post_patch_length=len(trusted_after),
-                    ),
-                }
-            trusted_main = trusted_after
-        elif source_message is None and item.payload.sides.main:
-            trusted_main, trusted_main_present = _replay_normalized_prefix(
-                items,
-                replacements=committed_replacements,
-                stop=item_index,
-                allowed_sides=allowed_sides,
-            )
-
         leading_outputs, prefix, anchor, suffix, after, patch = item.payload.sides.split_main()
         if patch is not None and anchor is None:
             if source_message is not None and interposed and source_message == patch.message:
@@ -1433,8 +1222,6 @@ def _normalize_timewarped_patches(
                     [patch.message, *source_bundle[1:], *leading_outputs, patch],
                 )
                 normalized[item_index] = destination
-                committed_replacements.update(source_replacements)
-                committed_replacements[item_index] = destination
                 trusted_main.extend(leading_outputs)
                 source_message = None
                 source_bundle = []
@@ -1474,8 +1261,6 @@ def _normalize_timewarped_patches(
         else:
             local_messages.extend(after)
         trusted_main.extend(local_messages)
-        if item.payload.sides.main:
-            trusted_main_present = True
 
         if anchor is not None:
             if patch is not None:
@@ -1527,5 +1312,5 @@ async def ingest_response_request(
     replay_items = _slice_to_last_compaction(input_items)
     decoded_items = _decode_queue(replay_items, keyring=keyring, side_codes=side_codes)
     allowed_sides = set(side_codes)
-    normalized_items = _normalize_timewarped_patches(decoded_items, allowed_sides=allowed_sides)
+    normalized_items = _normalize_timewarped_patches(decoded_items)
     return _replay_decoded_queue(normalized_items, allowed_sides=allowed_sides)

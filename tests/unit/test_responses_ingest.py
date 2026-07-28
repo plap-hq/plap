@@ -46,7 +46,6 @@ from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
     CompactionPayload,
-    GuardedPatch,
     Message,
     MessagePatch,
     ReasoningPayload,
@@ -145,12 +144,10 @@ def _reasoning_payload(
     sides: SidesUpdate,
     payload_id: str | None = None,
     previous_reasoning_id: str | None = None,
-    previous_compaction_id: str | None = None,
 ) -> ReasoningPayload:
     return ReasoningPayload(
         id=payload_id or _next_reasoning_payload_id(),
         previous_reasoning_id=previous_reasoning_id,
-        previous_compaction_id=previous_compaction_id,
         machine=machine,
         sides=sides,
     )
@@ -160,21 +157,9 @@ def _sides_update(
     *,
     active: set[Side] | None = None,
     main: list[Message | MessagePatch] | None = None,
-    patches: dict[Side, list[dict[str, object]] | None] | None = None,
-    current: Sides | None = None,
+    patches: dict[Side, list[dict[str, object]]] | None = None,
 ) -> SidesUpdate:
-    current_sides = Sides() if current is None else current
-    normalized_patches = {
-        side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
-    }
-    return SidesUpdate(active=active, main=[] if main is None else list(main), patches=normalized_patches)
-
-
-def _guarded_patch(side: Side, current: list[Message] | None, patch: list[dict[str, object]] | None) -> GuardedPatch:
-    return GuardedPatch(
-        shape=None if current is None else Sides(messages={side: list(current)}).shape(side),
-        patch=patch,
-    )
+    return SidesUpdate(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
 
 
 def _sealed_compaction(payload: CompactionPayload) -> RequestCompactionItem:
@@ -804,70 +789,6 @@ def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None
         )
 
 
-def test_guarded_patch_from_primitive_requires_shape_key() -> None:
-    with pytest.raises(ValueError, match="guarded patch is missing keys: shape"):
-        GuardedPatch.from_primitive({"patch": []})
-
-
-def test_guarded_patch_from_primitive_requires_patch_key() -> None:
-    with pytest.raises(ValueError, match="guarded patch is missing keys: patch"):
-        GuardedPatch.from_primitive({"shape": None})
-
-
-def test_sides_shape_ignores_textual_leaves() -> None:
-    first = Sides(
-        messages={
-            MAIN_SIDE: [
-                Message(
-                    role="assistant",
-                    content="hello",
-                    tool_calls=[ToolCall(id="call_0", name="read_file", arguments='{"path":"README.md"}')],
-                    reasoning_content="because",
-                ),
-                Message(role="tool", tool_call_id="call_0", content="first output"),
-            ],
-            "reviewer": [Message(role="assistant", content="review one")],
-        },
-    )
-    second = Sides(
-        messages={
-            MAIN_SIDE: [
-                Message(
-                    role="assistant",
-                    content="goodbye",
-                    tool_calls=[ToolCall(id="call_0", name="list_files", arguments='{"path":"docs"}')],
-                    reasoning_content="therefore",
-                ),
-                Message(role="tool", tool_call_id="call_0", content="second output"),
-            ],
-            "reviewer": [Message(role="assistant", content="review two")],
-        },
-    )
-
-    assert first.shape(MAIN_SIDE) == second.shape(MAIN_SIDE)
-
-
-def test_sides_shape_preserves_tool_call_edges() -> None:
-    first = Sides(
-        messages={
-            MAIN_SIDE: [
-                Message(role="assistant", tool_calls=[ToolCall(id="call_0", name="read_file", arguments="{}")]),
-                Message(role="tool", tool_call_id="call_0", content="output"),
-            ]
-        }
-    )
-    second = Sides(
-        messages={
-            MAIN_SIDE: [
-                Message(role="assistant", tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")]),
-                Message(role="tool", tool_call_id="call_1", content="output"),
-            ]
-        }
-    )
-
-    assert first.shape(MAIN_SIDE) != second.shape(MAIN_SIDE)
-
-
 def test_decode_queue_preserves_item_order() -> None:
     compaction = _sealed_compaction(_compaction_payload(machine={"active": []}, sides=Sides()))
     message = _message("hello")
@@ -957,7 +878,7 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
     first = _reasoning_payload(
         payload_id="rs_first",
         machine=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=_sides_update(main=[Message(role="assistant", content="first")], current=compaction.sides),
+        sides=_sides_update(main=[Message(role="assistant", content="first")]),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
@@ -965,14 +886,6 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
         machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
         sides=_sides_update(
             main=[Message(role="assistant", content="second")],
-            current=Sides(
-                messages={
-                    MAIN_SIDE: [
-                        Message(role="assistant", content="snapshot"),
-                        Message(role="assistant", content="first"),
-                    ]
-                }
-            ),
         ),
     )
 
@@ -1423,363 +1336,6 @@ async def test_ingest_response_request_timewarps_hidden_settlement_from_intermed
     ]
 
 
-async def test_ingest_response_request_timewarp_composes_with_guarded_rewrite_preserving_tail() -> None:
-    prefix = Message(role="user", content="before")
-    rewritten_prefix = Message(role="user", content="rewritten")
-    assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
-    parked_sides = Sides(active=set(), messages={MAIN_SIDE: [prefix, assistant]})
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=[prefix, assistant]),
-    )
-    rewritten = _reasoning_payload(
-        payload_id="rs_rewritten",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            patches={MAIN_SIDE: [{"op": "replace", "path": "/0/content", "value": "rewritten"}]},
-            current=parked_sides,
-        ),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=rewritten.id,
-        machine=[],
-        sides=_sides_update(active={MAIN_SIDE}, main=[MessagePatch(message=assistant)]),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                _sealed_reasoning(rewritten),
-                RequestMessageItem(content="new question", role="user", type="message"),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        rewritten_prefix,
-        Message(role="user", content="new question"),
-        Message(role="assistant", content="fabricated answer"),
-        assistant,
-    ]
-
-
-async def test_ingest_response_request_timewarp_lifts_multiple_guards_over_fabricated_turn() -> None:
-    first = Message(role="user", content="one")
-    first_rewritten = Message(role="user", content="one after r2")
-    second = Message(role="developer", content="two")
-    inserted = Message(role="system", content="inserted by r10")
-    assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
-    parked_state = [first, second, assistant]
-    rewritten_state = [first_rewritten, second, assistant]
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=parked_state),
-    )
-    rewritten = _reasoning_payload(
-        payload_id="rs_rewritten",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            patches={MAIN_SIDE: [{"op": "replace", "path": "/0/content", "value": "one after r2"}]},
-            current=Sides(active=set(), messages={MAIN_SIDE: parked_state}),
-        ),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=rewritten.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=assistant)],
-            patches={
-                MAIN_SIDE: [
-                    {"op": "test", "path": "/2/content", "value": "delayed answer"},
-                    {"op": "move", "from": "/1", "path": "/0"},
-                    {"op": "add", "path": "/2", "value": inserted.to_primitive()},
-                    {"op": "copy", "from": "/1", "path": "/3"},
-                    {"op": "remove", "path": "/0"},
-                ]
-            },
-            current=Sides(active=set(), messages={MAIN_SIDE: rewritten_state}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="new question", role="user", type="message"),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                _sealed_reasoning(rewritten),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        first_rewritten,
-        inserted,
-        first_rewritten,
-        Message(role="user", content="new question"),
-        Message(role="assistant", content="fabricated answer"),
-        assistant,
-    ]
-
-
-async def test_ingest_response_request_timewarp_lifts_guarded_partial_settlement_over_fabricated_turn() -> None:
-    assistant = Message(
-        role="assistant",
-        content="delayed call",
-        tool_calls=[
-            ToolCall(id="up_main_0", name="server_tool", arguments="{}"),
-            ToolCall(id="up_main_1", name="client_tool", arguments="{}"),
-        ],
-    )
-    hidden_output = Message(role="tool", tool_call_id="up_main_0", content="server result")
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=[assistant]),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=assistant)],
-            patches={MAIN_SIDE: [{"op": "add", "path": "/1", "value": hidden_output.to_primitive()}]},
-            current=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
-        ),
-    )
-    call_id = _sealed_call_id(MAIN_SIDE, "up_main_1")
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="new question", role="user", type="message"),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed call", role="assistant", type="message"),
-                RequestFunctionCallItem(arguments="{}", call_id=call_id, name="client_tool", type="function_call"),
-                RequestFunctionCallOutputItem(call_id=call_id, output="client result", type="function_call_output"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        Message(role="user", content="new question"),
-        Message(role="assistant", content="fabricated answer"),
-        assistant,
-        hidden_output,
-        Message(role="tool", tool_call_id="up_main_1", content="client result"),
-    ]
-
-
-async def test_ingest_response_request_timewarp_lifts_shape_assertion_over_fabricated_turn() -> None:
-    assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=[assistant]),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=assistant)],
-            patches={MAIN_SIDE: None},
-            current=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                RequestFunctionCallItem(arguments="{}", call_id="fab_0", name="fabricated", type="function_call"),
-                RequestFunctionCallOutputItem(call_id="fab_0", output="fabricated result", type="function_call_output"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        Message(
-            role="assistant",
-            content="fabricated answer",
-            tool_calls=[ToolCall(id="fab_0", name="fabricated", arguments="{}")],
-        ),
-        Message(role="tool", tool_call_id="fab_0", content="fabricated result"),
-        assistant,
-    ]
-
-
-async def test_ingest_response_request_timewarp_uses_post_guard_canonical_assistant() -> None:
-    assistant = Message(role="assistant", content="delayed answer", reasoning_content="before guard")
-    guarded_assistant = Message(role="assistant", content="delayed answer", reasoning_content="after guard")
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=[assistant]),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=guarded_assistant)],
-            patches={MAIN_SIDE: [{"op": "replace", "path": "/0/reasoning_content", "value": "after guard"}]},
-            current=Sides(active=set(), messages={MAIN_SIDE: [assistant]}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        Message(role="assistant", content="fabricated answer"),
-        guarded_assistant,
-    ]
-
-
-async def test_ingest_response_request_timewarp_preserves_standalone_prefix_before_parked_source() -> None:
-    prefix = Message(role="user", content="before source")
-    rewritten_prefix = Message(role="user", content="after guard")
-    assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=[assistant]),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=assistant)],
-            patches={MAIN_SIDE: [{"op": "replace", "path": "/0/content", "value": "after guard"}]},
-            current=Sides(active=set(), messages={MAIN_SIDE: [prefix, assistant]}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                RequestMessageItem(content="before source", role="user", type="message"),
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="fabricated answer", role="assistant", type="message"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="delayed answer", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        rewritten_prefix,
-        Message(role="assistant", content="fabricated answer"),
-        assistant,
-    ]
-
-
-async def test_ingest_response_request_lifted_guard_preserves_exact_equal_assistant_multiplicity() -> None:
-    equal = Message(role="assistant", content="same")
-    marker = Message(role="user", content="marker")
-    parked_state = [equal, marker, equal]
-    parked = _reasoning_payload(
-        payload_id="rs_parked",
-        machine=[],
-        sides=_sides_update(active=set(), main=parked_state),
-    )
-    published = _reasoning_payload(
-        payload_id="rs_published",
-        previous_reasoning_id=parked.id,
-        machine=[],
-        sides=_sides_update(
-            active={MAIN_SIDE},
-            main=[MessagePatch(message=equal)],
-            patches={MAIN_SIDE: [{"op": "move", "from": "/1", "path": "/0"}]},
-            current=Sides(active=set(), messages={MAIN_SIDE: parked_state}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(parked),
-                RequestMessageItem(content="same", role="assistant", type="message"),
-                _sealed_reasoning(published),
-                RequestMessageItem(content="same", role="assistant", type="message"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [marker, equal, equal, equal]
-
-
-async def test_ingest_response_request_applies_guard_to_standalone_main_without_timewarp_source() -> None:
-    before = Message(role="user", content="before")
-    after = Message(role="user", content="after")
-    payload = _reasoning_payload(
-        machine=[],
-        sides=_sides_update(
-            patches={MAIN_SIDE: [{"op": "replace", "path": "/0/content", "value": "after"}]},
-            current=Sides(active={MAIN_SIDE}, messages={MAIN_SIDE: [before]}),
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                RequestMessageItem(content="before", role="user", type="message"),
-                _sealed_reasoning(payload),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [after]
-
-
 async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queue() -> None:
     first = Message(role="assistant", content="first delayed", reasoning_content="first hidden")
     second = Message(role="assistant", content="second delayed", reasoning_content="second hidden")
@@ -1908,10 +1464,7 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
     )
     second_payload = _reasoning_payload(
         machine=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(
-            main=[Message(role="assistant", content="second")],
-            current=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="first")]}),
-        ),
+        sides=_sides_update(main=[Message(role="assistant", content="second")]),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -1947,41 +1500,9 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
     assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
 
 
-def test_reasoning_payload_rejects_previous_compaction_id() -> None:
-    with pytest.raises(ValueError, match="previous_compaction_id is no longer supported"):
-        _reasoning_payload(
-            payload_id="rs_first",
-            previous_compaction_id="cmp_missing",
-            machine=[],
-            sides=_sides_update(),
-        )
-
-
-async def test_ingest_response_request_rejects_reasoning_when_guarded_patch_shape_drifts() -> None:
-    compaction = _compaction_payload(
-        payload_id="cmp_root",
-        machine={"active": []},
-        sides=Sides(messages={MAIN_SIDE: [Message(role="assistant", content="snapshot")]}),
-    )
-    payload = _reasoning_payload(
-        payload_id="rs_first",
-        machine=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
-            patches={
-                MAIN_SIDE: [{"op": "add", "path": "/1", "value": {"role": "assistant", "content": "hidden"}}],
-            },
-            current=compaction.sides,
-        ),
-    )
-
-    with pytest.raises(PlapError) as exc_info:
-        await ingest_response_request(
-            ResponseCreateRequest(model="plap/test", input=[_sealed_compaction(compaction), _message("drift"), _sealed_reasoning(payload)]),
-            keyring=_keyring(),
-        )
-
-    assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "reasoning_sides_shape_mismatch"
+def test_sides_update_rejects_main_patch() -> None:
+    with pytest.raises(ValueError, match="may not target main"):
+        _sides_update(patches={MAIN_SIDE: []})
 
 
 async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
@@ -2634,147 +2155,6 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
     ]
 
 
-async def test_ingest_response_request_accepts_main_patched_open_cluster_with_empty_main_updates() -> None:
-    assistant = Message(
-        role="assistant",
-        content="main hidden",
-        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
-    )
-    payload = _reasoning_payload(
-        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(
-            patches={
-                MAIN_SIDE: [
-                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
-                ]
-            }
-        ),
-    )
-    call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(payload),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id=call_id,
-                    name="read_file",
-                    type="function_call",
-                ),
-                RequestFunctionCallOutputItem(call_id=call_id, output="main result", type="function_call_output"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        assistant,
-        Message(role="tool", tool_call_id="up_main_0", content="main result"),
-    ]
-
-
-async def test_ingest_response_request_accepts_main_patched_closed_cluster_with_fabricated_pair() -> None:
-    assistant = Message(
-        role="assistant",
-        content="main hidden",
-        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
-    )
-    payload = _reasoning_payload(
-        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(
-            patches={
-                MAIN_SIDE: [
-                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
-                    {"op": "add", "path": "/1", "value": {"role": "tool", "tool_call_id": "up_main_0", "content": "hidden result"}},
-                ]
-            }
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(payload),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="fab_0",
-                    name="read_file",
-                    type="function_call",
-                ),
-                RequestFunctionCallOutputItem(call_id="fab_0", output="main result", type="function_call_output"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        Message(
-            role="assistant",
-            content="main hidden",
-            tool_calls=[
-                ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}'),
-                ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}'),
-            ],
-        ),
-        Message(role="tool", tool_call_id="up_main_0", content="hidden result"),
-        Message(role="tool", tool_call_id="fab_0", content="main result"),
-    ]
-
-
-async def test_ingest_response_request_accepts_fabricated_main_pair_after_closed_cluster_and_user() -> None:
-    assistant = Message(
-        role="assistant",
-        content="main hidden",
-        tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
-    )
-    payload = _reasoning_payload(
-        machine=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(
-            patches={
-                MAIN_SIDE: [
-                    {"op": "add", "path": "/0", "value": assistant.to_primitive()},
-                    {"op": "add", "path": "/1", "value": {"role": "tool", "tool_call_id": "up_main_0", "content": "hidden result"}},
-                    {"op": "add", "path": "/2", "value": Message(role="user", content="later user").to_primitive()},
-                ]
-            }
-        ),
-    )
-
-    result = await ingest_response_request(
-        ResponseCreateRequest(
-            model="plap/test",
-            input=[
-                _sealed_reasoning(payload),
-                RequestFunctionCallItem(
-                    arguments='{"path":"README.md"}',
-                    call_id="fab_0",
-                    name="read_file",
-                    type="function_call",
-                ),
-                RequestFunctionCallOutputItem(call_id="fab_0", output="main result", type="function_call_output"),
-            ],
-        ),
-        keyring=_keyring(),
-    )
-
-    assert result.sides[MAIN_SIDE] == [
-        Message(
-            role="assistant",
-            content="main hidden",
-            tool_calls=[
-                ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}'),
-                ToolCall(id="fab_0", name="read_file", arguments='{"path":"README.md"}'),
-            ],
-        ),
-        Message(role="tool", tool_call_id="up_main_0", content="hidden result"),
-        Message(role="tool", tool_call_id="fab_0", content="main result"),
-        Message(role="user", content="later user"),
-    ]
-
-
 async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_reasoning_step() -> None:
     initial = Message(role="assistant", content="main hidden")
     first = _reasoning_payload(
@@ -2969,7 +2349,6 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
                     {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
                 ]
             },
-            current=Sides(messages={"reviewer": [assistant]}),
         ),
         previous_reasoning_id=first_payload.id,
     )

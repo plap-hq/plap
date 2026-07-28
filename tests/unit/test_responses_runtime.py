@@ -815,8 +815,15 @@ async def test_state_flush_preserves_explicit_empty_side() -> None:
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert "reviewer" in payload.sides.patches
-    assert payload.sides.patches["reviewer"].shape is None
-    assert payload.sides.patches["reviewer"].patch == []
+    assert payload.sides.patches["reviewer"] == []
+
+
+async def test_state_flush_rejects_persisted_main_mutation() -> None:
+    state = _state()
+    state.sides[MAIN_SIDE] = [Message(role="user", content="wrong lane")]
+
+    with pytest.raises(RuntimeError, match=r"use State\.main"):
+        await state.flush()
 
 
 async def test_state_finalize_uses_message_patch_and_emits_visible_items() -> None:

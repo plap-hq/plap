@@ -22,11 +22,10 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 4,
+        "version": 5,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
-        "previous_compaction_id": <string|null>,
         "machine": <JSONPatch>,
         "sides": <SidesUpdate>,
     }
@@ -56,7 +55,7 @@ Reasoning and compaction payloads
         "active": [<side>, ...] | null,
         "main": [<message>..., <optional-postfix-message-patch>],
         "patches": {
-            <side>: <guarded-patch>,
+            <non-main-side>: <JSONPatch>,
         },
     }
 
@@ -151,7 +150,8 @@ COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
-PAYLOAD_FORMAT_VERSION = 4
+COMPACTION_PAYLOAD_FORMAT_VERSION = 4
+REASONING_PAYLOAD_FORMAT_VERSION = 5
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
@@ -425,7 +425,7 @@ def _decode_encoded_upstream_id(header: int, value: bytes) -> str:
 
 def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
     return {
-        "version": PAYLOAD_FORMAT_VERSION,
+        "version": COMPACTION_PAYLOAD_FORMAT_VERSION,
         "type": COMPACTION_PAYLOAD_TYPE,
         **value.to_primitive(),
     }
@@ -434,7 +434,7 @@ def _compaction_to_json(value: CompactionPayload) -> dict[str, Any]:
 def _compaction_from_json(value: object) -> CompactionPayload:
     if not isinstance(value, dict):
         raise _compaction_replay_error(reason="compaction_payload_not_object", private_message="compaction payload must be an object")
-    if value.get("version") != PAYLOAD_FORMAT_VERSION or value.get("type") != COMPACTION_PAYLOAD_TYPE:
+    if value.get("version") != COMPACTION_PAYLOAD_FORMAT_VERSION or value.get("type") != COMPACTION_PAYLOAD_TYPE:
         raise _compaction_replay_error(reason="unsupported_compaction_payload", private_message="unsupported compaction payload")
     try:
         return CompactionPayload.from_primitive(
@@ -450,7 +450,7 @@ def _compaction_from_json(value: object) -> CompactionPayload:
 
 def _reasoning_to_json(value: ReasoningPayload) -> dict[str, Any]:
     return {
-        "version": PAYLOAD_FORMAT_VERSION,
+        "version": REASONING_PAYLOAD_FORMAT_VERSION,
         "type": REASONING_PAYLOAD_TYPE,
         **value.to_primitive(),
     }
@@ -459,14 +459,13 @@ def _reasoning_to_json(value: ReasoningPayload) -> dict[str, Any]:
 def _reasoning_from_json(value: object) -> ReasoningPayload:
     if not isinstance(value, dict):
         raise _reasoning_replay_error(reason="reasoning_payload_not_object", private_message="reasoning payload must be an object")
-    if value.get("version") != PAYLOAD_FORMAT_VERSION or value.get("type") != REASONING_PAYLOAD_TYPE:
+    if value.get("version") != REASONING_PAYLOAD_FORMAT_VERSION or value.get("type") != REASONING_PAYLOAD_TYPE:
         raise _reasoning_replay_error(reason="unsupported_reasoning_payload", private_message="unsupported reasoning payload")
     try:
         return ReasoningPayload.from_primitive(
             {
                 "id": value.get("id"),
                 "previous_reasoning_id": value.get("previous_reasoning_id"),
-                "previous_compaction_id": value.get("previous_compaction_id"),
                 "machine": value.get("machine"),
                 "sides": value.get("sides"),
             }

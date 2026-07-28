@@ -769,12 +769,10 @@ from plap.responses.ingest.ingest import ingest_response_request as _ingest_resp
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
-    GuardedPatch,
     Message,
     MessagePatch,
     ReasoningPayload,
     Side,
-    Sides,
     SidesUpdate,
     ToolCall,
 )
@@ -811,8 +809,6 @@ class _BaselineSettlementCase:
     baseline: tuple[Message, ...]
     main: tuple[Message | MessagePatch, ...]
     expected_main: tuple[Message, ...] | None
-    patch: tuple[dict[str, object], ...] | None = None
-    has_patch: bool = False
     active: frozenset[Side] | None = None
     trailing_items: tuple[RequestInputItem, ...] = ()
     expected_reason: str | None = None
@@ -852,12 +848,10 @@ def _reasoning_payload(
     sides: SidesUpdate,
     payload_id: str | None = None,
     previous_reasoning_id: str | None = None,
-    previous_compaction_id: str | None = None,
 ) -> ReasoningPayload:
     return ReasoningPayload(
         id=payload_id or _next_reasoning_payload_id(),
         previous_reasoning_id=previous_reasoning_id,
-        previous_compaction_id=previous_compaction_id,
         machine=machine,
         sides=sides,
     )
@@ -867,21 +861,9 @@ def _sides_update(
     *,
     active: set[Side] | None = None,
     main: list[Message | MessagePatch] | None = None,
-    patches: dict[Side, list[dict[str, object]] | None] | None = None,
-    current: Sides | None = None,
+    patches: dict[Side, list[dict[str, object]]] | None = None,
 ) -> SidesUpdate:
-    current_sides = Sides() if current is None else current
-    normalized_patches = {
-        side: _guarded_patch(side, current_sides.get(side), patch) for side, patch in ({} if patches is None else patches).items()
-    }
-    return SidesUpdate(active=active, main=[] if main is None else list(main), patches=normalized_patches)
-
-
-def _guarded_patch(side: Side, current: list[Message] | None, patch: list[dict[str, object]] | None) -> GuardedPatch:
-    return GuardedPatch(
-        shape=None if current is None else Sides(messages={side: list(current)}).shape(side),
-        patch=patch,
-    )
+    return SidesUpdate(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
 
 
 def _chain_reasoning_items(items: list[RequestInputItem]) -> list[RequestInputItem]:
@@ -895,7 +877,6 @@ def _chain_reasoning_items(items: list[RequestInputItem]) -> list[RequestInputIt
         chained_payload = _reasoning_payload(
             payload_id=payload.id,
             previous_reasoning_id=last_reasoning_id,
-            previous_compaction_id=None,
             machine=payload.machine,
             sides=payload.sides,
         )
@@ -2933,16 +2914,7 @@ REJECT_CASES.append(
                 _sealed_reasoning(
                     _reasoning_payload(
                         machine=[{"op": "add", "path": "/retro_2", "value": True}],
-                        sides=_sides_update(
-                            current=Sides(
-                                messages={
-                                    MAIN_SIDE: [
-                                        Message.from_primitive(_assistant_value("m1", "up_0")),
-                                        Message.from_primitive(_tool_value("up_0", "fo_0")),
-                                    ]
-                                }
-                            )
-                        ),
+                        sides=_sides_update(),
                     )
                 ),
                 _assistant_item("m2"),
@@ -3075,7 +3047,6 @@ def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
         content="owner",
         tool_calls=[_tool_call_model("x"), _tool_call_model("y")],
     )
-    owner_z = Message(role="assistant", content="owner", tool_calls=[_tool_call_model("z")])
     tool_x = Message(role="tool", tool_call_id="x", content="x result")
     tool_y = Message(role="tool", tool_call_id="y", content="y result")
     tool_z = Message(role="tool", tool_call_id="z", content="z result")
@@ -3084,13 +3055,6 @@ def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
     local_output = Message(role="tool", tool_call_id="local", content="local result")
     projected = Message(role="assistant", content="projected", reasoning_content="hidden")
     projected_patch = MessagePatch(message=projected)
-    rewrite_x_to_z = ({"op": "replace", "path": "/0/tool_calls/0/id", "value": "z"},)
-    close_x = ({"op": "add", "path": "/1", "value": tool_x.to_primitive()},)
-    introduce_x = ({"op": "add", "path": "/0", "value": owner_x.to_primitive()},)
-    introduce_and_close_x = (
-        {"op": "add", "path": "/0", "value": owner_x.to_primitive()},
-        {"op": "add", "path": "/1", "value": tool_x.to_primitive()},
-    )
     invalid = "reasoning_message_invalid"
     return [
         pytest.param(
@@ -3168,79 +3132,6 @@ def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
         pytest.param(
             _BaselineSettlementCase(
                 baseline=(owner_x,),
-                main=(tool_x,),
-                expected_main=(owner_x, tool_x),
-                patch=None,
-                has_patch=True,
-            ),
-            id="shape_guard_preserves_baseline_owner",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_z,),
-                expected_main=(owner_z, tool_z),
-                patch=rewrite_x_to_z,
-                has_patch=True,
-            ),
-            id="main_patch_rewrites_baseline_owner_before_settlement",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x,),
-                expected_main=None,
-                patch=rewrite_x_to_z,
-                has_patch=True,
-                expected_reason=invalid,
-            ),
-            id="reject_pre_patch_call_id_after_owner_rewrite",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x,),
-                expected_main=None,
-                patch=(),
-                has_patch=True,
-                expected_reason=invalid,
-            ),
-            id="reject_output_after_main_patch_removes_owner",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
-                main=(tool_x,),
-                expected_main=None,
-                patch=close_x,
-                has_patch=True,
-                expected_reason=invalid,
-            ),
-            id="reject_output_after_main_patch_closes_call",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(),
-                main=(tool_x,),
-                expected_main=(owner_x, tool_x),
-                patch=introduce_x,
-                has_patch=True,
-            ),
-            id="main_patch_introduces_baseline_owner",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(),
-                main=(successor,),
-                expected_main=(owner_x, tool_x, successor),
-                patch=introduce_and_close_x,
-                has_patch=True,
-            ),
-            id="main_patch_introduces_closed_baseline_before_remainder",
-        ),
-        pytest.param(
-            _BaselineSettlementCase(
-                baseline=(owner_x,),
                 main=(tool_x, successor),
                 expected_main=(owner_x, tool_x, successor),
             ),
@@ -3286,25 +3177,18 @@ def _baseline_settlement_cases() -> list[pytest.ParameterSet]:
 
 @pytest.mark.parametrize("case", _baseline_settlement_cases())
 async def test_baseline_settlement_truth_table(case: _BaselineSettlementCase) -> None:
-    baseline_messages = {MAIN_SIDE: list(case.baseline)} if case.baseline else {}
-    baseline_sides = Sides(active=set(), messages=baseline_messages)
     first = _sealed_reasoning(
         _reasoning_payload(
             machine=[],
             sides=_sides_update(active=set(), main=list(case.baseline)),
         )
     )
-    patches = None
-    if case.has_patch:
-        patches = {MAIN_SIDE: None if case.patch is None else list(case.patch)}
     second = _sealed_reasoning(
         _reasoning_payload(
             machine=[],
             sides=_sides_update(
                 active=None if case.active is None else set(case.active),
                 main=list(case.main),
-                patches=patches,
-                current=baseline_sides,
             ),
         )
     )

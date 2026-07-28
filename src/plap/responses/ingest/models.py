@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from plap.llms.completions.chat import ChatMessage as Message
 from plap.llms.completions.chat import ChatToolCall as ToolCall
 from plap.responses.ingest.patch import JSONPatch, JSONValue
-from plap.responses.ingest.shape import shape
 
 
 def _required_mapping(value: object, *, label: str) -> Mapping[str, object]:
@@ -112,14 +111,6 @@ def _required_main_update_list(value: object, *, label: str) -> list[MainUpdate]
     return updates
 
 
-def _required_shape(value: object, *, label: str) -> JSONValue:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise TypeError(f"{label} must be an array")
-    return value
-
-
 def _tool_call_ids(tool_calls: list[ToolCall], *, label: str) -> list[str]:
     call_ids = [tool_call.id for tool_call in tool_calls]
     if len(call_ids) != len(set(call_ids)):
@@ -210,12 +201,6 @@ class Sides:
             "messages": {side: [message.to_primitive() for message in self.messages[side]] for side in sorted(self.messages)},
         }
 
-    def shape(self, side: Side) -> JSONValue:
-        messages = self.get(side)
-        if messages is None:
-            return None
-        return shape(messages)
-
     @classmethod
     def from_primitive(cls, value: object) -> Sides:
         item = _required_mapping(value, label="sides")
@@ -239,44 +224,10 @@ class Sides:
 
 
 @dataclass(frozen=True, slots=True)
-class GuardedPatch:
-    shape: JSONValue
-    patch: JSONPatch | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "shape", _required_shape(self.shape, label="guarded patch shape"))
-        if self.patch is not None:
-            object.__setattr__(self, "patch", _required_patch(self.patch, label="guarded patch patch"))
-
-    def to_primitive(self) -> dict[str, object]:
-        return {
-            "shape": self.shape,
-            "patch": None if self.patch is None else list(self.patch),
-        }
-
-    @classmethod
-    def from_primitive(cls, value: object) -> GuardedPatch:
-        item = _required_mapping(value, label="guarded patch")
-        allowed = {"shape", "patch"}
-        unknown = set(item) - allowed
-        if unknown:
-            names = ", ".join(sorted(unknown))
-            raise ValueError(f"guarded patch contains unknown keys: {names}")
-        missing = allowed - set(item)
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise ValueError(f"guarded patch is missing keys: {names}")
-        return cls(
-            shape=_required_shape(item["shape"], label="guarded patch shape"),
-            patch=None if item["patch"] is None else _required_patch(item["patch"], label="guarded patch patch"),
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class SidesUpdate:
     active: set[Side] | None = None
     main: list[MainUpdate] = field(default_factory=list)
-    patches: dict[Side, GuardedPatch] = field(default_factory=dict)
+    patches: dict[Side, JSONPatch] = field(default_factory=dict)
 
     def split_main(
         self,
@@ -328,17 +279,19 @@ class SidesUpdate:
         self.split_main()
         if self.active is not None:
             object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
-        normalized: dict[Side, GuardedPatch] = {}
-        for raw_side, guarded in self.patches.items():
+        normalized: dict[Side, JSONPatch] = {}
+        for raw_side, patch in self.patches.items():
             side = _required_side(raw_side, label="sides update patches key")
-            normalized[side] = guarded
+            if side == MAIN_SIDE:
+                raise ValueError("sides update patches may not target main")
+            normalized[side] = _required_patch(patch, label=f"sides update patches.{side}")
         object.__setattr__(self, "patches", normalized)
 
     def to_primitive(self) -> dict[str, object]:
         value: dict[str, object] = {
             "active": None if self.active is None else sorted(self.active),
             "main": [message.to_primitive() for message in self.main],
-            "patches": {side: guarded.to_primitive() for side, guarded in sorted(self.patches.items())},
+            "patches": {side: list(patch) for side, patch in sorted(self.patches.items())},
         }
         return value
 
@@ -356,8 +309,11 @@ class SidesUpdate:
             active=None if active_value is None else _required_side_set(active_value, label="sides update active"),
             main=_required_main_update_list(item.get("main", []), label="sides update main"),
             patches={
-                _required_side(side, label="sides update patches key"): GuardedPatch.from_primitive(guarded)
-                for side, guarded in patches_value.items()
+                _required_side(side, label="sides update patches key"): _required_patch(
+                    patch,
+                    label=f"sides update patches.{side}",
+                )
+                for side, patch in patches_value.items()
             },
         )
 
@@ -366,25 +322,17 @@ class SidesUpdate:
 class ReasoningPayload:
     id: str
     previous_reasoning_id: str | None
-    previous_compaction_id: str | None
     machine: JSONPatch
     sides: SidesUpdate
 
     def __post_init__(self) -> None:
         _required_string(self.id, label="reasoning payload id")
         _optional_non_empty_string(self.previous_reasoning_id, label="reasoning payload previous_reasoning_id")
-        previous_compaction_id = _optional_non_empty_string(
-            self.previous_compaction_id,
-            label="reasoning payload previous_compaction_id",
-        )
-        if previous_compaction_id is not None:
-            raise ValueError("reasoning payload previous_compaction_id is no longer supported")
 
     def to_primitive(self) -> dict[str, object]:
         return {
             "id": self.id,
             "previous_reasoning_id": self.previous_reasoning_id,
-            "previous_compaction_id": self.previous_compaction_id,
             "machine": list(self.machine),
             "sides": self.sides.to_primitive(),
         }
@@ -396,9 +344,6 @@ class ReasoningPayload:
             id=_required_string(item.get("id"), label="reasoning payload id"),
             previous_reasoning_id=_optional_non_empty_string(
                 item.get("previous_reasoning_id"), label="reasoning payload previous_reasoning_id"
-            ),
-            previous_compaction_id=_optional_non_empty_string(
-                item.get("previous_compaction_id"), label="reasoning payload previous_compaction_id"
             ),
             machine=_required_patch(item.get("machine"), label="reasoning payload machine"),
             sides=SidesUpdate.from_primitive(item.get("sides")),

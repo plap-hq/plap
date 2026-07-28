@@ -16,7 +16,6 @@ from plap.responses.ingest import content
 from plap.responses.ingest.models import (
     MAIN_SIDE,
     CallID,
-    GuardedPatch,
     Ingested,
     Message,
     MessagePatch,
@@ -170,20 +169,24 @@ class State:
         main_update: list[Message | MessagePatch],
     ) -> tuple[JSONPatch, SidesUpdate]:
         machine_patch = diff(self._base_machine.to_primitive(), machine.to_primitive())
-        patches: dict[str, GuardedPatch] = {}
+        base_main_present = MAIN_SIDE in self._base_sides.messages
+        current_main_present = MAIN_SIDE in sides.messages
+        if base_main_present != current_main_present or self._base_sides.get(MAIN_SIDE) != sides.get(MAIN_SIDE):
+            raise RuntimeError("persisted main history is immutable; use State.main for main updates")
+
+        patches: dict[str, JSONPatch] = {}
         for side in sorted(set(self._base_sides.messages) | set(sides.messages)):
+            if side == MAIN_SIDE:
+                continue
             base_present = side in self._base_sides.messages
             current_present = side in sides.messages
             base_messages = self._base_sides.get(side)
             current_messages = sides.get(side)
             if base_present == current_present and base_messages == current_messages:
                 continue
-            patches[side] = GuardedPatch(
-                shape=self._base_sides.shape(side),
-                patch=diff(
-                    [] if base_messages is None else [message.to_primitive() for message in base_messages],
-                    [] if current_messages is None else [message.to_primitive() for message in current_messages],
-                ),
+            patches[side] = diff(
+                [] if base_messages is None else [message.to_primitive() for message in base_messages],
+                [] if current_messages is None else [message.to_primitive() for message in current_messages],
             )
         active = None if self._base_sides.active == sides.active else set(sides.active)
         return machine_patch, SidesUpdate(active=active, main=main_update, patches=patches)

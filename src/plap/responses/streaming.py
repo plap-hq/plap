@@ -251,7 +251,6 @@ class StreamCoordinator:
         payload = ReasoningPayload(
             id=lineage.item_id,
             previous_reasoning_id=lineage.previous_reasoning_id,
-            previous_compaction_id=None,
             machine=machine,
             sides=sides,
         )
