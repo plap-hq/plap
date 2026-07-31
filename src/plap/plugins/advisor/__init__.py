@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from pathlib import Path
 
 import msgspec
 import structlog
 
 from plap.bus import bus
 from plap.config import CueBox
-from plap.errors import ErrorLevel, PlapError, PrivateError
 from plap.llms import RetryLimitExceededError
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
@@ -33,13 +31,16 @@ from plap.plugins.advisor.markdown import (
     requirements_instruction,
 )
 from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
-from plap.plugins.core.request import apply_float_transform, apply_int_transform
+from plap.plugins.core.request import build_chat_request
+from plap.plugins.easy import bootstrap, server_tools
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
 
+bootstrap.config(__file__)
+
 logger = structlog.stdlib.get_logger(__name__)
 
-ADVISOR_SIDE = "advisor"
+ADVISOR_THREAD = "advisor"
 ADVISE_TOOL_NAME = "advise"
 ADVISOR_TOOL_OUTPUT = "0"
 ABORTED_TOOL_OUTPUT = "Tool call cancelled by advisor."
@@ -88,95 +89,73 @@ If you want to note something to yourself, put it in note, NOT advice.
 As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
 you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
 """
-ADVISE_TOOL = ChatTool(
-    function=ChatFunctionTool(
-        name=ADVISE_TOOL_NAME,
-        description="Provide guidance for the main agent.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "advice": {
-                    "type": "string",
-                    "description": "Guidance for the main agent.",
-                },
-                "note": {
-                    "type": "string",
-                    "description": (
-                        "Note passed to the next advice phase. This is non-blocking; writing one does NOT cause aborts or loops."
-                    ),
-                },
+ADVISE_FUNCTION = ChatFunctionTool(
+    name=ADVISE_TOOL_NAME,
+    description="Provide guidance for the main agent.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "advice": {
+                "type": "string",
+                "description": "Guidance for the main agent.",
             },
-            "additionalProperties": False,
+            "note": {
+                "type": "string",
+                "description": ("Note passed to the next advice phase. This is non-blocking; writing one does NOT cause aborts or loops."),
+            },
         },
-        strict=True,
-    )
+        "additionalProperties": False,
+    },
+    strict=True,
 )
 
 
-def _advisor_error(
-    *,
-    reason: str,
-    message: str,
-    context: dict[str, object] | None = None,
-) -> PlapError:
-    return PlapError(
-        public=None,
-        private=PrivateError(
-            event="response.advisor_failed",
-            reason=reason,
-            message=message,
-            level=ErrorLevel.ERROR,
-            context={} if context is None else context,
-        ),
-    )
-
-
-def _advisor_durable(state: State) -> dict[str, object]:
-    raw = state.durable.get(ADVISOR_SIDE)
+def _advisor_memory(state: State) -> dict[str, object]:
+    raw = state.memory.get(ADVISOR_THREAD)
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
 
 
 def _advisor_note(state: State) -> str | None:
-    value = _advisor_durable(state).get("note")
+    value = _advisor_memory(state).get("note")
     if not isinstance(value, str) or not value:
         return None
     return value
 
 
 def _set_advisor_note(state: State, note: str | None) -> None:
-    durable = _advisor_durable(state)
+    memory = _advisor_memory(state)
     if note is None:
-        durable.pop("note", None)
+        memory.pop("note", None)
     else:
-        durable["note"] = note
-    state.durable[ADVISOR_SIDE] = durable
+        memory["note"] = note
+    state.memory[ADVISOR_THREAD] = memory
 
 
-def _advisor_message_durable(msg: ChatMessage) -> dict[str, object]:
-    raw = msg.durable.get(ADVISOR_SIDE)
+def _advisor_message_memory(msg: ChatMessage) -> dict[str, object]:
+    raw = msg.memory.get(ADVISOR_THREAD)
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
 
 
 def _is_advisor_artifact(msg: ChatMessage) -> bool:
-    return isinstance(_advisor_message_durable(msg).get("call_id"), str)
+    return isinstance(_advisor_message_memory(msg).get("call_id"), str)
 
 
 def _advisor_call_id(msg: ChatMessage) -> str:
-    call_id = _advisor_message_durable(msg).get("call_id")
+    call_id = _advisor_message_memory(msg).get("call_id")
     if not isinstance(call_id, str):
         raise TypeError("advisor artifact is missing its call id")
     return call_id
 
 
 def _is_advisor_transcript_message(msg: ChatMessage) -> bool:
-    return msg.role == "user" and _advisor_message_durable(msg).get("transcript") is True
+    return msg.role == "user" and _advisor_message_memory(msg).get("transcript") is True
 
 
-def _strip_note_from_messages(messages: tuple[ChatMessage, ...]) -> list[ChatMessage]:
+def _strip_note_from_messages(messages: tuple[ChatMessage, ...], *, advise_tool_name: str) -> list[ChatMessage]:
     stripped: list[ChatMessage] = []
     for message in messages:
         if not message.is_assistant() or not message.tool_calls:
@@ -185,7 +164,7 @@ def _strip_note_from_messages(messages: tuple[ChatMessage, ...]) -> list[ChatMes
         changed = False
         tool_calls: list[ChatToolCall] = []
         for call in message.tool_calls:
-            if call.name != ADVISE_TOOL_NAME:
+            if call.name != advise_tool_name:
                 tool_calls.append(call)
                 continue
             arguments = msgspec.json.decode(call.arguments)
@@ -207,10 +186,10 @@ def _final_block_call_id(block: list[ChatMessage]) -> str | None:
     return None
 
 
-def _rebuild_advisor_side(state: State) -> None:
+def _rebuild_advisor_thread(state: State) -> None:
     existing_blocks: dict[str, list[ChatMessage]] = {}
     current_block: list[ChatMessage] = []
-    for entry in state.sides.get(ADVISOR_SIDE, []):
+    for entry in state.threads.get(ADVISOR_THREAD, []):
         if _is_advisor_transcript_message(entry):
             if current_block:
                 call_id = _final_block_call_id(current_block)
@@ -226,15 +205,15 @@ def _rebuild_advisor_side(state: State) -> None:
         if call_id is not None:
             existing_blocks[call_id] = list(current_block)
 
-    history = state.sides["main"]
-    new_side: list[ChatMessage] = []
+    history = state.threads["main"]
+    new_thread: list[ChatMessage] = []
     current_msgs: list[ChatMessage] = []
     buffered_msgs: list[ChatMessage] = []
 
     def flush_user():
         if current_msgs:
             rendered = "\n".join(render_main_messages(current_msgs))
-            new_side.append(ChatMessage(role="user", content=rendered, durable={ADVISOR_SIDE: {"transcript": True}}))
+            new_thread.append(ChatMessage(role="user", content=rendered, memory={ADVISOR_THREAD: {"transcript": True}}))
             current_msgs.clear()
 
     for msg in history:
@@ -247,7 +226,7 @@ def _rebuild_advisor_side(state: State) -> None:
                 flush_user()
                 block = existing_blocks.get(call_id)
                 if block is not None:
-                    new_side.extend(block)
+                    new_thread.extend(block)
                 current_msgs.clear()
                 current_msgs.extend(buffered_msgs)
                 buffered_msgs.clear()
@@ -257,8 +236,8 @@ def _rebuild_advisor_side(state: State) -> None:
     flush_user()
     if buffered_msgs:
         rendered = "\n".join(render_main_messages(buffered_msgs))
-        new_side.append(ChatMessage(role="user", content=rendered, durable={ADVISOR_SIDE: {"transcript": True}}))
-    state.sides[ADVISOR_SIDE] = new_side
+        new_thread.append(ChatMessage(role="user", content=rendered, memory={ADVISOR_THREAD: {"transcript": True}}))
+    state.threads[ADVISOR_THREAD] = new_thread
 
 
 def _phase_instruction(state: State, phase: str, main_request: ChatCompletionRequest) -> str:
@@ -286,40 +265,23 @@ def _advisor_request(
     phase_instruction: str,
 ) -> ChatCompletionRequest:
     advisor = config.advisor
-    sampling = advisor.sampling
     execution_request = state.prepared.execution_request
-    tools = [ADVISE_TOOL]
-    for tool in main_request.tools:
-        if tool.function.name == ADVISE_TOOL_NAME:
-            raise _advisor_error(
-                reason="advisor_tool_name_conflict",
-                message="main request tool conflicts with internal advisor advise tool",
-                context={"tool_name": ADVISE_TOOL_NAME},
-            )
-        tools.append(tool)
-    return ChatCompletionRequest(
-        model=advisor.model,
-        messages=[
-            ChatMessage(role="developer", content=ADVISOR_PROMPT),
-            *state.sides.get(ADVISOR_SIDE, []),
-            ChatMessage(role="user", content=phase_instruction),
-        ],
-        tools=tools,
-        tool_choice=ChatToolChoiceFunction(name=ADVISE_TOOL_NAME),
+    advise_function = server_tools.rename_to_avoid_collisions(ADVISE_FUNCTION, main_request.tools)
+    return replace(
+        build_chat_request(
+            advisor,
+            execution_request,
+            messages=[
+                ChatMessage(role="developer", content=ADVISOR_PROMPT),
+                *state.threads.get(ADVISOR_THREAD, []),
+                ChatMessage(role="user", content=phase_instruction),
+            ],
+        ),
+        tools=[ChatTool(function=advise_function), *main_request.tools],
+        tool_choice=ChatToolChoiceFunction(name=advise_function.name),
         parallel_tool_calls=False,
-        max_completion_tokens=advisor.max_completion_tokens,
-        temperature=apply_float_transform(execution_request.temperature, sampling.temperature, minimum=0, maximum=2),
-        top_p=apply_float_transform(execution_request.top_p, sampling.top_p, minimum=0, maximum=1),
-        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
-        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
-        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
-        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
-        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
-        seed=apply_int_transform(None, sampling.seed),
-        reasoning_effort=advisor.reasoning_effort,
         stream_options=ChatStreamOptions(include_usage=True),
         prompt_cache_key=execution_request.prompt_cache_key,
-        service_tier=advisor.service_tier,
     )
 
 
@@ -347,7 +309,7 @@ def _annotation_text(prefix: str, advice: str | None, note: str | None) -> str |
 async def _emit_annotation(state: State, text: str) -> None:
     if STEALTH or not text:
         return
-    await state.ensure_staged()
+    await state.ensure_progress()
     await state.coordinator.summary_delta(SummaryDelta(text=text))
     await state.coordinator.summary_done(SummaryDone())
 
@@ -361,7 +323,7 @@ async def _run_advisor(
     phase_instruction: str,
     phase: str,
 ) -> tuple[str | None, str]:
-    _rebuild_advisor_side(state)
+    _rebuild_advisor_thread(state)
     request = _advisor_request(
         state=state,
         config=config,
@@ -398,8 +360,10 @@ async def _run_advisor(
         phase=phase,
     )
 
-    state.sides[ADVISOR_SIDE].extend(_strip_note_from_messages(latest_snapshot.messages))
-    state.sides[ADVISOR_SIDE].append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
+    state.threads[ADVISOR_THREAD].extend(
+        _strip_note_from_messages(latest_snapshot.messages, advise_tool_name=request.tools[0].function.name)
+    )
+    state.threads[ADVISOR_THREAD].append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
 
     _set_advisor_note(state, note)
 
@@ -413,7 +377,7 @@ async def _maybe_advise_after_tool_call(
     budget: ResponseBudget,
     main_request: ChatCompletionRequest,
 ) -> ChatMessage | None:
-    history = state.sides["main"]
+    history = state.threads["main"]
     if not history or not history[-1].is_tool():
         return None
     phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
@@ -431,8 +395,8 @@ async def _maybe_advise_after_tool_call(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        message = ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}})
-        state.sides["main"].append(message)
+        message = ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}})
+        state.threads["main"].append(message)
         return message
     return None
 
@@ -463,12 +427,12 @@ async def _maybe_advise_before_tool_call(
     )
     if advice is None:
         return
-    state.sides["main"].extend(
+    state.threads["main"].extend(
         ChatMessage(
             role="tool",
             tool_call_id=call.id,
             content=ABORTED_TOOL_OUTPUT,
-            durable={ADVISOR_SIDE: {"call_id": call_id, "tool_name": call.name}},
+            memory={ADVISOR_THREAD: {"call_id": call_id, "tool_name": call.name}},
         )
         for call in open_calls
     )
@@ -477,7 +441,7 @@ async def _maybe_advise_before_tool_call(
     text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
+    state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
 
 
 async def _maybe_advise_before_return(
@@ -507,13 +471,7 @@ async def _maybe_advise_before_return(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
-
-
-@bus.listen("config.collect")
-async def collect(paths: tuple[str, ...], *, next):
-    here = Path(__file__).resolve()
-    return await next(paths=(*paths, str(here.parent / "schema.cue")))
+        state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
 
 
 @bus.listen("response.turn")
@@ -542,6 +500,6 @@ async def advise_turn(
 __all__ = [
     "ABORTED_TOOL_OUTPUT",
     "ADVISE_TOOL_NAME",
-    "ADVISOR_SIDE",
+    "ADVISOR_THREAD",
     "ADVISOR_TOOL_OUTPUT",
 ]

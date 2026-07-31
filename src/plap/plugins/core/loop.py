@@ -17,6 +17,7 @@ from plap.bus import bus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.llms import RetryLimitExceededError
+from plap.llms.accumulator import Snapshot
 from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatFinishReason, IChatCompletionClient
 from plap.llms.retry import RetryValidator, retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
@@ -80,6 +81,16 @@ async def response_request(state: State, config: CueBox) -> ChatCompletionReques
     return build_response_request(state, config)
 
 
+@bus.emit("response.snapshot")
+async def response_snapshot(
+    state: State,
+    config: CueBox,
+    request: ChatCompletionRequest,
+    snapshot: Snapshot,
+) -> Snapshot:
+    return snapshot
+
+
 @bus.emit("response.completion")
 async def response_completion(
     state: State,
@@ -90,7 +101,7 @@ async def response_completion(
 ) -> ChatCompletionResult:
     raw_client = await state.svcs.aget(IChatCompletionClient)
     client = budgeted(raw_client, budget, config.main)
-    main = state.sides["main"]
+    main = state.threads["main"]
     suffix = len(main)
     result: ChatCompletionResult | None = None
 
@@ -105,7 +116,13 @@ async def response_completion(
         async with anyio.create_task_group() as tg:
             tg.start_soon(run_summary)
             try:
-                async for snapshot in retry_stream(client, request, validators=validators):
+                async for raw_snapshot in retry_stream(client, request, validators=validators):
+                    snapshot = await response_snapshot(
+                        state=state,
+                        config=config,
+                        request=request,
+                        snapshot=raw_snapshot,
+                    )
                     main[suffix:] = snapshot.messages
                     if snapshot.result is not None:
                         result = snapshot.result
@@ -143,14 +160,14 @@ async def response_turn(
 
 @bus.emit("response.loop")
 async def response_loop(state: State, config: CueBox, budget: ResponseBudget) -> ChatCompletionResult | None:
-    if "main" not in state.sides.active or state.open_calls("main"):
+    if "main" not in state.threads.active or state.open_calls("main"):
         return None
 
     while True:
         request = await response_request(state=state, config=config)
         result = await response_turn(state=state, config=config, budget=budget, request=request)
-        main = state.sides["main"]
-        if "main" not in state.sides.active or state.open_calls("main") or not main or main[-1].is_assistant():
+        main = state.threads["main"]
+        if "main" not in state.threads.active or state.open_calls("main") or not main or main[-1].is_assistant():
             return result
 
 
@@ -190,7 +207,7 @@ async def run_response(state: State) -> None:
             except anyio.get_cancelled_exc_class():
                 if created:
                     with anyio.CancelScope(shield=True):
-                        await state.stage()
+                        await state.save_progress()
                     with anyio.CancelScope(shield=True):
                         await state.coordinator.cancelled()
                 raise
@@ -249,21 +266,21 @@ async def default_summary(
     async for item in source:
         if isinstance(item, SummaryDelta):
             if not open_part:
-                await state.ensure_staged()
+                await state.ensure_progress()
                 open_part = True
             await state.coordinator.summary_delta(SummaryDelta(text=item.text))
             accumulated += len(item.text)
             if accumulated >= SUMMARY_HARD_FLUSH_CHARS:
                 await state.coordinator.summary_done(SummaryDone())
-                await state.stage()
+                await state.save_progress()
                 open_part = False
                 accumulated = 0
         elif isinstance(item, SummaryDone):
             if open_part:
                 await state.coordinator.summary_done(SummaryDone())
-                await state.stage()
+                await state.save_progress()
                 open_part = False
                 accumulated = 0
     if open_part:
         await state.coordinator.summary_done(SummaryDone())
-        await state.stage()
+        await state.save_progress()

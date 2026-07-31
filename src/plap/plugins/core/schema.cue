@@ -70,27 +70,27 @@ package plap
   output_equivalence: #OutputEquivalence
 }
 
-#WellKnownSideCode: uint16 & <1024
-#RegisteredSideCode: uint16 & >=1024 & <49152
-#PrivateSideCode: uint16 & >=49152
+#WellKnownThreadCode: uint16 & <1024
+#RegisteredThreadCode: uint16 & >=1024 & <49152
+#PrivateThreadCode: uint16 & >=49152
 
-#WellKnownSides: {
+#WellKnownThreads: {
   main: 0
 }
 
-#RegisteredSides: {}
+#RegisteredThreads: {}
 
-#PrivateSides: {}
+#PrivateThreads: {}
 
-#SideCodes: {
-  for name, code in #WellKnownSides {
-    "\(name)": code & #WellKnownSideCode
+#ThreadCodes: {
+  for name, code in #WellKnownThreads {
+    "\(name)": code & #WellKnownThreadCode
   }
-  for name, code in #RegisteredSides {
-    "\(name)": code & #RegisteredSideCode
+  for name, code in #RegisteredThreads {
+    "\(name)": code & #RegisteredThreadCode
   }
-  for name, code in #PrivateSides {
-    "\(name)": code & #PrivateSideCode
+  for name, code in #PrivateThreads {
+    "\(name)": code & #PrivateThreadCode
   }
 }
 
@@ -106,9 +106,9 @@ package plap
   model_info!: #ModelInfoConfig
   main?: #FieldConfig
   reasoning_to_output: *1.0 | >=0
-  sides: #SideCodes
-  _sidesByCode: {
-    for name, code in sides {
+  threads: #ThreadCodes
+  _threadsByCode: {
+    for name, code in threads {
       "\(code)": name
     }
   }

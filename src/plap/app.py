@@ -263,21 +263,21 @@ def create_app() -> Litestar:
 
     bus.reset()
 
-    @bus.emit("config.collect")
-    async def collect_config(paths: tuple[str, ...]) -> tuple[str, ...]:
+    @bus.emit("bootstrap.config")
+    async def bootstrap_config(paths: tuple[str, ...]) -> tuple[str, ...]:
         return paths
 
-    @bus.emit("routes.collect")
-    async def collect_routes(routes: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+    @bus.emit("bootstrap.routes")
+    async def bootstrap_routes(routes: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
         _ = loaded
         return routes
 
-    @bus.emit("svcs.collect")
-    async def collect_svcs(registry: svcs.Registry, loaded: CueBox) -> None:
+    @bus.emit("bootstrap.services")
+    async def bootstrap_services(registry: svcs.Registry, loaded: CueBox) -> None:
         _ = registry, loaded
 
-    @bus.emit("shutdown.collect")
-    async def collect_shutdown(hooks: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
+    @bus.emit("bootstrap.shutdown_hooks")
+    async def bootstrap_shutdown_hooks(hooks: tuple[object, ...], loaded: CueBox) -> tuple[object, ...]:
         _ = loaded
         return hooks
 
@@ -285,7 +285,7 @@ def create_app() -> Litestar:
         entrypoint = discovered[name]
         _import_plugin(entrypoint)
 
-    config_paths = _run_sync(collect_config, paths=())
+    config_paths = _run_sync(bootstrap_config, paths=())
     loaded = load(*config_paths)
     if "plap" not in loaded:
         raise RuntimeError("config load did not produce package 'plap'")
@@ -310,10 +310,10 @@ def create_app() -> Litestar:
     registry.register_value(Database, database)
     registry.register_value(SealingKeyring, keyring)
     registry.register_factory(ResponseStore, lambda svcs_container: ResponseStore(svcs_container.get(Database)))
-    _run_sync(collect_svcs, registry=registry, loaded=loaded)
+    _run_sync(bootstrap_services, registry=registry, loaded=loaded)
 
-    routes = _run_sync(collect_routes, routes=(), loaded=loaded)
-    shutdown_hooks = _run_sync(collect_shutdown, hooks=(), loaded=loaded)
+    routes = _run_sync(bootstrap_routes, routes=(), loaded=loaded)
+    shutdown_hooks = _run_sync(bootstrap_shutdown_hooks, hooks=(), loaded=loaded)
 
     state = State(
         {

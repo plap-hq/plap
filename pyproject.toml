@@ -64,6 +64,7 @@ packages = ["src/plap"]
 
 [project.entry-points."plap.plugin"]
 core = "plap.plugins.core"
+easy = "plap.plugins.easy"
 vision = "plap.plugins.vision"
 summary = "plap.plugins.summary"
 advisor = "plap.plugins.advisor"

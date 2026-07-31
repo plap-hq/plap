@@ -376,14 +376,14 @@ class ChatMessage:
     tool_calls: list[ChatToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     reasoning_content: str | None = None
-    durable: dict[str, JSONValue] = field(default_factory=dict)
+    memory: dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", ChatRole(self.role))
         object.__setattr__(self, "tool_calls", list(self.tool_calls))
         if isinstance(self.content, list):
             object.__setattr__(self, "content", list(self.content))
-        object.__setattr__(self, "durable", _json_object(self.durable, label="message durable state"))
+        object.__setattr__(self, "memory", _json_object(self.memory, label="message memory"))
 
     def is_assistant(self) -> bool:
         return self.role == ChatRole.ASSISTANT
@@ -408,14 +408,14 @@ class ChatMessage:
             value["tool_calls"] = [call.to_primitive() for call in self.tool_calls]
         if self.reasoning_content is not None:
             value["reasoning_content"] = self.reasoning_content
-        if self.durable:
-            value["durable"] = _json_object(self.durable, label="message durable state")
+        if self.memory:
+            value["memory"] = _json_object(self.memory, label="message memory")
         return value
 
     @classmethod
     def from_primitive(cls, value: object) -> ChatMessage:
         item = _required_mapping(value, label="message")
-        allowed = {"role", "content", "name", "refusal", "tool_calls", "tool_call_id", "reasoning_content", "durable"}
+        allowed = {"role", "content", "name", "refusal", "tool_calls", "tool_call_id", "reasoning_content", "memory"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
@@ -434,7 +434,7 @@ class ChatMessage:
             tool_calls=tool_calls,
             tool_call_id=_optional_string(item.get("tool_call_id"), label="message tool_call_id"),
             reasoning_content=_optional_string(item.get("reasoning_content"), label="message reasoning_content"),
-            durable=_json_object(item.get("durable", {}), label="message durable state"),
+            memory=_json_object(item.get("memory", {}), label="message memory"),
         )
 
 

@@ -52,7 +52,7 @@ def test_measure_prompt_tokens_uses_model_visible_surface(monkeypatch) -> None:
                 tool_call_id="tool_output_1",
                 tool_calls=[ChatToolCall(id="tool_call_1", name="search", arguments='{"b":2,"a":1}')],
                 reasoning_content="kept thinking",
-                durable={"advisor": {"call_id": "call_1"}},
+                memory={"advisor": {"call_id": "call_1"}},
             )
         ],
         tokenizer_config=_tokenizer_config(model="crof/qwen3.5-9b"),

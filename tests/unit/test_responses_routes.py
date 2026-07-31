@@ -24,7 +24,7 @@ from plap.responses.ingest.models import (
     ReasoningCheckpoint,
     ReasoningPatch,
     ReasoningPayload,
-    Sides,
+    Threads,
 )
 from plap.responses.ingest.sealing import (
     open_reasoning_payload,
@@ -87,7 +87,7 @@ def _loaded() -> CueBox:
                 {
                     "config": CueBox(
                         {
-                            "sides": {"main": 0},
+                            "threads": {"main": 0},
                         },
                         frozen_box=True,
                     )
@@ -199,11 +199,11 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
     assert store.begin_calls == 0
     assert prepared.response_request is request
     assert prepared.execution_request is request
-    assert ingested.durable == {}
-    assert ingested.sides.messages.keys() == {"main"}
-    assert ingested.sides["main"][0].role == "user"
-    assert ingested.sides["main"][0].content == "hello"
-    assert ingested.sides.active == {"main"}
+    assert ingested.memory == {}
+    assert ingested.threads.messages.keys() == {"main"}
+    assert ingested.threads["main"][0].role == "user"
+    assert ingested.threads["main"][0].content == "hello"
+    assert ingested.threads.active == {"main"}
     assert ingested.last_reasoning_id is None
     assert ingested.last_compaction_id is None
     assert coordinator.current_response().model == request.model
@@ -215,7 +215,7 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
         id="rs_stored",
         previous_reasoning_id=None,
         previous_compaction_id=None,
-        state=ReasoningPatch(durable=[]),
+        state=ReasoningPatch(memory=[]),
     )
     execution_request = ResponseCreateRequest(
         model="plap/test",
@@ -254,10 +254,10 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
         request=response_request,
         channels=_RecordingChannels(),
     )
-    checkpoint = ReasoningCheckpoint(durable={"turn": 2}, active={"main"}, sides={})
+    checkpoint = ReasoningCheckpoint(memory={"turn": 2}, active={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
-    patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])
+    patch = ReasoningPatch(memory=[{"op": "add", "path": "/tool", "value": True}])
     await coordinator.begin_reasoning(state=patch, main=[])
     await coordinator.finish_reasoning(state=patch, main=[])
     output = coordinator.current_response().output
@@ -278,7 +278,7 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
 
 async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() -> None:
     keyring = _keyring()
-    compaction = CompactionPayload(id="cmp_stored", durable={"generation": 1}, sides=Sides())
+    compaction = CompactionPayload(id="cmp_stored", memory={"generation": 1}, threads=Threads())
     execution_request = ResponseCreateRequest(
         model="plap/test",
         input=[
@@ -315,10 +315,10 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
         request=response_request,
         channels=_RecordingChannels(),
     )
-    checkpoint = ReasoningCheckpoint(durable={"generation": 2}, active={"main"}, sides={})
+    checkpoint = ReasoningCheckpoint(memory={"generation": 2}, active={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
-    patch = ReasoningPatch(durable=[{"op": "add", "path": "/tool", "value": True}])
+    patch = ReasoningPatch(memory=[{"op": "add", "path": "/tool", "value": True}])
     await coordinator.begin_reasoning(state=patch, main=[])
     await coordinator.finish_reasoning(state=patch, main=[])
     checkpoint_item, patch_item = coordinator.current_response().output[-2:]
@@ -353,7 +353,7 @@ async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.Monkey
 
     await _run_stream(
         prepared=_prepared(),
-        ingested=Ingested(durable={}, sides=Sides(), main_tail=None, last_reasoning_id=None),
+        ingested=Ingested(memory={}, threads=Threads(), main_tail=None, last_reasoning_id=None),
         coordinator=_coordinator(),
         svcs=container,
     )

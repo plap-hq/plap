@@ -97,9 +97,9 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
     )
 
 
-def _side_codes(svcs: svcs.Container) -> dict[str, int]:
-    raw = svcs.get(CueBox).plap.config.sides
-    return {str(side): int(code) for side, code in raw.items()}
+def _thread_codes(svcs: svcs.Container) -> dict[str, int]:
+    raw = svcs.get(CueBox).plap.config.threads
+    return {str(thread): int(code) for thread, code in raw.items()}
 
 
 async def _prepare_create(
@@ -116,7 +116,7 @@ async def _prepare_create(
         ingested = await ingest_response_request(
             prepared.execution_request,
             keyring=sealing_keyring,
-            side_codes=_side_codes(svcs),
+            thread_codes=_thread_codes(svcs),
         )
         coordinator = StreamCoordinator(
             request=prepared.response_request,
@@ -222,7 +222,7 @@ def _response_state(
         svcs=svcs,
         coordinator=coordinator,
         sealing_keyring=svcs.get(SealingKeyring),
-        side_codes=_side_codes(svcs),
+        thread_codes=_thread_codes(svcs),
     )
 
 

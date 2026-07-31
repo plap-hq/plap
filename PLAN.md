@@ -3,18 +3,18 @@ Ingestion Rebuild Proposal
 Replace the fully chained reasoning replay system with a half-chained system:
 ... U R_checkpoint A FC FCO R_patch A ...
 The intended boundaries are:
-- The first reasoning item after a standalone user message checkpoints durable state and every non-main side.
+- The first reasoning item after a standalone user message checkpoints memory state and every non-main thread.
 - Main is never checkpointed by reasoning. It always uses append and postfix publication semantics.
 - Reasoning during subsequent tool-call turns remains patch-based and chained to the checkpoint.
 - A later user message breaks the chain again and requires another checkpoint.
-- Compaction remains a distinct full checkpoint containing durable state and every side, including main.
+- Compaction remains a distinct full checkpoint containing memory state and every thread, including main.
 - Public assistant content becomes positional and editable rather than authenticated by equality with sealed content.
-- Tool declarations remain authenticated and strict on every side.
+- Tool declarations remain authenticated and strict on every thread.
 - Main function calls attach to assistant positions rather than being permanently tied to the assistant that carried their sealed declaration.
 - Timewarp moves complete assistant-owned bundles without rewriting sealed payloads.
 2. Canonical Examples
 Input	Meaning
-U R	R must checkpoint durable state and non-main sides.
+U R	R must checkpoint memory state and non-main threads.
 U R1 FC FCO R2	R1 is a checkpoint; R2 is a chained patch.
 C R	R is a patch based on full compaction C.
 R(P(A)) M FC FCO	M receives private reasoning from A; calls attach to M.
@@ -24,7 +24,7 @@ M FMu FC FCO	Calls attach to M and render before FMu.
 R(M) FC FCO	Hidden M owns the call without a public message item.
 R1(M) RN(P(M)) FC FCO	Hidden M timewarps to RN and owns the call there.
 Terminology:
-- Durable: application-owned state persisted across turns, separate from message histories.
+- Memory: application-owned state persisted across turns, separate from message histories.
 - U: standalone public user message.
 - M: public assistant message.
 - FMa: fabricated assistant message.
@@ -34,11 +34,11 @@ Terminology:
 - R(M): reasoning appending hidden assistant M.
 - P(A): postfix MessagePatch carrying full sealed assistant A.
 - C: compaction item.
-3. Reasoning Payload Version 6
-Reasoning moves to payload version 6.
-Compaction remains version 4.
+3. Reasoning Payload Version 8
+Reasoning uses payload version 8.
+Compaction uses version 6.
 Call IDs remain version 2.
-Runtime side identity remains the descriptive string stored in reasoning and
+Runtime thread identity remains the descriptive string stored in reasoning and
 compaction payloads. CUE assigns the compact call-ID codes: `0..1023` is
 well-known, `1024..49151` is registered, and `49152..65535` is private or
 experimental. Core owns `main` at code 0; advisor owns code 1024.
@@ -52,40 +52,40 @@ ReasoningPayload {
 Checkpoint state:
 ReasoningCheckpoint {
     type: "checkpoint"
-    durable: object
-    active: Side[]
-    sides: {
-        <non-main side>: Message[]
+    memory: object
+    active: str[]
+    threads: {
+        <non-main thread>: Message[]
     }
 }
 Patch state:
 ReasoningPatch {
     type: "patch"
-    durable: JSONPatch
-    active: Side[] | null
-    sides: {
-        <non-main side>: JSONPatch
+    memory: JSONPatch
+    active: str[] | null
+    threads: {
+        <non-main thread>: JSONPatch
     }
 }
 Main updates remain:
 MainUpdate = Message | MessagePatch
-Durable state has two scopes with the same mutable JSON-object API:
-- State.durable is global state whose lifetime is independent of any message.
-- Message.durable is state owned by one message and follows that message through
+Persisted plugin memory has two owner scopes:
+- State.memory is global state whose lifetime is independent of any message.
+- Message.memory is memory owned by one message and follows that message through
   replay, patches, movement, and compaction.
 - Plugin data is nested under its plugin name at either scope.
-- Message durable state is sealed and hashed but never included in provider
+- Message memory is sealed and hashed but never included in provider
   messages or token projections.
-- Empty message durable state is omitted from the message primitive; unknown
+- Empty message memory is omitted from the message primitive; unknown
   top-level message fields are invalid.
 Structural rules:
-- Reasoning checkpoints cannot contain main in state.sides.
-- Reasoning patches cannot contain main in state.sides.
+- Reasoning checkpoints cannot contain main in state.threads.
+- Reasoning patches cannot contain main in state.threads.
 - Main updates exist only in the common append-only main field.
-- A checkpoint replaces the complete non-main side map.
-- A checkpoint side omitted from sides is removed.
-- An explicitly empty checkpoint side remains explicitly present.
-- A patch side omitted from sides is unchanged.
+- A checkpoint replaces the complete non-main thread map.
+- A checkpoint thread omitted from threads is removed.
+- An explicitly empty checkpoint thread remains explicitly present.
+- A patch thread omitted from threads is unchanged.
 - Main cannot be checkpointed or JSON-patched by reasoning.
 No reasoning-v5 compatibility decoder will be retained.
 4. Reasoning Boundary State
@@ -129,33 +129,33 @@ Applying a reasoning checkpoint performs one atomic transaction:
  1. Validate that a checkpoint is required.
  2. Validate that active/open tool obligations do not block reasoning.
  3. Preserve reconstructed main history.
- 4. Replace durable state.
+ 4. Replace memory state.
  5. Replace active membership.
- 6. Remove all existing non-main sides.
- 7. Install the checkpoint’s complete non-main side map.
- 8. Validate configured side membership.
+ 6. Remove all existing non-main threads.
+ 7. Install the checkpoint’s complete non-main thread map.
+ 8. Validate configured thread membership.
  9. Rebuild non-main call trackers.
 10. Apply the append-only main update.
 11. Validate all resulting histories.
 12. Set the checkpoint ID as the reasoning chain head.
 13. Clear checkpoint_required.
 Main is deliberately preserved through steps 4 through 9.
-A patch transaction performs the same validation and main transition, but applies durable and non-main JSON patches rather than replacing state.
+A patch transaction performs the same validation and main transition, but applies memory and non-main JSON patches rather than replacing state.
 6. Compaction Semantics
 Compaction remains stronger than a reasoning checkpoint.
 Compaction:
-- Replaces durable state.
+- Replaces memory state.
 - Replaces active membership.
 - Replaces main.
-- Replaces all non-main sides.
+- Replaces all non-main threads.
 - Establishes an authenticated main tail.
 - Clears reasoning lineage.
 - Establishes its ID as the compaction lineage anchor.
 - Allows a following patch with previous_reasoning_id=null.
 Reasoning checkpoint:
-- Replaces durable state.
+- Replaces memory state.
 - Replaces active membership.
-- Replaces only non-main sides.
+- Replaces only non-main threads.
 - Appends to main.
 - Establishes a new reasoning chain head.
 Therefore:
@@ -310,7 +310,7 @@ The live bundle movement includes:
 - Fabricated calls owned by that assistant.
 - Fabricated outputs owned by that assistant.
 The movement is confined to the main assistant bundle. Sealed non-main FC/FCO
-items never become source-owned main material and keep their existing side
+items never become source-owned main material and keep their existing thread
 attachments when interleaved with a timewarp.
 The movement excludes:
 - Unrelated fabricated assistants.
@@ -403,7 +403,7 @@ It accepts:
 R(P(M)) FC
 when no public assistant projection exists.
 17. Strict Tool Declarations
-Tool declarations remain strict on every side.
+Tool declarations remain strict on every thread.
 For main:
 - Full hidden assistants carry declarations.
 - MessagePatch carries declarations.
@@ -414,7 +414,7 @@ For main:
 - Hidden settled calls remain attached to their hidden/source assistant.
 - Missing FC is not interpreted as user deletion.
 - Missing FCO is invalid.
-For non-main sides:
+For non-main threads:
 - Checkpoints carry complete hidden histories and declarations.
 - Patch reasoning JSON-patches those histories.
 - FC opens the matching declaration.
@@ -425,8 +425,8 @@ For non-main sides:
 - Sealed non-main FC/FCO never participate in main positional owner selection.
 - Main MessagePatch attachment and timewarp never rehome a non-main call.
 - Interleaving a non-main FC/FCO with main fabrication or timewarp preserves its
-  attachment to the matching declaration on its sealed side.
-This maintains symmetric call obligations without giving non-main sides MessagePatch semantics.
+  attachment to the matching declaration on its sealed thread.
+This maintains symmetric call obligations without giving non-main threads MessagePatch semantics.
 18. Main Call Ownership
 Main calls choose their owner positionally.
 Rules:
@@ -507,38 +507,38 @@ checkpoint_required: bool
 last_compaction_id: string | null
 State selects the reasoning variant once per draft.
 Checkpoint generation:
-- Serialize the complete current durable object.
+- Serialize the complete current memory object.
 - Serialize the complete active set.
-- Serialize every current non-main side.
+- Serialize every current non-main thread.
 - Exclude main from checkpoint state.
 - Generate ordinary append-only main updates.
 Patch generation:
-- Diff durable state against the ingested base.
-- Diff each non-main side against the ingested base.
+- Diff memory state against the ingested base.
+- Diff each non-main thread against the ingested base.
 - Emit optional active replacement.
 - Generate the same append-only main updates.
 A streamed reasoning draft cannot change from checkpoint to patch or patch to checkpoint during replacement.
-State exposes one complete mutable main history as State.sides["main"]. The list
-may be appended, cleared, reordered, or replaced like any other side. Before
+State exposes one complete mutable main history as State.threads["main"]. The list
+may be appended, cleared, reordered, or replaced like any other thread. Before
 emission, State validates that the ingested main history remains an exact
 prefix and derives the reasoning main update from everything after that prefix.
 Only the persisted prefix is immutable; the current-response suffix remains
 freely replaceable. State has no separate main field or compatibility alias.
-State.stage creates or replaces a provisional reasoning item from a
+State.save_progress creates or replaces a provisional reasoning item from a
 cancellation-safe snapshot. State.commit finalizes reasoning from live state
-and emits eligible public output. Both reject active or stored sides absent
-from the CUE-composed side map.
+and emits eligible public output. Both reject active or stored threads absent
+from the CUE-composed thread map.
 22. Main Producer Cases
 Main text projection and call projection must be computed separately:
 public_message: ResponseMessageItem | None
 public_calls: ResponseFunctionCallItem[]
 Publication eligibility is structural rather than content-based:
-- A new logical assistant appended through State.sides["main"] is eligible when main is active.
+- A new logical assistant appended through State.threads["main"] is eligible when main is active.
 - A persisted HiddenMainTail is eligible when main is active.
 - A persisted PublicMainTail is historical and is never automatically eligible.
 - A persisted CompactedMainTail is historical and is never automatically eligible.
 - An inactive main tail is never eligible.
-- Active-to-active remains eligible when State.sides["main"] contains a genuinely new logical assistant.
+- Active-to-active remains eligible when State.threads["main"] contains a genuinely new logical assistant.
 - Deactivation and reactivation do not make a public or compacted tail eligible again.
 - The complete source retained by HiddenMainTail, not its rendered assistant, is carried by P(A).
 Producer forms:
@@ -613,11 +613,11 @@ Compaction predecessor mismatch	reasoning_previous_compaction_id_mismatch
 Public-bearing patch lacks assistant	main_message_patch_target_missing
 Active declaration lacks FC	reasoning_tool_call_missing_function_call_item
 Open call lacks FCO	function_call_missing_function_call_output
-FC targets inactive declaration	inactive_side_function_call
+FC targets inactive declaration	inactive_thread_function_call
 FCO lacks opened owner	function_call_output_without_pending_function_call
 Duplicate FC	duplicate_pending_function_call
 Reasoning crosses unfinished calls	pending_tool_outputs_block_message
-Existing invalid durable patch, invalid side patch, duplicate declaration, compaction, and sealed payload errors remain.
+Existing invalid memory patch, invalid thread patch, duplicate declaration, compaction, and sealed payload errors remain.
 26. Code Structure
 Build the replacement subsystem to completion before one coherent cutover.
 Files:
@@ -641,13 +641,13 @@ ingest.py will retain:
 - Input normalization.
 - Item decoding.
 - Compaction slicing.
-- Durable and non-main replay.
+- Memory and non-main replay.
 - Boundary state.
-- Side routing.
+- Thread routing.
 - Top-level orchestration.
 All called functions will remain above their callers per repository convention.
 27. Implementation Order
- 1. Add version-6 reasoning models.
+ 1. Add version-8 reasoning models.
  2. Add checkpoint and patch state variants.
  3. Move main append data to the common payload field.
  4. Update sealing documentation and exact wire serialization.
@@ -658,7 +658,7 @@ All called functions will remain above their callers per repository convention.
  9. Add live-bundle timewarp.
 10. Add declaration claiming and positional rehoming.
 11. Add checkpoint-boundary replay.
-12. Add durable and non-main checkpoint replacement.
+12. Add memory and non-main checkpoint replacement.
 13. Cut ingestion over atomically.
 14. Remove the old _Main implementation and normalizer.
 15. Update State checkpoint/patch generation.
@@ -682,11 +682,11 @@ No compatibility shim or transitional replay path will remain.
 - Reasoning created without compaction rejects after compaction.
 - Reasoning anchored to an older compaction rejects after a newer compaction.
 - Checkpoints preserve the current compaction anchor while clearing reasoning lineage.
-- Checkpoint replaces durable state exactly.
+- Checkpoint replaces memory state exactly.
 - Checkpoint replaces active membership exactly.
-- Checkpoint replaces every non-main side exactly.
-- Omitted checkpoint side is removed.
-- Explicit empty checkpoint side remains present.
+- Checkpoint replaces every non-main thread exactly.
+- Omitted checkpoint thread is removed.
+- Explicit empty checkpoint thread remains present.
 - Checkpoint never snapshots main.
 29. Required Public Patch Tests
 - Public content may differ from sealed content.
@@ -737,7 +737,7 @@ No compatibility shim or transitional replay path will remain.
 - M FC1 FMa FC2 FCO2 FCO1 produces two positional bundles.
 - Rehoming preserves authenticated declaration metadata.
 - Non-main pairing remains strict.
-- Main timewarp preserves interleaved non-main FC/FCO attachment to its sealed side.
+- Main timewarp preserves interleaved non-main FC/FCO attachment to its sealed thread.
 - Inactive declarations remain parked.
 - Stale non-main pairs remain discarded.
 - Main transplant behavior remains covered.
@@ -752,8 +752,8 @@ No compatibility shim or transitional replay path will remain.
 - An unchanged active public tail emits no output.
 - Reactivating a public tail emits no public message or MessagePatch.
 - Reactivating a compacted tail emits no public message or MessagePatch.
-- Active-to-active with a new State.sides["main"] assistant still publishes it.
-- State.sides["main"] may replace any current-response suffix.
+- Active-to-active with a new State.threads["main"] assistant still publishes it.
+- State.threads["main"] may replace any current-response suffix.
 - State rejects deletion, replacement, reordering, insertion, or altered-message substitution within the persisted main prefix.
 - Cancellation preserves checkpoint/patch variant.
 - Stored replay preserves chain boundaries.
@@ -794,5 +794,5 @@ The rebuild is complete only when:
 - No content-hash publication system remains.
 - Already-public and compacted tails are not automatically republished.
 - Explicit repeated source timewarp revises one bundle rather than duplicating it.
-- State.sides["main"] is the only mutable main API and reasoning emits only its validated suffix.
+- State.threads["main"] is the only mutable main API and reasoning emits only its validated suffix.
 - No old replay or compatibility path remains.

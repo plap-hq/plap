@@ -51,8 +51,8 @@ from plap.llms.completions.quirks import Drop, ExtraBodyIf, MoveMessageField, Mo
 from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
 from plap.plugins.vision import (
     VISION_PROMPT,
-    VISION_TOOL,
     VISION_TOOL_NAME,
+    VisionTool,
     _image_id,
     _normalize_image_ids,
     _rewrite_request,
@@ -131,9 +131,10 @@ def _make_reflection_lm_with_reasoning(model_name: str, *, reasoning_effort: str
 # Tunable seed candidate (4 parameters)
 # ---------------------------------------------------------------------------
 
-VISION_TOOL_DESCRIPTION = VISION_TOOL.function.description or ""
-VISION_TOOL_IDS_DESCRIPTION = str(VISION_TOOL.function.parameters["properties"]["ids"]["description"])
-VISION_TOOL_PROMPT_DESCRIPTION = str(VISION_TOOL.function.parameters["properties"]["prompt"]["description"])
+_DEFAULT_VISION_TOOL = VisionTool()
+VISION_TOOL_DESCRIPTION = _DEFAULT_VISION_TOOL.description
+VISION_TOOL_IDS_DESCRIPTION = str(_DEFAULT_VISION_TOOL.parameters["properties"]["ids"]["description"])
+VISION_TOOL_PROMPT_DESCRIPTION = str(_DEFAULT_VISION_TOOL.parameters["properties"]["prompt"]["description"])
 
 # SEED: dict[str, str] = {
 #     "vision_prompt": VISION_PROMPT,
@@ -820,7 +821,7 @@ async def _evaluate_one(
     chat_images: list[ChatContentImage] = [part for part in content if isinstance(part, ChatContentImage)]
     correct_ids = [_image_id(img) for img in chat_images]
 
-    # 2. Apply the vision plugin's rewrite: image → text id, inject VISION_TOOL
+    # 2. Apply the vision plugin's image-to-id rewrite.
     rewritten = _rewrite_request(raw_main)
     # Replace with the tuned tool description from this candidate
     tuned_tool = _build_tool(candidate["tool_description"], candidate["ids_description"], candidate["prompt_description"])
@@ -1155,7 +1156,7 @@ def _load_config():
         return _CONFIG_CACHE
     bus.reset()
 
-    @bus.emit("config.collect")
+    @bus.emit("bootstrap.config")
     async def _collect(paths: tuple[str, ...]) -> tuple[str, ...]:
         return paths
 

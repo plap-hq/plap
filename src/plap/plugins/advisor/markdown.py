@@ -186,7 +186,7 @@ def latest_closed_tool_output_turn(history: list[ChatMessage]) -> ToolOutputTurn
 def _tool_output_name(msg: ChatMessage) -> str | None:
     if msg.name is not None:
         return msg.name
-    advisor = msg.durable.get("advisor")
+    advisor = msg.memory.get("advisor")
     if not isinstance(advisor, Mapping):
         return None
     tool_name = advisor.get("tool_name")

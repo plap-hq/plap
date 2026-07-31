@@ -2018,17 +2018,17 @@ def test_build_providers_includes_wandb_route_when_api_key_is_configured() -> No
     assert isinstance(providers["wandb/"], OpenAIProvider)
 
 
-def test_chat_message_durable_state_round_trips_through_primitive() -> None:
+def test_chat_message_memory_round_trips_through_primitive() -> None:
     message = ChatMessage(
         role="tool",
         content="result",
         tool_call_id="call_1",
-        durable={"vision": {"reasoning_content": "private"}},
+        memory={"vision": {"reasoning_content": "private"}},
     )
 
     primitive = message.to_primitive()
 
-    assert primitive["durable"] == {"vision": {"reasoning_content": "private"}}
+    assert primitive["memory"] == {"vision": {"reasoning_content": "private"}}
     assert ChatMessage.from_primitive(primitive) == message
 
 
@@ -2037,9 +2037,9 @@ def test_chat_message_rejects_unknown_top_level_primitive_fields() -> None:
         ChatMessage.from_primitive({"role": "developer", "advisor": {"call_id": "call_1"}})
 
 
-def test_chat_message_rejects_non_json_durable_state() -> None:
-    with pytest.raises(TypeError, match=r"message durable state\.advisor must contain only JSON values"):
-        ChatMessage(role="developer", durable={"advisor": object()})
+def test_chat_message_rejects_non_json_memory() -> None:
+    with pytest.raises(TypeError, match=r"message memory\.advisor must contain only JSON values"):
+        ChatMessage(role="developer", memory={"advisor": object()})
 
 
 def test_build_chat_body_preserves_full_request_shape() -> None:
@@ -2085,7 +2085,7 @@ def test_build_chat_body_preserves_full_request_shape() -> None:
     assert body["stream_options"] == {"include_usage": True}
 
 
-def test_build_chat_body_excludes_message_durable_state() -> None:
+def test_build_chat_body_excludes_message_memory() -> None:
     request = ChatCompletionRequest(
         model="model-a",
         messages=[
@@ -2093,14 +2093,14 @@ def test_build_chat_body_excludes_message_durable_state() -> None:
                 role="assistant",
                 content="answer",
                 reasoning_content="private reasoning",
-                durable={"advisor": {"call_id": "call_1"}},
+                memory={"advisor": {"call_id": "call_1"}},
             ),
-            ChatMessage(role="developer", content="continue", durable={"advisor": {"transcript": True}}),
+            ChatMessage(role="developer", content="continue", memory={"advisor": {"transcript": True}}),
             ChatMessage(
                 role="tool",
                 content="cancelled",
                 tool_call_id="call_2",
-                durable={"advisor": {"call_id": "call_1", "tool_name": "read_file"}},
+                memory={"advisor": {"call_id": "call_1", "tool_name": "read_file"}},
             ),
         ],
     )

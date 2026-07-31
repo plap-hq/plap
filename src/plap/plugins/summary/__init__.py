@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import anyio
 
@@ -9,6 +8,7 @@ from plap.bus import bus
 from plap.config import CueBox
 from plap.llms.completions.chat import IChatCompletionClient
 from plap.plugins.core.budget import ResponseBudget, budgeted
+from plap.plugins.easy import bootstrap
 from plap.plugins.summary.summarizer import (
     ChatReasoningSummarizer,
     _append_summary,
@@ -18,11 +18,7 @@ from plap.plugins.summary.summarizer import (
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
 
-
-@bus.listen("config.collect")
-async def collect(paths: tuple[str, ...], *, next):
-    here = Path(__file__).resolve()
-    return await next(paths=(*paths, str(here.parent / "schema.cue")))
+bootstrap.config(__file__)
 
 
 async def _emit_summary_fragment(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
+
 from plap.config import CueBox
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
@@ -10,7 +13,7 @@ from plap.llms.completions.chat import (
     ChatTool,
     ChatToolChoiceFunction,
 )
-from plap.responses.contracts import FunctionTool, ToolChoiceFunction
+from plap.responses.contracts import FunctionTool, ResponseCreateRequest, ToolChoiceFunction
 from plap.responses.state import State
 
 DEVELOPER_PROMPT_TEMPLATE = "You are {model_name}, an AI assistant."
@@ -117,6 +120,29 @@ def build_config_request(state: State) -> dict[str, object]:
     return request
 
 
+def build_chat_request(
+    config: CueBox,
+    request: ResponseCreateRequest,
+    messages: Sequence[ChatMessage],
+) -> ChatCompletionRequest:
+    sampling = config.sampling
+    return ChatCompletionRequest(
+        model=config.model,
+        messages=list(messages),
+        max_completion_tokens=config.max_completion_tokens,
+        temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
+        top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
+        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
+        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
+        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
+        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
+        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
+        seed=apply_int_transform(None, sampling.seed),
+        reasoning_effort=config.reasoning_effort,
+        service_tier=config.service_tier,
+    )
+
+
 def build_response_request(state: State, config: CueBox) -> ChatCompletionRequest:
     request = state.prepared.execution_request
     main = config.main
@@ -142,36 +168,25 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
         for tool in request.tools or []
         if isinstance(tool, FunctionTool)
     ]
-    return ChatCompletionRequest(
-        model=main.model,
-        messages=[*instructions, *state.sides["main"]],
+    return replace(
+        build_chat_request(main, request, [*instructions, *state.threads["main"]]),
         tools=tools,
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,
         response_format=_response_format(state),
-        max_completion_tokens=main.max_completion_tokens,
-        temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
-        top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
-        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
-        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
-        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
-        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
-        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
         logprobs=True if top_logprobs is not None else None,
         top_logprobs=top_logprobs,
-        seed=apply_int_transform(None, sampling.seed),
-        reasoning_effort=main.reasoning_effort,
         stream_options=ChatStreamOptions(include_usage=True),
         user=request.user,
         prompt_cache_key=request.prompt_cache_key,
         metadata=request.metadata,
-        service_tier=main.service_tier,
     )
 
 
 __all__ = [
     "apply_float_transform",
     "apply_int_transform",
+    "build_chat_request",
     "build_config_request",
     "build_response_request",
 ]

@@ -51,8 +51,7 @@ from plap.responses.ingest.models import (
     ReasoningCheckpoint,
     ReasoningPatch,
     ReasoningPayload,
-    Side,
-    Sides,
+    Threads,
     ToolCall,
     split_main_updates,
 )
@@ -86,7 +85,7 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
-def _side_codes() -> dict[str, int]:
+def _thread_codes() -> dict[str, int]:
     return {
         "main": 0,
         "defender": 1024,
@@ -96,27 +95,27 @@ def _side_codes() -> dict[str, int]:
 
 
 def _decode_queue(items, *, keyring: SealingKeyring):
-    return _decode_queue_impl(items, keyring=keyring, side_codes=_side_codes())
+    return _decode_queue_impl(items, keyring=keyring, thread_codes=_thread_codes())
 
 
 async def ingest_response_request(request: ResponseCreateRequest, *, keyring: SealingKeyring):
-    return await _ingest_response_request_impl(request, keyring=keyring, side_codes=_side_codes())
+    return await _ingest_response_request_impl(request, keyring=keyring, thread_codes=_thread_codes())
 
 
 def _pack_call_id(value: CallID) -> bytes:
-    return _pack_call_id_impl(value, side_codes=_side_codes())
+    return _pack_call_id_impl(value, thread_codes=_thread_codes())
 
 
 def _unpack_call_id(value: bytes) -> CallID:
-    return _unpack_call_id_impl(value, side_codes=_side_codes())
+    return _unpack_call_id_impl(value, thread_codes=_thread_codes())
 
 
 def seal_call_id(value: CallID, *, keyring: SealingKeyring) -> str:
-    return _seal_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
+    return _seal_call_id_impl(value, keyring=keyring, thread_codes=_thread_codes())
 
 
 def open_call_id(value: str, *, keyring: SealingKeyring) -> CallID:
-    return _open_call_id_impl(value, keyring=keyring, side_codes=_side_codes())
+    return _open_call_id_impl(value, keyring=keyring, thread_codes=_thread_codes())
 
 
 _REASONING_PAYLOAD_COUNTER = count()
@@ -125,9 +124,9 @@ _COMPACTION_PAYLOAD_COUNTER = count()
 
 @dataclass(frozen=True, slots=True)
 class _Update:
-    active: set[Side] | None
+    active: set[str] | None
     main: list[Message | MessagePatch]
-    patches: dict[Side, list[dict[str, object]]]
+    patches: dict[str, list[dict[str, object]]]
 
 
 def _next_reasoning_payload_id() -> str:
@@ -140,17 +139,17 @@ def _next_compaction_payload_id() -> str:
 
 def _compaction_payload(
     *,
-    durable: dict[str, object],
-    sides: Sides,
+    memory: dict[str, object],
+    threads: Threads,
     payload_id: str | None = None,
 ) -> CompactionPayload:
-    return CompactionPayload(id=payload_id or _next_compaction_payload_id(), durable=durable, sides=sides)
+    return CompactionPayload(id=payload_id or _next_compaction_payload_id(), memory=memory, threads=threads)
 
 
 def _reasoning_payload(
     *,
-    durable: list[dict[str, object]],
-    sides: _Update,
+    memory: list[dict[str, object]],
+    threads: _Update,
     payload_id: str | None = None,
     previous_reasoning_id: str | None = None,
     previous_compaction_id: str | None = None,
@@ -158,28 +157,28 @@ def _reasoning_payload(
 ) -> ReasoningPayload:
     state = (
         ReasoningCheckpoint(
-            durable={},
-            active={"main"} if sides.active is None else sides.active,
-            sides={},
+            memory={},
+            active={"main"} if threads.active is None else threads.active,
+            threads={},
         )
         if checkpoint
-        else ReasoningPatch(durable=durable, active=sides.active, sides=sides.patches)
+        else ReasoningPatch(memory=memory, active=threads.active, threads=threads.patches)
     )
     return ReasoningPayload(
         id=payload_id or _next_reasoning_payload_id(),
         previous_reasoning_id=previous_reasoning_id,
         previous_compaction_id=previous_compaction_id,
         state=state,
-        main=sides.main,
+        main=threads.main,
     )
 
 
 def _checkpoint_payload(
     *,
-    durable: dict[str, object],
-    sides: _Update,
+    memory: dict[str, object],
+    threads: _Update,
     payload_id: str | None = None,
-    snapshots: dict[Side, list[Message]] | None = None,
+    snapshots: dict[str, list[Message]] | None = None,
     previous_compaction_id: str | None = None,
 ) -> ReasoningPayload:
     return ReasoningPayload(
@@ -187,23 +186,23 @@ def _checkpoint_payload(
         previous_reasoning_id=None,
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
-            durable=durable,
-            active={"main"} if sides.active is None else sides.active,
-            sides={} if snapshots is None else snapshots,
+            memory=memory,
+            active={"main"} if threads.active is None else threads.active,
+            threads={} if snapshots is None else snapshots,
         ),
-        main=sides.main,
+        main=threads.main,
     )
 
 
-def _sides_update(
+def _threads_update(
     *,
-    active: set[Side] | None = None,
+    active: set[str] | None = None,
     main: list[Message | MessagePatch] | None = None,
-    patches: dict[Side, list[dict[str, object]]] | None = None,
+    patches: dict[str, list[dict[str, object]]] | None = None,
 ) -> _Update:
     update = _Update(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
     split_main_updates(update.main)
-    ReasoningPatch(durable=[], active=active, sides=update.patches)
+    ReasoningPatch(memory=[], active=active, threads=update.patches)
     return update
 
 
@@ -224,22 +223,22 @@ def _sealed_reasoning(payload: ReasoningPayload) -> RequestReasoningItem:
     )
 
 
-def _sealed_call_id(side: str, upstream_tool_call_id: str) -> str:
+def _sealed_call_id(thread: str, upstream_tool_call_id: str) -> str:
     return seal_call_id(
         CallID(
-            side=side,
+            thread=thread,
             upstream_tool_call_id=upstream_tool_call_id,
         ),
         keyring=_keyring(),
     )
 
 
-def _sealed_call_id_for_message(side: str, upstream_tool_call_id: str, message: Message, *, tool_call_index: int = 0) -> str:
+def _sealed_call_id_for_message(thread: str, upstream_tool_call_id: str, message: Message, *, tool_call_index: int = 0) -> str:
     _ = message
     _ = tool_call_index
     return seal_call_id(
         CallID(
-            side=side,
+            thread=thread,
             upstream_tool_call_id=upstream_tool_call_id,
         ),
         keyring=_keyring(),
@@ -256,8 +255,8 @@ def _parallel_active_calls() -> tuple[ReasoningPayload, str, str]:
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"reviewer"}')],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             active={"main", "reviewer"},
             main=[main_assistant],
             patches={"reviewer": [{"op": "add", "path": "/0", "value": reviewer_assistant.to_primitive()}]},
@@ -309,7 +308,7 @@ def test_slice_to_last_compaction_preserves_compaction_only_queue() -> None:
 
 
 def test_decode_queue_opens_compaction_payload() -> None:
-    payload = _compaction_payload(durable={"active": []}, sides=Sides())
+    payload = _compaction_payload(memory={"active": []}, threads=Threads())
 
     decoded = _decode_queue([_sealed_compaction(payload)], keyring=_keyring())
 
@@ -318,8 +317,8 @@ def test_decode_queue_opens_compaction_payload() -> None:
 
 def test_decode_queue_opens_reasoning_payload() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": []}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/active", "value": []}],
+        threads=_threads_update(),
     )
 
     decoded = _decode_queue([_sealed_reasoning(payload)], keyring=_keyring())
@@ -328,14 +327,14 @@ def test_decode_queue_opens_reasoning_payload() -> None:
 
 
 def test_reasoning_payload_allows_empty_delta() -> None:
-    payload = _reasoning_payload(durable=[], sides=_sides_update())
+    payload = _reasoning_payload(memory=[], threads=_threads_update())
 
-    assert payload.state == ReasoningPatch(durable=[])
+    assert payload.state == ReasoningPatch(memory=[])
     assert payload.main == []
 
 
 def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:
-    payload = _reasoning_payload(durable=[{"op": "add", "path": "/active", "value": []}], sides=_sides_update())
+    payload = _reasoning_payload(memory=[{"op": "add", "path": "/active", "value": []}], threads=_threads_update())
     item = RequestReasoningItem(
         encrypted_content=seal_reasoning_payload(payload, keyring=_keyring()),
         id="rs_wrong",
@@ -351,7 +350,7 @@ def test_decode_queue_rejects_reasoning_item_id_mismatch() -> None:
 
 
 def test_decode_queue_rejects_compaction_item_id_mismatch() -> None:
-    payload = _compaction_payload(durable={"active": []}, sides=Sides())
+    payload = _compaction_payload(memory={"active": []}, threads=Threads())
     item = RequestCompactionItem(
         encrypted_content=seal_compaction_payload(payload, keyring=_keyring()),
         id="cmp_wrong",
@@ -503,7 +502,7 @@ def test_decode_queue_classifies_sealed_function_call() -> None:
         _DecodedSealedFunctionCall(
             item=item,
             call_id=CallID(
-                side="reviewer",
+                thread="reviewer",
                 upstream_tool_call_id="up_reviewer_0",
             ),
         )
@@ -536,7 +535,7 @@ def test_decode_queue_classifies_sealed_function_call_output() -> None:
         _DecodedSealedFunctionCallOutput(
             item=item,
             call_id=CallID(
-                side="defender",
+                thread="defender",
                 upstream_tool_call_id="up_defender_0",
             ),
         )
@@ -555,9 +554,9 @@ def test_decode_queue_classifies_unopenable_function_call_output_as_fabricated()
     assert decoded == [_DecodedFabricatedFunctionCallOutput(item=item)]
 
 
-def test_call_id_roundtrips_zero_based_main_side() -> None:
+def test_call_id_roundtrips_zero_based_main_thread() -> None:
     value = CallID(
-        side="main",
+        thread="main",
         upstream_tool_call_id="up_main_0",
     )
 
@@ -567,19 +566,19 @@ def test_call_id_roundtrips_zero_based_main_side() -> None:
 
 
 def test_pack_call_id_uses_base64url6_codec_when_possible() -> None:
-    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="up_main_0"))
+    packed = _pack_call_id(CallID(thread="main", upstream_tool_call_id="up_main_0"))
 
     assert packed[0] == 0x22
 
 
 def test_pack_call_id_uses_ascii7_codec_for_ascii_non_base64url_ids() -> None:
-    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="call:1"))
+    packed = _pack_call_id(CallID(thread="main", upstream_tool_call_id="call:1"))
 
     assert packed[0] == 0x21
 
 
 def test_pack_call_id_uses_utf8_codec_for_non_ascii_ids() -> None:
-    packed = _pack_call_id(CallID(side="main", upstream_tool_call_id="café"))
+    packed = _pack_call_id(CallID(thread="main", upstream_tool_call_id="café"))
 
     assert packed[0] == 0x20
 
@@ -626,27 +625,27 @@ def test_message_patch_rejects_non_assistant_message() -> None:
         MessagePatch(message=Message(role="user", content="not an assistant"))
 
 
-def test_sides_assignment_is_replaceable_and_copies_assigned_lists() -> None:
-    sides = Sides()
+def test_threads_assignment_is_replaceable_and_copies_assigned_lists() -> None:
+    threads = Threads()
     first = Message(role="assistant", content="first")
     second = Message(role="assistant", content="second")
 
     replacement = [first]
-    sides["main"] = replacement
+    threads["main"] = replacement
     replacement.append(second)
 
-    assert sides["main"] == [first]
-    sides["main"].append(second)
-    assert sides["main"] == [first, second]
+    assert threads["main"] == [first]
+    threads["main"].append(second)
+    assert threads["main"] == [first, second]
 
 
-def test_sides_update_main_accepts_terminal_patch_after_hidden_tool_messages() -> None:
+def test_threads_update_main_accepts_terminal_patch_after_hidden_tool_messages() -> None:
     assistant = Message(
         role="assistant",
         content="anchor",
         tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
     )
-    update = _sides_update(
+    update = _threads_update(
         main=[
             assistant,
             Message(role="tool", tool_call_id="call_1", content="hidden output"),
@@ -657,11 +656,11 @@ def test_sides_update_main_accepts_terminal_patch_after_hidden_tool_messages() -
     assert len(update.main) == 3
 
 
-def test_sides_update_main_rejects_second_patch() -> None:
+def test_threads_update_main_rejects_second_patch() -> None:
     first = Message(role="assistant", content="first")
     second = Message(role="assistant", content="second")
     with pytest.raises(ValueError, match="at most one message patch"):
-        _sides_update(
+        _threads_update(
             main=[
                 MessagePatch(message=first),
                 MessagePatch(message=second),
@@ -669,10 +668,10 @@ def test_sides_update_main_rejects_second_patch() -> None:
         )
 
 
-def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
+def test_threads_update_main_rejects_non_tool_message_after_patch() -> None:
     assistant = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="message patch must be the final main update"):
-        _sides_update(
+        _threads_update(
             main=[
                 MessagePatch(message=assistant),
                 Message(role="assistant", content="later assistant"),
@@ -680,10 +679,10 @@ def test_sides_update_main_rejects_non_tool_message_after_patch() -> None:
         )
 
 
-def test_sides_update_main_rejects_tool_message_after_patch() -> None:
+def test_threads_update_main_rejects_tool_message_after_patch() -> None:
     assistant = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="message patch must be the final main update"):
-        _sides_update(
+        _threads_update(
             main=[
                 MessagePatch(message=assistant),
                 Message(role="tool", content="missing id"),
@@ -691,13 +690,13 @@ def test_sides_update_main_rejects_tool_message_after_patch() -> None:
         )
 
 
-def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
+def test_threads_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
     anchor = Message(
         role="assistant",
         content="anchor",
         tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
     )
-    update = _sides_update(
+    update = _threads_update(
         main=[
             Message(
                 role="assistant",
@@ -714,8 +713,8 @@ def test_sides_update_main_accepts_closed_prefix_before_patch_anchor() -> None:
     assert len(update.main) == 5
 
 
-def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
-    update = _sides_update(
+def test_threads_update_main_accepts_closed_prefix_before_assistant_anchor() -> None:
+    update = _threads_update(
         main=[
             Message(
                 role="assistant",
@@ -735,8 +734,8 @@ def test_sides_update_main_accepts_closed_prefix_before_assistant_anchor() -> No
     assert len(update.main) == 4
 
 
-def test_sides_update_main_accepts_closed_non_assistant_tail_without_anchor() -> None:
-    update = _sides_update(
+def test_threads_update_main_accepts_closed_non_assistant_tail_without_anchor() -> None:
+    update = _threads_update(
         main=[
             Message(role="user", content="u"),
             Message(role="system", content="s"),
@@ -747,8 +746,8 @@ def test_sides_update_main_accepts_closed_non_assistant_tail_without_anchor() ->
     assert len(update.main) == 3
 
 
-def test_sides_update_main_accepts_closed_assistant_with_user_tail() -> None:
-    update = _sides_update(
+def test_threads_update_main_accepts_closed_assistant_with_user_tail() -> None:
+    update = _threads_update(
         main=[
             Message(role="assistant", content="done"),
             Message(role="user", content="tail"),
@@ -758,10 +757,10 @@ def test_sides_update_main_accepts_closed_assistant_with_user_tail() -> None:
     assert len(update.main) == 2
 
 
-def test_sides_update_main_rejects_message_patch_with_user_tail() -> None:
+def test_threads_update_main_rejects_message_patch_with_user_tail() -> None:
     assistant = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="message patch target may not have a trailing non-assistant tail"):
-        _sides_update(
+        _threads_update(
             main=[
                 assistant,
                 Message(role="user", content="tail"),
@@ -770,9 +769,9 @@ def test_sides_update_main_rejects_message_patch_with_user_tail() -> None:
         )
 
 
-def test_sides_update_main_rejects_open_assistant_with_user_tail() -> None:
+def test_threads_update_main_rejects_open_assistant_with_user_tail() -> None:
     with pytest.raises(ValueError, match="unresolved anchor tool calls may not have trailing non-assistant tail"):
-        _sides_update(
+        _threads_update(
             main=[
                 Message(
                     role="assistant",
@@ -784,10 +783,10 @@ def test_sides_update_main_rejects_open_assistant_with_user_tail() -> None:
         )
 
 
-def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
+def test_threads_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None:
     anchor = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
-        _sides_update(
+        _threads_update(
             main=[
                 Message(
                     role="assistant",
@@ -800,9 +799,9 @@ def test_sides_update_main_rejects_unclosed_prefix_before_patch_anchor() -> None
         )
 
 
-def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> None:
+def test_threads_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> None:
     with pytest.raises(ValueError, match="must satisfy all prefix tool calls before the anchor"):
-        _sides_update(
+        _threads_update(
             main=[
                 Message(
                     role="assistant",
@@ -814,10 +813,10 @@ def test_sides_update_main_rejects_unclosed_prefix_before_assistant_anchor() -> 
         )
 
 
-def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
+def test_threads_update_main_rejects_prefix_message_before_pending_tool_output_closes() -> None:
     anchor = Message(role="assistant", content="anchor")
     with pytest.raises(ValueError, match="cannot appear before earlier tool calls are satisfied"):
-        _sides_update(
+        _threads_update(
             main=[
                 Message(
                     role="assistant",
@@ -832,14 +831,14 @@ def test_sides_update_main_rejects_prefix_message_before_pending_tool_output_clo
         )
 
 
-def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
+def test_threads_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None:
     anchor = Message(
         role="assistant",
         content="anchor",
         tool_calls=[ToolCall(id="call_1", name="read_file", arguments="{}")],
     )
     with pytest.raises(ValueError, match="does not match an unresolved anchor tool call"):
-        _sides_update(
+        _threads_update(
             main=[
                 anchor,
                 Message(role="tool", tool_call_id="wrong", content="hidden output"),
@@ -849,7 +848,7 @@ def test_sides_update_main_rejects_suffix_tool_for_unknown_anchor_call() -> None
 
 
 def test_decode_queue_preserves_item_order() -> None:
-    compaction = _sealed_compaction(_compaction_payload(durable={"active": []}, sides=Sides()))
+    compaction = _sealed_compaction(_compaction_payload(memory={"active": []}, threads=Threads()))
     message = _message("hello")
     sealed_call = RequestFunctionCallItem(
         arguments='{"path":"README.md"}',
@@ -883,8 +882,8 @@ def test_decode_queue_rejects_unsealed_reasoning_input() -> None:
 
 async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_only_queue() -> None:
     payload = _compaction_payload(
-        durable={"active": ["reviewer"]},
-        sides=Sides(
+        memory={"active": ["reviewer"]},
+        threads=Threads(
             messages={
                 "main": [Message(role="assistant", content="main snapshot")],
                 "reviewer": [Message(role="assistant", content="review snapshot")],
@@ -897,16 +896,16 @@ async def test_ingest_response_request_returns_compaction_snapshot_for_carrier_o
         keyring=_keyring(),
     )
 
-    assert result.durable == payload.durable
-    assert result.sides == payload.sides
+    assert result.memory == payload.memory
+    assert result.threads == payload.threads
     assert result.last_reasoning_id is None
     assert result.last_compaction_id == payload.id
 
 
 async def test_ingest_response_request_rejects_unresolved_call_inside_compaction_snapshot() -> None:
     payload = _compaction_payload(
-        durable={},
-        sides=Sides(
+        memory={},
+        threads=Threads(
             active=set(),
             messages={
                 "reviewer": [
@@ -932,21 +931,21 @@ async def test_ingest_response_request_rejects_unresolved_call_inside_compaction
 async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_snapshot() -> None:
     compaction = _compaction_payload(
         payload_id="cmp_root",
-        durable={"active": []},
-        sides=Sides(messages={"main": [Message(role="assistant", content="snapshot")]}),
+        memory={"active": []},
+        threads=Threads(messages={"main": [Message(role="assistant", content="snapshot")]}),
     )
     first = _reasoning_payload(
         payload_id="rs_first",
         previous_compaction_id=compaction.id,
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=_sides_update(main=[Message(role="assistant", content="first")]),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        threads=_threads_update(main=[Message(role="assistant", content="first")]),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
         previous_reasoning_id=first.id,
         previous_compaction_id=compaction.id,
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             main=[Message(role="assistant", content="second")],
         ),
     )
@@ -959,8 +958,8 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
         keyring=_keyring(),
     )
 
-    assert result.durable == {"active": ["reviewer"], "meta": {"step": 1}}
-    assert result.sides["main"] == [
+    assert result.memory == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.threads["main"] == [
         Message(role="assistant", content="snapshot"),
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
@@ -969,10 +968,10 @@ async def test_ingest_response_request_accepts_reasoning_chain_after_compaction_
     assert result.last_compaction_id == compaction.id
 
 
-async def test_ingest_response_request_applies_reasoning_durable_patch() -> None:
+async def test_ingest_response_request_applies_reasoning_memory_patch() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(),
     )
 
     result = await ingest_response_request(
@@ -980,15 +979,15 @@ async def test_ingest_response_request_applies_reasoning_durable_patch() -> None
         keyring=_keyring(),
     )
 
-    assert result.durable == {"active": ["reviewer"]}
-    assert result.sides == Sides()
+    assert result.memory == {"active": ["reviewer"]}
+    assert result.threads == Threads()
     assert result.last_reasoning_id == payload.id
 
 
-async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -> None:
+async def test_ingest_response_request_applies_reasoning_non_main_thread_patch() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": {"role": "assistant", "content": "review hidden"}},
@@ -1002,13 +1001,13 @@ async def test_ingest_response_request_applies_reasoning_non_main_side_patch() -
         keyring=_keyring(),
     )
 
-    assert result.sides["reviewer"] == [Message(role="assistant", content="review hidden")]
+    assert result.threads["reviewer"] == [Message(role="assistant", content="review hidden")]
 
 
 async def test_ingest_response_request_appends_main_messages_from_reasoning() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": []}],
-        sides=_sides_update(main=[Message(role="assistant", content="main hidden")]),
+        memory=[{"op": "add", "path": "/active", "value": []}],
+        threads=_threads_update(main=[Message(role="assistant", content="main hidden")]),
     )
 
     result = await ingest_response_request(
@@ -1016,14 +1015,14 @@ async def test_ingest_response_request_appends_main_messages_from_reasoning() ->
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [Message(role="assistant", content="main hidden")]
+    assert result.threads["main"] == [Message(role="assistant", content="main hidden")]
 
 
 async def test_ingest_response_request_materializes_new_postfix_message_patch() -> None:
     assistant = Message(role="assistant", content="answer", reasoning_content="hidden")
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(main=[assistant, MessagePatch(message=assistant)]),
+        memory=[],
+        threads=_threads_update(main=[assistant, MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1037,7 +1036,7 @@ async def test_ingest_response_request_materializes_new_postfix_message_patch() 
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [assistant]
+    assert result.threads["main"] == [assistant]
 
 
 async def test_ingest_response_request_materializes_text_and_refusal_from_sealed_message() -> None:
@@ -1048,8 +1047,8 @@ async def test_ingest_response_request_materializes_text_and_refusal_from_sealed
         reasoning_content="hidden",
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(main=[assistant, MessagePatch(message=assistant)]),
+        memory=[],
+        threads=_threads_update(main=[assistant, MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1070,18 +1069,18 @@ async def test_ingest_response_request_materializes_text_and_refusal_from_sealed
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [assistant]
+    assert result.threads["main"] == [assistant]
 
 
 async def test_ingest_response_request_materializes_parked_postfix_message_patch() -> None:
     assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+        memory=[],
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         previous_reasoning_id=parked.id,
     )
 
@@ -1097,19 +1096,19 @@ async def test_ingest_response_request_materializes_parked_postfix_message_patch
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {"main"}
-    assert result.sides["main"] == [assistant]
+    assert result.threads.active == {"main"}
+    assert result.threads["main"] == [assistant]
 
 
 async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_turn() -> None:
     assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _checkpoint_payload(
-        durable={},
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+        memory={},
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1126,7 +1125,7 @@ async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_t
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1136,12 +1135,12 @@ async def test_ingest_response_request_timewarps_parked_patch_after_fabricated_t
 async def test_ingest_response_request_timewarp_preserves_equal_fabricated_assistant_multiplicity() -> None:
     assistant = Message(role="assistant", content="same")
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _checkpoint_payload(
-        durable={},
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+        memory={},
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
 
     result = await ingest_response_request(
@@ -1158,7 +1157,7 @@ async def test_ingest_response_request_timewarp_preserves_equal_fabricated_assis
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         assistant,
         assistant,
@@ -1168,12 +1167,12 @@ async def test_ingest_response_request_timewarp_preserves_equal_fabricated_assis
 async def test_ingest_response_request_timewarp_preserves_fabricated_assistant_mini_turn() -> None:
     assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+        memory=[],
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         previous_reasoning_id=parked.id,
     )
 
@@ -1192,7 +1191,7 @@ async def test_ingest_response_request_timewarp_preserves_fabricated_assistant_m
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="fabricated answer",
@@ -1208,15 +1207,15 @@ async def test_ingest_response_request_timewarps_across_irrelevant_reasoning_cha
     payloads = [
         _reasoning_payload(
             payload_id="rs_1",
-            durable=[],
-            sides=_sides_update(active=set(), main=[assistant]),
+            memory=[],
+            threads=_threads_update(active=set(), main=[assistant]),
         )
     ]
     payloads.append(
         _checkpoint_payload(
             payload_id="rs_2",
-            durable={"step_2": True},
-            sides=_sides_update(),
+            memory={"step_2": True},
+            threads=_threads_update(),
         )
     )
     for index in range(3, 10):
@@ -1224,16 +1223,16 @@ async def test_ingest_response_request_timewarps_across_irrelevant_reasoning_cha
             _reasoning_payload(
                 payload_id=f"rs_{index}",
                 previous_reasoning_id=payloads[-1].id,
-                durable=[{"op": "add", "path": f"/step_{index}", "value": True}],
-                sides=_sides_update(),
+                memory=[{"op": "add", "path": f"/step_{index}", "value": True}],
+                threads=_threads_update(),
             )
         )
     payloads.append(
         _reasoning_payload(
             payload_id="rs_10",
             previous_reasoning_id=payloads[-1].id,
-            durable=[],
-            sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+            memory=[],
+            threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
         )
     )
 
@@ -1251,12 +1250,12 @@ async def test_ingest_response_request_timewarps_across_irrelevant_reasoning_cha
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
     ]
-    assert result.durable == {f"step_{index}": True for index in range(2, 10)}
+    assert result.memory == {f"step_{index}": True for index in range(2, 10)}
 
 
 async def test_ingest_response_request_timewarps_parked_call_without_interruption_stub() -> None:
@@ -1266,12 +1265,12 @@ async def test_ingest_response_request_timewarps_parked_call_without_interruptio
         tool_calls=[ToolCall(id="up_main_0", name="client_tool", arguments="{}")],
     )
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _checkpoint_payload(
-        durable={},
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=assistant)]),
+        memory={},
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=assistant)]),
     )
     call_id = _sealed_call_id("main", "up_main_0")
 
@@ -1291,7 +1290,7 @@ async def test_ingest_response_request_timewarps_parked_call_without_interruptio
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1310,12 +1309,12 @@ async def test_ingest_response_request_timewarps_partial_hidden_settlement() -> 
     )
     hidden_output = Message(role="tool", tool_call_id="up_main_0", content="server result")
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     published = _checkpoint_payload(
-        durable={},
-        sides=_sides_update(
+        memory={},
+        threads=_threads_update(
             active={"main"},
             main=[hidden_output, MessagePatch(message=assistant)],
         ),
@@ -1338,7 +1337,7 @@ async def test_ingest_response_request_timewarps_partial_hidden_settlement() -> 
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1359,13 +1358,13 @@ async def test_ingest_response_request_timewarps_hidden_settlement_from_user_che
     hidden_output = Message(role="tool", tool_call_id="up_main_0", content="server result")
     parked = _reasoning_payload(
         payload_id="rs_parked",
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     settled = _checkpoint_payload(
         payload_id="rs_settled",
-        durable={},
-        sides=_sides_update(active={"main"}, main=[hidden_output, MessagePatch(message=assistant)]),
+        memory={},
+        threads=_threads_update(active={"main"}, main=[hidden_output, MessagePatch(message=assistant)]),
     )
     call_id = _sealed_call_id("main", "up_main_1")
 
@@ -1385,7 +1384,7 @@ async def test_ingest_response_request_timewarps_hidden_settlement_from_user_che
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="user", content="new question"),
         Message(role="assistant", content="fabricated answer"),
         assistant,
@@ -1399,26 +1398,26 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
     second = Message(role="assistant", content="second delayed", reasoning_content="second hidden")
     first_parked = _reasoning_payload(
         payload_id="rs_first_parked",
-        durable=[],
-        sides=_sides_update(active=set(), main=[first]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[first]),
     )
     first_published = _reasoning_payload(
         payload_id="rs_first_published",
         previous_reasoning_id=first_parked.id,
-        durable=[],
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=first)]),
+        memory=[],
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=first)]),
     )
     second_parked = _reasoning_payload(
         payload_id="rs_second_parked",
         previous_reasoning_id=first_published.id,
-        durable=[],
-        sides=_sides_update(active=set(), main=[second]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[second]),
     )
     second_published = _reasoning_payload(
         payload_id="rs_second_published",
         previous_reasoning_id=second_parked.id,
-        durable=[],
-        sides=_sides_update(active={"main"}, main=[MessagePatch(message=second)]),
+        memory=[],
+        threads=_threads_update(active={"main"}, main=[MessagePatch(message=second)]),
     )
 
     result = await ingest_response_request(
@@ -1438,7 +1437,7 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="assistant", content="first fabricated"),
         first,
         Message(role="assistant", content="second fabricated"),
@@ -1449,12 +1448,12 @@ async def test_ingest_response_request_normalizes_multiple_timewarps_in_one_queu
 async def test_ingest_response_request_preserves_equal_message_multiplicity_before_patch() -> None:
     assistant = Message(role="assistant", content="same", reasoning_content="hidden")
     first = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     second = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             active={"main"},
             main=[assistant, MessagePatch(message=assistant)],
         ),
@@ -1473,14 +1472,14 @@ async def test_ingest_response_request_preserves_equal_message_multiplicity_befo
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [assistant, assistant]
+    assert result.threads["main"] == [assistant, assistant]
 
 
 async def test_ingest_response_request_does_not_deduplicate_unpatched_equal_assistant() -> None:
     hidden = Message(role="assistant", content="same", reasoning_content="hidden")
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active={"main"}, main=[hidden]),
+        memory=[],
+        threads=_threads_update(active={"main"}, main=[hidden]),
     )
 
     result = await ingest_response_request(
@@ -1494,15 +1493,15 @@ async def test_ingest_response_request_does_not_deduplicate_unpatched_equal_assi
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [hidden, Message(role="assistant", content="same")]
+    assert result.threads["main"] == [hidden, Message(role="assistant", content="same")]
 
 
 async def test_ingest_response_request_preserves_unrelated_tail_for_postfix_source_mismatch() -> None:
     assistant = Message(role="assistant", content="answer", reasoning_content="hidden")
     other = Message(role="assistant", content="other", reasoning_content="other hidden")
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(main=[assistant, MessagePatch(message=other)]),
+        memory=[],
+        threads=_threads_update(main=[assistant, MessagePatch(message=other)]),
     )
 
     result = await ingest_response_request(
@@ -1516,7 +1515,7 @@ async def test_ingest_response_request_preserves_unrelated_tail_for_postfix_sour
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         assistant,
         Message(role="assistant", content="edited public", reasoning_content="other hidden"),
     ]
@@ -1524,12 +1523,12 @@ async def test_ingest_response_request_preserves_unrelated_tail_for_postfix_sour
 
 async def test_ingest_response_request_applies_multiple_reasoning_items_in_order() -> None:
     first_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(main=[Message(role="assistant", content="first")]),
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(main=[Message(role="assistant", content="first")]),
     )
     second_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(main=[Message(role="assistant", content="second")]),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        threads=_threads_update(main=[Message(role="assistant", content="second")]),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -1540,8 +1539,8 @@ async def test_ingest_response_request_applies_multiple_reasoning_items_in_order
         keyring=_keyring(),
     )
 
-    assert result.durable == {"active": ["reviewer"], "meta": {"step": 2}}
-    assert result.sides["main"] == [
+    assert result.memory == {"active": ["reviewer"], "meta": {"step": 2}}
+    assert result.threads["main"] == [
         Message(role="assistant", content="first"),
         Message(role="assistant", content="second"),
     ]
@@ -1551,8 +1550,8 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
     payload = _reasoning_payload(
         payload_id="rs_first",
         previous_reasoning_id="rs_missing",
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -1565,21 +1564,21 @@ async def test_ingest_response_request_rejects_first_reasoning_with_non_none_pre
     assert exc_info.value.private.reason == "reasoning_previous_reasoning_id_mismatch"
 
 
-def test_sides_update_rejects_main_patch() -> None:
+def test_threads_update_rejects_main_patch() -> None:
     with pytest.raises(ValueError, match="may not target main"):
-        _sides_update(patches={"main": []})
+        _threads_update(patches={"main": []})
 
 
 async def test_ingest_response_request_rejects_second_reasoning_with_none_previous_reasoning_id() -> None:
     first = _reasoning_payload(
         payload_id="rs_first",
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        threads=_threads_update(),
     )
     second = _reasoning_payload(
         payload_id="rs_second",
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -1595,14 +1594,14 @@ async def test_ingest_response_request_rejects_second_reasoning_with_none_previo
 async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_when_chain_matches() -> None:
     first = _reasoning_payload(
         payload_id="rs_duplicate",
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 1}}],
+        threads=_threads_update(),
     )
     second = _reasoning_payload(
         payload_id="rs_duplicate",
         previous_reasoning_id=first.id,
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(),
     )
 
     result = await ingest_response_request(
@@ -1610,7 +1609,7 @@ async def test_ingest_response_request_accepts_duplicate_reasoning_payload_id_wh
         keyring=_keyring(),
     )
 
-    assert result.durable == {"active": ["reviewer"], "meta": {"step": 1}}
+    assert result.memory == {"active": ["reviewer"], "meta": {"step": 1}}
 
 
 async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_pair() -> None:
@@ -1620,8 +1619,8 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -1649,7 +1648,7 @@ async def test_ingest_response_request_accepts_hidden_non_main_call_with_public_
         keyring=_keyring(),
     )
 
-    assert result.sides["reviewer"] == [
+    assert result.threads["reviewer"] == [
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="review result"),
     ]
@@ -1663,8 +1662,8 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
     )
     hidden_output = {"role": "tool", "tool_call_id": "up_reviewer_0", "content": "hidden result"}
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": assistant.to_primitive()},
@@ -1679,7 +1678,7 @@ async def test_ingest_response_request_accepts_hidden_call_satisfied_by_hidden_o
         keyring=_keyring(),
     )
 
-    assert result.sides["reviewer"] == [
+    assert result.threads["reviewer"] == [
         assistant,
         Message(role="tool", tool_call_id="up_reviewer_0", content="hidden result"),
     ]
@@ -1692,14 +1691,14 @@ async def test_ingest_response_request_parks_inactive_call_across_reasoning() ->
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     first = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
         ),
     )
     second = _reasoning_payload(
-        durable=[{"op": "add", "path": "/step", "value": 2}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/step", "value": 2}],
+        threads=_threads_update(),
         previous_reasoning_id=first.id,
     )
 
@@ -1708,9 +1707,9 @@ async def test_ingest_response_request_parks_inactive_call_across_reasoning() ->
         keyring=_keyring(),
     )
 
-    assert result.durable == {"step": 2}
-    assert result.sides.active == {"main"}
-    assert result.sides["reviewer"] == [assistant]
+    assert result.memory == {"step": 2}
+    assert result.threads.active == {"main"}
+    assert result.threads["reviewer"] == [assistant]
 
 
 async def test_ingest_response_request_rejects_public_replay_of_parked_call() -> None:
@@ -1719,8 +1718,8 @@ async def test_ingest_response_request_rejects_public_replay_of_parked_call() ->
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
         ),
     )
@@ -1739,23 +1738,23 @@ async def test_ingest_response_request_rejects_public_replay_of_parked_call() ->
         )
 
     assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "inactive_side_function_call"
+    assert exc_info.value.private.reason == "inactive_thread_function_call"
 
 
-async def test_ingest_response_request_replays_call_after_side_activation() -> None:
+async def test_ingest_response_request_replays_call_after_thread_activation() -> None:
     assistant = Message(
         role="assistant",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             patches={"reviewer": [{"op": "add", "path": "/0", "value": assistant.to_primitive()}]},
         ),
     )
     activated = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active={"main", "reviewer"}),
+        memory=[],
+        threads=_threads_update(active={"main", "reviewer"}),
         previous_reasoning_id=parked.id,
     )
     call_id = _sealed_call_id("reviewer", "up_reviewer_0")
@@ -1773,15 +1772,15 @@ async def test_ingest_response_request_replays_call_after_side_activation() -> N
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {"main", "reviewer"}
-    assert result.sides["reviewer"][-1] == Message(
+    assert result.threads.active == {"main", "reviewer"}
+    assert result.threads["reviewer"][-1] == Message(
         role="tool",
         tool_call_id="up_reviewer_0",
         content="review result",
     )
 
 
-async def test_ingest_response_request_requires_every_active_side_call_output() -> None:
+async def test_ingest_response_request_requires_every_active_thread_call_output() -> None:
     payload, main_call_id, reviewer_call_id = _parallel_active_calls()
 
     with pytest.raises(PlapError) as exc_info:
@@ -1804,7 +1803,7 @@ async def test_ingest_response_request_requires_every_active_side_call_output() 
     assert exc_info.value.private.reason == "function_call_missing_function_call_output"
 
 
-async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_sides() -> None:
+async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_threads() -> None:
     payload, main_call_id, reviewer_call_id = _parallel_active_calls()
 
     result = await ingest_response_request(
@@ -1821,8 +1820,8 @@ async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_s
         keyring=_keyring(),
     )
 
-    assert result.sides["main"][-1] == Message(role="tool", tool_call_id="up_main_0", content="main result")
-    assert result.sides["reviewer"][-1] == Message(
+    assert result.threads["main"][-1] == Message(role="tool", tool_call_id="up_main_0", content="main result")
+    assert result.threads["reviewer"][-1] == Message(
         role="tool",
         tool_call_id="up_reviewer_0",
         content="review result",
@@ -1836,8 +1835,8 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active={"reviewer"}, main=[assistant]),
+        memory=[],
+        threads=_threads_update(active={"reviewer"}, main=[assistant]),
     )
 
     result = await ingest_response_request(
@@ -1845,8 +1844,8 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {"main", "reviewer"}
-    assert result.sides["main"] == [
+    assert result.threads.active == {"main", "reviewer"}
+    assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
         Message(role="user", content="new request"),
@@ -1860,8 +1859,8 @@ async def test_ingest_response_request_fabricated_assistant_interrupts_parked_ma
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
 
     result = await ingest_response_request(
@@ -1875,8 +1874,8 @@ async def test_ingest_response_request_fabricated_assistant_interrupts_parked_ma
         keyring=_keyring(),
     )
 
-    assert result.sides.active == {"main"}
-    assert result.sides["main"] == [
+    assert result.threads.active == {"main"}
+    assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
         Message(role="assistant", content="imported answer"),
@@ -1886,8 +1885,8 @@ async def test_ingest_response_request_fabricated_assistant_interrupts_parked_ma
 async def test_ingest_response_request_fabricated_pair_attaches_to_inactive_main() -> None:
     assistant = Message(role="assistant", content="hidden")
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
 
     result = await ingest_response_request(
@@ -1902,8 +1901,8 @@ async def test_ingest_response_request_fabricated_pair_attaches_to_inactive_main
         keyring=_keyring(),
     )
 
-    assert result.sides.active == set()
-    assert result.sides["main"] == [
+    assert result.threads.active == set()
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1920,8 +1919,8 @@ async def test_ingest_response_request_fabricated_pair_preserves_other_parked_ca
         tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
 
     result = await ingest_response_request(
@@ -1936,8 +1935,8 @@ async def test_ingest_response_request_fabricated_pair_preserves_other_parked_ca
         keyring=_keyring(),
     )
 
-    assert result.sides.active == set()
-    assert result.sides["main"] == [
+    assert result.threads.active == set()
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -1957,8 +1956,8 @@ async def test_ingest_response_request_fabricated_pair_settles_matching_parked_c
         tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
 
     result = await ingest_response_request(
@@ -1973,8 +1972,8 @@ async def test_ingest_response_request_fabricated_pair_settles_matching_parked_c
         keyring=_keyring(),
     )
 
-    assert result.sides.active == set()
-    assert result.sides["main"] == [
+    assert result.threads.active == set()
+    assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="parked_0", content="fabricated result"),
     ]
@@ -1983,8 +1982,8 @@ async def test_ingest_response_request_fabricated_pair_settles_matching_parked_c
 async def test_ingest_response_request_sealed_transplant_attaches_to_inactive_main() -> None:
     assistant = Message(role="assistant", content="hidden")
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     call_id = _sealed_call_id("main", "transplanted_0")
 
@@ -2000,8 +1999,8 @@ async def test_ingest_response_request_sealed_transplant_attaches_to_inactive_ma
         keyring=_keyring(),
     )
 
-    assert result.sides.active == set()
-    assert result.sides["main"] == [
+    assert result.threads.active == set()
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -2018,8 +2017,8 @@ async def test_ingest_response_request_sealed_transplant_preserves_other_parked_
         tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     call_id = _sealed_call_id("main", "transplanted_0")
 
@@ -2035,8 +2034,8 @@ async def test_ingest_response_request_sealed_transplant_preserves_other_parked_
         keyring=_keyring(),
     )
 
-    assert result.sides.active == set()
-    assert result.sides["main"] == [
+    assert result.threads.active == set()
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="hidden",
@@ -2056,8 +2055,8 @@ async def test_ingest_response_request_rejects_sealed_replay_of_inactive_main_pa
         tool_calls=[ToolCall(id="parked_0", name="parked", arguments="{}")],
     )
     payload = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     call_id = _sealed_call_id("main", "parked_0")
 
@@ -2074,7 +2073,7 @@ async def test_ingest_response_request_rejects_sealed_replay_of_inactive_main_pa
         )
 
     assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "inactive_side_function_call"
+    assert exc_info.value.private.reason == "inactive_thread_function_call"
 
 
 async def test_ingest_response_request_materializes_partially_settled_baseline() -> None:
@@ -2087,13 +2086,13 @@ async def test_ingest_response_request_materializes_partially_settled_baseline()
         ],
     )
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     hidden_output = Message(role="tool", tool_call_id="up_main_0", content="subagent result")
     published = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(
+        memory=[],
+        threads=_threads_update(
             active={"main"},
             main=[hidden_output, MessagePatch(message=assistant)],
         ),
@@ -2120,7 +2119,7 @@ async def test_ingest_response_request_materializes_partially_settled_baseline()
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         assistant,
         hidden_output,
         Message(role="tool", tool_call_id="up_main_1", content="client result"),
@@ -2134,13 +2133,13 @@ async def test_ingest_response_request_keeps_fully_settled_baseline_hidden() -> 
         tool_calls=[ToolCall(id="up_main_0", name="subagent", arguments="{}")],
     )
     parked = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(active=set(), main=[assistant]),
+        memory=[],
+        threads=_threads_update(active=set(), main=[assistant]),
     )
     hidden_output = Message(role="tool", tool_call_id="up_main_0", content="subagent result")
     settled = _reasoning_payload(
-        durable=[],
-        sides=_sides_update(main=[hidden_output]),
+        memory=[],
+        threads=_threads_update(main=[hidden_output]),
         previous_reasoning_id=parked.id,
     )
 
@@ -2152,7 +2151,7 @@ async def test_ingest_response_request_keeps_fully_settled_baseline_hidden() -> 
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [assistant, hidden_output]
+    assert result.threads["main"] == [assistant, hidden_output]
 
 
 async def test_ingest_response_request_user_does_not_satisfy_open_main_call() -> None:
@@ -2160,7 +2159,7 @@ async def test_ingest_response_request_user_does_not_satisfy_open_main_call() ->
         role="assistant",
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
-    payload = _reasoning_payload(durable=[], sides=_sides_update(main=[assistant]))
+    payload = _reasoning_payload(memory=[], threads=_threads_update(main=[assistant]))
     call_id = _sealed_call_id("main", "up_main_0")
 
     with pytest.raises(PlapError) as exc_info:
@@ -2192,8 +2191,8 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         tool_calls=[ToolCall(id="up_main_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(main=[assistant]),
+        memory=[{"op": "add", "path": "/active", "value": ["main"]}],
+        threads=_threads_update(main=[assistant]),
     )
     call_id = _sealed_call_id_for_message("main", "up_main_0", assistant)
 
@@ -2214,7 +2213,7 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="main result"),
     ]
@@ -2223,12 +2222,12 @@ async def test_ingest_response_request_accepts_main_hidden_call_with_public_pair
 async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_reasoning_step() -> None:
     initial = Message(role="assistant", content="main hidden")
     first = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(main=[initial]),
+        memory=[{"op": "add", "path": "/active", "value": ["main"]}],
+        threads=_threads_update(main=[initial]),
     )
     second = _reasoning_payload(
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        threads=_threads_update(),
         previous_reasoning_id=first.id,
     )
 
@@ -2250,7 +2249,7 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(
             role="assistant",
             content="main hidden",
@@ -2262,8 +2261,8 @@ async def test_ingest_response_request_accepts_fabricated_main_pair_after_empty_
 
 async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_call() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["main"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["main"]}],
+        threads=_threads_update(
             main=[
                 Message(
                     role="assistant",
@@ -2275,8 +2274,8 @@ async def test_ingest_response_request_rejects_reasoning_after_hidden_main_open_
     )
     later = _sealed_reasoning(
         _reasoning_payload(
-            durable=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-            sides=_sides_update(),
+            memory=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+            threads=_threads_update(),
             previous_reasoning_id=payload.id,
         )
     )
@@ -2298,8 +2297,8 @@ async def test_ingest_response_request_rejects_hidden_call_missing_public_functi
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -2326,8 +2325,8 @@ async def test_ingest_response_request_rejects_function_call_output_without_pend
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -2361,8 +2360,8 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -2389,15 +2388,15 @@ async def test_ingest_response_request_rejects_duplicate_public_function_call_it
     assert exc_info.value.private.reason == "duplicate_pending_function_call"
 
 
-async def test_ingest_response_request_rejects_same_side_reasoning_before_public_output() -> None:
+async def test_ingest_response_request_rejects_same_thread_reasoning_before_public_output() -> None:
     assistant = Message(
         role="assistant",
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     first_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -2407,8 +2406,8 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
         ),
     )
     second_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        threads=_threads_update(
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/1", "value": {"role": "assistant", "content": "interleaving"}},
@@ -2443,15 +2442,15 @@ async def test_ingest_response_request_rejects_same_side_reasoning_before_public
     assert exc_info.value.private.reason == "pending_tool_outputs_block_message"
 
 
-async def test_ingest_response_request_rejects_durable_only_reasoning_while_waiting_for_output() -> None:
+async def test_ingest_response_request_rejects_memory_only_reasoning_while_waiting_for_output() -> None:
     assistant = Message(
         role="assistant",
         content="review hidden",
         tool_calls=[ToolCall(id="up_reviewer_0", name="read_file", arguments='{"path":"README.md"}')],
     )
     first_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             active={"main", "reviewer"},
             patches={
                 "reviewer": [
@@ -2461,8 +2460,8 @@ async def test_ingest_response_request_rejects_durable_only_reasoning_while_wait
         ),
     )
     second_payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
-        sides=_sides_update(),
+        memory=[{"op": "add", "path": "/meta", "value": {"step": 2}}],
+        threads=_threads_update(),
         previous_reasoning_id=first_payload.id,
     )
     first = _sealed_reasoning(first_payload)
@@ -2495,8 +2494,8 @@ async def test_ingest_response_request_rejects_durable_only_reasoning_while_wait
 async def test_ingest_response_request_rejects_source_less_patch_without_reasoning_slice() -> None:
     assistant = Message(role="assistant", content="answer", reasoning_content="hidden assistant state")
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": []}],
-        sides=_sides_update(main=[MessagePatch(message=assistant)]),
+        memory=[{"op": "add", "path": "/active", "value": []}],
+        threads=_threads_update(main=[MessagePatch(message=assistant)]),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -2515,8 +2514,8 @@ async def test_ingest_response_request_accepts_standalone_main_message() -> None
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [Message(role="user", content="hello")]
-    assert result.sides.active == {"main"}
+    assert result.threads["main"] == [Message(role="user", content="hello")]
+    assert result.threads.active == {"main"}
 
 
 async def test_ingest_response_request_discards_naked_non_main_sealed_function_call() -> None:
@@ -2532,7 +2531,7 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_function_c
         keyring=_keyring(),
     )
 
-    assert result.sides.get("reviewer", []) == []
+    assert result.threads.get("reviewer", []) == []
 
 
 async def test_ingest_response_request_rejects_naked_main_sealed_pair_without_anchor() -> None:
@@ -2581,7 +2580,7 @@ async def test_ingest_response_request_accepts_closed_anchor_then_stripped_hidde
         keyring=_keyring(),
     )
 
-    assert result.sides["main"] == [
+    assert result.threads["main"] == [
         Message(role="assistant", content="m", tool_calls=[ToolCall(id="syn_0", name="read_file", arguments='{"path":"README.md"}')]),
         Message(role="tool", tool_call_id="syn_0", content="fo_0"),
     ]
@@ -2600,13 +2599,13 @@ async def test_ingest_response_request_discards_naked_non_main_sealed_pair_even_
         keyring=_keyring(),
     )
 
-    assert result.sides.get("reviewer", []) == []
+    assert result.threads.get("reviewer", []) == []
 
 
-async def test_ingest_response_request_fails_closed_on_invalid_durable_patch() -> None:
+async def test_ingest_response_request_fails_closed_on_invalid_memory_patch() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "replace", "path": "/missing", "value": 1}],
-        sides=_sides_update(),
+        memory=[{"op": "replace", "path": "/missing", "value": 1}],
+        threads=_threads_update(),
     )
 
     with pytest.raises(PlapError) as exc_info:
@@ -2616,13 +2615,13 @@ async def test_ingest_response_request_fails_closed_on_invalid_durable_patch() -
         )
 
     assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "reasoning_durable_patch_invalid"
+    assert exc_info.value.private.reason == "reasoning_memory_patch_invalid"
 
 
-async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> None:
+async def test_ingest_response_request_fails_closed_on_invalid_thread_patch() -> None:
     payload = _reasoning_payload(
-        durable=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
-        sides=_sides_update(
+        memory=[{"op": "add", "path": "/active", "value": ["reviewer"]}],
+        threads=_threads_update(
             patches={
                 "reviewer": [
                     {"op": "add", "path": "/0", "value": 1},
@@ -2638,7 +2637,7 @@ async def test_ingest_response_request_fails_closed_on_invalid_side_patch() -> N
         )
 
     assert exc_info.value.private is not None
-    assert exc_info.value.private.reason == "reasoning_side_patch_invalid"
+    assert exc_info.value.private.reason == "reasoning_thread_patch_invalid"
 
 
 def test_assistant_message_content_roundtrip_normalizes_single_text_part() -> None:

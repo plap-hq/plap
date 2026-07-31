@@ -26,19 +26,19 @@ from plap.llms.completions.chat import (
 )
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
-from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Sides
+from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Threads
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 
-_ADVISOR_SIDE = "advisor"
+_ADVISOR_THREAD = "advisor"
 _ADVISE_TOOL_NAME = "advise"
 _ADVISOR_TOOL_OUTPUT = "0"
 _ABORTED_TOOL_OUTPUT = "Tool call cancelled by advisor."
 
 
 def _has_advisor_marker(msg: ChatMessage) -> bool:
-    return isinstance(msg.durable.get(_ADVISOR_SIDE), dict)
+    return isinstance(msg.memory.get(_ADVISOR_THREAD), dict)
 
 
 @pytest.fixture(autouse=True)
@@ -223,7 +223,8 @@ def _tool() -> dict[str, object]:
 
 
 def _request(**updates: object) -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap-ai/test", input="hello", tools=[_tool()], **updates)
+    tools = updates.pop("tools", [_tool()])
+    return ResponseCreateRequest(model="plap-ai/test", input="hello", tools=tools, **updates)
 
 
 def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
@@ -262,8 +263,8 @@ def _state(
     return State.from_ingested(
         ingested=ingested
         or Ingested(
-            durable={},
-            sides=Sides(messages={"main": [Message(role="user", content="hello")]}),
+            memory={},
+            threads=Threads(messages={"main": [Message(role="user", content="hello")]}),
             main_tail=None,
             last_reasoning_id=None,
         ),
@@ -271,7 +272,7 @@ def _state(
         svcs=_svcs(client),
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
-        side_codes={"main": 0, _ADVISOR_SIDE: 1024},
+        thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
     )
 
 
@@ -281,8 +282,8 @@ def _after_tool_ingested() -> Ingested:
         tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
     )
     return Ingested(
-        durable={},
-        sides=Sides(
+        memory={},
+        threads=Threads(
             messages={
                 "main": [
                     Message(role="user", content="hello"),
@@ -333,7 +334,12 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
     ]
 
 
-def _advisor_step(advice: str | None = "", *, note: str | None = None) -> list[ChatCompletionDelta]:
+def _advisor_step(
+    advice: str | None = "",
+    *,
+    note: str | None = None,
+    tool_name: str = _ADVISE_TOOL_NAME,
+) -> list[ChatCompletionDelta]:
     arguments: dict[str, str] = {}
     if advice is not None:
         arguments["advice"] = advice
@@ -345,7 +351,7 @@ def _advisor_step(advice: str | None = "", *, note: str | None = None) -> list[C
             tool_call_delta=ChatToolCallDelta(
                 index=0,
                 id="call_advise",
-                name=_ADVISE_TOOL_NAME,
+                name=tool_name,
                 arguments_delta=msgspec.json.encode(arguments).decode(),
             ),
         ),
@@ -419,8 +425,28 @@ async def test_before_tool_noop_returns_function_call() -> None:
     assert [tool.function.name for tool in advisor_request.tools] == [_ADVISE_TOOL_NAME, "read_file"]
     assert advisor_request.tool_choice.name == _ADVISE_TOOL_NAME
     assert "### tool_call read_file" in advisor_request.messages[-2].content
-    assert state.sides[_ADVISOR_SIDE][-1].role == "tool"
-    assert state.sides[_ADVISOR_SIDE][-1].tool_call_id == "call_advise"
+    assert state.threads[_ADVISOR_THREAD][-1].role == "tool"
+    assert state.threads[_ADVISOR_THREAD][-1].tool_call_id == "call_advise"
+
+
+@pytest.mark.anyio
+async def test_advisor_rebinds_advise_without_renaming_client_tool() -> None:
+    core = _reload_handlers()
+    advise_tool = {
+        "type": "function",
+        "name": _ADVISE_TOOL_NAME,
+        "parameters": {"type": "object"},
+    }
+    request = _request(tools=[advise_tool, _tool()])
+    client = _Client(main=[_tool_step()], advisor=[_advisor_step("", tool_name="advise_2")])
+    state = _state(client, request=request)
+
+    await core.run_response(state=state)
+
+    assert [tool.function.name for tool in client.main_requests[0].tools] == [_ADVISE_TOOL_NAME, "read_file"]
+    advisor_request = client.advisor_requests[0]
+    assert [tool.function.name for tool in advisor_request.tools] == ["advise_2", _ADVISE_TOOL_NAME, "read_file"]
+    assert advisor_request.tool_choice.name == "advise_2"
 
 
 @pytest.mark.anyio
@@ -434,9 +460,9 @@ async def test_advisor_retry_limit_skips_current_phase() -> None:
     output = state.coordinator.current_response().output
     assert any(isinstance(item, ResponseFunctionCallItem) for item in output)
     assert len(client.advisor_requests) == 3
-    side = state.sides.get(_ADVISOR_SIDE)
-    assert side is not None
-    assert all(msg.role == "user" for msg in side)
+    thread = state.threads.get(_ADVISOR_THREAD)
+    assert thread is not None
+    assert all(msg.role == "user" for msg in thread)
 
 
 @pytest.mark.anyio
@@ -451,9 +477,9 @@ async def test_advisor_retry_hidden_usage_caps_next_attempt() -> None:
     output = state.coordinator.current_response().output
     assert any(isinstance(item, ResponseFunctionCallItem) for item in output)
     assert len(client.advisor_requests) == 1
-    side = state.sides.get(_ADVISOR_SIDE)
-    assert side is not None
-    assert all(msg.role == "user" for msg in side)
+    thread = state.threads.get(_ADVISOR_THREAD)
+    assert thread is not None
+    assert all(msg.role == "user" for msg in thread)
 
 
 @pytest.mark.anyio
@@ -475,7 +501,7 @@ async def test_before_tool_advice_aborts_call_and_loops_to_final_answer() -> Non
     second_main = client.main_requests[1]
     aborted = next(message for message in second_main.messages if message.role == "tool" and message.content == _ABORTED_TOOL_OUTPUT)
     assert aborted.name is None
-    assert aborted.durable == {_ADVISOR_SIDE: {"call_id": "call_advise", "tool_name": "read_file"}}
+    assert aborted.memory == {_ADVISOR_THREAD: {"call_id": "call_advise", "tool_name": "read_file"}}
     assert any(
         message.role == "developer" and message.content == "Do not read that file." and _has_advisor_marker(message)
         for message in second_main.messages
@@ -519,20 +545,20 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
     await core.run_response(state=state)
 
     assert len(client.advisor_requests) == 1
-    durable = state.durable.get(_ADVISOR_SIDE, {})
-    assert isinstance(durable, dict)
-    assert durable.get("note") == "Watch whether the final answer is actually verified."
+    memory = state.memory.get(_ADVISOR_THREAD, {})
+    assert isinstance(memory, dict)
+    assert memory.get("note") == "Watch whether the final answer is actually verified."
     main_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
     phase_instruction = _advisor_module()._phase_instruction(state, "before_return", main_request)
     assert "# note from previous phase (may be stale)" in phase_instruction
     assert "Watch whether the final answer is actually verified." in phase_instruction
     assert not any(
         message.role == "assistant" and message.tool_calls and "note" in message.tool_calls[0].arguments
-        for message in state.sides[_ADVISOR_SIDE]
+        for message in state.threads[_ADVISOR_THREAD]
     )
     _advisor_module()._set_advisor_note(state, None)
-    durable = state.durable.get(_ADVISOR_SIDE, {})
-    assert not isinstance(durable, dict) or "note" not in durable
+    memory = state.memory.get(_ADVISOR_THREAD, {})
+    assert not isinstance(memory, dict) or "note" not in memory
 
 
 @pytest.mark.anyio
@@ -667,16 +693,16 @@ def test_render_main_messages_includes_all_roles() -> None:
     assert "## user\n### content\n```text\nmore\n```" in rendered
 
 
-def test_render_main_messages_does_not_emit_message_durable_state() -> None:
+def test_render_main_messages_does_not_emit_message_memory() -> None:
     messages = [
         ChatMessage(
             role="tool",
             name="read_file",
             tool_call_id="call_1",
             content="output",
-            durable={"advisor": {"call_id": "call_x"}},
+            memory={"advisor": {"call_id": "call_x"}},
         ),
-        ChatMessage(role="developer", content="note", durable={"advisor": {"transcript": True}}),
+        ChatMessage(role="developer", content="note", memory={"advisor": {"transcript": True}}),
     ]
 
     rendered = "\n".join(_markdown_module().render_main_messages(messages))

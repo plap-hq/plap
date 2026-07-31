@@ -93,14 +93,14 @@ def _prepared() -> PreparedRequest:
 
 def _reasoning_args(label: str) -> dict[str, object]:
     return {
-        "state": ReasoningPatch(durable=[]),
+        "state": ReasoningPatch(memory=[]),
         "main": [Message(role="assistant", content=label)],
     }
 
 
 def _checkpoint_args(label: str) -> dict[str, object]:
     return {
-        "state": ReasoningCheckpoint(durable={"checkpoint": True}, active={"main"}, sides={}),
+        "state": ReasoningCheckpoint(memory={"checkpoint": True}, active={"main"}, threads={}),
         "main": [Message(role="assistant", content=label)],
     }
 

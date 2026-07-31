@@ -22,24 +22,24 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 6,
+        "version": 8,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
         "previous_compaction_id": <string|null>,
         "state": {
             "type": "checkpoint",
-            "durable": <object>,
-            "active": [<side>, ...],
-            "sides": {
-                <non-main-side>: [<message>, ...],
+            "memory": <object>,
+            "active": [<thread>, ...],
+            "threads": {
+                <non-main-thread>: [<message>, ...],
             },
         } | {
             "type": "patch",
-            "durable": <JSONPatch>,
-            "active": [<side>, ...] | null,
-            "sides": {
-                <non-main-side>: <JSONPatch>,
+            "memory": <JSONPatch>,
+            "active": [<thread>, ...] | null,
+            "threads": {
+                <non-main-thread>: <JSONPatch>,
             },
         },
         "main": [<message>..., <optional-postfix-message-patch>],
@@ -48,24 +48,24 @@ Reasoning and compaction payloads
 - Compaction envelope:
 
     {
-        "version": 4,
+        "version": 6,
         "type": "compaction",
         "id": <string>,
-        "durable": <object>,
-        "sides": <Sides>,
+        "memory": <object>,
+        "threads": <Threads>,
     }
 
-- Side snapshot:
+- Thread snapshot:
 
     {
-        "active": [<side>, ...],
+        "active": [<thread>, ...],
         "messages": {
-            <side>: [<message>, ...],
+            <thread>: [<message>, ...],
         },
     }
 
-- Reasoning checkpoints replace durable state, active membership, and every non-main
-  side. Reasoning patches apply deltas to those fields. Main always uses the
+- Reasoning checkpoints replace memory, active membership, and every non-main
+  thread. Reasoning patches apply deltas to those fields. Main always uses the
   common append-only `main` lane and is never checkpointed by reasoning.
 - `previous_compaction_id` is null before any compaction and otherwise equals
   the latest replayed compaction ID for every checkpoint and patch.
@@ -92,7 +92,7 @@ Sealed call ids
 - Before encryption, the plaintext byte layout is:
 
     header[1]
-    || side_code_be_u16[2]
+    || thread_code_be_u16[2]
     || encoded_upstream_tool_call_id[bytes]
 
 - `header` bit layout:
@@ -106,13 +106,13 @@ Sealed call ids
   - `10 = base64url6`
   - `11` is reserved
 
-- `side_code_be_u16` is the side code as an unsigned 16-bit big-endian integer.
+- `thread_code_be_u16` is the thread code as an unsigned 16-bit big-endian integer.
 
- - Side codes come from `config.sides` in the loaded CUE config.
- - Codes `0..1023` are reserved for well-known core sides.
+ - Thread codes come from `config.threads` in the loaded CUE config.
+ - Codes `0..1023` are reserved for well-known core threads.
  - Codes `1024..49151` are assigned to registered plugins.
  - Codes `49152..65535` are available for private or experimental plugins.
- - Only configured sides may be encoded or decoded.
+ - Only configured threads may be encoded or decoded.
 
 - `encoded_upstream_tool_call_id` decodes to the required, non-empty UTF-8
   `upstream_tool_call_id`.
@@ -169,14 +169,14 @@ from plap.responses.ingest.errors import (
 from plap.responses.ingest.errors import (
     tool_replay_error as _tool_replay_error,
 )
-from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload, Side
+from plap.responses.ingest.models import CallID, CompactionPayload, ReasoningPayload
 
 COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
-COMPACTION_PAYLOAD_FORMAT_VERSION = 4
-REASONING_PAYLOAD_FORMAT_VERSION = 6
+COMPACTION_PAYLOAD_FORMAT_VERSION = 6
+REASONING_PAYLOAD_FORMAT_VERSION = 8
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
@@ -346,18 +346,18 @@ _CODECS: dict[int, _Codec] = {
 _CODEC_PREFERENCE: tuple[_Codec, ...] = (_CODECS[2], _CODECS[1], _CODECS[0])
 
 
-def _side_code(side_codes: Mapping[Side, int], side: Side) -> int:
-    side_code = side_codes.get(side)
-    if side_code is None or not 0 <= side_code <= 0xFFFF:
-        raise _tool_replay_error(reason="invalid_function_call_side", private_message="invalid function call side")
-    return side_code
+def _thread_code(thread_codes: Mapping[str, int], thread: str) -> int:
+    thread_code = thread_codes.get(thread)
+    if thread_code is None or not 0 <= thread_code <= 0xFFFF:
+        raise _tool_replay_error(reason="invalid_function_call_thread", private_message="invalid function call thread")
+    return thread_code
 
 
-def _side_name(side_codes: Mapping[Side, int], code: int) -> Side:
-    for side, side_code in side_codes.items():
-        if side_code == code:
-            return side
-    raise _tool_replay_error(reason="invalid_function_call_id_side", private_message="invalid function call id side")
+def _thread_name(thread_codes: Mapping[str, int], code: int) -> str:
+    for thread, thread_code in thread_codes.items():
+        if thread_code == code:
+            return thread
+    raise _tool_replay_error(reason="invalid_function_call_id_thread", private_message="invalid function call id thread")
 
 
 def _decode_encoded_upstream_id(header: int, value: bytes) -> str:
@@ -389,8 +389,8 @@ def _compaction_from_json(value: object) -> CompactionPayload:
         return CompactionPayload.from_primitive(
             {
                 "id": value.get("id"),
-                "durable": value.get("durable"),
-                "sides": value.get("sides"),
+                "memory": value.get("memory"),
+                "threads": value.get("threads"),
             }
         )
     except (TypeError, ValueError) as exc:
@@ -424,10 +424,10 @@ def _reasoning_from_json(value: object) -> ReasoningPayload:
         raise _reasoning_replay_error(reason="reasoning_payload_invalid", private_message=str(exc), cause=exc) from exc
 
 
-def _pack_call_id(value: CallID, *, side_codes: Mapping[Side, int]) -> bytes:
+def _pack_call_id(value: CallID, *, thread_codes: Mapping[str, int]) -> bytes:
     if not value.upstream_tool_call_id:
         raise _tool_replay_error(reason="upstream_tool_call_id_missing", private_message="upstream_tool_call_id is required")
-    side_code = _side_code(side_codes, value.side)
+    thread_code = _thread_code(thread_codes, value.thread)
     for codec in _CODEC_PREFERENCE:
         if not codec.matches(value.upstream_tool_call_id):
             continue
@@ -436,14 +436,14 @@ def _pack_call_id(value: CallID, *, side_codes: Mapping[Side, int]) -> bytes:
         return b"".join(
             (
                 bytes([header]),
-                side_code.to_bytes(2, byteorder="big"),
+                thread_code.to_bytes(2, byteorder="big"),
                 encoded_upstream_id,
             )
         )
     raise RuntimeError("at least one call id codec must match")
 
 
-def _unpack_call_id(value: bytes, *, side_codes: Mapping[Side, int]) -> CallID:
+def _unpack_call_id(value: bytes, *, thread_codes: Mapping[str, int]) -> CallID:
     min_length = CALL_ID_HEADER_BYTES + 1
     if len(value) < min_length:
         raise _tool_replay_error(reason="function_call_id_plaintext_too_short", private_message="function call id plaintext is too short")
@@ -456,9 +456,9 @@ def _unpack_call_id(value: bytes, *, side_codes: Mapping[Side, int]) -> CallID:
             reason="function_call_id_reserved_bits_nonzero",
             private_message="function call id reserved bits must be zero",
         )
-    side_code = int.from_bytes(value[1:CALL_ID_HEADER_BYTES], byteorder="big")
+    thread_code = int.from_bytes(value[1:CALL_ID_HEADER_BYTES], byteorder="big")
     return CallID(
-        side=_side_name(side_codes, side_code),
+        thread=_thread_name(thread_codes, thread_code),
         upstream_tool_call_id=_decode_encoded_upstream_id(header, value[CALL_ID_HEADER_BYTES:]),
     )
 
@@ -537,9 +537,9 @@ def seal_call_id(
     value: CallID,
     *,
     keyring: SealingKeyring,
-    side_codes: Mapping[Side, int],
+    thread_codes: Mapping[str, int],
 ) -> str:
-    plaintext = _pack_call_id(value, side_codes=side_codes)
+    plaintext = _pack_call_id(value, thread_codes=thread_codes)
     ciphertext = AESSIV(keyring.active(CALL_ID_PURPOSE)).encrypt(
         plaintext,
         associated_data(CALL_ID_PURPOSE),
@@ -551,7 +551,7 @@ def open_call_id(
     value: str,
     *,
     keyring: SealingKeyring,
-    side_codes: Mapping[Side, int],
+    thread_codes: Mapping[str, int],
 ) -> CallID:
     if not value.startswith(CALL_ID_PREFIX):
         raise _tool_replay_error(reason="sealed_function_call_id_prefix_invalid", private_message="invalid sealed function call id prefix")
@@ -567,7 +567,7 @@ def open_call_id(
                 payload,
                 associated_data(CALL_ID_PURPOSE),
             )
-            return _unpack_call_id(plaintext, side_codes=side_codes)
+            return _unpack_call_id(plaintext, thread_codes=thread_codes)
         except (InvalidTag, PlapError) as exc:
             last_error = exc
     raise _tool_replay_error(

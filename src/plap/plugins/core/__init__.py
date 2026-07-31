@@ -12,20 +12,20 @@ from plap.plugins.core.loop import run_response as run_response
 from plap.responses.routes import RESPONSE_ROUTE_HANDLERS
 
 
-@bus.listen("config.collect")
-async def collect(paths: tuple[str, ...], *, next):
+@bus.listen("bootstrap.config")
+async def bootstrap_config(paths: tuple[str, ...], *, next):
     here = Path(__file__).resolve()
-    return await next(paths=(*paths, str(here.parents[4] / "config.cue"), str(here.parent / "schema.cue")))
+    return await next(paths=(*paths, str(here.parents[4] / "config.cue"), str(here.parent)))
 
 
-@bus.listen("routes.collect")
-async def collect_routes(routes: tuple[object, ...], loaded: CueBox, *, next):
+@bus.listen("bootstrap.routes")
+async def bootstrap_routes(routes: tuple[object, ...], loaded: CueBox, *, next):
     _ = loaded
     return await next(routes=(*routes, *RESPONSE_ROUTE_HANDLERS))
 
 
-@bus.listen("svcs.collect")
-async def collect_svcs(registry: svcs.Registry, loaded: CueBox, *, next):
+@bus.listen("bootstrap.services")
+async def bootstrap_services(registry: svcs.Registry, loaded: CueBox, *, next):
     client = build_chat_completion_client(loaded.plap.config)
     registry.register_value(IChatCompletionClient, client, on_registry_close=client.aclose)
     return await next()

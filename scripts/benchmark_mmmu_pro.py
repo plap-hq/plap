@@ -643,7 +643,7 @@ def _load_config() -> CueBox:
 
     bus.reset()
 
-    @bus.emit("config.collect")
+    @bus.emit("bootstrap.config")
     async def collect(paths: tuple[str, ...]) -> tuple[str, ...]:
         return paths
 

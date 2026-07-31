@@ -4,8 +4,8 @@ import base64
 import binascii
 import re
 from collections.abc import Mapping
-from dataclasses import replace
-from pathlib import Path
+from dataclasses import field, replace
+from typing import Any
 
 import blake3
 import msgspec
@@ -18,48 +18,20 @@ from plap.llms.completions.chat import (
     ChatContentImage,
     ChatContentPart,
     ChatContentText,
-    ChatFunctionTool,
     ChatMessage,
-    ChatTool,
+    ChatToolCall,
     IChatCompletionClient,
 )
-from plap.llms.json import decode_json_object_or_none
-from plap.llms.retry import RetryValidator, retry_message
-from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
-from plap.plugins.core.request import apply_float_transform, apply_int_transform
+from plap.plugins.core.budget import ResponseBudget, budgeted
+from plap.plugins.core.request import build_chat_request
+from plap.plugins.easy import ServerTool, bootstrap, server_tools
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.ingest.models import Message
 from plap.responses.state import State
 
+bootstrap.config(__file__)
+
 VISION_TOOL_NAME = "vision"
-VISION_BUDGET_OUTPUT = "Image inspection skipped because the response output budget was exhausted."
-VISION_TOOL = ChatTool(
-    function=ChatFunctionTool(
-        name=VISION_TOOL_NAME,
-        description=(
-            "Ask a question about images present in the conversation. "
-            "Use ids like image-XXXX-XXXX-XXXX-XXXX in the ids field to select the relevant images, and use the prompt field "
-            "to describe what to inspect."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Image ids to inspect.",
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Question for the vision model about the selected images.",
-                },
-            },
-            "required": ["ids", "prompt"],
-            "additionalProperties": False,
-        },
-        strict=True,
-    )
-)
 VISION_PROMPT = (
     "Answer image questions. "
     "A standalone text token matching image-XXXX-XXXX-XXXX-XXXX labels the image immediately after it. "
@@ -132,7 +104,7 @@ def _rewrite_request(request: ChatCompletionRequest) -> ChatCompletionRequest:
     for message in request.messages:
         content, changed = _replace_images(message.content)
         messages.append(message if not changed else replace(message, content=content))
-    return replace(request, messages=messages, tools=[*request.tools, VISION_TOOL])
+    return replace(request, messages=messages)
 
 
 def _canonical_image_id(match: re.Match[str]) -> str:
@@ -173,21 +145,8 @@ def _normalize_image_ids(value: object) -> list[str] | None:
     return raw
 
 
-def _tool_args_or_none(call) -> tuple[list[str], str] | None:
-    arguments = decode_json_object_or_none(call.arguments)
-    if arguments is None:
-        return None
-    ids = _normalize_image_ids(arguments.get("ids"))
-    prompt = arguments.get("prompt")
-    if ids is None:
-        return None
-    if not isinstance(prompt, str) or not prompt:
-        return None
-    return ids, prompt
-
-
-def _tool_args(call) -> tuple[list[str], str]:
-    arguments = msgspec.json.decode(call.arguments)
+def _tool_args(encoded: str) -> tuple[list[str], str]:
+    arguments = msgspec.json.decode(encoded)
     if not isinstance(arguments, dict):
         raise TypeError("vision tool arguments must decode to an object")
     ids = _normalize_image_ids(arguments.get("ids"))
@@ -215,7 +174,7 @@ def _tool_output_text(result: ChatCompletionResult) -> str:
 
 
 def _vision_reasoning_content(message: ChatMessage) -> str | None:
-    raw = message.durable.get(VISION_TOOL_NAME)
+    raw = message.memory.get(VISION_TOOL_NAME)
     if not isinstance(raw, Mapping):
         return None
     reasoning_content = raw.get("reasoning_content")
@@ -224,53 +183,19 @@ def _vision_reasoning_content(message: ChatMessage) -> str | None:
 
 def _tool_output_message(result: ChatCompletionResult, *, tool_call_id: str) -> ChatMessage:
     reasoning_content = result.message.reasoning_content
+    annotation: dict[str, object] = {"status": "completed"}
+    if reasoning_content is not None:
+        annotation["reasoning_content"] = reasoning_content
     return ChatMessage(
         role="tool",
         tool_call_id=tool_call_id,
         content=_tool_output_text(result),
-        durable={} if reasoning_content is None else {VISION_TOOL_NAME: {"reasoning_content": reasoning_content}},
+        memory={VISION_TOOL_NAME: annotation},
     )
 
 
 def _vision_turn_prompt(ids: list[str], prompt: str) -> str:
     return f"Selected image ids: {', '.join(ids)}\nQuestion: {prompt}"
-
-
-def _vision_context(messages: list[Message]) -> tuple[list[ChatMessage], set[str]]:
-    transcript: list[ChatMessage] = []
-    known_image_ids: set[str] = set()
-    pending_calls: dict[str, tuple[list[str], str]] = {}
-    for message in messages:
-        content = message.content
-        if isinstance(content, list):
-            images = [part for part in content if isinstance(part, ChatContentImage)]
-            if images:
-                ids = [_image_id(image) for image in images]
-                known_image_ids.update(ids)
-                transcript.append(ChatMessage(role="user", content=_vision_content(ids, images)))
-        if message.is_assistant():
-            for call in message.tool_calls:
-                if call.name != VISION_TOOL_NAME:
-                    continue
-                arguments = _tool_args_or_none(call)
-                if arguments is None:
-                    continue
-                pending_calls[call.id] = arguments
-            continue
-        if not message.is_tool() or message.tool_call_id is None:
-            continue
-        arguments = pending_calls.pop(message.tool_call_id, None)
-        if arguments is None:
-            continue
-        ids, prompt = arguments
-        transcript.append(ChatMessage(role="user", content=_vision_turn_prompt(ids, prompt)))
-        transcript.append(ChatMessage(role="assistant", content=message.content, reasoning_content=_vision_reasoning_content(message)))
-    return transcript, known_image_ids
-
-
-def _vision_history_messages(messages: list[Message]) -> list[ChatMessage]:
-    transcript, _known_image_ids = _vision_context(messages)
-    return transcript
 
 
 def _vision_content(ids: list[str], images: list[ChatContentImage]) -> list[ChatContentPart]:
@@ -281,6 +206,36 @@ def _vision_content(ids: list[str], images: list[ChatContentImage]) -> list[Chat
     return content
 
 
+def _vision_context(messages: list[Message]) -> tuple[list[ChatMessage], set[str]]:
+    transcript: list[ChatMessage] = []
+    known_image_ids: set[str] = set()
+    for message in messages:
+        content = message.content
+        if isinstance(content, list):
+            images = [part for part in content if isinstance(part, ChatContentImage)]
+            if images:
+                ids = [_image_id(image) for image in images]
+                known_image_ids.update(ids)
+                transcript.append(ChatMessage(role="user", content=_vision_content(ids, images)))
+        if not message.is_tool():
+            continue
+        record = message.memory.get("server_tools")
+        if not isinstance(record, Mapping) or record.get("tool") != VISION_TOOL_NAME:
+            continue
+        encoded = record.get("arguments")
+        if not isinstance(encoded, str):
+            continue
+        ids, prompt = _tool_args(encoded)
+        transcript.append(ChatMessage(role="user", content=_vision_turn_prompt(ids, prompt)))
+        transcript.append(ChatMessage(role="assistant", content=message.content, reasoning_content=_vision_reasoning_content(message)))
+    return transcript, known_image_ids
+
+
+def _vision_history_messages(messages: list[Message]) -> list[ChatMessage]:
+    transcript, _known_image_ids = _vision_context(messages)
+    return transcript
+
+
 def _vision_request(
     config: CueBox,
     request: ResponseCreateRequest,
@@ -288,120 +243,74 @@ def _vision_request(
     ids: list[str],
     prompt: str,
 ) -> ChatCompletionRequest:
-    sampling = config.vision.sampling
-    return ChatCompletionRequest(
-        model=config.vision.model,
+    return build_chat_request(
+        config.vision,
+        request,
         messages=[
             ChatMessage(role="developer", content=VISION_PROMPT),
             *transcript,
             ChatMessage(role="user", content=_vision_turn_prompt(ids, prompt)),
         ],
-        max_completion_tokens=config.vision.max_completion_tokens,
-        temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
-        top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
-        min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),
-        top_k=apply_int_transform(None, sampling.top_k, minimum=0),
-        frequency_penalty=apply_float_transform(None, sampling.frequency_penalty, minimum=-2, maximum=2),
-        presence_penalty=apply_float_transform(None, sampling.presence_penalty, minimum=-2, maximum=2),
-        repetition_penalty=apply_float_transform(None, sampling.repetition_penalty, minimum=0, maximum=2),
-        seed=apply_int_transform(None, sampling.seed),
-        reasoning_effort=config.vision.reasoning_effort,
-        service_tier=config.vision.service_tier,
     )
 
 
-async def _vision_tool_output(
-    state: State,
-    config: CueBox,
-    budget: ResponseBudget,
-    *,
-    history: list[Message],
-    ids: list[str],
-    prompt: str,
-    tool_call_id: str,
-) -> ChatMessage:
-    transcript, known_image_ids = _vision_context(history)
-    missing = [image_id for image_id in ids if image_id not in known_image_ids]
-    if missing:
-        raise RuntimeError(f"unknown image ids reached execution: {', '.join(sorted(missing))}")
-    raw_client = await state.svcs.aget(IChatCompletionClient)
-    client = budgeted(raw_client, budget, config.vision)
-    try:
+@server_tools.register
+class VisionTool(ServerTool):
+    name: str = VISION_TOOL_NAME
+    parameters: dict[str, Any] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Image ids to inspect.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Question for the vision model about the selected images.",
+                },
+            },
+            "required": ["ids", "prompt"],
+            "additionalProperties": False,
+        }
+    )
+    strict: bool = True
+    description: str = (
+        "Ask a question about images present in the conversation. "
+        "Use ids like image-XXXX-XXXX-XXXX-XXXX in the ids field to select the relevant images, and use the prompt field "
+        "to describe what to inspect."
+    )
+
+    async def __call__(
+        self,
+        state: State,
+        config: CueBox,
+        budget: ResponseBudget,
+        call: ChatToolCall,
+    ) -> ChatMessage:
+        ids, prompt = _tool_args(call.arguments)
+        transcript, known_image_ids = _vision_context(state.threads["main"])
+        missing = [image_id for image_id in ids if image_id not in known_image_ids]
+        if missing:
+            return ChatMessage(
+                role="tool",
+                tool_call_id=call.id,
+                content=f"Unknown image IDs: {', '.join(missing)}.",
+                memory={
+                    VISION_TOOL_NAME: {
+                        "status": "failed",
+                        "reason": "unknown_image_ids",
+                    }
+                },
+            )
+
+        client = budgeted(await state.svcs.aget(IChatCompletionClient), budget, config.vision)
         result = await client.complete(_vision_request(config, state.prepared.execution_request, transcript, ids, prompt))
-    except ResponseBudgetExhaustedError:
-        return ChatMessage(role="tool", tool_call_id=tool_call_id, content=VISION_BUDGET_OUTPUT)
-    return _tool_output_message(result, tool_call_id=tool_call_id)
-
-
-def _vision_validator(state: State) -> RetryValidator:
-    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
-        _ = request
-        _transcript, known_image_ids = _vision_context(state.sides["main"])
-        for call in result.message.tool_calls:
-            if call.name != VISION_TOOL_NAME:
-                continue
-            arguments = _tool_args_or_none(call)
-            if arguments is None:
-                return retry_message(
-                    problems=("The vision tool call must include image ids and a non-empty prompt.",),
-                    rules=("Use the ids field to select one or more image ids and the prompt field to describe what to inspect.",),
-                )
-            ids, _prompt = arguments
-            missing = [image_id for image_id in ids if image_id not in known_image_ids]
-            if missing:
-                joined = ", ".join(sorted(missing))
-                return retry_message(
-                    problems=(f"You requested unknown image ids: {joined}.",),
-                    rules=("Use only image ids that already appear in the conversation.",),
-                )
-        return None
-
-    return validate
-
-
-@bus.listen("config.collect")
-async def collect(paths: tuple[str, ...], *, next):
-    here = Path(__file__).resolve()
-    return await next(paths=(*paths, str(here.parent / "schema.cue")))
+        return _tool_output_message(result, tool_call_id=call.id)
 
 
 @bus.listen("response.request")
 async def inject_images(state: State, config: CueBox, *, next) -> ChatCompletionRequest:
     _ = state, config
     return _rewrite_request(await next(state=state, config=config))
-
-
-@bus.listen("response.completion")
-async def complete_with_images(
-    state: State,
-    config: CueBox,
-    budget: ResponseBudget,
-    request: ChatCompletionRequest,
-    validators: tuple[RetryValidator, ...],
-    *,
-    next,
-) -> ChatCompletionResult:
-    result = await next(
-        state=state,
-        config=config,
-        budget=budget,
-        request=request,
-        validators=(*validators, _vision_validator(state)),
-    )
-    if result.finish_reason != "tool_calls":
-        return result
-    history = state.sides["main"]
-    image_calls = [call for call in result.message.tool_calls if call.name == VISION_TOOL_NAME]
-    for call in image_calls:
-        ids, prompt = _tool_args(call)
-        tool_message = await _vision_tool_output(
-            state,
-            config,
-            budget,
-            history=history,
-            ids=ids,
-            prompt=prompt,
-            tool_call_id=call.id,
-        )
-        state.sides["main"].append(tool_message)
-    return result

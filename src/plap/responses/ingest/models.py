@@ -37,9 +37,6 @@ def _required_patch(value: object, *, label: str) -> JSONPatch:
     return patch
 
 
-type Side = str
-
-
 def _validate_main_source(source: Message) -> None:
     if not source.is_assistant():
         raise ValueError("main tail source must be an assistant message")
@@ -73,17 +70,17 @@ class CompactedMainTail:
 type MainTail = HiddenMainTail | PublicMainTail | CompactedMainTail
 
 
-def _required_side(value: object, *, label: str) -> Side:
+def _required_thread_name(value: object, *, label: str) -> str:
     return _required_string(value, label=label)
 
 
-def _required_side_set(value: object, *, label: str) -> set[Side]:
+def _required_thread_name_set(value: object, *, label: str) -> set[str]:
     if not isinstance(value, list):
         raise TypeError(f"{label} must be an array")
-    sides = {_required_side(side, label=f"{label} item") for side in value}
-    if len(sides) != len(value):
+    threads = {_required_thread_name(thread, label=f"{label} item") for thread in value}
+    if len(threads) != len(value):
         raise ValueError(f"{label} must not contain duplicates")
-    return sides
+    return threads
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,30 +184,30 @@ def split_tail(items: list[Message]) -> tuple[list[Message], Message | None, lis
 
 
 @dataclass(slots=True)
-class Sides:
-    active: set[Side] = field(default_factory=lambda: {"main"})
-    messages: dict[Side, list[Message]] = field(default_factory=dict)
+class Threads:
+    active: set[str] = field(default_factory=lambda: {"main"})
+    messages: dict[str, list[Message]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.active = {_required_side(side, label="active side") for side in self.active}
-        normalized: dict[Side, list[Message]] = {}
-        for raw_side, messages in self.messages.items():
-            side = _required_side(raw_side, label="sides key")
-            normalized[side] = list(messages)
+        self.active = {_required_thread_name(thread, label="active thread") for thread in self.active}
+        normalized: dict[str, list[Message]] = {}
+        for raw_thread, messages in self.messages.items():
+            thread = _required_thread_name(raw_thread, label="threads key")
+            normalized[thread] = list(messages)
         self.messages = normalized
 
-    def get(self, side: Side, default: list[Message] | None = None) -> list[Message] | None:
-        return self.messages.get(_required_side(side, label="side"), default)
+    def get(self, thread: str, default: list[Message] | None = None) -> list[Message] | None:
+        return self.messages.get(_required_thread_name(thread, label="thread"), default)
 
-    def __getitem__(self, side: Side) -> list[Message]:
-        return self.messages[_required_side(side, label="side")]
+    def __getitem__(self, thread: str) -> list[Message]:
+        return self.messages[_required_thread_name(thread, label="thread")]
 
-    def __setitem__(self, side: Side, messages: list[Message]) -> None:
-        key = _required_side(side, label="side")
+    def __setitem__(self, thread: str, messages: list[Message]) -> None:
+        key = _required_thread_name(thread, label="thread")
         self.messages[key] = list(messages)
 
-    def setdefault(self, side: Side, default: list[Message] | None = None) -> list[Message]:
-        key = _required_side(side, label="side")
+    def setdefault(self, thread: str, default: list[Message] | None = None) -> list[Message]:
+        key = _required_thread_name(thread, label="thread")
         if key not in self.messages:
             self.messages[key] = [] if default is None else list(default)
         return self.messages[key]
@@ -221,27 +218,27 @@ class Sides:
     def to_primitive(self) -> dict[str, object]:
         return {
             "active": sorted(self.active),
-            "messages": {side: [message.to_primitive() for message in self.messages[side]] for side in sorted(self.messages)},
+            "messages": {thread: [message.to_primitive() for message in self.messages[thread]] for thread in sorted(self.messages)},
         }
 
     @classmethod
-    def from_primitive(cls, value: object) -> Sides:
-        item = _required_mapping(value, label="sides")
+    def from_primitive(cls, value: object) -> Threads:
+        item = _required_mapping(value, label="threads")
         allowed = {"active", "messages"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
-            raise ValueError(f"sides contains unknown keys: {names}")
+            raise ValueError(f"threads contains unknown keys: {names}")
         missing = allowed - set(item)
         if missing:
             names = ", ".join(sorted(missing))
-            raise ValueError(f"sides is missing keys: {names}")
-        messages_value = _required_mapping(item["messages"], label="sides messages")
+            raise ValueError(f"threads is missing keys: {names}")
+        messages_value = _required_mapping(item["messages"], label="threads messages")
         return cls(
-            active=_required_side_set(item["active"], label="sides active"),
+            active=_required_thread_name_set(item["active"], label="threads active"),
             messages={
-                _required_side(side, label="sides key"): _required_message_list(messages, label=f"sides.{side}")
-                for side, messages in messages_value.items()
+                _required_thread_name(thread, label="threads key"): _required_message_list(messages, label=f"threads.{thread}")
+                for thread, messages in messages_value.items()
             },
         )
 
@@ -295,101 +292,109 @@ def split_main_updates(
 
 @dataclass(frozen=True, slots=True)
 class ReasoningCheckpoint:
-    durable: dict[str, JSONValue]
-    active: set[Side]
-    sides: dict[Side, list[Message]]
+    memory: dict[str, JSONValue]
+    active: set[str]
+    threads: dict[str, list[Message]]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "durable", dict(self.durable))
-        object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
-        normalized: dict[Side, list[Message]] = {}
-        for raw_side, messages in self.sides.items():
-            side = _required_side(raw_side, label="reasoning checkpoint sides key")
-            if side == "main":
-                raise ValueError("reasoning checkpoint sides may not contain main")
-            normalized[side] = list(messages)
-        object.__setattr__(self, "sides", normalized)
+        object.__setattr__(self, "memory", dict(self.memory))
+        object.__setattr__(
+            self,
+            "active",
+            {_required_thread_name(thread, label="active thread") for thread in self.active},
+        )
+        normalized: dict[str, list[Message]] = {}
+        for raw_thread, messages in self.threads.items():
+            thread = _required_thread_name(raw_thread, label="reasoning checkpoint threads key")
+            if thread == "main":
+                raise ValueError("reasoning checkpoint threads may not contain main")
+            normalized[thread] = list(messages)
+        object.__setattr__(self, "threads", normalized)
 
     def to_primitive(self) -> dict[str, object]:
         return {
             "type": "checkpoint",
-            "durable": dict(self.durable),
+            "memory": dict(self.memory),
             "active": sorted(self.active),
-            "sides": {side: [message.to_primitive() for message in self.sides[side]] for side in sorted(self.sides)},
+            "threads": {thread: [message.to_primitive() for message in self.threads[thread]] for thread in sorted(self.threads)},
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> ReasoningCheckpoint:
         item = _required_mapping(value, label="reasoning checkpoint")
-        allowed = {"type", "durable", "active", "sides"}
+        allowed = {"type", "memory", "active", "threads"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"reasoning checkpoint contains unknown keys: {names}")
         if item.get("type") != "checkpoint":
             raise ValueError("reasoning checkpoint type must be 'checkpoint'")
-        durable = _required_mapping(item.get("durable"), label="reasoning checkpoint durable state")
-        sides = _required_mapping(item.get("sides"), label="reasoning checkpoint sides")
+        memory = _required_mapping(item.get("memory"), label="reasoning checkpoint memory")
+        threads = _required_mapping(item.get("threads"), label="reasoning checkpoint threads")
         return cls(
-            durable=dict(durable),
-            active=_required_side_set(item.get("active"), label="reasoning checkpoint active"),
-            sides={
-                _required_side(side, label="reasoning checkpoint sides key"): _required_message_list(
+            memory=dict(memory),
+            active=_required_thread_name_set(item.get("active"), label="reasoning checkpoint active"),
+            threads={
+                _required_thread_name(thread, label="reasoning checkpoint threads key"): _required_message_list(
                     messages,
-                    label=f"reasoning checkpoint sides.{side}",
+                    label=f"reasoning checkpoint threads.{thread}",
                 )
-                for side, messages in sides.items()
+                for thread, messages in threads.items()
             },
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ReasoningPatch:
-    durable: JSONPatch
-    active: set[Side] | None = None
-    sides: dict[Side, JSONPatch] = field(default_factory=dict)
+    memory: JSONPatch
+    active: set[str] | None = None
+    threads: dict[str, JSONPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "durable", _required_patch(self.durable, label="reasoning durable patch"))
+        object.__setattr__(self, "memory", _required_patch(self.memory, label="reasoning memory patch"))
         if self.active is not None:
-            object.__setattr__(self, "active", {_required_side(side, label="active side") for side in self.active})
-        normalized: dict[Side, JSONPatch] = {}
-        for raw_side, patch in self.sides.items():
-            side = _required_side(raw_side, label="reasoning patch sides key")
-            if side == "main":
-                raise ValueError("reasoning patch sides may not target main")
-            normalized[side] = _required_patch(patch, label=f"reasoning patch sides.{side}")
-        object.__setattr__(self, "sides", normalized)
+            object.__setattr__(
+                self,
+                "active",
+                {_required_thread_name(thread, label="active thread") for thread in self.active},
+            )
+        normalized: dict[str, JSONPatch] = {}
+        for raw_thread, patch in self.threads.items():
+            thread = _required_thread_name(raw_thread, label="reasoning patch threads key")
+            if thread == "main":
+                raise ValueError("reasoning patch threads may not target main")
+            normalized[thread] = _required_patch(patch, label=f"reasoning patch threads.{thread}")
+        object.__setattr__(self, "threads", normalized)
 
     def to_primitive(self) -> dict[str, object]:
         return {
             "type": "patch",
-            "durable": list(self.durable),
+            "memory": list(self.memory),
             "active": None if self.active is None else sorted(self.active),
-            "sides": {side: list(patch) for side, patch in sorted(self.sides.items())},
+            "threads": {thread: list(patch) for thread, patch in sorted(self.threads.items())},
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> ReasoningPatch:
         item = _required_mapping(value, label="reasoning patch")
-        allowed = {"type", "durable", "active", "sides"}
+        allowed = {"type", "memory", "active", "threads"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"reasoning patch contains unknown keys: {names}")
         if item.get("type") != "patch":
             raise ValueError("reasoning patch type must be 'patch'")
-        sides = _required_mapping(item.get("sides"), label="reasoning patch sides")
+        threads = _required_mapping(item.get("threads"), label="reasoning patch threads")
         active = item.get("active")
         return cls(
-            durable=_required_patch(item.get("durable"), label="reasoning durable patch"),
-            active=None if active is None else _required_side_set(active, label="reasoning patch active"),
-            sides={
-                _required_side(side, label="reasoning patch sides key"): _required_patch(
+            memory=_required_patch(item.get("memory"), label="reasoning memory patch"),
+            active=None if active is None else _required_thread_name_set(active, label="reasoning patch active"),
+            threads={
+                _required_thread_name(thread, label="reasoning patch threads key"): _required_patch(
                     patch,
-                    label=f"reasoning patch sides.{side}",
+                    label=f"reasoning patch threads.{thread}",
                 )
-                for side, patch in sides.items()
+                for thread, patch in threads.items()
             },
         )
 
@@ -456,8 +461,8 @@ class ReasoningPayload:
 @dataclass(frozen=True, slots=True)
 class CompactionPayload:
     id: str
-    durable: dict[str, JSONValue]
-    sides: Sides
+    memory: dict[str, JSONValue]
+    threads: Threads
 
     def __post_init__(self) -> None:
         _required_string(self.id, label="compaction payload id")
@@ -465,36 +470,36 @@ class CompactionPayload:
     def to_primitive(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "durable": dict(self.durable),
-            "sides": self.sides.to_primitive(),
+            "memory": dict(self.memory),
+            "threads": self.threads.to_primitive(),
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> CompactionPayload:
         item = _required_mapping(value, label="compaction payload")
-        durable_value = item.get("durable")
-        if not isinstance(durable_value, Mapping):
-            raise TypeError("compaction payload durable state must be an object")
+        memory_value = item.get("memory")
+        if not isinstance(memory_value, Mapping):
+            raise TypeError("compaction payload memory must be an object")
         return cls(
             id=_required_string(item.get("id"), label="compaction payload id"),
-            durable=dict(durable_value),
-            sides=Sides.from_primitive(item.get("sides")),
+            memory=dict(memory_value),
+            threads=Threads.from_primitive(item.get("threads")),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CallID:
-    side: Side
+    thread: str
     upstream_tool_call_id: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "side", _required_side(self.side, label="function call side"))
+        object.__setattr__(self, "thread", _required_thread_name(self.thread, label="function call thread"))
 
 
 @dataclass(slots=True)
 class Ingested:
-    durable: dict[str, JSONValue]
-    sides: Sides
+    memory: dict[str, JSONValue]
+    threads: Threads
     main_tail: MainTail | None
     last_reasoning_id: str | None
     last_compaction_id: str | None = None

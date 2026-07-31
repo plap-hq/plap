@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Sequence
+from dataclasses import field
+from functools import partial
 from types import SimpleNamespace
 from uuid import uuid4
 
+import anyio
 import msgspec
 import pytest
 import svcs
@@ -26,12 +29,12 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.llms.retry import RetryValidator
 from plap.plugins.core.budget import ResponseBudget
-from plap.plugins.vision import VISION_BUDGET_OUTPUT, VISION_TOOL_NAME, _image_id, _vision_history_messages
+from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages
 from plap.responses.contracts import ResponseCreateRequest
-from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem
-from plap.responses.ingest.models import Ingested, Message, Sides
+from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
+from plap.responses.ingest.models import Ingested, Message, Threads
+from plap.responses.ingest.sealing import open_reasoning_payload
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -109,11 +112,39 @@ class _Client:
         return None
 
 
+class _BlockingClient:
+    def __init__(self, delta: ChatCompletionDelta) -> None:
+        self._delta = delta
+        self.blocked = anyio.Event()
+        self.stream_requests: list[ChatCompletionRequest] = []
+
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        _ = request
+        raise AssertionError("unexpected completion request")
+
+    def stream(self, request: ChatCompletionRequest):
+        self.stream_requests.append(request)
+
+        async def run():
+            yield self._delta
+            self.blocked.set()
+            await anyio.sleep_forever()
+
+        return run()
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _reload_handlers():
     bus.reset()
     core_module = importlib.import_module("plap.plugins.core.loop")
+    easy_server_tools_module = importlib.import_module("plap.plugins.easy.server_tools")
+    easy_module = importlib.import_module("plap.plugins.easy")
     vision_module = importlib.import_module("plap.plugins.vision")
     core_module = importlib.reload(core_module)
+    importlib.reload(easy_server_tools_module)
+    importlib.reload(easy_module)
     importlib.reload(vision_module)
     return core_module
 
@@ -150,11 +181,40 @@ def _image_message(url: str, *, detail: str | None = None) -> Message:
 
 def _ingested(url: str = "https://example.com/cat.png") -> Ingested:
     return Ingested(
-        durable={},
-        sides=Sides(messages={"main": [_image_message(url)]}),
+        memory={},
+        threads=Threads(messages={"main": [_image_message(url)]}),
         main_tail=None,
         last_reasoning_id=None,
     )
+
+
+def _server_history_ingested(*, external_name: str | None = None) -> Ingested:
+    image = _image("https://example.com/cat.png")
+    arguments = msgspec.json.encode({"ids": [_image_id(image)], "prompt": "describe"}).decode()
+    calls = [ChatToolCall(id="call_server", name=VISION_TOOL_NAME, arguments=arguments)]
+    if external_name is not None:
+        calls.append(ChatToolCall(id="call_external", name=external_name, arguments="{}"))
+    messages = [
+        Message(role="user", content=[image]),
+        Message(
+            role="assistant",
+            tool_calls=calls,
+            memory={"server_tools": {"call_ids": ["call_server"]}},
+        ),
+        Message(
+            role="tool",
+            tool_call_id="call_server",
+            content="vision output",
+            memory={"server_tools": {"tool": VISION_TOOL_NAME, "arguments": arguments}},
+        ),
+    ]
+    if external_name is not None:
+        messages.append(Message(role="tool", tool_call_id="call_external", content="external output"))
+    return Ingested(memory={}, threads=Threads(messages={"main": messages}), main_tail=None, last_reasoning_id=None)
+
+
+def _tool_call_name(messages: Sequence[ChatMessage], call_id: str) -> str:
+    return next(call.name for message in messages for call in message.tool_calls if call.id == call_id)
 
 
 class _Config(Box):
@@ -255,7 +315,7 @@ def _state(
         svcs=_svcs(client, config or _config()),
         coordinator=_coordinator(store, channels, actual_request),
         sealing_keyring=_keyring(),
-        side_codes={"main": 0},
+        thread_codes={"main": 0},
     )
     return state, store, channels
 
@@ -353,7 +413,17 @@ def test_vision_history_messages_replay_images_and_prior_turns_in_order_without_
                 )
             ],
         ),
-        ChatMessage(role="tool", tool_call_id="call_vision_1", content="first comparison"),
+        ChatMessage(
+            role="tool",
+            tool_call_id="call_vision_1",
+            content="first comparison",
+            memory={
+                "server_tools": {
+                    "tool": VISION_TOOL_NAME,
+                    "arguments": msgspec.json.encode({"ids": [image_a_id, image_b_id], "prompt": "compare them"}).decode(),
+                }
+            },
+        ),
         ChatMessage(role="user", content=[image_c]),
         ChatMessage(role="user", content=[image_a]),
     ]
@@ -391,7 +461,13 @@ def test_vision_history_messages_replay_hidden_reasoning_from_tool_messages() ->
             role="tool",
             tool_call_id="call_vision_1",
             content="first comparison",
-            durable={"vision": {"reasoning_content": "I checked the labels before comparing the shapes."}},
+            memory={
+                "vision": {"reasoning_content": "I checked the labels before comparing the shapes."},
+                "server_tools": {
+                    "tool": VISION_TOOL_NAME,
+                    "arguments": msgspec.json.encode({"ids": [image_id], "prompt": "inspect closely"}).decode(),
+                },
+            },
         ),
     ]
 
@@ -416,6 +492,53 @@ async def test_request_rewrites_images_and_preserves_none_tool_choice() -> None:
     assert sum(1 for message in request.messages if message.role == "developer") == 1
     assert isinstance(request.messages[1].content, list)
     assert request.messages[1].content[0].text.startswith("image-")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("client_names", "expected_wire_name"),
+    [
+        ([], "vision"),
+        (["vision_2"], "vision"),
+        (["vision", "vision_2"], "vision_3"),
+    ],
+)
+async def test_historical_server_calls_follow_current_wire_binding(
+    client_names: list[str],
+    expected_wire_name: str,
+) -> None:
+    core = _reload_handlers()
+    client = _Client(streams=[], completes=[])
+    request = _request(tools=[{"type": "function", "name": name, "parameters": {"type": "object"}} for name in client_names])
+    state, _, _ = _state(client, request=request, ingested=_server_history_ingested())
+
+    finalized = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+
+    assert _tool_names(finalized) == [*client_names, expected_wire_name]
+    assert _tool_call_name(finalized.messages, "call_server") == expected_wire_name
+    assert _tool_call_name(state.threads["main"], "call_server") == VISION_TOOL_NAME
+
+
+@pytest.mark.anyio
+async def test_historical_rebinding_leaves_client_calls_unchanged() -> None:
+    core = _reload_handlers()
+    client = _Client(streams=[], completes=[])
+    request = _request(
+        tools=[
+            {"type": "function", "name": "vision", "parameters": {"type": "object"}},
+            {"type": "function", "name": "vision_2", "parameters": {"type": "object"}},
+        ]
+    )
+    state, _, _ = _state(
+        client,
+        request=request,
+        ingested=_server_history_ingested(external_name="vision"),
+    )
+
+    finalized = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+
+    assert _tool_call_name(finalized.messages, "call_server") == "vision_3"
+    assert _tool_call_name(finalized.messages, "call_external") == "vision"
 
 
 @pytest.mark.anyio
@@ -459,7 +582,8 @@ async def test_internal_images_tool_closes_call_when_response_budget_is_exhauste
     client = _Client(
         streams=[
             _tool_step(
-                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
+                ("call_vision_1", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
+                ("call_vision_2", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"double check"}}'),
                 usage=_usage(input_tokens=8, output_tokens=4),
             )
         ],
@@ -471,7 +595,10 @@ async def test_internal_images_tool_closes_call_when_response_budget_is_exhauste
 
     assert client.complete_requests == []
     assert state.coordinator.current_response().status == "incomplete"
-    assert any(message.role == "tool" and message.content == VISION_BUDGET_OUTPUT for message in state.sides["main"])
+    failed = [message for message in state.threads["main"] if message.role == "tool"]
+    assert [message.tool_call_id for message in failed] == ["call_vision_1", "call_vision_2"]
+    assert all(message.content == "The server could not run this tool because the response budget was exhausted." for message in failed)
+    assert all(message.memory["server_tools"]["error"] == "budget_exhausted" for message in failed)
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in _output_items(state))
 
 
@@ -521,8 +648,6 @@ async def test_internal_images_tool_replays_prior_hidden_vision_reasoning_into_l
 @pytest.mark.parametrize(
     "ids_case",
     [
-        "string_full",
-        "string_prefixless",
         "prefixless",
         "split_full_jsonish",
         "split_prefixless_jsonish",
@@ -533,11 +658,7 @@ async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> 
     core = _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     prefixless = image_id.removeprefix("image-")
-    if ids_case == "string_full":
-        ids = image_id
-    elif ids_case == "string_prefixless":
-        ids = prefixless
-    elif ids_case == "prefixless":
+    if ids_case == "prefixless":
         ids = [prefixless]
     elif ids_case == "split_full_jsonish":
         ids = list(f'["{image_id}"]')
@@ -704,7 +825,105 @@ async def test_internal_images_tool_stays_hidden_when_external_tool_remains_open
 
 
 @pytest.mark.anyio
-async def test_unknown_image_id_retries_before_internal_tool_execution() -> None:
+async def test_vision_server_tool_rebinds_without_renaming_client_tools() -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_vision", "vision_3", f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            ),
+            _text_step("final answer", usage=_usage(input_tokens=5, output_tokens=3)),
+        ],
+        completes=[_complete("vision output", usage=_usage(input_tokens=6, output_tokens=2))],
+    )
+    state, _, _ = _state(
+        client,
+        request=_request(
+            tools=[
+                {"type": "function", "name": "vision", "parameters": {"type": "object"}},
+                {"type": "function", "name": "vision_2", "parameters": {"type": "object"}},
+            ]
+        ),
+    )
+
+    await core.run_response(state=state)
+
+    assert _tool_names(client.stream_requests[0]) == ["vision", "vision_2", "vision_3"]
+    assistant = next(message for message in state.threads["main"] if any(call.id == "call_vision" for call in message.tool_calls))
+    assert _tool_call_name([assistant], "call_vision") == VISION_TOOL_NAME
+    assert assistant.memory["server_tools"]["call_ids"] == ["call_vision"]
+    assert _tool_call_name(client.stream_requests[1].messages, "call_vision") == "vision_3"
+    tool_output = next(message for message in state.threads["main"] if message.tool_call_id == "call_vision")
+    assert tool_output.memory["server_tools"]["tool"] == VISION_TOOL_NAME
+    assert tool_output.memory["server_tools"]["arguments"] == (f'{{"ids":["{image_id}"],"prompt":"describe"}}')
+
+
+@pytest.mark.anyio
+async def test_rejected_server_tool_attempt_is_stored_canonical_and_rebound_on_later_requests() -> None:
+    core = _reload_handlers()
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_vision", "vision_2", "{}"),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            ),
+            _text_step("fixed answer", usage=_usage(input_tokens=5, output_tokens=3)),
+        ],
+        completes=[],
+    )
+    state, _, _ = _state(
+        client,
+        request=_request(tools=[{"type": "function", "name": "vision", "parameters": {"type": "object"}}]),
+    )
+
+    await core.run_response(state=state)
+
+    assistant = next(message for message in state.threads["main"] if any(call.id == "call_vision" for call in message.tool_calls))
+    assert assistant.tool_calls[0].name == VISION_TOOL_NAME
+    assert assistant.memory["server_tools"]["call_ids"] == ["call_vision"]
+    assert _tool_call_name(client.stream_requests[1].messages, "call_vision") == "vision_2"
+    later_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    assert _tool_call_name(later_request.messages, "call_vision") == "vision_2"
+
+
+@pytest.mark.anyio
+async def test_vision_server_tool_is_canonical_before_interrupted_progress_is_saved() -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    client = _BlockingClient(
+        _delta(
+            tool_call_delta=ChatToolCallDelta(
+                index=0,
+                id="call_vision",
+                name="vision_2",
+                arguments_delta=f'{{"ids":["{image_id}"],"prompt":"describe"}}',
+            )
+        )
+    )
+    state, _, _ = _state(
+        client,
+        request=_request(tools=[{"type": "function", "name": "vision", "parameters": {"type": "object"}}]),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(partial(core.run_response, state=state))
+        await client.blocked.wait()
+        task_group.cancel_scope.cancel()
+
+    assistant = next(message for message in state.threads["main"] if message.is_assistant())
+    assert assistant.tool_calls[0].name == VISION_TOOL_NAME
+    assert assistant.memory["server_tools"]["call_ids"] == ["call_vision"]
+    reasoning = next(item for item in _output_items(state) if isinstance(item, ResponseReasoningItem))
+    payload = open_reasoning_payload(reasoning.encrypted_content, keyring=_keyring())
+    persisted_assistant = next(message for message in payload.main if message.is_assistant())
+    assert persisted_assistant.tool_calls[0].name == VISION_TOOL_NAME
+    assert persisted_assistant.memory["server_tools"]["call_ids"] == ["call_vision"]
+
+
+@pytest.mark.anyio
+async def test_unknown_image_id_returns_failed_tool_output() -> None:
     core = _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
@@ -726,10 +945,10 @@ async def test_unknown_image_id_retries_before_internal_tool_execution() -> None
     await core.run_response(state=state)
 
     assert len(client.stream_requests) == 3
-    assert any(
-        message.role == "user" and isinstance(message.content, str) and "unknown image ids" in message.content.lower()
-        for message in client.stream_requests[1].messages
-    )
+    failed = next(message for message in client.stream_requests[1].messages if message.tool_call_id == "call_vision_bad")
+    assert failed.content == "Unknown image IDs: image-AAAA-BBBB-CCCC-DDDD."
+    assert failed.memory["vision"] == {"status": "failed", "reason": "unknown_image_ids"}
+    assert failed.memory["server_tools"]["tool"] == VISION_TOOL_NAME
     assert len(client.complete_requests) == 1
     output = _output_items(state)
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
@@ -740,48 +959,47 @@ async def test_unknown_image_id_retries_before_internal_tool_execution() -> None
 @pytest.mark.anyio
 async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> None:
     core = _reload_handlers()
+    easy_server_tools = importlib.import_module("plap.plugins.easy.server_tools")
 
-    @bus.listen("response.completion")
-    async def run_internal(
-        state: State,
-        config: CueBox,
-        budget: ResponseBudget,
-        request: ChatCompletionRequest,
-        validators: tuple[RetryValidator, ...],
-        *,
-        next,
-    ) -> object:
-        result = await next(
-            state=state,
-            config=config,
-            budget=budget,
-            request=request,
-            validators=validators,
-        )
-        if result.finish_reason != ChatFinishReason.TOOL_CALLS:
-            return result
-        for call in result.message.tool_calls:
-            if call.name == "internal":
-                state.sides["main"].append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
-        return result
+    @easy_server_tools.register
+    class InternalTool(easy_server_tools.ServerTool):
+        name: str = "internal"
+        parameters: dict[str, object] | None = field(default_factory=lambda: {"type": "object"})
+        strict: bool | None = True
+
+        async def __call__(
+            self,
+            state: State,
+            config: CueBox,
+            budget: ResponseBudget,
+            call: ChatToolCall,
+        ) -> ChatMessage:
+            _ = state, config, budget
+            return ChatMessage(role="tool", tool_call_id=call.id, content=f"{self.name}:{call.name}")
 
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
             _tool_step(
                 ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
-                ("call_internal", "internal", "{}"),
+                ("call_internal", "internal_2", "{}"),
                 usage=_usage(input_tokens=8, output_tokens=4),
             ),
             _text_step("all internal done", usage=_usage(input_tokens=5, output_tokens=3)),
         ],
         completes=[_complete("vision output", usage=_usage(input_tokens=6, output_tokens=2))],
     )
-    state, _, _ = _state(client)
+    state, _, _ = _state(
+        client,
+        request=_request(tools=[{"type": "function", "name": "internal", "parameters": {"type": "object"}}]),
+    )
 
     await core.run_response(state=state)
 
     assert len(client.stream_requests) == 2
+    internal_output = next(message for message in state.threads["main"] if message.tool_call_id == "call_internal")
+    assert internal_output.content == "internal:internal"
+    assert internal_output.memory["server_tools"] == {"tool": "internal", "arguments": "{}"}
     output = _output_items(state)
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
     final_message = next(item for item in output if isinstance(item, ResponseMessageItem))

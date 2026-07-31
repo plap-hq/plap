@@ -1,6 +1,6 @@
 package plap
 
-#RegisteredSides: {
+#RegisteredThreads: {
   advisor: 1024
 }
 

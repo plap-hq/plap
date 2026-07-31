@@ -38,7 +38,7 @@ from plap.responses.ingest.models import (
     PublicMainTail,
     ReasoningCheckpoint,
     ReasoningPatch,
-    Sides,
+    Threads,
     ToolCall,
 )
 from plap.responses.ingest.sealing import open_call_id, open_reasoning_payload
@@ -108,7 +108,7 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
-def _side_codes() -> dict[str, int]:
+def _thread_codes() -> dict[str, int]:
     return {"main": 0, "defender": 1024, "reviewer": 1025}
 
 
@@ -132,8 +132,8 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
 
 def _ingested(*, active: set[str] | None = None) -> Ingested:
     return Ingested(
-        durable={},
-        sides=Sides(active={"main"} if active is None else active),
+        memory={},
+        threads=Threads(active={"main"} if active is None else active),
         main_tail=None,
         last_reasoning_id=None,
     )
@@ -283,7 +283,7 @@ def _state(
         svcs=_svcs(client=client, config=config),
         coordinator=_coordinator(actual_store, actual_channels, actual_request),
         sealing_keyring=_keyring(),
-        side_codes=_side_codes(),
+        thread_codes=_thread_codes(),
     )
 
 
@@ -628,8 +628,8 @@ async def test_run_response_completes_simple_turn_without_midstream_staging() ->
         request=request,
         client=client,
         ingested=Ingested(
-            durable={},
-            sides=Sides(messages={"main": [Message(role="user", content="hello")]}),
+            memory={},
+            threads=Threads(messages={"main": [Message(role="user", content="hello")]}),
             main_tail=None,
             last_reasoning_id=None,
         ),
@@ -675,6 +675,13 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
         )
         events.append("completion.after")
         return result
+
+    @bus.listen("response.snapshot")
+    async def wrap_snapshot(state, config, request, snapshot, *, next):
+        events.append("snapshot.before")
+        snapshot = await next(state=state, config=config, request=request, snapshot=snapshot)
+        events.append("snapshot.after")
+        return snapshot
 
     @bus.listen("response.turn")
     async def wrap_turn(state, config, budget, request, *, next):
@@ -722,6 +729,8 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
         "request.after",
         "turn.before",
         "completion.before",
+        "snapshot.before",
+        "snapshot.after",
         "completion.after",
         "turn.after",
         "loop.after",
@@ -730,10 +739,10 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
     ]
 
 
-def test_state_from_ingested_preserves_active_sides() -> None:
+def test_state_from_ingested_preserves_active_threads() -> None:
     state = _state(ingested=_ingested(active={"reviewer"}))
 
-    assert state.sides.active == {"reviewer"}
+    assert state.threads.active == {"reviewer"}
 
 
 async def test_run_response_cancellation_before_created_is_noop() -> None:
@@ -851,7 +860,7 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
     assert response.output[1].content[0].text == "fixed"
 
 
-async def test_run_response_summary_stages_on_summary_done(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_response_summary_saves_progress_on_summary_done(monkeypatch: pytest.MonkeyPatch) -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
     request = _request(reasoning={"summary": "concise"})
@@ -912,12 +921,12 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
     assert isinstance(response.output[0], ResponseReasoningItem)
 
 
-async def test_state_stage_persists_stubbed_open_tail_calls() -> None:
+async def test_state_save_progress_persists_stubbed_open_tail_calls() -> None:
     store = _RecordingStore()
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides["main"] = [
+    state.threads["main"] = [
         Message(
             role="assistant",
             content="thinking",
@@ -925,7 +934,7 @@ async def test_state_stage_persists_stubbed_open_tail_calls() -> None:
         )
     ]
 
-    await state.stage()
+    await state.save_progress()
 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
@@ -938,7 +947,7 @@ async def test_state_stage_persists_stubbed_open_tail_calls() -> None:
     assert payload.main[1].content
 
 
-async def test_state_stage_appends_cross_lane_stub_without_main_patch() -> None:
+async def test_state_save_progress_appends_cross_lane_stub_without_main_patch() -> None:
     assistant = Message(
         role="assistant",
         content="working",
@@ -949,16 +958,16 @@ async def test_state_stage_appends_cross_lane_stub_without_main_patch() -> None:
     )
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active={"main"}, messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides["main"].append(completed)
+    state.threads["main"].append(completed)
 
-    await state.stage()
+    await state.save_progress()
 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
@@ -968,10 +977,10 @@ async def test_state_stage_appends_cross_lane_stub_without_main_patch() -> None:
         Message(role="tool", tool_call_id="call_open", content=INTERRUPTED_TOOL_OUTPUT),
     ]
     assert isinstance(payload.state, ReasoningPatch)
-    assert "main" not in payload.state.sides
+    assert "main" not in payload.state.threads
 
 
-async def test_state_stage_preserves_inactive_cross_lane_call_without_stub() -> None:
+async def test_state_save_progress_preserves_inactive_cross_lane_call_without_stub() -> None:
     assistant = Message(
         role="assistant",
         content="working",
@@ -982,114 +991,114 @@ async def test_state_stage_preserves_inactive_cross_lane_call_without_stub() -> 
     )
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides["main"].append(completed)
+    state.threads["main"].append(completed)
 
-    await state.stage()
+    await state.save_progress()
 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [completed]
     assert isinstance(payload.state, ReasoningPatch)
-    assert "main" not in payload.state.sides
+    assert "main" not in payload.state.threads
 
 
-async def test_state_stage_preserves_explicit_empty_side() -> None:
+async def test_state_save_progress_preserves_explicit_empty_thread() -> None:
     store = _RecordingStore()
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides["reviewer"] = []
+    state.threads["reviewer"] = []
 
-    await state.stage()
+    await state.save_progress()
 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert isinstance(payload.state, ReasoningPatch)
-    assert "reviewer" in payload.state.sides
-    assert payload.state.sides["reviewer"] == []
+    assert "reviewer" in payload.state.threads
+    assert payload.state.threads["reviewer"] == []
 
 
-@pytest.mark.parametrize("operation", ["stage", "commit"])
+@pytest.mark.parametrize("operation", ["save_progress", "commit"])
 @pytest.mark.parametrize("location", ["active", "messages"])
-async def test_state_emission_rejects_unconfigured_sides(operation: str, location: str) -> None:
+async def test_state_emission_rejects_unconfigured_threads(operation: str, location: str) -> None:
     state = _state()
     if location == "active":
-        state.sides.active.add("unknown")
+        state.threads.active.add("unknown")
     else:
-        state.sides["unknown"] = []
+        state.threads["unknown"] = []
 
-    with pytest.raises(ValueError, match="state contains unconfigured sides: unknown"):
+    with pytest.raises(ValueError, match="state contains unconfigured threads: unknown"):
         await getattr(state, operation)()
 
 
-async def test_state_stage_rejects_persisted_main_mutation() -> None:
+async def test_state_save_progress_rejects_persisted_main_mutation() -> None:
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(messages={"main": [Message(role="user", content="original")]}),
+            memory={},
+            threads=Threads(messages={"main": [Message(role="user", content="original")]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides["main"] = [Message(role="user", content="wrong lane")]
+    state.threads["main"] = [Message(role="user", content="wrong lane")]
 
     with pytest.raises(RuntimeError, match="replace only the current response suffix"):
-        await state.stage()
+        await state.save_progress()
 
 
-async def test_state_stage_accepts_replaced_current_response_suffix() -> None:
+async def test_state_save_progress_accepts_replaced_current_response_suffix() -> None:
     base = Message(role="developer", content="base")
     first = Message(role="developer", content="first")
     second = Message(role="developer", content="second")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(messages={"main": [base]}),
+            memory={},
+            threads=Threads(messages={"main": [base]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides["main"] = [base, first, second]
-    state.sides["main"] = [base, second, first]
+    state.threads["main"] = [base, first, second]
+    state.threads["main"] = [base, second, first]
 
-    await state.stage()
+    await state.save_progress()
 
     item = _last_output_item(state.coordinator)
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [second, first]
     assert isinstance(payload.state, ReasoningPatch)
-    assert "main" not in payload.state.sides
+    assert "main" not in payload.state.threads
 
 
-async def test_state_stage_accepts_cleared_current_response_suffix() -> None:
+async def test_state_save_progress_accepts_cleared_current_response_suffix() -> None:
     base = Message(role="developer", content="base")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(messages={"main": [base]}),
+            memory={},
+            threads=Threads(messages={"main": [base]}),
             main_tail=None,
             last_reasoning_id=None,
         )
     )
-    state.sides["main"].append(Message(role="developer", content="discarded draft"))
-    state.sides["main"] = [base]
+    state.threads["main"].append(Message(role="developer", content="discarded draft"))
+    state.threads["main"] = [base]
 
-    await state.stage()
+    await state.save_progress()
 
     assert state.coordinator.current_response().output == []
 
 
-async def test_state_stage_rejects_changes_within_persisted_main_prefix() -> None:
+async def test_state_save_progress_rejects_changes_within_persisted_main_prefix() -> None:
     first = Message(role="system", content="first")
     second = Message(role="developer", content="second")
     replacements = [
@@ -1102,32 +1111,32 @@ async def test_state_stage_rejects_changes_within_persisted_main_prefix() -> Non
     for replacement in replacements:
         state = _state(
             ingested=Ingested(
-                durable={},
-                sides=Sides(messages={"main": [first, second]}),
+                memory={},
+                threads=Threads(messages={"main": [first, second]}),
                 main_tail=None,
                 last_reasoning_id=None,
             )
         )
-        state.sides["main"] = replacement
+        state.threads["main"] = replacement
 
         with pytest.raises(RuntimeError, match="replace only the current response suffix"):
-            await state.stage()
+            await state.save_progress()
 
 
-async def test_state_stage_rejects_nested_persisted_main_mutation() -> None:
+async def test_state_save_progress_rejects_nested_persisted_main_mutation() -> None:
     base = Message(role="assistant", content="base")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(messages={"main": [base]}),
+            memory={},
+            threads=Threads(messages={"main": [base]}),
             main_tail=PublicMainTail(source=None),
             last_reasoning_id=None,
         )
     )
-    state.sides["main"][0].tool_calls.append(ToolCall(id="changed", name="changed", arguments="{}"))
+    state.threads["main"][0].tool_calls.append(ToolCall(id="changed", name="changed", arguments="{}"))
 
     with pytest.raises(RuntimeError, match="replace only the current response suffix"):
-        await state.stage()
+        await state.save_progress()
 
 
 async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None:
@@ -1135,7 +1144,7 @@ async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides["main"] = [
+    state.threads["main"] = [
         Message(
             role="assistant",
             content="hello",
@@ -1149,9 +1158,9 @@ async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None
     response = state.coordinator.current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert reasoning_payload.main[0] == state.sides["main"][0]
+    assert reasoning_payload.main[0] == state.threads["main"][0]
     assert isinstance(reasoning_payload.main[1], MessagePatch)
-    assert reasoning_payload.main[1].message == state.sides["main"][0]
+    assert reasoning_payload.main[1].message == state.threads["main"][0]
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "hello"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
@@ -1165,7 +1174,7 @@ async def test_state_commit_uses_direct_hidden_assistant_for_new_call_only_turn(
         reasoning_content="private",
         tool_calls=[ToolCall(id="call_main", name="search", arguments="{}")],
     )
-    state.sides["main"] = [assistant]
+    state.threads["main"] = [assistant]
 
     await state.commit()
 
@@ -1180,8 +1189,8 @@ async def test_state_commit_uses_direct_hidden_assistant_for_new_call_only_turn(
 async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
     state = _state(
         ingested=Ingested(
-            durable={"base": True, "nullable": None},
-            sides=Sides(
+            memory={"base": True, "nullable": None},
+            threads=Threads(
                 active={"main"},
                 messages={"main": [Message(role="user", content="question")]},
             ),
@@ -1190,9 +1199,9 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
             checkpoint_required=True,
         )
     )
-    state.sides["reviewer"] = [Message(role="assistant", content="review state")]
-    state.sides.active.add("reviewer")
-    state.sides["main"].append(Message(role="assistant", content="answer", reasoning_content="private"))
+    state.threads["reviewer"] = [Message(role="assistant", content="review state")]
+    state.threads.active.add("reviewer")
+    state.threads["main"].append(Message(role="assistant", content="answer", reasoning_content="private"))
 
     await state.commit()
 
@@ -1201,16 +1210,16 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
     payload = open_reasoning_payload(reasoning_item.encrypted_content, keyring=_keyring())
     assert payload.previous_reasoning_id is None
     assert isinstance(payload.state, ReasoningCheckpoint)
-    assert payload.state.durable == {"base": True, "nullable": None}
+    assert payload.state.memory == {"base": True, "nullable": None}
     assert payload.state.active == {"main", "reviewer"}
-    assert payload.state.sides == {"reviewer": [Message(role="assistant", content="review state")]}
-    assert "main" not in payload.state.sides
-    assert payload.main == [state.sides["main"][-1], MessagePatch(state.sides["main"][-1])]
+    assert payload.state.threads == {"reviewer": [Message(role="assistant", content="review state")]}
+    assert "main" not in payload.state.threads
+    assert payload.main == [state.threads["main"][-1], MessagePatch(state.threads["main"][-1])]
 
 
 async def test_state_commit_keeps_inactive_main_output_private() -> None:
     state = _state(ingested=_ingested(active=set()))
-    state.sides["main"] = [
+    state.threads["main"] = [
         Message(
             role="assistant",
             content="private answer",
@@ -1224,7 +1233,7 @@ async def test_state_commit_keeps_inactive_main_output_private() -> None:
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
-    assert payload.main == state.sides["main"]
+    assert payload.main == state.threads["main"]
 
 
 async def test_run_response_emits_reactivated_persisted_main_call_without_main_completion() -> None:
@@ -1240,13 +1249,13 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
         channels,
         client=object(),
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         ),
     )
-    state.sides.active.add("main")
+    state.threads.active.add("main")
 
     await run_response(state=state)
 
@@ -1261,20 +1270,20 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
     assert isinstance(response.output[1], ResponseMessageItem)
     assert response.output[1].content[0].text == "private answer"
     assert isinstance(response.output[2], ResponseFunctionCallItem)
-    assert open_call_id(response.output[2].call_id, keyring=_keyring(), side_codes=_side_codes()).side == "main"
+    assert open_call_id(response.output[2].call_id, keyring=_keyring(), thread_codes=_thread_codes()).thread == "main"
 
 
 async def test_state_commit_materializes_parked_text_tail_after_activation() -> None:
     assistant = Message(role="assistant", content="delayed answer", reasoning_content="hidden")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
-    state.sides.active.add("main")
+    state.threads.active.add("main")
 
     await state.commit()
 
@@ -1291,8 +1300,8 @@ async def test_state_commit_does_not_republish_active_public_tail() -> None:
     public = Message(role="assistant", content="edited answer", reasoning_content="private")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active={"main"}, messages={"main": [public]}),
+            memory={},
+            threads=Threads(active={"main"}, messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
@@ -1308,13 +1317,13 @@ async def test_state_commit_does_not_republish_reactivated_public_tail() -> None
     public = Message(role="assistant", content="edited answer", reasoning_content="private")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [public]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
     )
-    state.sides.active.add("main")
+    state.threads.active.add("main")
 
     await state.commit()
 
@@ -1333,13 +1342,13 @@ async def test_state_commit_publishes_new_active_tail_after_public_history() -> 
     current = Message(role="assistant", content="new answer", reasoning_content="new private")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active={"main"}, messages={"main": [public]}),
+            memory={},
+            threads=Threads(active={"main"}, messages={"main": [public]}),
             main_tail=PublicMainTail(source=source),
             last_reasoning_id="rs_public",
         )
     )
-    state.sides["main"].append(current)
+    state.threads["main"].append(current)
 
     await state.commit()
 
@@ -1355,14 +1364,14 @@ async def test_state_commit_does_not_publish_reactivated_compacted_tail() -> Non
     snapshot = Message(role="assistant", content="historical answer", reasoning_content="compacted private")
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [snapshot]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [snapshot]}),
             main_tail=CompactedMainTail(source=snapshot),
             last_reasoning_id=None,
             last_compaction_id="cmp_history",
         )
     )
-    state.sides.active.add("main")
+    state.threads.active.add("main")
 
     await state.commit()
 
@@ -1382,13 +1391,13 @@ async def test_state_commit_repositions_persisted_call_only_tail_without_public_
     )
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active=set(), messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active=set(), messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id="rs_parked",
         )
     )
-    state.sides.active.add("main")
+    state.threads.active.add("main")
 
     await state.commit()
 
@@ -1411,14 +1420,14 @@ async def test_state_commit_materializes_partial_cross_lane_settlement() -> None
     )
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active={"main"}, messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides["main"].append(completed)
+    state.threads["main"].append(completed)
 
     await state.commit()
 
@@ -1439,14 +1448,14 @@ async def test_state_commit_keeps_fully_settled_main_turn_hidden() -> None:
     )
     state = _state(
         ingested=Ingested(
-            durable={},
-            sides=Sides(active={"main"}, messages={"main": [assistant]}),
+            memory={},
+            threads=Threads(active={"main"}, messages={"main": [assistant]}),
             main_tail=HiddenMainTail(source=assistant),
             last_reasoning_id=None,
         )
     )
     completed = Message(role="tool", tool_call_id="call_done", content="subagent result")
-    state.sides["main"].append(completed)
+    state.threads["main"].append(completed)
 
     await state.commit()
 
@@ -1457,22 +1466,22 @@ async def test_state_commit_keeps_fully_settled_main_turn_hidden() -> None:
     assert reasoning.main == [completed]
 
 
-async def test_state_commit_emits_active_side_calls_in_deterministic_order() -> None:
+async def test_state_commit_emits_active_thread_calls_in_deterministic_order() -> None:
     state = _state(ingested=_ingested(active={"main", "reviewer", "defender"}))
-    state.sides["main"] = [
+    state.threads["main"] = [
         Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")]),
     ]
-    state.sides["reviewer"] = [
+    state.threads["reviewer"] = [
         Message(role="assistant", tool_calls=[ToolCall(id="call_reviewer", name="review_tool", arguments="{}")]),
     ]
-    state.sides["defender"] = [
+    state.threads["defender"] = [
         Message(role="assistant", tool_calls=[ToolCall(id="call_defender", name="defend_tool", arguments="{}")]),
     ]
 
     await state.commit()
 
     calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
-    assert [open_call_id(item.call_id, keyring=_keyring(), side_codes=_side_codes()).side for item in calls] == [
+    assert [open_call_id(item.call_id, keyring=_keyring(), thread_codes=_thread_codes()).thread for item in calls] == [
         "main",
         "defender",
         "reviewer",
@@ -1484,7 +1493,7 @@ async def test_state_commit_keeps_closed_assistant_with_user_tail_hidden() -> No
     channels = _RecordingChannels()
     state = _state(store, channels)
 
-    state.sides["main"] = [
+    state.threads["main"] = [
         Message(role="assistant", content="hidden assistant"),
         Message(role="user", content="tail"),
     ]
@@ -1509,8 +1518,8 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_comm
         channels,
         client=object(),
         ingested=Ingested(
-            durable={},
-            sides=Sides(
+            memory={},
+            threads=Threads(
                 active=set(),
                 messages={
                     "main": [Message(role="assistant", tool_calls=[ToolCall(id="call_main", name="main_tool", arguments="{}")])],
@@ -1531,8 +1540,8 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_comm
             last_reasoning_id=None,
         ),
     )
-    state.sides.active.add("main")
-    state.sides.active.add("reviewer")
+    state.threads.active.add("main")
+    state.threads.active.add("reviewer")
     first_call_emitted = anyio.Event()
     release_commit = anyio.Event()
     original_emit = StreamCoordinator.emit

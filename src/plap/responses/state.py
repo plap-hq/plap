@@ -21,8 +21,7 @@ from plap.responses.ingest.models import (
     ReasoningCheckpoint,
     ReasoningPatch,
     ReasoningState,
-    Side,
-    Sides,
+    Threads,
     split_tail,
 )
 from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
@@ -39,15 +38,15 @@ class State:
     svcs: svcs.Container
     coordinator: StreamCoordinator
     _sealing_keyring: SealingKeyring
-    _side_codes: Mapping[str, int]
-    _base_durable: dict[str, JSONValue]
-    _base_sides: Sides
+    _thread_codes: Mapping[str, int]
+    _base_memory: dict[str, JSONValue]
+    _base_threads: Threads
     _base_main_tail: MainTail | None
     _reasoning_id: str | None
     _checkpoint_required: bool
 
-    durable: dict[str, JSONValue]
-    sides: Sides
+    memory: dict[str, JSONValue]
+    threads: Threads
 
     @classmethod
     def from_ingested(
@@ -58,24 +57,24 @@ class State:
         svcs: svcs.Container,
         coordinator: StreamCoordinator,
         sealing_keyring: SealingKeyring,
-        side_codes: Mapping[str, int],
+        thread_codes: Mapping[str, int],
     ) -> State:
-        base_durable = deepcopy(ingested.durable)
-        base_sides = deepcopy(ingested.sides)
-        base_sides.setdefault("main")
+        base_memory = deepcopy(ingested.memory)
+        base_threads = deepcopy(ingested.threads)
+        base_threads.setdefault("main")
         return cls(
             prepared=prepared,
             svcs=svcs,
             coordinator=coordinator,
             _sealing_keyring=sealing_keyring,
-            _side_codes=dict(side_codes),
-            _base_durable=base_durable,
-            _base_sides=base_sides,
+            _thread_codes=dict(thread_codes),
+            _base_memory=base_memory,
+            _base_threads=base_threads,
             _base_main_tail=deepcopy(ingested.main_tail),
             _reasoning_id=None,
             _checkpoint_required=ingested.checkpoint_required,
-            durable=deepcopy(base_durable),
-            sides=deepcopy(base_sides),
+            memory=deepcopy(base_memory),
+            threads=deepcopy(base_threads),
         )
 
     def _split_tail(
@@ -131,13 +130,13 @@ class State:
             type="message",
         )
 
-    def _function_items(self, side: str, tool_calls: list[ChatToolCall]) -> list[ResponseFunctionCallItem]:
+    def _function_items(self, thread: str, tool_calls: list[ChatToolCall]) -> list[ResponseFunctionCallItem]:
         items: list[ResponseFunctionCallItem] = []
         for tool_call in tool_calls:
             sealed_call_id = seal_call_id(
-                CallID(side=side, upstream_tool_call_id=tool_call.id),
+                CallID(thread=thread, upstream_tool_call_id=tool_call.id),
                 keyring=self._sealing_keyring,
-                side_codes=self._side_codes,
+                thread_codes=self._thread_codes,
             )
             items.append(
                 ResponseFunctionCallItem(
@@ -151,9 +150,9 @@ class State:
             )
         return items
 
-    def _main_suffix(self, sides: Sides) -> list[Message]:
-        base = self._base_sides["main"]
-        current = sides["main"]
+    def _main_suffix(self, threads: Threads) -> list[Message]:
+        base = self._base_threads["main"]
+        current = threads["main"]
         if len(current) < len(base) or current[: len(base)] != base:
             raise RuntimeError("persisted main history is immutable; replace only the current response suffix")
         return current[len(base) :]
@@ -161,50 +160,50 @@ class State:
     def _build_update(
         self,
         *,
-        durable: dict[str, JSONValue],
-        sides: Sides,
+        memory: dict[str, JSONValue],
+        threads: Threads,
     ) -> ReasoningState:
-        self._main_suffix(sides)
+        self._main_suffix(threads)
 
         if self._checkpoint_required:
             return ReasoningCheckpoint(
-                durable=deepcopy(durable),
-                active=set(sides.active),
-                sides={side: deepcopy(messages) for side, messages in sides.items() if side != "main"},
+                memory=deepcopy(memory),
+                active=set(threads.active),
+                threads={thread: deepcopy(messages) for thread, messages in threads.items() if thread != "main"},
             )
 
-        durable_patch = diff(self._base_durable, durable)
+        memory_patch = diff(self._base_memory, memory)
         patches: dict[str, JSONPatch] = {}
-        for side in sorted(set(self._base_sides.messages) | set(sides.messages)):
-            if side == "main":
+        for thread in sorted(set(self._base_threads.messages) | set(threads.messages)):
+            if thread == "main":
                 continue
-            base_present = side in self._base_sides.messages
-            current_present = side in sides.messages
-            base_messages = self._base_sides.get(side)
-            current_messages = sides.get(side)
+            base_present = thread in self._base_threads.messages
+            current_present = thread in threads.messages
+            base_messages = self._base_threads.get(thread)
+            current_messages = threads.get(thread)
             if base_present == current_present and base_messages == current_messages:
                 continue
-            patches[side] = diff(
+            patches[thread] = diff(
                 [] if base_messages is None else [message.to_primitive() for message in base_messages],
                 [] if current_messages is None else [message.to_primitive() for message in current_messages],
             )
-        active = None if self._base_sides.active == sides.active else set(sides.active)
-        return ReasoningPatch(durable=durable_patch, active=active, sides=patches)
+        active = None if self._base_threads.active == threads.active else set(threads.active)
+        return ReasoningPatch(memory=memory_patch, active=active, threads=patches)
 
-    def _validate_sides(self) -> None:
-        unknown = (self.sides.active | set(self.sides.messages)) - set(self._side_codes)
+    def _validate_threads(self) -> None:
+        unknown = (self.threads.active | set(self.threads.messages)) - set(self._thread_codes)
         if unknown:
             names = ", ".join(sorted(unknown))
-            raise ValueError(f"state contains unconfigured sides: {names}")
+            raise ValueError(f"state contains unconfigured threads: {names}")
 
     def _validate_main(self) -> None:
-        self._validate_sides()
-        self._main_suffix(self.sides)
-        self._split_tail(self.sides["main"], label="main history")
+        self._validate_threads()
+        self._main_suffix(self.threads)
+        self._split_tail(self.threads["main"], label="main history")
 
-    def _logical_main(self, *, sides: Sides | None = None) -> Message | None:
-        current_sides = self.sides if sides is None else sides
-        _, anchor, suffix, after, open_calls = self._split_tail(current_sides["main"], label="main history")
+    def _logical_main(self, *, threads: Threads | None = None) -> Message | None:
+        current_threads = self.threads if threads is None else threads
+        _, anchor, suffix, after, open_calls = self._split_tail(current_threads["main"], label="main history")
         if anchor is None or after:
             return None
         if suffix and not open_calls:
@@ -214,12 +213,12 @@ class State:
     def _main_publication(
         self,
         *,
-        sides: Sides,
+        threads: Threads,
         main: list[Message],
     ) -> tuple[Message | None, Message | None]:
-        if "main" not in sides.active:
+        if "main" not in threads.active:
             return None, None
-        visible = self._logical_main(sides=sides)
+        visible = self._logical_main(threads=threads)
         if visible is None:
             return None, None
         if any(message is visible for message in main):
@@ -255,37 +254,37 @@ class State:
     def _update_empty(self, state: ReasoningState, main: list[Message | MessagePatch]) -> bool:
         if main or isinstance(state, ReasoningCheckpoint):
             return False
-        return not state.durable and state.active is None and not state.sides
+        return not state.memory and state.active is None and not state.threads
 
-    def _staged_snapshot(self) -> tuple[dict[str, JSONValue], Sides, list[Message]]:
+    def _progress_snapshot(self) -> tuple[dict[str, JSONValue], Threads, list[Message]]:
         self._validate_main()
-        shadow_durable = deepcopy(self.durable)
-        shadow_sides = deepcopy(self.sides)
-        for side in list(shadow_sides.messages):
-            if side != "main" and side in shadow_sides.active:
-                shadow_sides[side] = self._stubbed(shadow_sides[side], label=f"{side} side")
-        if "main" in shadow_sides.active:
-            open_calls = self._split_tail(shadow_sides["main"], label="main history")[4]
-            shadow_sides["main"].extend(
+        shadow_memory = deepcopy(self.memory)
+        shadow_threads = deepcopy(self.threads)
+        for thread in list(shadow_threads.messages):
+            if thread != "main" and thread in shadow_threads.active:
+                shadow_threads[thread] = self._stubbed(shadow_threads[thread], label=f"{thread} thread")
+        if "main" in shadow_threads.active:
+            open_calls = self._split_tail(shadow_threads["main"], label="main history")[4]
+            shadow_threads["main"].extend(
                 Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls
             )
-        return shadow_durable, shadow_sides, self._main_suffix(shadow_sides)
+        return shadow_memory, shadow_threads, self._main_suffix(shadow_threads)
 
-    def _commit_snapshot(self) -> tuple[dict[str, JSONValue], Sides, list[Message]]:
+    def _commit_snapshot(self) -> tuple[dict[str, JSONValue], Threads, list[Message]]:
         self._validate_main()
-        for side, messages in self.sides.items():
-            if side == "main":
+        for thread, messages in self.threads.items():
+            if thread == "main":
                 continue
-            self._split_tail(messages, label=f"{side} side")
-        sides = deepcopy(self.sides)
-        return deepcopy(self.durable), sides, self._main_suffix(sides)
+            self._split_tail(messages, label=f"{thread} thread")
+        threads = deepcopy(self.threads)
+        return deepcopy(self.memory), threads, self._main_suffix(threads)
 
-    def open_calls(self, side: Side) -> list[ChatToolCall]:
-        return self._split_tail(self.sides.get(side, []) or [], label=f"{side} history")[4]
+    def open_calls(self, thread: str) -> list[ChatToolCall]:
+        return self._split_tail(self.threads.get(thread, []) or [], label=f"{thread} history")[4]
 
-    async def stage(self) -> None:
-        durable, sides, main = self._staged_snapshot()
-        state = self._build_update(durable=durable, sides=sides)
+    async def save_progress(self) -> None:
+        memory, threads, main = self._progress_snapshot()
+        state = self._build_update(memory=memory, threads=threads)
         main_update = deepcopy(main)
         if self._reasoning_id is None:
             if self._update_empty(state, main_update):
@@ -294,18 +293,18 @@ class State:
             return
         await self.coordinator.replace_reasoning(state=state, main=main_update)
 
-    async def ensure_staged(self) -> None:
+    async def ensure_progress(self) -> None:
         if self._reasoning_id is None:
-            await self.stage()
+            await self.save_progress()
 
     async def commit(self) -> None:
-        durable, sides, main = self._commit_snapshot()
-        visible_main, persisted_source = self._main_publication(sides=sides, main=main)
+        memory, threads, main = self._commit_snapshot()
+        visible_main, persisted_source = self._main_publication(threads=threads, main=main)
         visible_message = None if visible_main is None else self._message_item(visible_main)
         visible_calls: list[ResponseFunctionCallItem] = []
         main_open_calls: list[ChatToolCall] = []
         if visible_main is not None:
-            main_open_calls = self._split_tail(sides["main"], label="main history")[4]
+            main_open_calls = self._split_tail(threads["main"], label="main history")[4]
             visible_calls.extend(self._function_items("main", main_open_calls))
         main_update = self._main_update(
             main,
@@ -315,13 +314,13 @@ class State:
             persisted_source=persisted_source,
         )
 
-        state = self._build_update(durable=durable, sides=sides)
+        state = self._build_update(memory=memory, threads=threads)
 
-        for side in sorted(sides.messages):
-            if side == "main" or side not in sides.active:
+        for thread in sorted(threads.messages):
+            if thread == "main" or thread not in threads.active:
                 continue
-            messages = sides[side]
-            visible_calls.extend(self._function_items(side, self._split_tail(messages, label=f"{side} side")[4]))
+            messages = threads[thread]
+            visible_calls.extend(self._function_items(thread, self._split_tail(messages, label=f"{thread} thread")[4]))
 
         if self._reasoning_id is None and not self._update_empty(state, main_update):
             self._reasoning_id = await self.coordinator.begin_reasoning(state=state, main=main_update)

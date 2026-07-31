@@ -35,8 +35,7 @@ from plap.responses.ingest.models import (
     ReasoningCheckpoint,
     ReasoningPatch,
     ReasoningPayload,
-    Side,
-    Sides,
+    Threads,
 )
 from plap.responses.ingest.patch import JSONPatch, JSONValue
 from plap.responses.ingest.sealing import open_call_id, open_compaction_payload, open_reasoning_payload
@@ -96,9 +95,9 @@ def _open_reasoning_item(item: RequestReasoningItem, *, keyring: SealingKeyring)
     return payload
 
 
-def _open_call_id_or_none(value: str, *, keyring: SealingKeyring, side_codes: dict[str, int]) -> CallID | None:
+def _open_call_id_or_none(value: str, *, keyring: SealingKeyring, thread_codes: dict[str, int]) -> CallID | None:
     try:
-        return open_call_id(value, keyring=keyring, side_codes=side_codes)
+        return open_call_id(value, keyring=keyring, thread_codes=thread_codes)
     except PlapError:
         return None
 
@@ -151,7 +150,7 @@ type _DecodedInput = (
 )
 
 
-def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring, side_codes: dict[str, int]) -> _DecodedInput:
+def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring, thread_codes: dict[str, int]) -> _DecodedInput:
     if isinstance(item, RequestCompactionItem):
         return _DecodedCompaction(payload=_open_compaction_item(item, keyring=keyring))
     if isinstance(item, RequestReasoningItem):
@@ -159,49 +158,49 @@ def _decode_item(item: RequestInputItem, *, keyring: SealingKeyring, side_codes:
     if isinstance(item, RequestMessageItem):
         return _DecodedMessage(message=_decode_message_item(item))
     if isinstance(item, RequestFunctionCallItem):
-        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, side_codes=side_codes)
+        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, thread_codes=thread_codes)
         if call_id is None:
             return _DecodedFabricatedFunctionCall(item=item)
         return _DecodedSealedFunctionCall(item=item, call_id=call_id)
     if isinstance(item, RequestFunctionCallOutputItem):
-        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, side_codes=side_codes)
+        call_id = _open_call_id_or_none(item.call_id, keyring=keyring, thread_codes=thread_codes)
         if call_id is None:
             return _DecodedFabricatedFunctionCallOutput(item=item)
         return _DecodedSealedFunctionCallOutput(item=item, call_id=call_id)
     raise TypeError(f"unsupported request input item: {type(item).__name__}")
 
 
-def _decode_queue(items: list[RequestInputItem], *, keyring: SealingKeyring, side_codes: dict[str, int]) -> list[_DecodedInput]:
-    return [_decode_item(item, keyring=keyring, side_codes=side_codes) for item in items]
+def _decode_queue(items: list[RequestInputItem], *, keyring: SealingKeyring, thread_codes: dict[str, int]) -> list[_DecodedInput]:
+    return [_decode_item(item, keyring=keyring, thread_codes=thread_codes) for item in items]
 
 
-def _apply_durable_patch(durable: dict[str, JSONValue], patch: JSONPatch) -> dict[str, JSONValue]:
+def _apply_memory_patch(memory: dict[str, JSONValue], patch: JSONPatch) -> dict[str, JSONValue]:
     try:
-        result = jsonpatch.apply_patch(durable, patch, in_place=False)
+        result = jsonpatch.apply_patch(memory, patch, in_place=False)
     except (jsonpatch.JsonPatchException, TypeError, ValueError) as exc:
-        raise _reasoning_replay_error(reason="reasoning_durable_patch_invalid", private_message=str(exc), cause=exc) from exc
+        raise _reasoning_replay_error(reason="reasoning_memory_patch_invalid", private_message=str(exc), cause=exc) from exc
     if not isinstance(result, Mapping):
         raise _reasoning_replay_error(
-            reason="reasoning_durable_patch_invalid",
-            private_message="reasoning durable patch result must be an object",
+            reason="reasoning_memory_patch_invalid",
+            private_message="reasoning memory patch result must be an object",
         )
     return dict(result)
 
 
-def _apply_side_patch(messages: list[Message], patch: JSONPatch, *, side: Side) -> list[Message]:
+def _apply_thread_patch(messages: list[Message], patch: JSONPatch, *, thread: str) -> list[Message]:
     primitives = [message.to_primitive() for message in messages]
     try:
         result = jsonpatch.apply_patch(primitives, patch, in_place=False)
     except (jsonpatch.JsonPatchException, TypeError, ValueError) as exc:
         raise _reasoning_replay_error(
-            reason="reasoning_side_patch_invalid",
-            private_message=f"{side} patch failed: {exc}",
+            reason="reasoning_thread_patch_invalid",
+            private_message=f"{thread} patch failed: {exc}",
             cause=exc,
         ) from exc
     if not isinstance(result, list):
         raise _reasoning_replay_error(
-            reason="reasoning_side_patch_invalid",
-            private_message=f"{side} patch result must be an array",
+            reason="reasoning_thread_patch_invalid",
+            private_message=f"{thread} patch result must be an array",
         )
     rebuilt: list[Message] = []
     for index, item in enumerate(result):
@@ -209,32 +208,32 @@ def _apply_side_patch(messages: list[Message], patch: JSONPatch, *, side: Side) 
             rebuilt.append(Message.from_primitive(item))
         except (TypeError, ValueError) as exc:
             raise _reasoning_replay_error(
-                reason="reasoning_side_patch_invalid",
-                private_message=f"{side} patch result[{index}] is invalid: {exc}",
+                reason="reasoning_thread_patch_invalid",
+                private_message=f"{thread} patch result[{index}] is invalid: {exc}",
                 cause=exc,
             ) from exc
     return rebuilt
 
 
 @dataclass(slots=True)
-class _SideCalls:
+class _ThreadCalls:
     by_id: dict[str, CallPhase] = field(default_factory=dict)
 
     @classmethod
-    def rebuild(cls, messages: list[Message]) -> _SideCalls:
-        side_calls = cls()
+    def rebuild(cls, messages: list[Message]) -> _ThreadCalls:
+        thread_calls = cls()
         for message in messages:
-            if not message.is_tool() and side_calls.has_unfinished():
+            if not message.is_tool() and thread_calls.has_unfinished():
                 raise _tool_replay_error(
                     reason="pending_tool_outputs_block_message",
                     private_message="message cannot appear before open function calls are closed",
                 )
             if message.is_assistant() and message.tool_calls:
-                side_calls.register(message)
+                thread_calls.register(message)
                 continue
             if message.is_tool():
-                side_calls.settle_output(message)
-        return side_calls
+                thread_calls.settle_output(message)
+        return thread_calls
 
     def has_declared(self) -> bool:
         return any(phase == CallPhase.DECLARED for phase in self.by_id.values())
@@ -253,7 +252,7 @@ class _SideCalls:
             if tool_call.id in self.by_id:
                 raise _tool_replay_error(
                     reason="duplicate_tool_call_id_in_history",
-                    private_message="tool call id appears more than once in side history",
+                    private_message="tool call id appears more than once in thread history",
                 )
             self.by_id[tool_call.id] = CallPhase.DECLARED
 
@@ -316,52 +315,52 @@ class _SideCalls:
 
 @dataclass(slots=True)
 class _Replay:
-    durable: dict[str, JSONValue]
-    sides: Sides
-    allowed_sides: set[Side]
-    calls_by_side: dict[Side, _SideCalls] = field(default_factory=dict)
+    memory: dict[str, JSONValue]
+    threads: Threads
+    allowed_threads: set[str]
+    calls_by_thread: dict[str, _ThreadCalls] = field(default_factory=dict)
     main: MainReplay = field(default_factory=MainReplay)
     last_reasoning_id: str | None = None
     last_compaction_id: str | None = None
     checkpoint_required: bool = False
     deferred_main_interrupt: bool = False
 
-    def _main_calls(self) -> _SideCalls:
-        return _SideCalls(by_id=self.main.phases())
+    def _main_calls(self) -> _ThreadCalls:
+        return _ThreadCalls(by_id=self.main.phases())
 
     def _sync_main(self) -> None:
         messages = self.main.current_messages()
-        if messages or "main" in self.sides.messages:
-            self.sides["main"] = messages
+        if messages or "main" in self.threads.messages:
+            self.threads["main"] = messages
 
-    def _rebuild_non_main_calls(self, side: Side) -> None:
-        self.calls_by_side[side] = _SideCalls.rebuild(self.sides.get(side, []) or [])
+    def _rebuild_non_main_calls(self, thread: str) -> None:
+        self.calls_by_thread[thread] = _ThreadCalls.rebuild(self.threads.get(thread, []) or [])
 
     def _rebuild_all_non_main_calls(self) -> None:
-        self.calls_by_side = {}
-        for side in self.sides.messages:
-            if side != "main":
-                self._rebuild_non_main_calls(side)
+        self.calls_by_thread = {}
+        for thread in self.threads.messages:
+            if thread != "main":
+                self._rebuild_non_main_calls(thread)
 
-    def _validate_sides(self) -> None:
-        unknown = (self.sides.active | set(self.sides.messages)) - self.allowed_sides
+    def _validate_threads(self) -> None:
+        unknown = (self.threads.active | set(self.threads.messages)) - self.allowed_threads
         if unknown:
             names = ", ".join(sorted(unknown))
             raise _reasoning_replay_error(
-                reason="reasoning_active_side_invalid",
-                private_message=f"reasoning activates unconfigured sides: {names}",
+                reason="reasoning_active_thread_invalid",
+                private_message=f"reasoning activates unconfigured threads: {names}",
             )
 
     def _validate_call_boundary(self, *, allow_deferred_main: bool) -> None:
         self.main.assert_no_pending_patch()
         main_calls = self._main_calls()
-        if main_calls.has_open() or ("main" in self.sides.active and main_calls.has_declared() and not allow_deferred_main):
+        if main_calls.has_open() or ("main" in self.threads.active and main_calls.has_declared() and not allow_deferred_main):
             raise _tool_replay_error(
                 reason="pending_tool_outputs_block_message",
                 private_message="reasoning cannot appear before active main function calls are closed",
             )
-        for side, side_calls in self.calls_by_side.items():
-            if side_calls.has_open() or (side in self.sides.active and side_calls.has_declared()):
+        for thread, thread_calls in self.calls_by_thread.items():
+            if thread_calls.has_open() or (thread in self.threads.active and thread_calls.has_declared()):
                 raise _tool_replay_error(
                     reason="pending_tool_outputs_block_message",
                     private_message="reasoning cannot appear before active function calls are closed",
@@ -399,16 +398,16 @@ class _Replay:
             )
 
     def _step_compaction(self, payload: CompactionPayload) -> None:
-        self.durable = dict(payload.durable)
-        self.sides = Sides.from_primitive(payload.sides.to_primitive())
-        self._validate_sides()
-        self.main.load_snapshot(self.sides.get("main") or [])
+        self.memory = dict(payload.memory)
+        self.threads = Threads.from_primitive(payload.threads.to_primitive())
+        self._validate_threads()
+        self.main.load_snapshot(self.threads.get("main") or [])
         self._rebuild_all_non_main_calls()
-        calls = [self._main_calls(), *self.calls_by_side.values()]
-        if any(side_calls.has_unfinished() for side_calls in calls):
+        calls = [self._main_calls(), *self.calls_by_thread.values()]
+        if any(thread_calls.has_unfinished() for thread_calls in calls):
             raise _compaction_replay_error(
                 reason="compaction_contains_unresolved_tool_call",
-                private_message="compaction side histories must not contain unresolved tool calls",
+                private_message="compaction thread histories must not contain unresolved tool calls",
             )
         self.last_reasoning_id = None
         self.last_compaction_id = payload.id
@@ -417,23 +416,23 @@ class _Replay:
 
     def _apply_checkpoint(self, state: ReasoningCheckpoint) -> None:
         self._sync_main()
-        main_present = "main" in self.sides.messages
+        main_present = "main" in self.threads.messages
         main_messages = self.main.current_messages()
-        messages = {side: list(side_messages) for side, side_messages in state.sides.items()}
+        messages = {thread: list(thread_messages) for thread, thread_messages in state.threads.items()}
         if main_present or main_messages:
             messages["main"] = main_messages
-        self.durable = dict(state.durable)
-        self.sides = Sides(active=set(state.active), messages=messages)
+        self.memory = dict(state.memory)
+        self.threads = Threads(active=set(state.active), messages=messages)
         self._rebuild_all_non_main_calls()
 
     def _apply_patch(self, state: ReasoningPatch) -> None:
-        self.durable = _apply_durable_patch(self.durable, state.durable)
-        for side, patch in state.sides.items():
-            current = self.sides.get(side, []) or []
-            self.sides[side] = list(current) if not patch else _apply_side_patch(current, patch, side=side)
-            self._rebuild_non_main_calls(side)
+        self.memory = _apply_memory_patch(self.memory, state.memory)
+        for thread, patch in state.threads.items():
+            current = self.threads.get(thread, []) or []
+            self.threads[thread] = list(current) if not patch else _apply_thread_patch(current, patch, thread=thread)
+            self._rebuild_non_main_calls(thread)
         if state.active is not None:
-            self.sides.active = set(state.active)
+            self.threads.active = set(state.active)
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
         self._validate_reasoning(payload)
@@ -445,45 +444,45 @@ class _Replay:
             self.checkpoint_required = False
         else:
             self._apply_patch(payload.state)
-        self._validate_sides()
+        self._validate_threads()
         self.main.apply_update(payload.main)
         self._sync_main()
         self.last_reasoning_id = payload.id
 
     def _step_non_main_function_call(self, call_id: CallID) -> None:
-        side_calls = self.calls_by_side.get(call_id.side)
-        if side_calls is None or side_calls.phase(call_id.upstream_tool_call_id) is None:
+        thread_calls = self.calls_by_thread.get(call_id.thread)
+        if thread_calls is None or thread_calls.phase(call_id.upstream_tool_call_id) is None:
             return
-        if call_id.side not in self.sides.active:
+        if call_id.thread not in self.threads.active:
             raise _tool_replay_error(
-                reason="inactive_side_function_call",
-                private_message="public function_call belongs to an inactive side",
+                reason="inactive_thread_function_call",
+                private_message="public function_call belongs to an inactive thread",
             )
-        side_calls.open(call_id.upstream_tool_call_id)
+        thread_calls.open(call_id.upstream_tool_call_id)
 
     def _step_non_main_function_call_output(self, item: RequestFunctionCallOutputItem, call_id: CallID) -> None:
-        side_calls = self.calls_by_side.get(call_id.side)
-        if side_calls is None or side_calls.phase(call_id.upstream_tool_call_id) is None:
+        thread_calls = self.calls_by_thread.get(call_id.thread)
+        if thread_calls is None or thread_calls.phase(call_id.upstream_tool_call_id) is None:
             return
-        side_calls.close(call_id.upstream_tool_call_id)
-        self.sides.setdefault(call_id.side).append(
+        thread_calls.close(call_id.upstream_tool_call_id)
+        self.threads.setdefault(call_id.thread).append(
             Message(
                 role="tool",
                 tool_call_id=call_id.upstream_tool_call_id,
                 content=content.tool_output(item),
             )
         )
-        self._rebuild_non_main_calls(call_id.side)
+        self._rebuild_non_main_calls(call_id.thread)
 
     def _activate_main_for_message(self, message: Message) -> None:
         if message.role not in {"user", "assistant"}:
             return
-        if "main" not in self.sides.active:
+        if "main" not in self.threads.active:
             if message.role == "user" and self._main_calls().has_declared():
                 self.deferred_main_interrupt = True
             else:
                 self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
-        self.sides.active.add("main")
+        self.threads.active.add("main")
         if message.role == "user":
             self.checkpoint_required = True
 
@@ -493,10 +492,10 @@ class _Replay:
             self.main.append_message(item.message)
         elif isinstance(item, _DecodedSealedFunctionCall):
             phase = self.main.phases().get(item.call_id.upstream_tool_call_id)
-            if "main" not in self.sides.active and phase == CallPhase.DECLARED:
+            if "main" not in self.threads.active and phase == CallPhase.DECLARED:
                 raise _tool_replay_error(
-                    reason="inactive_side_function_call",
-                    private_message="public function_call belongs to an inactive side",
+                    reason="inactive_thread_function_call",
+                    private_message="public function_call belongs to an inactive thread",
                 )
             self.main.add_call(item.item, call_id=item.call_id.upstream_tool_call_id)
         elif isinstance(item, _DecodedFabricatedFunctionCall):
@@ -514,16 +513,16 @@ class _Replay:
             self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
             self.deferred_main_interrupt = False
         self.main.assert_no_pending_patch()
-        self._main_calls().validate_completion(active="main" in self.sides.active)
-        for side, side_calls in self.calls_by_side.items():
-            side_calls.validate_completion(active=side in self.sides.active)
+        self._main_calls().validate_completion(active="main" in self.threads.active)
+        for thread, thread_calls in self.calls_by_thread.items():
+            thread_calls.validate_completion(active=thread in self.threads.active)
 
     def finish(self) -> Ingested:
         self._validate_finish()
         self._sync_main()
         return Ingested(
-            durable=self.durable,
-            sides=self.sides,
+            memory=self.memory,
+            threads=self.threads,
             main_tail=self.main.tail(),
             last_reasoning_id=self.last_reasoning_id,
             last_compaction_id=self.last_compaction_id,
@@ -538,13 +537,13 @@ class _Replay:
             self._step_reasoning(item.payload)
             return
         if isinstance(item, _DecodedSealedFunctionCall):
-            if item.call_id.side == "main":
+            if item.call_id.thread == "main":
                 self._step_main_item(item)
             else:
                 self._step_non_main_function_call(item.call_id)
             return
         if isinstance(item, _DecodedSealedFunctionCallOutput):
-            if item.call_id.side == "main":
+            if item.call_id.thread == "main":
                 self._step_main_item(item)
             else:
                 self._step_non_main_function_call_output(item.item, item.call_id)
@@ -552,9 +551,9 @@ class _Replay:
         self._step_main_item(item)
 
 
-def _replay_decoded_queue(items: list[_DecodedInput], *, allowed_sides: set[Side]) -> Ingested:
-    replay = _Replay(durable={}, sides=Sides(), allowed_sides=allowed_sides)
-    replay._validate_sides()
+def _replay_decoded_queue(items: list[_DecodedInput], *, allowed_threads: set[str]) -> Ingested:
+    replay = _Replay(memory={}, threads=Threads(), allowed_threads=allowed_threads)
+    replay._validate_threads()
     for item in items:
         replay.step(item)
     return replay.finish()
@@ -564,9 +563,9 @@ async def ingest_response_request(
     request: ResponseCreateRequest,
     *,
     keyring: SealingKeyring,
-    side_codes: dict[str, int],
+    thread_codes: dict[str, int],
 ) -> Ingested:
     input_items = _normalize_input_items(request)
     replay_items = _slice_to_last_compaction(input_items)
-    decoded_items = _decode_queue(replay_items, keyring=keyring, side_codes=side_codes)
-    return _replay_decoded_queue(decoded_items, allowed_sides=set(side_codes))
+    decoded_items = _decode_queue(replay_items, keyring=keyring, thread_codes=thread_codes)
+    return _replay_decoded_queue(decoded_items, allowed_threads=set(thread_codes))

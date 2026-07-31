@@ -1,1 +1,1 @@
-plugins = ["core", "vision", "summary", "advisor"]
+plugins = ["core", "easy", "vision", "summary", "advisor"]
