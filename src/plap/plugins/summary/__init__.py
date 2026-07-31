@@ -8,6 +8,7 @@ import anyio
 from plap.bus import bus
 from plap.config import CueBox
 from plap.llms.completions.chat import IChatCompletionClient
+from plap.plugins.core.budget import ResponseBudget, budgeted
 from plap.plugins.summary.summarizer import (
     ChatReasoningSummarizer,
     _append_summary,
@@ -24,34 +25,26 @@ async def collect(paths: tuple[str, ...], *, next):
     return await next(paths=(*paths, str(here.parent / "schema.cue")))
 
 
-@bus.listen("response.summary")
-async def wrap_summary(
-    state: State,
-    config: CueBox,
-    source: AsyncIterator[SummaryDelta | SummaryDone],
+async def _emit_summary_fragment(
     *,
-    next,
-) -> None:
-    mode = _summary_mode(state)
-    if mode is None:
-        return await next(state=state, config=config, source=source)
+    mode: str,
+    summarizer: ChatReasoningSummarizer,
+    prior_summary: str | None,
+    fragment: str,
+    send: anyio.abc.ObjectSendStream[SummaryDelta | SummaryDone],
+) -> str | None:
+    full = ""
+    async for text in summarizer.stream(mode=mode, prior_summary=prior_summary, fragment=fragment):
+        if not text:
+            continue
+        full += text
+        await send.send(SummaryDelta(text=text))
 
-    summarizer = ChatReasoningSummarizer(
-        client=await state.svcs.aget(IChatCompletionClient),
-        model=config.summary.model,
-        max_completion_tokens=config.summary.max_completion_tokens,
-        prompt_cache_key=state.prepared.execution_request.prompt_cache_key,
-        reasoning_effort=config.summary.reasoning_effort,
-        service_tier=config.summary.service_tier,
-    )
+    if not full:
+        return prior_summary
 
-    downstream_send, downstream_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(_run_summarizer, mode, summarizer, source, downstream_send)
-        try:
-            return await next(state=state, config=config, source=downstream_receive)
-        finally:
-            task_group.cancel_scope.cancel()
+    await send.send(SummaryDone())
+    return _append_summary(prior_summary, full)
 
 
 async def _run_summarizer(
@@ -96,23 +89,32 @@ async def _run_summarizer(
             )
 
 
-async def _emit_summary_fragment(
+@bus.listen("response.summary")
+async def wrap_summary(
+    state: State,
+    config: CueBox,
+    budget: ResponseBudget,
+    source: AsyncIterator[SummaryDelta | SummaryDone],
     *,
-    mode: str,
-    summarizer: ChatReasoningSummarizer,
-    prior_summary: str | None,
-    fragment: str,
-    send: anyio.abc.ObjectSendStream[SummaryDelta | SummaryDone],
-) -> str | None:
-    full = ""
-    async for text in summarizer.stream(mode=mode, prior_summary=prior_summary, fragment=fragment):
-        if not text:
-            continue
-        full += text
-        await send.send(SummaryDelta(text=text))
+    next,
+) -> None:
+    mode = _summary_mode(state)
+    if mode is None:
+        return await next(state=state, config=config, budget=budget, source=source)
 
-    if not full:
-        return prior_summary
+    summarizer = ChatReasoningSummarizer(
+        client=budgeted(await state.svcs.aget(IChatCompletionClient), budget, config.summary),
+        model=config.summary.model,
+        max_completion_tokens=config.summary.max_completion_tokens,
+        prompt_cache_key=state.prepared.execution_request.prompt_cache_key,
+        reasoning_effort=config.summary.reasoning_effort,
+        service_tier=config.summary.service_tier,
+    )
 
-    await send.send(SummaryDone())
-    return _append_summary(prior_summary, full)
+    downstream_send, downstream_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_run_summarizer, mode, summarizer, source, downstream_send)
+        try:
+            return await next(state=state, config=config, budget=budget, source=downstream_receive)
+        finally:
+            task_group.cancel_scope.cancel()

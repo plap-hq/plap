@@ -25,14 +25,14 @@ from plap.llms.completions.chat import (
 )
 from plap.llms.json import decode_json_object_or_none
 from plap.llms.retry import RetryValidator, retry_message
-from plap.plugins.core.ledger import UsageLedger
-from plap.plugins.core.loop import StreamResult
+from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
 from plap.plugins.core.request import apply_float_transform, apply_int_transform
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.ingest.models import Message
 from plap.responses.state import State
 
 VISION_TOOL_NAME = "vision"
+VISION_BUDGET_OUTPUT = "Image inspection skipped because the response output budget was exhausted."
 VISION_TOOL = ChatTool(
     function=ChatFunctionTool(
         name=VISION_TOOL_NAME,
@@ -313,7 +313,7 @@ def _vision_request(
 async def _vision_tool_output(
     state: State,
     config: CueBox,
-    ledger: UsageLedger,
+    budget: ResponseBudget,
     *,
     history: list[Message],
     ids: list[str],
@@ -324,9 +324,12 @@ async def _vision_tool_output(
     missing = [image_id for image_id in ids if image_id not in known_image_ids]
     if missing:
         raise RuntimeError(f"unknown image ids reached execution: {', '.join(sorted(missing))}")
-    client = await state.svcs.aget(IChatCompletionClient)
-    result = await client.complete(_vision_request(config, state.prepared.execution_request, transcript, ids, prompt))
-    ledger.hide(config.vision.public_usage, result.usage)
+    raw_client = await state.svcs.aget(IChatCompletionClient)
+    client = budgeted(raw_client, budget, config.vision)
+    try:
+        result = await client.complete(_vision_request(config, state.prepared.execution_request, transcript, ids, prompt))
+    except ResponseBudgetExhaustedError:
+        return ChatMessage(role="tool", tool_call_id=tool_call_id, content=VISION_BUDGET_OUTPUT)
     return _tool_output_message(result, tool_call_id=tool_call_id)
 
 
@@ -368,36 +371,33 @@ async def inject_images(state: State, config: CueBox, *, next) -> ChatCompletion
     return _rewrite_request(await next(state=state, config=config))
 
 
-@bus.listen("response.validate")
-async def validate_images(
+@bus.listen("response.completion")
+async def complete_with_images(
     state: State,
     config: CueBox,
+    budget: ResponseBudget,
+    request: ChatCompletionRequest,
     validators: tuple[RetryValidator, ...],
     *,
     next,
-) -> tuple[RetryValidator, ...]:
-    _ = config
-    return await next(state=state, config=config, validators=(*validators, _vision_validator(state)))
-
-
-@bus.listen("response.loop")
-async def run_images(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
-    if "main" not in state.sides.active:
-        return await next(state=state, config=config, ledger=ledger)
-    result = await next(state=state, config=config, ledger=ledger)
-    if result is None:
-        return None
-    accepted = result.accepted
-    if accepted is None or accepted.finish_reason != "tool_calls":
+) -> ChatCompletionResult:
+    result = await next(
+        state=state,
+        config=config,
+        budget=budget,
+        request=request,
+        validators=(*validators, _vision_validator(state)),
+    )
+    if result.finish_reason != "tool_calls":
         return result
     history = state.sides["main"]
-    image_calls = [call for call in accepted.message.tool_calls if call.name == VISION_TOOL_NAME]
+    image_calls = [call for call in result.message.tool_calls if call.name == VISION_TOOL_NAME]
     for call in image_calls:
         ids, prompt = _tool_args(call)
         tool_message = await _vision_tool_output(
             state,
             config,
-            ledger,
+            budget,
             history=history,
             ids=ids,
             prompt=prompt,

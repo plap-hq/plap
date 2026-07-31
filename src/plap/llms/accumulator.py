@@ -26,6 +26,12 @@ class Snapshot:
     results: tuple[ChatCompletionResult, ...]
     delta: ChatCompletionDelta | None = None
 
+    @property
+    def result(self) -> ChatCompletionResult | None:
+        if self.delta is None or self.delta.finish_reason is None:
+            return None
+        return self.results[-1] if self.results else None
+
 
 @dataclass(slots=True)
 class _ToolCall:

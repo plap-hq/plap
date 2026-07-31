@@ -1,7 +1,6 @@
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.retry import (
     RETRY_TOOL_PLACEHOLDER,
-    NextRequest,
     RetryError,
     RetryLimitExceededError,
     RetryToolSchemaError,
@@ -15,7 +14,6 @@ from plap.llms.retry import (
 __all__ = [
     "RETRY_TOOL_PLACEHOLDER",
     "Accumulator",
-    "NextRequest",
     "RetryError",
     "RetryLimitExceededError",
     "RetryToolSchemaError",

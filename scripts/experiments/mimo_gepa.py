@@ -15,7 +15,7 @@ import threading
 import warnings
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 import duckdb  # noqa: E402
 import gepa.optimize_anything as oa  # noqa: E402
 from gepa.optimize_anything import EngineConfig, GEPAConfig, ReflectionConfig  # noqa: E402
+from plap.settings import Settings  # noqa: E402
 
 import plap.llms.accumulator as accumulator_module  # noqa: E402
 from plap.llms.accumulator import Accumulator  # noqa: E402
@@ -46,7 +47,6 @@ from plap.llms.completions.tokens import measure_request_tokens  # noqa: E402
 from plap.llms.json import Outcome, recover  # noqa: E402
 from plap.llms.retry import RetryLimitExceededError  # noqa: E402
 from plap.llms.retry import complete as retry_complete  # noqa: E402
-from plap.settings import Settings  # noqa: E402
 
 DEFAULT_DATABASE = REPO_ROOT / "archive" / "deepswe.duckdb"
 DEFAULT_ENV_FILE = REPO_ROOT / "tests" / ".env"
@@ -1690,13 +1690,14 @@ async def _run_judge_completion(
     )
     snapshot = await retry_complete(
         client,
-        next_request=lambda history: replace(base_request, messages=[*base_request.messages, *history.messages]),
+        base_request,
         validators=(_retry_on_invalid_judge_output,),
         max_attempts=3,
     )
-    if not snapshot.results:
+    result = snapshot.result
+    if result is None:
         raise RetryLimitExceededError(last_retry_message=None)
-    return _parse_judge_result(snapshot.results[-1].message.content or "")
+    return _parse_judge_result(result.message.content or "")
 
 
 async def _run_overfit_audit_completion(
@@ -1706,13 +1707,14 @@ async def _run_overfit_audit_completion(
 ) -> OverfitAuditResult:
     snapshot = await retry_complete(
         client,
-        next_request=lambda history: replace(request, messages=[*request.messages, *history.messages]),
+        request,
         validators=(_retry_on_invalid_overfit_audit_output,),
         max_attempts=3,
     )
-    if not snapshot.results:
+    result = snapshot.result
+    if result is None:
         raise RetryLimitExceededError(last_retry_message=None)
-    return _parse_overfit_audit_result(snapshot.results[-1].message.content or "")
+    return _parse_overfit_audit_result(result.message.content or "")
 
 
 async def _compute_candidate_overfit_audit_async(

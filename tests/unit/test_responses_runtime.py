@@ -16,9 +16,17 @@ from pydantic import TypeAdapter
 from plap.bus import bus
 from plap.config import CueBox
 from plap.keyring import SealingKeyring
-from plap.llms.completions.chat import ChatCompletionDelta, ChatFinishReason, ChatToolCallDelta, ChatUsage, IChatCompletionClient
+from plap.llms.completions.chat import (
+    ChatCompletionDelta,
+    ChatCompletionRequest,
+    ChatFinishReason,
+    ChatToolCallDelta,
+    ChatUsage,
+    IChatCompletionClient,
+)
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
-from plap.plugins.core.loop import UsageLedger, response_request, run_response
+from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
+from plap.plugins.core.loop import response_request, run_response
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import (
@@ -162,7 +170,7 @@ def _config() -> _Config:
                 "tokenizer_trust_remote_code": False,
                 "reasoning_effort": None,
                 "service_tier": None,
-                "public_usage": {
+                "output_equivalence": {
                     "uncached_input_to_output": 0.25,
                     "cached_input_to_output": 0.05,
                     "output_to_output": 1.0,
@@ -187,7 +195,7 @@ def _config() -> _Config:
                 "tokenizer_trust_remote_code": False,
                 "reasoning_effort": None,
                 "service_tier": None,
-                "public_usage": {
+                "output_equivalence": {
                     "uncached_input_to_output": 0.25,
                     "cached_input_to_output": 0.05,
                     "output_to_output": 1.0,
@@ -214,7 +222,7 @@ def _loaded(config: _Config | None = None) -> object:
     return SimpleNamespace(plap=SimpleNamespace(config=config or _config()))
 
 
-def _public_usage(**updates: object) -> Box:
+def _output_equivalence(**updates: object) -> Box:
     return Box(
         {
             "uncached_input_to_output": 0.25,
@@ -344,6 +352,7 @@ class _StubChatClient:
 async def test_response_request_applies_internal_sampling_config() -> None:
     request = _request()
     config_data = _config().to_dict()
+    config_data["main"]["max_completion_tokens"] = 321
     config_data["main"]["sampling"] = {
         "temperature": None,
         "top_p": None,
@@ -404,6 +413,7 @@ async def test_response_request_applies_internal_sampling_config() -> None:
 
     built = await response_request(state=state, config=state.svcs.get(CueBox).plap.config)
 
+    assert built.max_completion_tokens == 321
     assert built.min_p == 0.15
     assert built.top_k == 17
     assert built.frequency_penalty == 0.25
@@ -422,87 +432,180 @@ class _FakeReasoningSummarizer:
         yield "summary part"
 
 
-def test_usage_ledger_returns_none_without_charges() -> None:
-    ledger = UsageLedger(budget=None, reasoning_to_output=1.0)
+async def _record_usage(
+    budget: ResponseBudget,
+    field: object,
+    usage: ChatUsage,
+    *,
+    max_completion_tokens: int | None = None,
+) -> ChatCompletionRequest:
+    raw_client = _StubChatClient([_delta(finish_reason=ChatFinishReason.STOP, usage=usage)])
+    client = budgeted(raw_client, budget, field)
+    request = ChatCompletionRequest(model="test-model", messages=[], max_completion_tokens=max_completion_tokens)
+    async for _delta_item in client.stream(request):
+        pass
+    return cast(ChatCompletionRequest, raw_client.requests[0])
 
-    assert ledger.usage() is None
+
+def test_response_budget_returns_none_without_charges() -> None:
+    budget = ResponseBudget(_config(), None)
+
+    assert budget.finish() is None
 
 
-def test_usage_ledger_cap_respects_budget_and_limit() -> None:
-    ledger = UsageLedger(budget=20, reasoning_to_output=1.0)
+async def test_response_budget_caps_completion_requests() -> None:
+    config_data = _config().to_dict()
+    config_data["main"]["output_equivalence"] = _output_equivalence(output_to_output=2.0).to_dict()
+    config = _Config(config_data, frozen_box=True)
 
-    assert ledger.cap(_public_usage(output_to_output=2.0), None) == 10
-    assert ledger.cap(_public_usage(output_to_output=2.0), 7) == 7
-    assert ledger.cap(None, 7) == 7
+    unlimited_request = await _record_usage(
+        ResponseBudget(config, 20),
+        config.main,
+        _usage(input_tokens=1, output_tokens=1),
+    )
+    limited_request = await _record_usage(
+        ResponseBudget(config, 20),
+        config.main,
+        _usage(input_tokens=1, output_tokens=1),
+        max_completion_tokens=7,
+    )
+
+    assert unlimited_request.max_completion_tokens == 10
+    assert limited_request.max_completion_tokens == 7
 
 
-def test_usage_ledger_scales_single_visible_usage() -> None:
-    ledger = UsageLedger(budget=20, reasoning_to_output=1.5)
+async def test_response_budget_scales_single_output_usage() -> None:
+    config_data = _config().to_dict()
+    config_data["reasoning_to_output"] = 1.5
+    config = _Config(config_data, frozen_box=True)
+    budget = ResponseBudget(config, 20)
     usage = _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5)
 
-    ledger.show(_public_usage(), usage)
-
-    response_usage = ledger.usage()
+    await _record_usage(budget, config.main, usage)
+    response_usage = budget.finish(usage)
     assert response_usage is not None
     assert response_usage.input_tokens == 10
     assert response_usage.input_tokens_details.cached_tokens == 1
     assert response_usage.output_tokens == 15
     assert response_usage.output_tokens_details.reasoning_tokens == 8
     assert response_usage.total_tokens == 25
-    assert ledger.remaining() == 5
+    assert budget.remaining == 5
 
 
-def test_usage_ledger_hidden_usage_is_squashed_into_reasoning_tokens() -> None:
-    ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
+async def test_response_budget_internal_usage_is_squashed_into_reasoning_tokens() -> None:
+    config = _config()
+    budget = ResponseBudget(config, 100)
     hidden_usage = _usage(input_tokens=80, output_tokens=15)
     output_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=2, reasoning_tokens=1)
 
-    ledger.hide(_public_usage(), hidden_usage)
-    ledger.show(_public_usage(), output_usage)
-
-    response_usage = ledger.usage()
+    await _record_usage(budget, config.main, hidden_usage)
+    await _record_usage(budget, config.main, output_usage)
+    response_usage = budget.finish(output_usage)
     assert response_usage is not None
     assert response_usage.input_tokens == 80
     assert response_usage.input_tokens_details.cached_tokens == 0
     assert response_usage.output_tokens == 40
     assert response_usage.output_tokens_details.reasoning_tokens == 36
     assert response_usage.total_tokens == 120
-    assert ledger.remaining() == 60
+    assert budget.remaining == 60
 
 
-def test_usage_ledger_hidden_then_visible_keeps_hidden_debit() -> None:
-    ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
+async def test_response_budget_uses_main_input_when_internal_summary_finishes_first() -> None:
+    config = _config()
+    budget = ResponseBudget(config, 100)
+    summary_usage = _usage(input_tokens=80, output_tokens=2)
+    main_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=3)
+
+    await _record_usage(budget, config.summary, summary_usage)
+    await _record_usage(budget, config.main, main_usage)
+    response_usage = budget.finish(main_usage)
+    assert response_usage is not None
+    assert response_usage.input_tokens == 10
+    assert response_usage.input_tokens_details.cached_tokens == 3
+
+
+async def test_response_budget_accepts_a_plugin_defined_config_field() -> None:
+    config_data = _config().to_dict()
+    config_data["critic"] = config_data["main"]
+    config = _Config(config_data, frozen_box=True)
+    budget = ResponseBudget(config, 20)
+    critic_usage = _usage(input_tokens=4, output_tokens=3)
+    main_usage = _usage(input_tokens=2, output_tokens=1)
+
+    await _record_usage(budget, config.critic, critic_usage)
+    await _record_usage(budget, config.main, main_usage)
+
+    response_usage = budget.finish(main_usage)
+    assert response_usage is not None
+    assert response_usage.input_tokens == 2
+    assert response_usage.output_tokens == 5
+
+
+async def test_response_budget_internal_then_output_keeps_internal_debit() -> None:
+    config = _config()
+    budget = ResponseBudget(config, 100)
     hidden_usage = _usage(input_tokens=20, output_tokens=9, reasoning_tokens=3)
     output_usage = _usage(input_tokens=4, output_tokens=2, cached_tokens=1)
 
-    ledger.hide(_public_usage(), hidden_usage)
-    assert ledger.remaining() == 86
+    await _record_usage(budget, config.main, hidden_usage)
+    assert budget.remaining == 86
 
-    ledger.show(_public_usage(), output_usage)
-
-    response_usage = ledger.usage()
+    await _record_usage(budget, config.main, output_usage)
+    response_usage = budget.finish(output_usage)
     assert response_usage is not None
     assert response_usage.input_tokens == 20
     assert response_usage.output_tokens == 16
     assert response_usage.output_tokens_details.reasoning_tokens == 14
     assert response_usage.total_tokens == 36
-    assert ledger.remaining() == 84
+    assert budget.remaining == 84
 
 
-def test_usage_ledger_clamps_output_tokens_to_visible_floor_for_discounted_visible_actor() -> None:
-    cheap_output = _public_usage(output_to_output=0.5)
+async def test_response_budget_clamps_output_tokens_to_visible_floor_for_discounted_output() -> None:
+    config_data = _config().to_dict()
+    config_data["main"]["output_equivalence"] = _output_equivalence(output_to_output=0.5).to_dict()
+    config = _Config(config_data, frozen_box=True)
     usage = _usage(input_tokens=10, output_tokens=20, reasoning_tokens=5)
-    ledger = UsageLedger(budget=100, reasoning_to_output=1.0)
+    budget = ResponseBudget(config, 100)
 
-    ledger.show(cheap_output, usage)
-
-    response_usage = ledger.usage()
+    await _record_usage(budget, config.main, usage)
+    response_usage = budget.finish(usage)
     assert response_usage is not None
     assert response_usage.input_tokens == 10
     assert response_usage.output_tokens == 15
     assert response_usage.output_tokens_details.reasoning_tokens == 0
     assert response_usage.total_tokens == 25
-    assert ledger.remaining() == 90
+    assert budget.remaining == 90
+
+
+async def test_budgeted_client_reports_last_service_tier_when_budget_is_exhausted() -> None:
+    config = _config()
+    budget = ResponseBudget(config, 1)
+    raw_client = _StubChatClient([_delta(finish_reason=ChatFinishReason.STOP, usage=_usage(input_tokens=0, output_tokens=1))])
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    async for _delta_item in budgeted(raw_client, budget, config.main).stream(request):
+        pass
+
+    with pytest.raises(ResponseBudgetExhaustedError) as exc_info:
+        async for _delta_item in budgeted(raw_client, budget, config.main).stream(request):
+            pass
+
+    assert exc_info.value.last_service_tier == "default"
+
+
+async def test_response_budget_rejects_unrecorded_usage_and_duplicate_finish() -> None:
+    config = _config()
+    budget = ResponseBudget(config, 20)
+    usage = _usage(input_tokens=1, output_tokens=1)
+
+    with pytest.raises(RuntimeError, match="was not recorded"):
+        budget.finish(usage)
+
+    await _record_usage(budget, config.main, usage)
+    budget.finish(usage)
+
+    with pytest.raises(RuntimeError, match="already been finished"):
+        budget.finish(usage)
 
 
 async def test_run_response_completes_simple_turn_without_midstream_staging() -> None:
@@ -548,6 +651,85 @@ async def test_run_response_completes_simple_turn_without_midstream_staging() ->
     assert response.usage.input_tokens == 7
 
 
+async def test_response_hooks_follow_the_documented_execution_order() -> None:
+    bus.reset()
+    core = importlib.reload(importlib.import_module("plap.plugins.core.loop"))
+    events: list[str] = []
+
+    @bus.listen("response.request")
+    async def wrap_request(state, config, *, next):
+        events.append("request.before")
+        request = await next(state=state, config=config)
+        events.append("request.after")
+        return request
+
+    @bus.listen("response.completion")
+    async def wrap_completion(state, config, budget, request, validators, *, next):
+        events.append("completion.before")
+        result = await next(
+            state=state,
+            config=config,
+            budget=budget,
+            request=request,
+            validators=validators,
+        )
+        events.append("completion.after")
+        return result
+
+    @bus.listen("response.turn")
+    async def wrap_turn(state, config, budget, request, *, next):
+        events.append("turn.before")
+        result = await next(state=state, config=config, budget=budget, request=request)
+        events.append("turn.after")
+        return result
+
+    @bus.listen("response.loop")
+    async def wrap_loop(state, config, budget, *, next):
+        events.append("loop.before")
+        result = await next(state=state, config=config, budget=budget)
+        events.append("loop.after")
+        return result
+
+    @bus.listen("response.commit")
+    async def wrap_commit(state, *, next):
+        events.append("commit.before")
+        await next(state=state)
+        events.append("commit.after")
+
+    state = _state(
+        _RecordingStore(),
+        _RecordingChannels(),
+        client=_StubChatClient(
+            [
+                _delta(
+                    content_delta="hello",
+                    finish_reason=ChatFinishReason.STOP,
+                    usage=_usage(input_tokens=2, output_tokens=1),
+                )
+            ]
+        ),
+    )
+
+    try:
+        await core.run_response(state=state)
+    finally:
+        bus.reset()
+        importlib.reload(core)
+
+    assert events == [
+        "loop.before",
+        "request.before",
+        "request.after",
+        "turn.before",
+        "completion.before",
+        "completion.after",
+        "turn.after",
+        "loop.after",
+        "commit.before",
+        "commit.after",
+    ]
+
+
 def test_state_from_ingested_preserves_active_sides() -> None:
     state = _state(ingested=_ingested(active={"reviewer"}))
 
@@ -580,7 +762,7 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
         body_started.set()
         await anyio.sleep(10)
 
-    monkeypatch.setattr("plap.plugins.core.loop.stream_response", _block)
+    monkeypatch.setattr("plap.plugins.core.loop.response_loop", _block)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(

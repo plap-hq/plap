@@ -1,6 +1,13 @@
+"""Execute a response as a loop of main-agent turns.
+
+One response runs one loop. Each loop iteration builds one request and runs one
+turn. A turn wraps one retried main-model completion. Commit runs once after the
+loop has stopped.
+"""
+
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from typing import NoReturn
 
 import anyio
 import structlog
@@ -13,7 +20,7 @@ from plap.llms import RetryLimitExceededError
 from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatFinishReason, IChatCompletionClient
 from plap.llms.retry import RetryValidator, retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
-from plap.plugins.core.ledger import UsageLedger
+from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
 from plap.plugins.core.request import build_config_request, build_response_request
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
@@ -41,6 +48,19 @@ def _retry_limit_error() -> PlapError:
     )
 
 
+def _raise_retry_limit_error() -> NoReturn:
+    raise _retry_limit_error()
+
+
+def _raise_task_error(exc: BaseExceptionGroup) -> NoReturn:
+    if len(exc.exceptions) != 1:
+        raise exc
+    inner = exc.exceptions[0]
+    if isinstance(inner, BaseExceptionGroup):
+        _raise_task_error(inner)
+    raise inner
+
+
 def _unexpected_public_error() -> PublicError:
     return PublicError(
         status_code=500,
@@ -50,44 +70,6 @@ def _unexpected_public_error() -> PublicError:
     )
 
 
-def _accepted_result(latest_snapshot: object | None, hidden_results_accounted: int) -> ChatCompletionResult | None:
-    if latest_snapshot is None:
-        return None
-    accepted_results = list(latest_snapshot.results[hidden_results_accounted:])
-    if not accepted_results:
-        return None
-    return accepted_results[-1]
-
-
-def _last_service_tier(latest_snapshot: object | None) -> str | None:
-    if latest_snapshot is None or not latest_snapshot.results:
-        return None
-    return latest_snapshot.results[-1].service_tier
-
-
-def _should_loop(state: State, result: StreamResult) -> bool:
-    if "main" not in state.sides.active:
-        return False
-    if result.accepted is None or result.budget_exhausted:
-        return False
-    oc = state.open_calls("main")
-    if oc:
-        return False
-    history = state.sides["main"]
-    return bool(history) and not history[-1].is_assistant()
-
-
-@dataclass(slots=True)
-class StreamResult:
-    ledger: UsageLedger
-    pricing: object
-    accepted: ChatCompletionResult | None
-    budget_exhausted: bool
-    last_service_tier: str | None
-    error: PlapError | None = None
-
-
-@bus.emit("response.config")
 async def resolve_config(state: State, request: dict[str, object]) -> CueBox:
     loaded = state.svcs.get(CueBox)
     return loaded.plap.config.resolve(request)
@@ -98,205 +80,86 @@ async def response_request(state: State, config: CueBox) -> ChatCompletionReques
     return build_response_request(state, config)
 
 
-@bus.emit("response.validate")
-async def response_validate(
+@bus.emit("response.completion")
+async def response_completion(
     state: State,
     config: CueBox,
-    validators: tuple[RetryValidator, ...],
-) -> tuple[RetryValidator, ...]:
-    _ = state, config
-    return validators
-
-
-@bus.emit("response.stream")
-async def stream_response(
-    state: State,
-    config: CueBox,
+    budget: ResponseBudget,
     request: ChatCompletionRequest,
-    ledger: UsageLedger,
-) -> StreamResult:
-    main = config.main
-    hidden_results_accounted = 0
-    budget_exhausted = False
-    latest_snapshot = None
-    prefix = list(state.sides["main"])
-    chat_completion_client = await state.svcs.aget(IChatCompletionClient)
+    validators: tuple[RetryValidator, ...],
+) -> ChatCompletionResult:
+    raw_client = await state.svcs.aget(IChatCompletionClient)
+    client = budgeted(raw_client, budget, config.main)
+    main = state.sides["main"]
+    suffix = len(main)
+    result: ChatCompletionResult | None = None
 
-    logger.info(
-        "response.runtime.turn",
-        side="main",
-        main_model=request.model,
-        tool_count=len(request.tools),
-    )
-
-    def next_request(history):
-        nonlocal hidden_results_accounted, budget_exhausted
-        for result in history.results[hidden_results_accounted:]:
-            ledger.hide(main.public_usage, result.usage)
-            hidden_results_accounted += 1
-        attempt_index = hidden_results_accounted + 1
-        attempt_budget = ledger.cap(main.public_usage, None)
-        attempt_cap = ledger.cap(main.public_usage, main.max_completion_tokens)
-        if attempt_cap == 0:
-            budget_exhausted = True
-            logger.info(
-                "response.runtime.main.skipped",
-                attempt_budget=attempt_budget,
-                attempt_index=attempt_index,
-                hidden_history_messages=len(history.messages),
-                hidden_history_results=len(history.results),
-                remaining_budget=ledger.remaining(),
-                reason="budget_exhausted",
-            )
-            return None
-        attempt_request = replace(
-            request,
-            messages=[*request.messages, *history.messages],
-            max_completion_tokens=attempt_cap,
-        )
-        logger.info(
-            "response.runtime.main",
-            attempt_budget=attempt_budget,
-            attempt_index=attempt_index,
-            hidden_history_messages=len(history.messages),
-            hidden_history_results=len(history.results),
-            main_cap=attempt_cap,
-            remaining_budget=ledger.remaining(),
-        )
-        logger.bind(log_channel="payload").info(
-            "response.runtime.main.payload",
-            attempt_index=attempt_index,
-            request=asdict(attempt_request),
-        )
-        return attempt_request
-
-    validators = await response_validate(
-        state=state,
-        config=config,
-        validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
-    )
-
-    source = retry_stream(
-        chat_completion_client,
-        next_request=next_request,
-        validators=validators,
-    )
+    logger.info("response.turn.started", model=request.model, tool_count=len(request.tools))
 
     summary_send, summary_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
 
-    async def run_summary():
-        await bus.emit("response.summary", state=state, config=config, source=summary_receive)
+    async def run_summary() -> None:
+        await bus.emit("response.summary", state=state, config=config, budget=budget, source=summary_receive)
 
     try:
         async with anyio.create_task_group() as tg:
             tg.start_soon(run_summary)
             try:
-                async for snapshot in source:
-                    latest_snapshot = snapshot
-                    state.sides["main"] = [*prefix, *snapshot.messages]
-
+                async for snapshot in retry_stream(client, request, validators=validators):
+                    main[suffix:] = snapshot.messages
+                    if snapshot.result is not None:
+                        result = snapshot.result
                     delta = snapshot.delta
                     if delta is not None and delta.reasoning_delta is not None:
                         await summary_send.send(SummaryDelta(text=delta.reasoning_delta))
-                    if delta is None or (delta is not None and (delta.tool_call_delta is not None or delta.finish_reason is not None)):
+                    if delta is None or delta.tool_call_delta is not None or delta.finish_reason is not None:
                         await summary_send.send(SummaryDone())
             finally:
                 await summary_send.aclose()
+    except BaseExceptionGroup as exc:
+        _raise_task_error(exc)
 
-    except RetryLimitExceededError:
-        if latest_snapshot is not None:
-            state.sides["main"] = [*prefix, *latest_snapshot.messages]
-        accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
-        usage = None if accepted is None else accepted.usage
-        logger.info(
-            "response.runtime.main.result",
-            accepted=accepted is not None,
-            budget_exhausted=budget_exhausted,
-            cached_tokens=None if usage is None else usage.cached_tokens,
-            error="retry_limit_exceeded",
-            finish_reason=None if accepted is None else accepted.finish_reason,
-            hidden_results_accounted=hidden_results_accounted,
-            input_tokens=None if usage is None else usage.input_tokens,
-            output_tokens=None if usage is None else usage.output_tokens,
-            reasoning_tokens=None if usage is None else usage.reasoning_tokens,
-            remaining_budget=ledger.remaining(),
-            service_tier=None if accepted is None else accepted.service_tier,
-            total_tokens=None if usage is None else usage.total_tokens,
-        )
-        return StreamResult(
-            ledger=ledger,
-            pricing=main.public_usage,
-            accepted=accepted,
-            budget_exhausted=budget_exhausted,
-            last_service_tier=_last_service_tier(latest_snapshot),
-            error=_retry_limit_error(),
-        )
-
-    accepted = _accepted_result(latest_snapshot, hidden_results_accounted)
-    usage = None if accepted is None else accepted.usage
-    logger.info(
-        "response.runtime.main.result",
-        accepted=accepted is not None,
-        budget_exhausted=budget_exhausted,
-        cached_tokens=None if usage is None else usage.cached_tokens,
-        finish_reason=None if accepted is None else accepted.finish_reason,
-        hidden_results_accounted=hidden_results_accounted,
-        input_tokens=None if usage is None else usage.input_tokens,
-        output_tokens=None if usage is None else usage.output_tokens,
-        reasoning_tokens=None if usage is None else usage.reasoning_tokens,
-        remaining_budget=ledger.remaining(),
-        service_tier=None if accepted is None else accepted.service_tier,
-        total_tokens=None if usage is None else usage.total_tokens,
-    )
-    return StreamResult(
-        ledger=ledger,
-        pricing=main.public_usage,
-        accepted=accepted,
-        budget_exhausted=budget_exhausted,
-        last_service_tier=_last_service_tier(latest_snapshot),
-    )
-
-
-@bus.emit("response.commit")
-async def commit_response(state: State, config: CueBox, result: StreamResult | None) -> None:
-    _ = config, result
-    await state.commit()
-
-
-@bus.emit("response.finish")
-async def finish_response(state: State, config: CueBox, result: StreamResult | None, ledger: UsageLedger) -> None:
     if result is None:
-        await state.coordinator.completed(service_tier=None, usage=ledger.usage())
-        return
-    if result.error is not None:
-        raise result.error
+        raise RuntimeError("response stream ended without an accepted final result")
 
-    accepted = result.accepted
-    if accepted is not None:
-        result.ledger.show(result.pricing, accepted.usage)
-        usage = result.ledger.usage()
-        if accepted.finish_reason == ChatFinishReason.LENGTH:
-            await state.coordinator.incomplete(service_tier=accepted.service_tier, usage=usage)
-            return
-        await state.coordinator.completed(service_tier=accepted.service_tier, usage=usage)
-        return
+    return result
 
-    if result.budget_exhausted:
-        await state.coordinator.incomplete(service_tier=result.last_service_tier, usage=result.ledger.usage())
-        return
 
-    raise RuntimeError("response stream ended without an accepted final result")
+@bus.emit("response.turn")
+async def response_turn(
+    state: State,
+    config: CueBox,
+    budget: ResponseBudget,
+    request: ChatCompletionRequest,
+) -> ChatCompletionResult:
+    return await response_completion(
+        state=state,
+        config=config,
+        budget=budget,
+        request=request,
+        validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
+    )
 
 
 @bus.emit("response.loop")
-async def loop_response(state: State, config: CueBox, ledger: UsageLedger) -> StreamResult | None:
+async def response_loop(state: State, config: CueBox, budget: ResponseBudget) -> ChatCompletionResult | None:
     if "main" not in state.sides.active or state.open_calls("main"):
         return None
-    request = await response_request(state=state, config=config)
-    return await stream_response(state=state, config=config, request=request, ledger=ledger)
+
+    while True:
+        request = await response_request(state=state, config=config)
+        result = await response_turn(state=state, config=config, budget=budget, request=request)
+        main = state.sides["main"]
+        if "main" not in state.sides.active or state.open_calls("main") or not main or main[-1].is_assistant():
+            return result
 
 
-@bus.emit("response.run")
+@bus.emit("response.commit")
+async def response_commit(state: State) -> None:
+    await state.commit()
+
+
+@bus.emit("response.start")
 async def run_response(state: State) -> None:
     with tracer.start_as_current_span("response.execute") as span:
         span.set_attribute("plap.response.id", state.coordinator.response_id)
@@ -307,20 +170,23 @@ async def run_response(state: State) -> None:
         try:
             try:
                 config = await resolve_config(state=state, request=build_config_request(state))
-                ledger = UsageLedger(
-                    budget=state.prepared.execution_request.max_output_tokens,
-                    reasoning_to_output=config.reasoning_to_output,
-                )
+                budget = ResponseBudget(config, state.prepared.execution_request.max_output_tokens)
                 await anyio.sleep(0)
                 with anyio.CancelScope(shield=True):
                     await state.coordinator.created()
                 created = True
                 await state.coordinator.in_progress()
-                while True:
-                    result = await loop_response(state=state, config=config, ledger=ledger)
-                    if result is None or not _should_loop(state, result):
-                        break
-                    result.ledger.hide(result.pricing, result.accepted.usage if result.accepted is not None else None)
+                result: ChatCompletionResult | None = None
+                budget_exhausted: ResponseBudgetExhaustedError | None = None
+                retry_exhausted = False
+                try:
+                    result = await response_loop(state=state, config=config, budget=budget)
+                except ResponseBudgetExhaustedError as exc:
+                    budget_exhausted = exc
+                    result = None
+                except RetryLimitExceededError:
+                    retry_exhausted = True
+                    result = None
             except anyio.get_cancelled_exc_class():
                 if created:
                     with anyio.CancelScope(shield=True):
@@ -329,8 +195,23 @@ async def run_response(state: State) -> None:
                         await state.coordinator.cancelled()
                 raise
             with anyio.CancelScope(shield=True):
-                await commit_response(state=state, config=config, result=result)
-                await finish_response(state=state, config=config, result=result, ledger=ledger)
+                if retry_exhausted:
+                    await response_commit(state=state)
+                    _raise_retry_limit_error()
+                usage = budget.finish(None if result is None or budget_exhausted is not None else result.usage)
+                await response_commit(state=state)
+                if budget_exhausted is not None:
+                    await state.coordinator.incomplete(
+                        service_tier=budget_exhausted.last_service_tier,
+                        usage=usage,
+                    )
+                elif result is None:
+                    await state.coordinator.completed(service_tier=None, usage=usage)
+                else:
+                    if result.finish_reason == ChatFinishReason.LENGTH:
+                        await state.coordinator.incomplete(service_tier=result.service_tier, usage=usage)
+                    else:
+                        await state.coordinator.completed(service_tier=result.service_tier, usage=usage)
         except PlapError as exc:
             public = exc.public or _unexpected_public_error()
             exc.log(
@@ -359,9 +240,10 @@ async def run_response(state: State) -> None:
 async def default_summary(
     state: State,
     config: CueBox,
+    budget: ResponseBudget,
     source: anyio.abc.ObjectReceiveStream[SummaryDelta | SummaryDone],
 ) -> None:
-    _ = config
+    _ = config, budget
     open_part = False
     accumulated = 0
     async for item in source:

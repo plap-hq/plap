@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import replace
 
 from plap.llms.accumulator import Accumulator, Snapshot
 from plap.llms.completions.chat import (
@@ -36,7 +37,6 @@ class RetryToolSchemaError(RetryError):
 
 
 type RetryValidator = Callable[[ChatCompletionResult, ChatCompletionRequest], Awaitable[str | None]]
-type NextRequest = Callable[[Snapshot], ChatCompletionRequest | None]
 
 
 def _tool_stubs(message: ChatMessage) -> tuple[ChatMessage, ...]:
@@ -227,8 +227,8 @@ async def _first_retry_message(
 
 async def stream(
     client: IChatCompletionClient,
+    request: ChatCompletionRequest,
     *,
-    next_request: NextRequest,
     validators: Sequence[RetryValidator] = (),
     max_attempts: int = 3,
 ) -> AsyncIterator[Snapshot]:
@@ -236,16 +236,13 @@ async def stream(
     last_retry_message: str | None = None
 
     for _ in range(max_attempts):
-        request = next_request(history)
-        if request is None:
-            return
-
-        accumulator = Accumulator(tools=tuple(request.tools))
+        attempt_request = replace(request, messages=[*request.messages, *history.messages])
+        accumulator = Accumulator(tools=tuple(attempt_request.tools))
         last: Snapshot | None = None
         stream_error: ChatCompletionProviderError | None = None
 
         try:
-            async for delta in client.stream(request):
+            async for delta in client.stream(attempt_request):
                 current = accumulator.apply(delta)
                 last = Snapshot(
                     messages=(*history.messages, *current.messages),
@@ -259,15 +256,15 @@ async def stream(
         if stream_error is not None:
             if last is None:
                 raise stream_error
-            if not last.results:
+            if last.result is None:
                 yield history
                 continue
 
-        if last is None or not last.results:
+        result = None if last is None else last.result
+        if result is None:
             raise RuntimeError("stream ended without final result")
 
-        result = last.results[-1]
-        fix = await _first_retry_message(result, request, validators)
+        fix = await _first_retry_message(result, attempt_request, validators)
         if fix is None:
             return
         last_retry_message = fix
@@ -289,15 +286,15 @@ async def stream(
 
 async def complete(
     client: IChatCompletionClient,
+    request: ChatCompletionRequest,
     *,
-    next_request: NextRequest,
     validators: Sequence[RetryValidator] = (),
     max_attempts: int = 3,
 ) -> Snapshot:
     final = Snapshot(messages=(), results=(), delta=None)
     async for snapshot in stream(
         client,
-        next_request=next_request,
+        request,
         validators=validators,
         max_attempts=max_attempts,
     ):
@@ -307,7 +304,6 @@ async def complete(
 
 __all__ = [
     "RETRY_TOOL_PLACEHOLDER",
-    "NextRequest",
     "RetryError",
     "RetryLimitExceededError",
     "RetryToolSchemaError",

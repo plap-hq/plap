@@ -26,8 +26,9 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.plugins.core.ledger import UsageLedger
-from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages, run_images
+from plap.llms.retry import RetryValidator
+from plap.plugins.core.budget import ResponseBudget
+from plap.plugins.vision import VISION_BUDGET_OUTPUT, VISION_TOOL_NAME, _image_id, _vision_history_messages
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem
 from plap.responses.ingest.models import Ingested, Message, Sides
@@ -171,7 +172,7 @@ def _config() -> _Config:
                 "max_completion_tokens": None,
                 "reasoning_effort": None,
                 "service_tier": None,
-                "public_usage": {
+                "output_equivalence": {
                     "uncached_input_to_output": 0.25,
                     "cached_input_to_output": 0.05,
                     "output_to_output": 1.0,
@@ -204,7 +205,7 @@ def _config() -> _Config:
                     "seed": None,
                     "top_logprobs": None,
                 },
-                "public_usage": {
+                "output_equivalence": {
                     "uncached_input_to_output": 0.25,
                     "cached_input_to_output": 0.05,
                     "output_to_output": 1.0,
@@ -286,31 +287,6 @@ def _delta(
         usage=usage,
         service_tier="default",
     )
-
-
-@pytest.mark.anyio
-async def test_vision_delegates_without_work_when_main_is_inactive() -> None:
-    client = _Client(streams=[], completes=[])
-    state, _, _ = _state(client)
-    state.sides.active.discard("main")
-    delegated = 0
-
-    async def next_handler(**kwargs):
-        nonlocal delegated
-        _ = kwargs
-        delegated += 1
-
-    result = await run_images(
-        state=state,
-        config=state.svcs.get(CueBox).plap.config,
-        ledger=UsageLedger(budget=None, reasoning_to_output=1.0),
-        next=next_handler,
-    )
-
-    assert result is None
-    assert delegated == 1
-    assert client.stream_requests == []
-    assert client.complete_requests == []
 
 
 def _tool_step(*calls: tuple[str, str, str], usage: ChatUsage) -> list[ChatCompletionDelta]:
@@ -474,6 +450,29 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
     final_message = next(item for item in output if isinstance(item, ResponseMessageItem))
     assert _message_text(final_message) == "final answer"
+
+
+@pytest.mark.anyio
+async def test_internal_images_tool_closes_call_when_response_budget_is_exhausted() -> None:
+    core = _reload_handlers()
+    image_id = _image_id(_image("https://example.com/cat.png"))
+    client = _Client(
+        streams=[
+            _tool_step(
+                ("call_vision", VISION_TOOL_NAME, f'{{"ids":["{image_id}"],"prompt":"describe"}}'),
+                usage=_usage(input_tokens=8, output_tokens=4),
+            )
+        ],
+        completes=[],
+    )
+    state, _, _ = _state(client, request=_request(max_output_tokens=4))
+
+    await core.run_response(state=state)
+
+    assert client.complete_requests == []
+    assert state.coordinator.current_response().status == "incomplete"
+    assert any(message.role == "tool" and message.content == VISION_BUDGET_OUTPUT for message in state.sides["main"])
+    assert not any(isinstance(item, ResponseFunctionCallItem) for item in _output_items(state))
 
 
 @pytest.mark.anyio
@@ -742,13 +741,26 @@ async def test_unknown_image_id_retries_before_internal_tool_execution() -> None
 async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> None:
     core = _reload_handlers()
 
-    @bus.listen("response.loop")
-    async def run_internal(state: State, config: CueBox, ledger, *, next) -> object:
-        result = await next(state=state, config=config, ledger=ledger)
-        accepted = result.accepted
-        if accepted is None or accepted.finish_reason != ChatFinishReason.TOOL_CALLS:
+    @bus.listen("response.completion")
+    async def run_internal(
+        state: State,
+        config: CueBox,
+        budget: ResponseBudget,
+        request: ChatCompletionRequest,
+        validators: tuple[RetryValidator, ...],
+        *,
+        next,
+    ) -> object:
+        result = await next(
+            state=state,
+            config=config,
+            budget=budget,
+            request=request,
+            validators=validators,
+        )
+        if result.finish_reason != ChatFinishReason.TOOL_CALLS:
             return result
-        for call in accepted.message.tool_calls:
+        for call in result.message.tool_calls:
             if call.name == "internal":
                 state.sides["main"].append(ChatMessage(role="tool", tool_call_id=call.id, content="internal output"))
         return result

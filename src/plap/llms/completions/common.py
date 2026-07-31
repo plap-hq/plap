@@ -26,7 +26,7 @@ from plap.llms.completions.chat import (
     content_from_primitive,
     content_to_wire,
 )
-from plap.llms.completions.errors import ChatCompletionProviderError
+from plap.llms.completions.errors import ChatCompletionError, ChatCompletionProviderError
 
 
 def _set(target: dict[str, Any], key: str, value: Any) -> None:
@@ -454,8 +454,9 @@ class StreamState:
     saw_output: bool = False
     saw_tool_calls: bool = False
     saw_finish_reason: bool = False
+    _terminal: ChatCompletionDelta | None = None
 
-    def apply(self, delta: ChatCompletionDelta) -> None:
+    def _track(self, delta: ChatCompletionDelta) -> None:
         if delta.id is not None:
             self.last_id = delta.id
         if delta.model is not None:
@@ -474,7 +475,51 @@ class StreamState:
         if delta.finish_reason is not None:
             self.saw_finish_reason = True
 
-    def inferred_terminal_delta(self) -> ChatCompletionDelta | None:
+    def _normalized_terminal_delta(self, delta: ChatCompletionDelta) -> ChatCompletionDelta:
+        if delta.finish_reason is None:
+            return delta
+        finish_reason = _terminal_finish_reason(
+            delta.finish_reason,
+            saw_tool_calls=self.saw_tool_calls,
+            saw_output=self.saw_output,
+        )
+        if finish_reason == delta.finish_reason:
+            return delta
+        return replace(delta, finish_reason=finish_reason)
+
+    def apply(self, delta: ChatCompletionDelta) -> ChatCompletionDelta | None:
+        self._track(delta)
+        delta = self._normalized_terminal_delta(delta)
+        terminal = self._terminal
+
+        if terminal is None:
+            if delta.finish_reason is not None:
+                self._terminal = delta
+                return None
+            return delta
+
+        if delta.finish_reason is None and not has_output(delta):
+            self._terminal = replace(
+                terminal,
+                id=delta.id if delta.id is not None else terminal.id,
+                model=delta.model if delta.model is not None else terminal.model,
+                created_at=delta.created_at if delta.created_at is not None else terminal.created_at,
+                usage=delta.usage if delta.usage is not None else terminal.usage,
+                system_fingerprint=(delta.system_fingerprint if delta.system_fingerprint is not None else terminal.system_fingerprint),
+                service_tier=delta.service_tier if delta.service_tier is not None else terminal.service_tier,
+            )
+            return None
+
+        if delta.finish_reason is not None:
+            raise ChatCompletionError("stream emitted more than one finish_reason")
+        raise ChatCompletionError("stream emitted output after finish_reason")
+
+    def flush_terminal(self) -> ChatCompletionDelta | None:
+        terminal = self._terminal
+        self._terminal = None
+        return terminal
+
+    def _inferred_terminal_delta(self) -> ChatCompletionDelta | None:
         if self.saw_finish_reason:
             return None
         finish_reason = _terminal_finish_reason(
@@ -494,17 +539,9 @@ class StreamState:
             service_tier=self.last_service_tier,
         )
 
-    def normalized_terminal_delta(self, delta: ChatCompletionDelta) -> ChatCompletionDelta:
-        if delta.finish_reason is None:
-            return delta
-        finish_reason = _terminal_finish_reason(
-            delta.finish_reason,
-            saw_tool_calls=self.saw_tool_calls,
-            saw_output=self.saw_output,
-        )
-        if finish_reason == delta.finish_reason:
-            return delta
-        return replace(delta, finish_reason=finish_reason)
+    def finish(self) -> ChatCompletionDelta | None:
+        terminal = self.flush_terminal()
+        return terminal if terminal is not None else self._inferred_terminal_delta()
 
 
 def raise_incomplete_stream_error() -> None:

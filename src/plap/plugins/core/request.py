@@ -149,6 +149,7 @@ def build_response_request(state: State, config: CueBox) -> ChatCompletionReques
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,
         response_format=_response_format(state),
+        max_completion_tokens=main.max_completion_tokens,
         temperature=apply_float_transform(request.temperature, sampling.temperature, minimum=0, maximum=2),
         top_p=apply_float_transform(request.top_p, sampling.top_p, minimum=0, maximum=1),
         min_p=apply_float_transform(None, sampling.min_p, minimum=0, maximum=1),

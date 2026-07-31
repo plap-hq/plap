@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import msgspec
@@ -15,6 +15,7 @@ from plap.errors import ErrorLevel, PlapError, PrivateError
 from plap.llms import RetryLimitExceededError
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
+    ChatCompletionResult,
     ChatFinishReason,
     ChatFunctionTool,
     ChatMessage,
@@ -24,15 +25,14 @@ from plap.llms.completions.chat import (
     ChatToolChoiceFunction,
     IChatCompletionClient,
 )
+from plap.llms.retry import complete as retry_complete
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
-from plap.llms.retry import stream as retry_stream
 from plap.plugins.advisor.markdown import (
     note_instruction,
     render_main_messages,
     requirements_instruction,
 )
-from plap.plugins.core.ledger import UsageLedger
-from plap.plugins.core.loop import StreamResult, response_request
+from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
 from plap.plugins.core.request import apply_float_transform, apply_int_transform
 from plap.responses.state import State
 from plap.responses.summary import SummaryDelta, SummaryDone
@@ -356,7 +356,7 @@ async def _run_advisor(
     *,
     state: State,
     config: CueBox,
-    ledger: UsageLedger,
+    budget: ResponseBudget,
     main_request: ChatCompletionRequest,
     phase_instruction: str,
     phase: str,
@@ -369,81 +369,33 @@ async def _run_advisor(
         phase_instruction=phase_instruction,
     )
 
-    client = await state.svcs.aget(IChatCompletionClient)
-    latest_snapshot = None
-    hidden_results_accounted = 0
-    budget_exhausted = False
-
-    def next_request(history):
-        nonlocal hidden_results_accounted, budget_exhausted
-        for result in history.results[hidden_results_accounted:]:
-            ledger.hide(config.advisor.public_usage, result.usage)
-            hidden_results_accounted += 1
-        attempt_index = hidden_results_accounted + 1
-        attempt_budget = ledger.cap(config.advisor.public_usage, None)
-        attempt_cap = ledger.cap(config.advisor.public_usage, config.advisor.max_completion_tokens)
-        if attempt_cap == 0:
-            budget_exhausted = True
-            logger.info(
-                "response.advisor.skipped",
-                phase=phase,
-                reason="budget_exhausted",
-                attempt_budget=attempt_budget,
-                attempt_index=attempt_index,
-                hidden_history_messages=len(history.messages),
-                hidden_results=len(history.results),
-                remaining=ledger.remaining(),
-            )
-            return None
-        attempt_request = replace(request, messages=[*request.messages, *history.messages], max_completion_tokens=attempt_cap)
-        logger.info(
-            "response.advisor.request",
-            attempt_index=attempt_index,
-            attempt_budget=attempt_budget,
-            cap=attempt_cap,
-            hidden_history_messages=len(history.messages),
-            hidden_results=len(history.results),
-            remaining=ledger.remaining(),
-            phase=phase,
-        )
-        logger.bind(log_channel="payload").info(
-            "response.advisor.request.payload",
-            attempt_index=attempt_index,
-            request=asdict(attempt_request),
-        )
-        return attempt_request
+    raw_client = await state.svcs.aget(IChatCompletionClient)
+    client = budgeted(raw_client, budget, config.advisor)
 
     try:
-        async for snapshot in retry_stream(
+        latest_snapshot = await retry_complete(
             client,
-            next_request=next_request,
+            request,
             validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
-        ):
-            latest_snapshot = snapshot
+        )
+    except ResponseBudgetExhaustedError:
+        logger.info("response.advisor.skipped", phase=phase, reason="budget_exhausted", remaining=budget.remaining)
+        return None, ""
     except RetryLimitExceededError:
         logger.warning("response.advisor.skipped", phase=phase, reason="retry_limit_exceeded")
         return None, ""
 
-    if budget_exhausted or latest_snapshot is None:
-        return None, ""
-
-    result = latest_snapshot.results[-1]
-    ledger.hide(config.advisor.public_usage, result.usage)
+    result = latest_snapshot.result
+    if result is None:  # pragma: no cover - retry_complete returns an accepted terminal snapshot
+        raise RuntimeError("advisor completion ended without an accepted result")
     call = result.message.tool_calls[0]
     advice, note = _advice_fields(call)
-    usage = result.usage
-
     logger.info(
         "response.advisor.result",
-        advisor_cached_tokens=None if usage is None else usage.cached_tokens,
-        phase=phase,
-        applied=advice is not None,
         advice_chars=len(advice) if advice else 0,
-        advisor_input_tokens=None if usage is None else usage.input_tokens,
-        advisor_output_tokens=None if usage is None else usage.output_tokens,
-        advisor_reasoning_tokens=None if usage is None else usage.reasoning_tokens,
-        advisor_total_tokens=None if usage is None else usage.total_tokens,
-        remaining=ledger.remaining(),
+        applied=advice is not None,
+        has_note=note is not None,
+        phase=phase,
     )
 
     state.sides[ADVISOR_SIDE].extend(_strip_note_from_messages(latest_snapshot.messages))
@@ -458,18 +410,18 @@ async def _maybe_advise_after_tool_call(
     *,
     state: State,
     config: CueBox,
-    ledger: UsageLedger,
+    budget: ResponseBudget,
     main_request: ChatCompletionRequest,
-) -> None:
+) -> ChatMessage | None:
     history = state.sides["main"]
     if not history or not history[-1].is_tool():
-        return
+        return None
     phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
     logger.info("response.advisor.phase", phase="after_tool_call", main_model=main_request.model, main_messages=len(history))
     advice, call_id = await _run_advisor(
         state=state,
         config=config,
-        ledger=ledger,
+        budget=budget,
         main_request=main_request,
         phase_instruction=phase_instruction,
         phase="after_tool_call",
@@ -479,19 +431,21 @@ async def _maybe_advise_after_tool_call(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.sides["main"].append(ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}}))
+        message = ChatMessage(role="developer", content=advice, durable={ADVISOR_SIDE: {"call_id": call_id}})
+        state.sides["main"].append(message)
+        return message
+    return None
 
 
 async def _maybe_advise_before_tool_call(
     *,
     state: State,
     config: CueBox,
-    ledger: UsageLedger,
+    budget: ResponseBudget,
     main_request: ChatCompletionRequest,
-    result: StreamResult,
+    result: ChatCompletionResult,
 ) -> None:
-    accepted = result.accepted
-    if accepted is None or accepted.finish_reason != ChatFinishReason.TOOL_CALLS:
+    if result.finish_reason != ChatFinishReason.TOOL_CALLS:
         return
     open_calls = state.open_calls("main")
     if not open_calls:
@@ -502,7 +456,7 @@ async def _maybe_advise_before_tool_call(
     advice, call_id = await _run_advisor(
         state=state,
         config=config,
-        ledger=ledger,
+        budget=budget,
         main_request=main_request,
         phase_instruction=phase_instruction,
         phase="before_tool_call",
@@ -530,12 +484,11 @@ async def _maybe_advise_before_return(
     *,
     state: State,
     config: CueBox,
-    ledger: UsageLedger,
+    budget: ResponseBudget,
     main_request: ChatCompletionRequest,
-    result: StreamResult,
+    result: ChatCompletionResult,
 ) -> None:
-    accepted = result.accepted
-    if accepted is None or accepted.finish_reason != ChatFinishReason.STOP or accepted.message.tool_calls:
+    if result.finish_reason != ChatFinishReason.STOP or result.message.tool_calls:
         return
     if state.open_calls("main"):
         return
@@ -544,7 +497,7 @@ async def _maybe_advise_before_return(
     advice, call_id = await _run_advisor(
         state=state,
         config=config,
-        ledger=ledger,
+        budget=budget,
         main_request=main_request,
         phase_instruction=phase_instruction,
         phase="before_return",
@@ -563,17 +516,26 @@ async def collect(paths: tuple[str, ...], *, next):
     return await next(paths=(*paths, str(here.parent / "schema.cue")))
 
 
-@bus.listen("response.loop")
-async def advise_response(state: State, config: CueBox, ledger: UsageLedger, *, next) -> StreamResult | None:
-    if "main" not in state.sides.active or state.open_calls("main"):
-        return await next(state=state, config=config, ledger=ledger)
-    main_request = await response_request(state=state, config=config)
-    await _maybe_advise_after_tool_call(state=state, config=config, ledger=ledger, main_request=main_request)
-    result = await next(state=state, config=config, ledger=ledger)
-    if result is None:
-        return None
-    await _maybe_advise_before_tool_call(state=state, config=config, ledger=ledger, main_request=main_request, result=result)
-    await _maybe_advise_before_return(state=state, config=config, ledger=ledger, main_request=main_request, result=result)
+@bus.listen("response.turn")
+async def advise_turn(
+    state: State,
+    config: CueBox,
+    budget: ResponseBudget,
+    request: ChatCompletionRequest,
+    *,
+    next,
+) -> ChatCompletionResult:
+    advice = await _maybe_advise_after_tool_call(
+        state=state,
+        config=config,
+        budget=budget,
+        main_request=request,
+    )
+    if advice is not None:
+        request = replace(request, messages=[*request.messages, advice])
+    result = await next(state=state, config=config, budget=budget, request=request)
+    await _maybe_advise_before_tool_call(state=state, config=config, budget=budget, main_request=request, result=result)
+    await _maybe_advise_before_return(state=state, config=config, budget=budget, main_request=request, result=result)
     return result
 
 

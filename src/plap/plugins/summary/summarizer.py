@@ -7,10 +7,12 @@ from typing import Literal, Protocol, runtime_checkable
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatMessage,
+    ChatStreamOptions,
     IChatCompletionClient,
     ReasoningEffort,
     ServiceTier,
 )
+from plap.plugins.core.budget import ResponseBudgetExhaustedError
 
 type SummaryMode = Literal["auto", "concise", "detailed"]
 
@@ -73,44 +75,6 @@ class IReasoningSummarizer(Protocol):
     ) -> AsyncIterator[str]: ...
 
 
-class ChatReasoningSummarizer(IReasoningSummarizer):
-    def __init__(
-        self,
-        *,
-        client: IChatCompletionClient,
-        model: str,
-        max_completion_tokens: int | None,
-        prompt_cache_key: str | None,
-        reasoning_effort: ReasoningEffort | None,
-        service_tier: ServiceTier | None,
-    ) -> None:
-        self._client = client
-        self._model = model
-        self._max_completion_tokens = max_completion_tokens
-        self._prompt_cache_key = prompt_cache_key
-        self._reasoning_effort = reasoning_effort
-        self._service_tier = service_tier
-
-    def stream(
-        self,
-        *,
-        mode: SummaryMode,
-        prior_summary: str | None,
-        fragment: str,
-    ) -> AsyncIterator[str]:
-        request = _summary_request(
-            model=self._model,
-            max_completion_tokens=self._max_completion_tokens,
-            prompt_cache_key=self._prompt_cache_key,
-            reasoning_effort=self._reasoning_effort,
-            service_tier=self._service_tier,
-            mode=mode,
-            prior_summary=prior_summary,
-            fragment=fragment,
-        )
-        return _stream_summary_text(self._client, request)
-
-
 def _summary_mode(state) -> str | None:
     reasoning = state.prepared.execution_request.reasoning
     if reasoning is None:
@@ -158,6 +122,7 @@ def _summary_request(
         prompt_cache_key=prompt_cache_key,
         reasoning_effort=reasoning_effort,
         service_tier=service_tier,
+        stream_options=ChatStreamOptions(include_usage=True),
         temperature=0,
     )
 
@@ -166,9 +131,50 @@ async def _stream_summary_text(
     client: IChatCompletionClient,
     request: ChatCompletionRequest,
 ) -> AsyncIterator[str]:
-    async for delta in client.stream(request):
-        if delta.content_delta:
-            yield delta.content_delta
+    try:
+        async for delta in client.stream(request):
+            if delta.content_delta:
+                yield delta.content_delta
+    except ResponseBudgetExhaustedError:
+        return
+
+
+class ChatReasoningSummarizer(IReasoningSummarizer):
+    def __init__(
+        self,
+        *,
+        client: IChatCompletionClient,
+        model: str,
+        max_completion_tokens: int | None,
+        prompt_cache_key: str | None,
+        reasoning_effort: ReasoningEffort | None,
+        service_tier: ServiceTier | None,
+    ) -> None:
+        self._client = client
+        self._model = model
+        self._max_completion_tokens = max_completion_tokens
+        self._prompt_cache_key = prompt_cache_key
+        self._reasoning_effort = reasoning_effort
+        self._service_tier = service_tier
+
+    def stream(
+        self,
+        *,
+        mode: SummaryMode,
+        prior_summary: str | None,
+        fragment: str,
+    ) -> AsyncIterator[str]:
+        request = _summary_request(
+            model=self._model,
+            max_completion_tokens=self._max_completion_tokens,
+            prompt_cache_key=self._prompt_cache_key,
+            reasoning_effort=self._reasoning_effort,
+            service_tier=self._service_tier,
+            mode=mode,
+            prior_summary=prior_summary,
+            fragment=fragment,
+        )
+        return _stream_summary_text(self._client, request)
 
 
 def _summary_boundary_index(text: str) -> int | None:

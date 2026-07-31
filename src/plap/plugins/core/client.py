@@ -12,3 +12,6 @@ def build_chat_completion_client(config: CueBox) -> IChatCompletionClient:
         return UnavailableChatCompletionClient()
     routes = [ModelRoute(prefix=prefix, client=ChatCompletionClient(provider)) for prefix, provider in providers.items()]
     return RoutingChatCompletionClient(routes)
+
+
+__all__ = ["build_chat_completion_client"]

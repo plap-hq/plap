@@ -24,8 +24,6 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.plugins.advisor import advise_response
-from plap.plugins.core.ledger import UsageLedger
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Sides
@@ -160,7 +158,7 @@ def _field(model: str) -> dict[str, object]:
         "max_completion_tokens": 128,
         "reasoning_effort": None,
         "service_tier": None,
-        "public_usage": {
+        "output_equivalence": {
             "uncached_input_to_output": 0.25,
             "cached_input_to_output": 0.05,
             "output_to_output": 1.0,
@@ -335,30 +333,6 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
     ]
 
 
-@pytest.mark.anyio
-async def test_advisor_delegates_without_work_when_main_is_inactive() -> None:
-    client = _Client(main=[], advisor=[])
-    state = _state(client)
-    state.sides.active.discard("main")
-    delegated = 0
-
-    async def next_handler(**kwargs):
-        nonlocal delegated
-        _ = kwargs
-        delegated += 1
-
-    result = await advise_response(
-        state=state,
-        config=state.svcs.get(CueBox).plap.config,
-        ledger=UsageLedger(budget=None, reasoning_to_output=1.0),
-        next=next_handler,
-    )
-
-    assert result is None
-    assert delegated == 1
-    assert client.advisor_requests == []
-
-
 def _advisor_step(advice: str | None = "", *, note: str | None = None) -> list[ChatCompletionDelta]:
     arguments: dict[str, str] = {}
     if advice is not None:
@@ -468,7 +442,7 @@ async def test_advisor_retry_limit_skips_current_phase() -> None:
 @pytest.mark.anyio
 async def test_advisor_retry_hidden_usage_caps_next_attempt() -> None:
     core = _reload_handlers()
-    request = _request(max_output_tokens=1)
+    request = _request(max_output_tokens=5)
     client = _Client(main=[_tool_step()], advisor=[_expensive_bad_advisor_step()])
     state = _state(client, request=request)
 

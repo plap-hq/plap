@@ -18,7 +18,7 @@ from plap.llms.completions.common import (
     delta_from_data,
     raise_incomplete_stream_error,
 )
-from plap.llms.completions.errors import ChatCompletionUnsupportedRequestError
+from plap.llms.completions.errors import ChatCompletionProviderError, ChatCompletionUnsupportedRequestError
 
 type NextComplete = Callable[[ChatCompletionRequest | None], Awaitable[dict[str, Any]]]
 type NextStream = Callable[[ChatCompletionRequest | None], AsyncIterator[dict[str, Any]]]
@@ -163,13 +163,19 @@ class ChatCompletionClient(IChatCompletionClient):
         async def run() -> AsyncIterator[ChatCompletionDelta]:
             quirks = self._quirks(request.model)
             state = StreamState()
-            async for raw in self._stream_request(request, quirks, 0):
-                delta = delta_from_data(raw, request=request)
-                state.apply(delta)
-                yield state.normalized_terminal_delta(delta)
-            inferred_delta = state.inferred_terminal_delta()
-            if inferred_delta is not None:
-                yield inferred_delta
+            try:
+                async for raw in self._stream_request(request, quirks, 0):
+                    delta = state.apply(delta_from_data(raw, request=request))
+                    if delta is not None:
+                        yield delta
+            except ChatCompletionProviderError:
+                terminal = state.flush_terminal()
+                if terminal is not None:
+                    yield terminal
+                raise
+            terminal = state.finish()
+            if terminal is not None:
+                yield terminal
             elif not state.saw_finish_reason:
                 raise_incomplete_stream_error()
 

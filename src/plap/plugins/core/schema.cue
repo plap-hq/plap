@@ -32,10 +32,10 @@ package plap
   top_logprobs: *null | #IntTransform
 }
 
-#PublicUsageConfig: {
-  uncached_input_to_output: *0.25 | number
-  cached_input_to_output: *0.05 | number
-  output_to_output: *1.0 | number
+#OutputEquivalence: {
+  uncached_input_to_output: *0.25 | >=0
+  cached_input_to_output: *0.05 | >=0
+  output_to_output: *1.0 | >0
 }
 
 #PricingConfig: {
@@ -67,7 +67,7 @@ package plap
   reasoning_effort: *null | #ReasoningEffort
   service_tier: *null | string
   sampling: #SamplingConfig
-  public_usage: #PublicUsageConfig
+  output_equivalence: #OutputEquivalence
 }
 
 #WellKnownSideCode: uint16 & <1024
@@ -105,7 +105,7 @@ package plap
   display_name!: string
   model_info!: #ModelInfoConfig
   main?: #FieldConfig
-  reasoning_to_output: *1.0 | number
+  reasoning_to_output: *1.0 | >=0
   sides: #SideCodes
   _sidesByCode: {
     for name, code in sides {

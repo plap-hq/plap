@@ -618,11 +618,8 @@ async def _complete_with_retries(
     *,
     validators: tuple[RetryValidator, ...],
 ):
-    def next_request(history) -> ChatCompletionRequest:
-        return replace(request, messages=[*request.messages, *history.messages])
-
-    snapshot = await retry_complete(client, next_request=next_request, validators=validators)
-    if not snapshot.results:
+    snapshot = await retry_complete(client, request, validators=validators)
+    if snapshot.result is None:
         raise RuntimeError("retry-complete ended without a final result")
     return snapshot
 
@@ -748,7 +745,8 @@ async def _evaluate_example(
     try:
         while True:
             snapshot = await _complete_with_retries(main_client, main_request, validators=validators)
-            main_result = snapshot.results[-1]
+            main_result = snapshot.result
+            assert main_result is not None  # Guarded by _complete_with_retries.
             main_usage = _merge_usage(main_usage, main_result.usage)
             main_calls += 1
             total_turns += 1
