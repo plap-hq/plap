@@ -163,7 +163,7 @@ class ResponseObject(StrictModel):
     )
     service_tier: ServiceTier | None = Field(
         default=None,
-        description="Actual or requested service tier for processing.",
+        description="Service tier requested for processing.",
     )
     status: ResponseStatus = Field(description="Response generation status.")
     temperature: float | None = Field(default=None, ge=0, le=2, description="Sampling temperature used.")

@@ -32,6 +32,18 @@ class ResponseCompletedEvent(StrictModel):
     type: Literal["response.completed"] = Field(description="Stream event discriminator.")
 
 
+class ResponseFailedEvent(StrictModel):
+    response: ResponseObject = Field(description="Final failed response snapshot.")
+    sequence_number: int = Field(description="Monotonic stream event sequence number.")
+    type: Literal["response.failed"] = Field(description="Stream event discriminator.")
+
+
+class ResponseIncompleteEvent(StrictModel):
+    response: ResponseObject = Field(description="Final incomplete response snapshot.")
+    sequence_number: int = Field(description="Monotonic stream event sequence number.")
+    type: Literal["response.incomplete"] = Field(description="Stream event discriminator.")
+
+
 class ResponseOutputItemAddedEvent(StrictModel):
     item: ResponseOutputItem = Field(description="Output item snapshot at add time.")
     output_index: int = Field(description="Index of this item in response.output.")
@@ -229,6 +241,8 @@ type ResponseStreamEvent = Annotated[
     ResponseCreatedEvent
     | ResponseInProgressEvent
     | ResponseCompletedEvent
+    | ResponseFailedEvent
+    | ResponseIncompleteEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent

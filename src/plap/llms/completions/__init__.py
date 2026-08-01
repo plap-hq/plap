@@ -1,3 +1,8 @@
+from plap.llms.completions.budget import (
+    BudgetedChatCompletionClient,
+    CompletionBudget,
+    CompletionBudgetExhaustedError,
+)
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -18,6 +23,7 @@ from plap.llms.completions.chat import (
     ChatToolChoiceMode,
     ChatUsage,
     IChatCompletionClient,
+    OutputEquivalence,
     ReasoningEffort,
     ServiceTier,
 )
@@ -37,6 +43,7 @@ from plap.llms.completions.router import ModelRoute, RoutingChatCompletionClient
 from plap.llms.completions.tokens import ITokenizerConfig, estimate_text_tokens, measure_prompt_tokens, measure_request_tokens
 
 __all__ = [
+    "BudgetedChatCompletionClient",
     "Call",
     "ChatCompletionAuthenticationError",
     "ChatCompletionClient",
@@ -64,11 +71,14 @@ __all__ = [
     "ChatToolChoiceFunction",
     "ChatToolChoiceMode",
     "ChatUsage",
+    "CompletionBudget",
+    "CompletionBudgetExhaustedError",
     "FireworksProvider",
     "IChatCompletionClient",
     "ITokenizerConfig",
     "ModelRoute",
     "OpenAIProvider",
+    "OutputEquivalence",
     "Provider",
     "Quirk",
     "ReasoningEffort",

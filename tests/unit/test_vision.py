@@ -3,8 +3,6 @@ from __future__ import annotations
 import importlib
 from collections.abc import Sequence
 from dataclasses import field
-from functools import partial
-from types import SimpleNamespace
 from uuid import uuid4
 
 import anyio
@@ -16,6 +14,7 @@ from box import Box
 from plap.bus import bus
 from plap.config import CueBox
 from plap.keyring import SealingKeyring
+from plap.llms.completions.budget import BudgetedChatCompletionClient, CompletionBudget
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -29,12 +28,12 @@ from plap.llms.completions.chat import (
     ChatUsage,
     IChatCompletionClient,
 )
-from plap.plugins.core.budget import ResponseBudget
 from plap.plugins.vision import VISION_TOOL_NAME, _image_id, _vision_history_messages
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import Ingested, Message, Threads
 from plap.responses.ingest.sealing import open_reasoning_payload
+from plap.responses.routes import _accept_response, _execute_response
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -73,8 +72,8 @@ class _RecordingStore:
         _ = prepared, response
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
-        _ = prepared, response_id
+    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+        _ = prepared, response
         return True
 
 
@@ -163,11 +162,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
         scope_id=uuid4(),
         response_request=actual_request,
         execution_request=actual_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
 
 
@@ -277,15 +272,10 @@ def _config() -> _Config:
     )
 
 
-def _loaded(config: Box | None = None) -> object:
-    return SimpleNamespace(plap=SimpleNamespace(config=config or _config()))
-
-
-def _svcs(client: IChatCompletionClient, config: Box | None = None) -> svcs.Container:
+def _svcs(config: Box | None = None) -> svcs.Container:
     registry = svcs.Registry()
     registry.register_value(SealingKeyring, _keyring())
-    registry.register_value(CueBox, _loaded(config))
-    registry.register_value(IChatCompletionClient, client)
+    registry.register_value(CueBox, config or _config())
     return svcs.Container(registry)
 
 
@@ -307,17 +297,30 @@ def _state(
     config: Box | None = None,
 ) -> tuple[State, _RecordingStore, _RecordingChannels]:
     actual_request = request or _request()
+    actual_config = config or _config()
     store = _RecordingStore()
     channels = _RecordingChannels()
+    container = _svcs(actual_config)
+    budget = CompletionBudget(
+        actual_request.max_output_tokens,
+        reasoning_to_output=float(actual_config.reasoning_to_output),
+    )
+    container.register_local_value(CompletionBudget, budget)
+    container.register_local_value(IChatCompletionClient, BudgetedChatCompletionClient(client, budget))
+    container.register_local_value(StreamCoordinator, _coordinator(store, channels, actual_request))
     state = State.from_ingested(
         ingested=ingested or _ingested(),
-        prepared=_prepared(actual_request),
-        svcs=_svcs(client, config or _config()),
-        coordinator=_coordinator(store, channels, actual_request),
-        sealing_keyring=_keyring(),
+        request=actual_request,
+        config=actual_config,
+        svcs=container,
         thread_codes={"main": 0},
     )
     return state, store, channels
+
+
+async def _run(state: State) -> None:
+    await _accept_response(state)
+    await _execute_response(state)
 
 
 def _usage(*, input_tokens: int, output_tokens: int, reasoning_tokens: int | None = None) -> ChatUsage:
@@ -388,7 +391,7 @@ def _message_text(item: ResponseMessageItem) -> str:
 
 
 def _output_items(state: State) -> list[object]:
-    return state.coordinator.current_response().output
+    return state.svcs.get(StreamCoordinator).current_response().output
 
 
 def test_image_id_ignores_detail_for_same_source() -> None:
@@ -485,7 +488,7 @@ async def test_request_rewrites_images_and_preserves_none_tool_choice() -> None:
     client = _Client(streams=[], completes=[])
     state, _, _ = _state(client, request=_request(tool_choice="none"))
 
-    request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    request = await core.response_request(state=state)
 
     assert request.tool_choice == "none"
     assert _tool_names(request) == [VISION_TOOL_NAME]
@@ -512,7 +515,7 @@ async def test_historical_server_calls_follow_current_wire_binding(
     request = _request(tools=[{"type": "function", "name": name, "parameters": {"type": "object"}} for name in client_names])
     state, _, _ = _state(client, request=request, ingested=_server_history_ingested())
 
-    finalized = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    finalized = await core.response_request(state=state)
 
     assert _tool_names(finalized) == [*client_names, expected_wire_name]
     assert _tool_call_name(finalized.messages, "call_server") == expected_wire_name
@@ -535,7 +538,7 @@ async def test_historical_rebinding_leaves_client_calls_unchanged() -> None:
         ingested=_server_history_ingested(external_name="vision"),
     )
 
-    finalized = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    finalized = await core.response_request(state=state)
 
     assert _tool_call_name(finalized.messages, "call_server") == "vision_3"
     assert _tool_call_name(finalized.messages, "call_external") == "vision"
@@ -543,7 +546,7 @@ async def test_historical_rebinding_leaves_client_calls_unchanged() -> None:
 
 @pytest.mark.anyio
 async def test_internal_images_tool_loops_to_final_answer() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -557,7 +560,7 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
     )
     state, store, _ = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert store.begin_calls == 1
     assert store.finish_calls == 1
@@ -577,7 +580,7 @@ async def test_internal_images_tool_loops_to_final_answer() -> None:
 
 @pytest.mark.anyio
 async def test_internal_images_tool_closes_call_when_response_budget_is_exhausted() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -591,10 +594,10 @@ async def test_internal_images_tool_closes_call_when_response_budget_is_exhauste
     )
     state, _, _ = _state(client, request=_request(max_output_tokens=4))
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert client.complete_requests == []
-    assert state.coordinator.current_response().status == "incomplete"
+    assert state.svcs.get(StreamCoordinator).current_response().status == "incomplete"
     failed = [message for message in state.threads["main"] if message.role == "tool"]
     assert [message.tool_call_id for message in failed] == ["call_vision_1", "call_vision_2"]
     assert all(message.content == "The server could not run this tool because the response budget was exhausted." for message in failed)
@@ -604,7 +607,7 @@ async def test_internal_images_tool_closes_call_when_response_budget_is_exhauste
 
 @pytest.mark.anyio
 async def test_internal_images_tool_replays_prior_hidden_vision_reasoning_into_later_vision_turns() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -633,7 +636,7 @@ async def test_internal_images_tool_replays_prior_hidden_vision_reasoning_into_l
     )
     state, _, _ = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.complete_requests) == 2
     second_request = client.complete_requests[1]
@@ -655,7 +658,7 @@ async def test_internal_images_tool_replays_prior_hidden_vision_reasoning_into_l
     ],
 )
 async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     prefixless = image_id.removeprefix("image-")
     if ids_case == "prefixless":
@@ -681,7 +684,7 @@ async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> 
     )
     state, _, _ = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.stream_requests) == 2
     assert len(client.complete_requests) == 1
@@ -697,7 +700,7 @@ async def test_internal_images_tool_accepts_lenient_image_ids(ids_case: str) -> 
 
 @pytest.mark.anyio
 async def test_internal_images_tool_applies_vision_sampling_config() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     request = _request(temperature=0.4, top_p=0.9)
     client = _Client(
@@ -784,7 +787,7 @@ async def test_internal_images_tool_applies_vision_sampling_config() -> None:
     }
     state, _, _ = _state(client, request=request, config=_Config(config_data, frozen_box=True))
 
-    await core.run_response(state=state)
+    await _run(state)
 
     vision_request = client.complete_requests[0]
     assert vision_request.temperature == pytest.approx(0.3)
@@ -799,7 +802,7 @@ async def test_internal_images_tool_applies_vision_sampling_config() -> None:
 
 @pytest.mark.anyio
 async def test_internal_images_tool_stays_hidden_when_external_tool_remains_open() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -816,7 +819,7 @@ async def test_internal_images_tool_stays_hidden_when_external_tool_remains_open
         request=_request(tools=[{"type": "function", "name": "client_tool", "parameters": {"type": "object"}}]),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     output = _output_items(state)
     visible_calls = [item for item in output if isinstance(item, ResponseFunctionCallItem)]
@@ -826,7 +829,7 @@ async def test_internal_images_tool_stays_hidden_when_external_tool_remains_open
 
 @pytest.mark.anyio
 async def test_vision_server_tool_rebinds_without_renaming_client_tools() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -848,7 +851,7 @@ async def test_vision_server_tool_rebinds_without_renaming_client_tools() -> Non
         ),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert _tool_names(client.stream_requests[0]) == ["vision", "vision_2", "vision_3"]
     assistant = next(message for message in state.threads["main"] if any(call.id == "call_vision" for call in message.tool_calls))
@@ -878,19 +881,19 @@ async def test_rejected_server_tool_attempt_is_stored_canonical_and_rebound_on_l
         request=_request(tools=[{"type": "function", "name": "vision", "parameters": {"type": "object"}}]),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assistant = next(message for message in state.threads["main"] if any(call.id == "call_vision" for call in message.tool_calls))
     assert assistant.tool_calls[0].name == VISION_TOOL_NAME
     assert assistant.memory["server_tools"]["call_ids"] == ["call_vision"]
     assert _tool_call_name(client.stream_requests[1].messages, "call_vision") == "vision_2"
-    later_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    later_request = await core.response_request(state=state)
     assert _tool_call_name(later_request.messages, "call_vision") == "vision_2"
 
 
 @pytest.mark.anyio
 async def test_vision_server_tool_is_canonical_before_interrupted_progress_is_saved() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _BlockingClient(
         _delta(
@@ -908,7 +911,7 @@ async def test_vision_server_tool_is_canonical_before_interrupted_progress_is_sa
     )
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(partial(core.run_response, state=state))
+        task_group.start_soon(_run, state)
         await client.blocked.wait()
         task_group.cancel_scope.cancel()
 
@@ -924,7 +927,7 @@ async def test_vision_server_tool_is_canonical_before_interrupted_progress_is_sa
 
 @pytest.mark.anyio
 async def test_unknown_image_id_returns_failed_tool_output() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     image_id = _image_id(_image("https://example.com/cat.png"))
     client = _Client(
         streams=[
@@ -942,7 +945,7 @@ async def test_unknown_image_id_returns_failed_tool_output() -> None:
     )
     state, _, _ = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.stream_requests) == 3
     failed = next(message for message in client.stream_requests[1].messages if message.tool_call_id == "call_vision_bad")
@@ -958,7 +961,7 @@ async def test_unknown_image_id_returns_failed_tool_output() -> None:
 
 @pytest.mark.anyio
 async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     easy_server_tools = importlib.import_module("plap.plugins.easy.server_tools")
 
     @easy_server_tools.register
@@ -970,11 +973,9 @@ async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> No
         async def __call__(
             self,
             state: State,
-            config: CueBox,
-            budget: ResponseBudget,
             call: ChatToolCall,
         ) -> ChatMessage:
-            _ = state, config, budget
+            _ = state
             return ChatMessage(role="tool", tool_call_id=call.id, content=f"{self.name}:{call.name}")
 
     image_id = _image_id(_image("https://example.com/cat.png"))
@@ -994,7 +995,7 @@ async def test_multiple_internal_tool_plugins_loop_without_leaking_calls() -> No
         request=_request(tools=[{"type": "function", "name": "internal", "parameters": {"type": "object"}}]),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.stream_requests) == 2
     internal_output = next(message for message in state.threads["main"] if message.tool_call_id == "call_internal")

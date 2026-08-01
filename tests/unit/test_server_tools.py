@@ -4,9 +4,7 @@ from dataclasses import FrozenInstanceError, field, is_dataclass, replace
 
 import pytest
 
-from plap.config import CueBox
 from plap.llms.completions.chat import ChatMessage, ChatToolCall
-from plap.plugins.core.budget import ResponseBudget
 from plap.plugins.easy.server_tools import ServerTool
 from plap.responses.state import State
 
@@ -20,11 +18,9 @@ class ExampleTool(ServerTool):
     async def __call__(
         self,
         state: State,
-        config: CueBox,
-        budget: ResponseBudget,
         call: ChatToolCall,
     ) -> ChatMessage:
-        _ = state, config, budget
+        _ = state
         return ChatMessage(role="tool", tool_call_id=call.id)
 
 

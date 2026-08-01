@@ -22,7 +22,6 @@ from plap.llms.completions.chat import (
     ChatToolCall,
     IChatCompletionClient,
 )
-from plap.plugins.core.budget import ResponseBudget, budgeted
 from plap.plugins.core.request import build_chat_request
 from plap.plugins.easy import ServerTool, bootstrap, server_tools
 from plap.responses.contracts import ResponseCreateRequest
@@ -285,8 +284,6 @@ class VisionTool(ServerTool):
     async def __call__(
         self,
         state: State,
-        config: CueBox,
-        budget: ResponseBudget,
         call: ChatToolCall,
     ) -> ChatMessage:
         ids, prompt = _tool_args(call.arguments)
@@ -305,12 +302,11 @@ class VisionTool(ServerTool):
                 },
             )
 
-        client = budgeted(await state.svcs.aget(IChatCompletionClient), budget, config.vision)
-        result = await client.complete(_vision_request(config, state.prepared.execution_request, transcript, ids, prompt))
+        client = await state.svcs.aget(IChatCompletionClient)
+        result = await client.complete(_vision_request(state.config, state.request, transcript, ids, prompt))
         return _tool_output_message(result, tool_call_id=call.id)
 
 
 @bus.listen("response.request")
-async def inject_images(state: State, config: CueBox, *, next) -> ChatCompletionRequest:
-    _ = state, config
-    return _rewrite_request(await next(state=state, config=config))
+async def inject_images(state: State, *, next) -> ChatCompletionRequest:
+    return _rewrite_request(await next(state=state))

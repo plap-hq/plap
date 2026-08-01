@@ -11,6 +11,7 @@ from plap.bus import EventBus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.completions.budget import CompletionBudget
 from plap.responses.contracts import (
     RequestCompactionItem,
     RequestMessageItem,
@@ -31,7 +32,8 @@ from plap.responses.ingest.sealing import (
     seal_compaction_payload,
     seal_reasoning_payload,
 )
-from plap.responses.routes import _model_object, _prepare_create, _run_stream
+from plap.responses.routes import _accept_response, _execute_response, _model_object, _prepare_create, responses_socket
+from plap.responses.state import State
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.streaming import StreamCoordinator
 
@@ -80,20 +82,25 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
-def _loaded() -> CueBox:
-    return CueBox(
+class _Config(CueBox):
+    def resolve(self, request: dict[str, object] | None = None, /, **kwargs: object) -> _Config:
+        _ = request, kwargs
+        return self
+
+
+def _config() -> _Config:
+    return _Config(
         {
-            "plap": CueBox(
-                {
-                    "config": CueBox(
-                        {
-                            "threads": {"main": 0},
-                        },
-                        frozen_box=True,
-                    )
+            "threads": {"main": 0},
+            "overlays": {"model": {"plap/test": {}}},
+            "main": {
+                "output_equivalence": {
+                    "uncached_input_to_output": 0.25,
+                    "cached_input_to_output": 0.05,
+                    "output_to_output": 1.0,
                 },
-                frozen_box=True,
-            )
+            },
+            "reasoning_to_output": 1.0,
         },
         frozen_box=True,
     )
@@ -125,11 +132,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
         scope_id=uuid4(),
         response_request=response_request,
         execution_request=response_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
 
 
@@ -157,7 +160,7 @@ def _plap_error() -> PlapError:
 def _svcs() -> svcs.Container:
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
-    registry.register_value(CueBox, _loaded())
+    registry.register_value(CueBox, _config())
     registry.register_value(SealingKeyring, _keyring())
     store = _RecordingStore(_prepared())
     registry.register_value(_RecordingStore, store)
@@ -178,17 +181,32 @@ def _svcs() -> svcs.Container:
     return svcs.Container(registry)
 
 
+def _state() -> State:
+    config = _config()
+    container = _svcs()
+    container.register_local_value(CompletionBudget, CompletionBudget(None, reasoning_to_output=1.0))
+    container.register_local_value(StreamCoordinator, _coordinator())
+    return State.from_ingested(
+        ingested=Ingested(memory={}, threads=Threads(), main_tail=None, last_reasoning_id=None),
+        request=_request(),
+        config=config,
+        svcs=container,
+        thread_codes={"main": 0},
+    )
+
+
 async def test_prepare_create_prepares_and_stops_before_created() -> None:
     request = _request()
+    config = _config()
     store = _RecordingStore(_prepared(request))
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
-    registry.register_value(CueBox, _loaded())
+    registry.register_value(CueBox, config)
     registry.register_value(SealingKeyring, _keyring())
     registry.register_value(ResponseStore, store)
     container = svcs.Container(registry)
 
-    prepared, ingested, coordinator = await _prepare_create(
+    state = await _prepare_create(
         svcs=container,
         auth_context=_auth_context(),
         request=request,
@@ -197,16 +215,15 @@ async def test_prepare_create_prepares_and_stops_before_created() -> None:
 
     assert store.prepare_calls == 1
     assert store.begin_calls == 0
-    assert prepared.response_request is request
-    assert prepared.execution_request is request
-    assert ingested.memory == {}
-    assert ingested.threads.messages.keys() == {"main"}
-    assert ingested.threads["main"][0].role == "user"
-    assert ingested.threads["main"][0].content == "hello"
-    assert ingested.threads.active == {"main"}
-    assert ingested.last_reasoning_id is None
-    assert ingested.last_compaction_id is None
-    assert coordinator.current_response().model == request.model
+    assert state.request is request
+    assert state.config is config
+    assert state.svcs.get(CompletionBudget).remaining is None
+    assert state.memory == {}
+    assert state.threads.messages.keys() == {"main"}
+    assert state.threads["main"][0].role == "user"
+    assert state.threads["main"][0].content == "hello"
+    assert state.threads.active == {"main"}
+    assert state.svcs.get(StreamCoordinator).current_response().model == request.model
 
 
 async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage() -> None:
@@ -234,26 +251,23 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
         scope_id=uuid4(),
         response_request=response_request,
         execution_request=execution_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
     store = _RecordingStore(prepared)
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
-    registry.register_value(CueBox, _loaded())
+    registry.register_value(CueBox, _config())
     registry.register_value(SealingKeyring, keyring)
     registry.register_value(ResponseStore, store)
     container = svcs.Container(registry)
 
-    _, ingested, coordinator = await _prepare_create(
+    state = await _prepare_create(
         svcs=container,
         auth_context=_auth_context(),
         request=response_request,
         channels=_RecordingChannels(),
     )
+    coordinator = state.svcs.get(StreamCoordinator)
     checkpoint = ReasoningCheckpoint(memory={"turn": 2}, active={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
@@ -264,8 +278,6 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
     checkpoint_item = output[-2]
     patch_item = output[-1]
 
-    assert ingested.last_reasoning_id == stored.id
-    assert ingested.checkpoint_required is True
     assert isinstance(checkpoint_item, ResponseReasoningItem)
     assert isinstance(patch_item, ResponseReasoningItem)
     checkpoint_payload = open_reasoning_payload(checkpoint_item.encrypted_content, keyring=keyring)
@@ -295,26 +307,23 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
         scope_id=uuid4(),
         response_request=response_request,
         execution_request=execution_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
     store = _RecordingStore(prepared)
     registry = svcs.Registry()
     registry.register_value(AuthContext, _auth_context())
-    registry.register_value(CueBox, _loaded())
+    registry.register_value(CueBox, _config())
     registry.register_value(SealingKeyring, keyring)
     registry.register_value(ResponseStore, store)
     container = svcs.Container(registry)
 
-    _, ingested, coordinator = await _prepare_create(
+    state = await _prepare_create(
         svcs=container,
         auth_context=_auth_context(),
         request=response_request,
         channels=_RecordingChannels(),
     )
+    coordinator = state.svcs.get(StreamCoordinator)
     checkpoint = ReasoningCheckpoint(memory={"generation": 2}, active={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
@@ -323,9 +332,6 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
     await coordinator.finish_reasoning(state=patch, main=[])
     checkpoint_item, patch_item = coordinator.current_response().output[-2:]
 
-    assert ingested.last_reasoning_id is None
-    assert ingested.last_compaction_id == compaction.id
-    assert ingested.checkpoint_required is True
     assert isinstance(checkpoint_item, ResponseReasoningItem)
     assert isinstance(patch_item, ResponseReasoningItem)
     checkpoint_payload = open_reasoning_payload(checkpoint_item.encrypted_content, keyring=keyring)
@@ -336,24 +342,153 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
     assert patch_payload.previous_compaction_id == compaction.id
 
 
-async def test_run_stream_swallows_runtime_plap_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_response_start_return_without_terminalization_fails_response(monkeypatch: pytest.MonkeyPatch) -> None:
     bus = EventBus()
 
+    @bus.emit("response.start")
+    async def _body(state: State) -> None:
+        _ = state
+
+    monkeypatch.setattr("plap.responses.routes.bus", bus)
+    state = _state()
+
+    await _accept_response(state)
+    await _execute_response(state)
+
+    response = state.svcs.get(StreamCoordinator).current_response()
+    assert response.status == "failed"
+    assert response.error is not None
+    assert response.error.code == "server_error"
+
+
+async def test_response_start_error_after_terminalization_preserves_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    bus = EventBus()
+
+    @bus.emit("response.start")
+    async def _body(state: State) -> None:
+        await state.svcs.get(StreamCoordinator).completed()
+
     @bus.listen("response.start")
-    async def _boom(*, next, state) -> None:
-        _ = next, state
+    async def _boom(state: State, *, next) -> None:
+        await next(state=state)
         raise _plap_error()
 
     monkeypatch.setattr("plap.responses.routes.bus", bus)
+    state = _state()
+
+    await _accept_response(state)
+    await _execute_response(state)
+
+    assert state.svcs.get(StreamCoordinator).current_response().status == "completed"
+
+
+async def test_safe_progress_failure_does_not_fabricate_failed_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    bus = EventBus()
+
+    @bus.emit("response.start")
+    async def _boom(state: State) -> None:
+        _ = state
+        raise RuntimeError("execution failed")
+
+    async def _fail_save_progress(self: State) -> None:
+        raise RuntimeError("progress persistence failed")
+
+    monkeypatch.setattr("plap.responses.routes.bus", bus)
+    monkeypatch.setattr(State, "save_progress", _fail_save_progress)
+    state = _state()
+
+    await _accept_response(state)
+    with pytest.raises(RuntimeError, match="progress persistence failed"):
+        await _execute_response(state)
+
+    assert state.svcs.get(StreamCoordinator).current_response().status == "in_progress"
+
+
+async def test_config_failure_raises_during_preparation() -> None:
+    class FailingConfig(_Config):
+        def resolve(self, request: dict[str, object] | None = None, /, **kwargs: object) -> _Config:
+            _ = request, kwargs
+            raise _plap_error()
 
     registry = svcs.Registry()
-    registry.register_value(CueBox, _loaded())
+    registry.register_value(CueBox, FailingConfig(_config().to_dict(), frozen_box=True))
     registry.register_value(SealingKeyring, _keyring())
+    store = _RecordingStore(_prepared())
+    registry.register_value(ResponseStore, store)
     container = svcs.Container(registry)
 
-    await _run_stream(
-        prepared=_prepared(),
-        ingested=Ingested(memory={}, threads=Threads(), main_tail=None, last_reasoning_id=None),
-        coordinator=_coordinator(),
-        svcs=container,
-    )
+    with pytest.raises(PlapError) as exc_info:
+        await _prepare_create(
+            svcs=container,
+            auth_context=_auth_context(),
+            request=_request(),
+            channels=_RecordingChannels(),
+        )
+
+    assert exc_info.value.public is not None
+    assert exc_info.value.public.code == "test_error"
+    assert store.prepare_calls == 0
+
+
+async def test_websocket_response_containers_close_after_preparation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Container:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class Plugins:
+        def get(self, plugin_type):
+            _ = plugin_type
+            return object()
+
+    class AppState:
+        svcs_registry = object()
+
+    class App:
+        plugins = Plugins()
+        state = AppState()
+
+    class Socket:
+        app = App()
+
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+            self.received = 0
+
+        async def accept(self) -> None:
+            return None
+
+        async def receive_json(self) -> dict[str, object]:
+            if self.received == 2:
+                raise RuntimeError("socket closed")
+            self.received += 1
+            return {
+                "type": "response.create",
+                "response": {"model": "plap/test", "input": "hello"},
+            }
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            self.sent.append(payload)
+
+    async def fail_prepare(**kwargs):
+        _ = kwargs
+        raise RuntimeError("preparation failed")
+
+    containers: list[Container] = []
+
+    def build_container(registry) -> Container:
+        _ = registry
+        container = Container()
+        containers.append(container)
+        return container
+
+    monkeypatch.setattr("plap.responses.routes.Container", build_container)
+    monkeypatch.setattr("plap.responses.routes._prepare_create", fail_prepare)
+
+    socket = Socket()
+    await responses_socket.fn(socket, _auth_context())
+
+    assert len(containers) == 2
+    assert all(container.closed for container in containers)
+    assert [payload["type"] for payload in socket.sent] == ["error", "error"]

@@ -6,6 +6,7 @@ import svcs
 
 from plap.bus import bus
 from plap.config import CueBox
+from plap.llms.completions.budget import BudgetedChatCompletionClient, CompletionBudget
 from plap.llms.completions.chat import IChatCompletionClient
 from plap.plugins.core.client import build_chat_completion_client
 from plap.plugins.core.loop import run_response as run_response
@@ -27,7 +28,11 @@ async def bootstrap_routes(routes: tuple[object, ...], loaded: CueBox, *, next):
 @bus.listen("bootstrap.services")
 async def bootstrap_services(registry: svcs.Registry, loaded: CueBox, *, next):
     client = build_chat_completion_client(loaded.plap.config)
-    registry.register_value(IChatCompletionClient, client, on_registry_close=client.aclose)
+
+    def client_factory(svcs_container: svcs.Container) -> IChatCompletionClient:
+        return BudgetedChatCompletionClient(client, svcs_container.get(CompletionBudget))
+
+    registry.register_factory(IChatCompletionClient, client_factory, on_registry_close=client.aclose)
     return await next()
 
 

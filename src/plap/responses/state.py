@@ -7,9 +7,10 @@ from dataclasses import dataclass
 
 import svcs
 
+from plap.config import CueBox
 from plap.keyring import SealingKeyring
 from plap.llms.completions.chat import ChatToolCall
-from plap.responses.contracts import ResponseFunctionCallItem, ResponseMessageItem
+from plap.responses.contracts import ResponseCreateRequest, ResponseFunctionCallItem, ResponseMessageItem
 from plap.responses.ingest import content
 from plap.responses.ingest.models import (
     CallID,
@@ -26,7 +27,6 @@ from plap.responses.ingest.models import (
 )
 from plap.responses.ingest.patch import JSONPatch, JSONValue, diff
 from plap.responses.ingest.sealing import seal_call_id
-from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
 
 INTERRUPTED_TOOL_OUTPUT = "Tool call aborted because the response was interrupted."
@@ -34,10 +34,13 @@ INTERRUPTED_TOOL_OUTPUT = "Tool call aborted because the response was interrupte
 
 @dataclass(slots=True)
 class State:
-    prepared: PreparedRequest
+    request: ResponseCreateRequest
+    config: CueBox
     svcs: svcs.Container
-    coordinator: StreamCoordinator
-    _sealing_keyring: SealingKeyring
+
+    memory: dict[str, JSONValue]
+    threads: Threads
+
     _thread_codes: Mapping[str, int]
     _base_memory: dict[str, JSONValue]
     _base_threads: Threads
@@ -45,28 +48,23 @@ class State:
     _reasoning_id: str | None
     _checkpoint_required: bool
 
-    memory: dict[str, JSONValue]
-    threads: Threads
-
     @classmethod
     def from_ingested(
         cls,
         *,
         ingested: Ingested,
-        prepared: PreparedRequest,
+        request: ResponseCreateRequest,
+        config: CueBox,
         svcs: svcs.Container,
-        coordinator: StreamCoordinator,
-        sealing_keyring: SealingKeyring,
         thread_codes: Mapping[str, int],
     ) -> State:
         base_memory = deepcopy(ingested.memory)
         base_threads = deepcopy(ingested.threads)
         base_threads.setdefault("main")
         return cls(
-            prepared=prepared,
+            request=request,
+            config=config,
             svcs=svcs,
-            coordinator=coordinator,
-            _sealing_keyring=sealing_keyring,
             _thread_codes=dict(thread_codes),
             _base_memory=base_memory,
             _base_threads=base_threads,
@@ -135,7 +133,7 @@ class State:
         for tool_call in tool_calls:
             sealed_call_id = seal_call_id(
                 CallID(thread=thread, upstream_tool_call_id=tool_call.id),
-                keyring=self._sealing_keyring,
+                keyring=self.svcs.get(SealingKeyring),
                 thread_codes=self._thread_codes,
             )
             items.append(
@@ -283,21 +281,23 @@ class State:
         return self._split_tail(self.threads.get(thread, []) or [], label=f"{thread} history")[4]
 
     async def save_progress(self) -> None:
+        coordinator = self.svcs.get(StreamCoordinator)
         memory, threads, main = self._progress_snapshot()
         state = self._build_update(memory=memory, threads=threads)
         main_update = deepcopy(main)
         if self._reasoning_id is None:
             if self._update_empty(state, main_update):
                 return
-            self._reasoning_id = await self.coordinator.begin_reasoning(state=state, main=main_update)
+            self._reasoning_id = await coordinator.begin_reasoning(state=state, main=main_update)
             return
-        await self.coordinator.replace_reasoning(state=state, main=main_update)
+        await coordinator.replace_reasoning(state=state, main=main_update)
 
     async def ensure_progress(self) -> None:
         if self._reasoning_id is None:
             await self.save_progress()
 
     async def commit(self) -> None:
+        coordinator = self.svcs.get(StreamCoordinator)
         memory, threads, main = self._commit_snapshot()
         visible_main, persisted_source = self._main_publication(threads=threads, main=main)
         visible_message = None if visible_main is None else self._message_item(visible_main)
@@ -323,12 +323,12 @@ class State:
             visible_calls.extend(self._function_items(thread, self._split_tail(messages, label=f"{thread} thread")[4]))
 
         if self._reasoning_id is None and not self._update_empty(state, main_update):
-            self._reasoning_id = await self.coordinator.begin_reasoning(state=state, main=main_update)
+            self._reasoning_id = await coordinator.begin_reasoning(state=state, main=main_update)
         if self._reasoning_id is not None:
-            await self.coordinator.finish_reasoning(state=state, main=main_update)
+            await coordinator.finish_reasoning(state=state, main=main_update)
             self._reasoning_id = None
             self._checkpoint_required = False
         if visible_message is not None:
-            await self.coordinator.emit(visible_message)
+            await coordinator.emit(visible_message)
         for item in visible_calls:
-            await self.coordinator.emit(item)
+            await coordinator.emit(item)

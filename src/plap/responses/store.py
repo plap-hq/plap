@@ -18,7 +18,6 @@ from plap.auth import AuthContext
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.persistence import Database
 from plap.responses.contracts import (
-    ConversationReference,
     InputItemsPage,
     InputItemsPageItem,
     RequestInputItem,
@@ -88,6 +87,25 @@ def _previous_response_not_found_error(response_id: str, *, param: str) -> PlapE
             message=f"previous response was not found: {response_id}",
             level=ErrorLevel.WARNING,
             context={"response_id": response_id},
+        ),
+    )
+
+
+def _previous_response_not_replayable_error(response_id: str, *, status: str, param: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=409,
+            type="invalid_request_error",
+            code="previous_response_not_replayable",
+            message=f"Previous response '{response_id}' is not in a terminal state.",
+            param=param,
+        ),
+        private=PrivateError(
+            event="response.store.invalid_request",
+            reason="previous_response_not_replayable",
+            message=f"previous response is not replayable with status {status}: {response_id}",
+            level=ErrorLevel.WARNING,
+            context={"response_id": response_id, "status": status},
         ),
     )
 
@@ -189,11 +207,7 @@ class PreparedRequest:
     scope_id: UUID
     response_request: ResponseCreateRequest
     execution_request: ResponseCreateRequest
-    current_input_items: list[RequestInputItem]
     stored_input_items: list[RequestInputItem]
-    parent_response_id: str | None
-    conversation_id: str | None
-    persist_response: bool
 
 
 class ResponseStore:
@@ -202,7 +216,7 @@ class ResponseStore:
 
     async def prepare_request(self, auth_context: AuthContext, request: ResponseCreateRequest) -> PreparedRequest:
         scope_id = self._scope_id(auth_context)
-        conversation_id = self._conversation_id(request.conversation)
+        conversation_id = request.conversation_id
         if request.previous_response_id is not None and conversation_id is not None:
             raise _conflicting_continuation_parameters_error()
         if conversation_id is not None and request.store is False:
@@ -239,7 +253,7 @@ class ResponseStore:
             execution_replay_items = replay_items
 
         response_request = request.model_copy(update={"previous_response_id": parent_response_id})
-        execution_request = request.model_copy(update={"input": [*execution_replay_items, *execution_current_input_items]})
+        execution_request = response_request.model_copy(update={"input": [*execution_replay_items, *execution_current_input_items]})
         logger.info(
             "response.store.prepared",
             conversation_id=conversation_id,
@@ -258,15 +272,11 @@ class ResponseStore:
             scope_id=scope_id,
             response_request=response_request,
             execution_request=execution_request,
-            current_input_items=current_input_items,
             stored_input_items=stored_input_items,
-            parent_response_id=parent_response_id,
-            conversation_id=conversation_id,
-            persist_response=request.store is not False,
         )
 
     async def begin_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
-        if not prepared.persist_response:
+        if prepared.response_request.store is False:
             return
         input_items = self._stored_input_payloads(response.id, prepared.stored_input_items)
         logger.info(
@@ -299,7 +309,7 @@ class ResponseStore:
                 {
                     "scope_id": prepared.scope_id,
                     "response_id": response.id,
-                    "prev_response_id": prepared.parent_response_id,
+                    "prev_response_id": prepared.response_request.previous_response_id,
                     "input_items": self._json_text(input_items),
                     "retention": timedelta(days=30),
                     "status": "in_progress",
@@ -316,7 +326,7 @@ class ResponseStore:
         output_index: int,
         item: object,
     ) -> None:
-        if not prepared.persist_response:
+        if prepared.response_request.store is False:
             return
         logger.debug(
             "response.store.append_output_item",
@@ -363,7 +373,7 @@ class ResponseStore:
         output_index: int,
         item: object,
     ) -> None:
-        if not prepared.persist_response:
+        if prepared.response_request.store is False:
             return
         logger.debug(
             "response.store.replace_output_item",
@@ -424,7 +434,7 @@ class ResponseStore:
             insert_result.close()
 
     async def finish_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
-        if not prepared.persist_response:
+        if prepared.response_request.store is False:
             return
         logger.info(
             "response.store.finish",
@@ -446,6 +456,8 @@ class ResponseStore:
                            fields = cast(:fields as jsonb)
                      where scope_id = :scope_id
                        and response_id = :response_id
+                       and status in ('queued', 'in_progress')
+                    returning response_id
                     """
                 ),
                 {
@@ -456,13 +468,16 @@ class ResponseStore:
                     "response_id": response.id,
                 },
             )
+            finished_response_id = update_result.scalar_one_or_none()
             update_result.close()
-            if prepared.conversation_id is not None:
+            if finished_response_id is None:
+                raise RuntimeError("response could not transition to a terminal status")
+            if prepared.response_request.conversation_id is not None:
                 move_head_result = await connection.execute(
                     text("select responses.move_conversation_head(:scope_id, :conversation_id, :response_id, :retention)"),
                     {
                         "scope_id": prepared.scope_id,
-                        "conversation_id": prepared.conversation_id,
+                        "conversation_id": prepared.response_request.conversation_id,
                         "response_id": response.id,
                         "retention": None,
                     },
@@ -470,39 +485,47 @@ class ResponseStore:
                 move_head_result.scalar_one_or_none()
                 move_head_result.close()
 
-    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
-        if not prepared.persist_response:
+    async def fail_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
+        if prepared.response_request.store is False:
             return False
-        completed_at = datetime.now(UTC)
         logger.warning(
             "response.store.fail",
-            response_id=response_id,
+            response_id=response.id,
+        )
+        logger.bind(log_channel="payload").warning(
+            "response.store.fail.payload",
+            response=response.model_dump(mode="json", exclude_none=True),
         )
         async with self._database.connection_transaction() as connection:
             update_result = await connection.execute(
                 text(
                     """
                     update responses.response_records
-                       set status = 'failed',
-                           completed_at = :completed_at
+                       set status = :status,
+                           completed_at = :completed_at,
+                           fields = cast(:fields as jsonb)
                      where scope_id = :scope_id
-                       and response_id = :response_id
-                       and status in ('queued', 'in_progress')
+                        and response_id = :response_id
+                        and status in ('queued', 'in_progress')
                     returning response_id
                     """
                 ),
                 {
-                    "completed_at": completed_at,
+                    "status": response.status,
+                    "completed_at": self._completed_at(response),
+                    "fields": self._json_text(self._response_fields(response)),
                     "scope_id": prepared.scope_id,
-                    "response_id": response_id,
+                    "response_id": response.id,
                 },
             )
             failed_response_id = update_result.scalar_one_or_none()
             update_result.close()
-            return failed_response_id is not None
+            if failed_response_id is None:
+                raise RuntimeError("response could not transition to failed")
+            return True
 
     async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
-        if not prepared.persist_response:
+        if prepared.response_request.store is False:
             return False
         logger.info(
             "response.store.cancel",
@@ -536,7 +559,9 @@ class ResponseStore:
             )
             cancelled_response_id = update_result.scalar_one_or_none()
             update_result.close()
-            return cancelled_response_id is not None
+            if cancelled_response_id is None:
+                raise RuntimeError("response could not transition to cancelled")
+            return True
 
     async def get_response(self, auth_context: AuthContext, response_id: str) -> ResponseObject | None:
         scope_id = self._scope_id(auth_context)
@@ -642,14 +667,6 @@ class ResponseStore:
         return auth_context.organization_id or auth_context.user_id
 
     @staticmethod
-    def _conversation_id(conversation: str | ConversationReference | None) -> str | None:
-        if conversation is None:
-            return None
-        if isinstance(conversation, str):
-            return conversation
-        return conversation.id
-
-    @staticmethod
     def _current_input_items(request: ResponseCreateRequest) -> list[RequestInputItem]:
         if request.input is None:
             return []
@@ -690,6 +707,30 @@ class ResponseStore:
                 ids.append(item_id)
         return ids
 
+    async def _response_replay_status(self, connection: AsyncConnection, scope_id: UUID, response_id: str) -> str | None:
+        result = await connection.execute(
+            text(
+                """
+                select status
+                  from responses.response_records record
+                 where record.scope_id = :scope_id
+                   and record.response_id = :response_id
+                   and not exists (
+                       select 1
+                         from responses.response_tombstones tombstone
+                        where tombstone.scope_id = record.scope_id
+                          and tombstone.response_id = record.response_id
+                   )
+                """
+            ),
+            {"scope_id": scope_id, "response_id": response_id},
+        )
+        try:
+            status = result.scalar_one_or_none()
+            return None if status is None else str(status)
+        finally:
+            result.close()
+
     async def _require_replayable_response(
         self,
         connection: AsyncConnection,
@@ -698,9 +739,11 @@ class ResponseStore:
         *,
         param: str,
     ) -> None:
-        exists = await self._response_exists(connection, scope_id, response_id)
-        if not exists:
+        status = await self._response_replay_status(connection, scope_id, response_id)
+        if status is None:
             raise _previous_response_not_found_error(response_id, param=param)
+        if status not in {"completed", "incomplete", "failed", "cancelled"}:
+            raise _previous_response_not_replayable_error(response_id, status=status, param=param)
 
     async def _conversation_head(self, connection: AsyncConnection, scope_id: UUID, conversation_id: str) -> str | None:
         result = await connection.execute(

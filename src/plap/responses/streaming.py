@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 from litestar.channels import ChannelsPlugin
 
-from plap.errors import PublicError
 from plap.keyring import SealingKeyring
 from plap.responses.contracts import (
     ConversationReference,
@@ -18,11 +17,13 @@ from plap.responses.contracts import (
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
     ResponseCreateRequest,
-    ResponseErrorEvent,
+    ResponseError,
+    ResponseFailedEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionCallItem,
     ResponseIncompleteDetails,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseMessageItem,
     ResponseObject,
@@ -47,6 +48,15 @@ from plap.responses.ingest.models import MainUpdate, ReasoningCheckpoint, Reason
 from plap.responses.ingest.sealing import seal_reasoning_payload
 from plap.responses.store import PreparedRequest, ResponseStore
 from plap.responses.summary import SummaryDelta, SummaryDone
+
+_GENERIC_RESPONSE_ERROR = ResponseError(
+    code="server_error",
+    message="The model failed to generate a response.",
+)
+
+
+class ResponseFinalizationError(Exception):
+    """Response persistence or terminal event publication failed."""
 
 
 def channel_name(response_id: str) -> str:
@@ -178,21 +188,30 @@ class StreamCoordinator:
         self,
         status: ResponseStatus,
         *,
-        service_tier: str | None = None,
         usage: ResponseUsage | None = None,
         incomplete_reason: str | None = None,
+        error: ResponseError | None = None,
     ) -> ResponseObject:
         updates: dict[str, object] = {
             "completed_at": time.time(),
             "output": list(self._items),
-            "service_tier": service_tier or self._response.service_tier,
             "status": status,
             "usage": usage,
             "incomplete_details": None,
+            "error": error,
         }
         if incomplete_reason is not None:
             updates["incomplete_details"] = ResponseIncompleteDetails(reason=incomplete_reason)
         return self._response.model_copy(update=updates)
+
+    async def _persist_failed(self) -> ResponseObject:
+        response = self._terminal_response("failed", error=_GENERIC_RESPONSE_ERROR)
+        if self._response_store is not None and self._prepared is not None:
+            updated = await self._response_store.fail_response(self._prepared, response)
+            if not updated:
+                raise RuntimeError("response could not transition to failed")
+        self._response = response
+        return response
 
     def _require_sealing_keyring(self) -> SealingKeyring:
         if self._sealing_keyring is None:
@@ -274,6 +293,22 @@ class StreamCoordinator:
             summary=list(draft.summary_parts),
             status=status,
         )
+
+    async def _finish_draft(self, *, status: str) -> str:
+        draft = self._active_draft()
+        item = self._draft_item(draft=draft, status=status)
+        await self._replace_item(output_index=draft.output_index, item=item)
+        await self._publish(
+            ResponseOutputItemDoneEvent(
+                item=item,
+                output_index=draft.output_index,
+                sequence_number=0,
+                type="response.output_item.done",
+            )
+        )
+        self._chain.record_reasoning(draft.lineage.item_id)
+        self._draft = None
+        return item.id
 
     async def _emit_message_events(self, item: ResponseMessageItem, *, output_index: int) -> None:
         for content_index, content_part in enumerate(item.content):
@@ -429,9 +464,19 @@ class StreamCoordinator:
 
     async def created(self) -> None:
         response = self.current_response()
-        if self._response_store is not None and self._prepared is not None:
-            await self._response_store.begin_response(self._prepared, response)
-        await self._publish(ResponseCreatedEvent(response=response, sequence_number=0, type="response.created"))
+        persisted = False
+        try:
+            if self._response_store is not None and self._prepared is not None:
+                await self._response_store.begin_response(self._prepared, response)
+                persisted = True
+            await self._publish(ResponseCreatedEvent(response=response, sequence_number=0, type="response.created"))
+        except Exception as exc:
+            if persisted:
+                try:
+                    await self._persist_failed()
+                except Exception as compensation_exc:
+                    raise ResponseFinalizationError("response acceptance compensation failed") from compensation_exc
+            raise ResponseFinalizationError("response acceptance failed") from exc
 
     async def in_progress(self) -> None:
         await self._publish(ResponseInProgressEvent(response=self.current_response(), sequence_number=0, type="response.in_progress"))
@@ -551,55 +596,41 @@ class StreamCoordinator:
             raise RuntimeError("reasoning state type cannot change while an item is active")
         draft.state = state
         draft.main = main
-        item = self._draft_item(draft=draft, status="completed")
-        await self._replace_item(output_index=draft.output_index, item=item)
-        await self._publish(
-            ResponseOutputItemDoneEvent(
-                item=item,
-                output_index=draft.output_index,
-                sequence_number=0,
-                type="response.output_item.done",
-            )
-        )
-        self._chain.record_reasoning(draft.lineage.item_id)
-        self._draft = None
-        return item.id
+        return await self._finish_draft(status="completed")
 
     async def completed(
         self,
         *,
-        service_tier: str | None = None,
         usage: ResponseUsage | None = None,
     ) -> None:
         if self._draft is not None:
             raise RuntimeError("cannot complete response while a reasoning item is active")
-        self._response = self._terminal_response("completed", service_tier=service_tier, usage=usage)
+        response = self._terminal_response("completed", usage=usage)
         if self._response_store is not None and self._prepared is not None:
-            await self._response_store.finish_response(self._prepared, self._response)
-        await self._publish(ResponseCompletedEvent(response=self._response, sequence_number=0, type="response.completed"))
+            await self._response_store.finish_response(self._prepared, response)
+        self._response = response
+        await self._publish(ResponseCompletedEvent(response=response, sequence_number=0, type="response.completed"))
 
     async def incomplete(
         self,
         *,
-        service_tier: str | None = None,
         usage: ResponseUsage | None = None,
     ) -> None:
         if self._draft is not None:
             raise RuntimeError("cannot mark response incomplete while a reasoning item is active")
-        self._response = self._terminal_response(
+        response = self._terminal_response(
             "incomplete",
-            service_tier=service_tier,
             usage=usage,
             incomplete_reason="max_output_tokens",
         )
         if self._response_store is not None and self._prepared is not None:
-            await self._response_store.finish_response(self._prepared, self._response)
-        await self._publish(ResponseCompletedEvent(response=self._response, sequence_number=0, type="response.completed"))
+            await self._response_store.finish_response(self._prepared, response)
+        self._response = response
+        await self._publish(ResponseIncompleteEvent(response=response, sequence_number=0, type="response.incomplete"))
 
     async def cancelled(
         self,
         *,
-        service_tier: str | None = None,
         usage: ResponseUsage | None = None,
     ) -> None:
         draft = self._draft
@@ -607,26 +638,17 @@ class StreamCoordinator:
             item = self._draft_item(draft=draft, status="in_progress")
             await self._replace_item(output_index=draft.output_index, item=item)
             self._draft = None
-        self._response = self._terminal_response("cancelled", service_tier=service_tier, usage=usage)
+        response = self._terminal_response("cancelled", usage=usage)
         if self._response_store is not None and self._prepared is not None:
-            await self._response_store.cancel_response(self._prepared, self._response)
-        await self._publish(ResponseCompletedEvent(response=self._response, sequence_number=0, type="response.completed"))
+            await self._response_store.cancel_response(self._prepared, response)
+        self._response = response
+        await self._publish(ResponseCompletedEvent(response=response, sequence_number=0, type="response.completed"))
 
-    async def fail(self, public: PublicError) -> None:
+    async def failed(self) -> None:
         draft = self._draft
         if draft is not None:
-            item = self._draft_item(draft=draft, status="in_progress")
-            await self._replace_item(output_index=draft.output_index, item=item)
-            self._draft = None
-        self._response = self._terminal_response("failed")
-        if self._response_store is not None and self._prepared is not None:
-            await self._response_store.fail_response(self._prepared, self._response.id)
-        await self._publish(
-            ResponseErrorEvent(
-                code=public.code,
-                message=public.message,
-                param=public.param,
-                sequence_number=0,
-                type="error",
-            )
-        )
+            if draft.summary_pending:
+                await self.summary_done(SummaryDone())
+            await self._finish_draft(status="incomplete")
+        response = await self._persist_failed()
+        await self._publish(ResponseFailedEvent(response=response, sequence_number=0, type="response.failed"))

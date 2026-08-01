@@ -5,8 +5,8 @@ from dataclasses import dataclass, field, replace
 from typing import dataclass_transform
 
 from plap.bus import bus
-from plap.config import CueBox
 from plap.llms.accumulator import Snapshot
+from plap.llms.completions.budget import CompletionBudgetExhaustedError
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -16,7 +16,6 @@ from plap.llms.completions.chat import (
     ChatTool,
     ChatToolCall,
 )
-from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError
 from plap.responses.state import State
 
 BUDGET_TOOL_OUTPUT = "The server could not run this tool because the response budget was exhausted."
@@ -32,8 +31,6 @@ class ServerTool(ChatFunctionTool):
     async def __call__(
         self,
         state: State,
-        config: CueBox,
-        budget: ResponseBudget,
         call: ChatToolCall,
     ) -> ChatMessage:
         raise NotImplementedError
@@ -208,8 +205,8 @@ def _record_server_tool_call(tool: ServerTool, call: ChatToolCall, message: Chat
 
 
 @bus.listen("response.request")
-async def _inject_server_tools(state: State, config: CueBox, *, next) -> ChatCompletionRequest:
-    request = await next(state=state, config=config)
+async def _inject_server_tools(state: State, *, next) -> ChatCompletionRequest:
+    request = await next(state=state)
     tools, wire_names = _bind_tools(request.tools)
     return replace(request, messages=_rebind_history(request.messages, wire_names), tools=tools)
 
@@ -229,13 +226,11 @@ async def _canonicalize_server_tool_calls(
 @bus.listen("response.completion")
 async def _execute_server_tools(
     state: State,
-    config: CueBox,
-    budget: ResponseBudget,
     request: ChatCompletionRequest,
     *,
     next,
 ) -> ChatCompletionResult:
-    result = await next(state=state, config=config, budget=budget, request=request)
+    result = await next(state=state, request=request)
     tools = {tool.name: tool for tool in _registered_by_wire(request).values()}
     server_call_ids = _server_call_ids(result.message)
     for call in result.message.tool_calls:
@@ -245,8 +240,8 @@ async def _execute_server_tools(
         if tool is None:  # pragma: no cover - snapshot canonicalization uses the same finalized request
             raise RuntimeError(f"canonical server tool is not registered: {call.name}")
         try:
-            message = await tool(state, config, budget, call)
-        except ResponseBudgetExhaustedError:
+            message = await tool(state, call)
+        except CompletionBudgetExhaustedError:
             message = _budget_exhausted_message(tool, call)
         else:
             message = _record_server_tool_call(tool, call, message)

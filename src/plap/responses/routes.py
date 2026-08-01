@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
-from functools import partial
 from typing import Any
 
 import anyio
@@ -17,6 +16,7 @@ from litestar.di import Provide
 from litestar.response import ServerSentEvent
 from opentelemetry import trace
 from pydantic import TypeAdapter, ValidationError
+from svcs import Container
 
 from plap.auth import AuthContext
 from plap.auth.dependencies import provide_socket_auth_context
@@ -24,6 +24,7 @@ from plap.bus import bus
 from plap.config import CueBox
 from plap.errors import ErrorLevel, PlapError, PrivateError, PublicError
 from plap.keyring import SealingKeyring
+from plap.llms.completions.budget import CompletionBudget
 from plap.logging import bound_context
 from plap.responses.contracts import (
     CompactedResponseObject,
@@ -40,16 +41,17 @@ from plap.responses.contracts import (
     ResponseCreateRequest,
     ResponseDeleted,
     ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseIncompleteEvent,
     ResponseObject,
     ResponseStreamEvent,
     ServiceTier,
 )
 from plap.responses.ingest.ingest import ingest_response_request
-from plap.responses.ingest.models import Ingested
 from plap.responses.projection import ResponseProjection
 from plap.responses.state import State
-from plap.responses.store import PreparedRequest, ResponseStore
-from plap.responses.streaming import StreamCoordinator
+from plap.responses.store import ResponseStore
+from plap.responses.streaming import ResponseFinalizationError, StreamCoordinator
 from plap.telemetry import record_scope_context
 
 logger = structlog.stdlib.get_logger(__name__)
@@ -97,65 +99,41 @@ def _response_not_found_error(response_id: str, *, action: str) -> PlapError:
     )
 
 
-def _thread_codes(svcs: svcs.Container) -> dict[str, int]:
-    raw = svcs.get(CueBox).plap.config.threads
-    return {str(thread): int(code) for thread, code in raw.items()}
-
-
-async def _prepare_create(
-    *,
-    svcs: svcs.Container,
-    auth_context: AuthContext,
-    request: ResponseCreateRequest,
-    channels: ChannelsPlugin,
-) -> tuple[PreparedRequest, Ingested, StreamCoordinator]:
-    sealing_keyring = svcs.get(SealingKeyring)
-    response_store = svcs.get(ResponseStore)
-    with tracer.start_as_current_span("response.prepare") as span:
-        prepared = await response_store.prepare_request(auth_context, request)
-        ingested = await ingest_response_request(
-            prepared.execution_request,
-            keyring=sealing_keyring,
-            thread_codes=_thread_codes(svcs),
-        )
-        coordinator = StreamCoordinator(
-            request=prepared.response_request,
-            channels=channels,
-            prepared=prepared,
-            response_store=response_store,
-            sealing_keyring=sealing_keyring,
-            last_reasoning_id=ingested.last_reasoning_id,
-            last_compaction_id=ingested.last_compaction_id,
-        )
-        span.set_attribute("plap.response.id", coordinator.response_id)
-        span.set_attribute("plap.response.model", prepared.response_request.model)
-        if prepared.conversation_id is not None:
-            span.set_attribute("plap.response.conversation_id", prepared.conversation_id)
-        return prepared, ingested, coordinator
-
-
-def _response_context(prepared: PreparedRequest, coordinator: StreamCoordinator):
-    return bound_context(
-        conversation_id=prepared.conversation_id,
-        response_id=coordinator.response_id,
+def _missing_model_error() -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=400,
+            type="invalid_request_error",
+            code="missing_required_parameter",
+            message="Parameter 'model' is required.",
+            param="model",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason="model_required",
+            message="response model is required",
+            level=ErrorLevel.WARNING,
+        ),
     )
 
 
-def _record_request_scope_context(
-    request: Request[object, object, object],
-    prepared: PreparedRequest,
-    coordinator: StreamCoordinator,
-) -> None:
-    record_scope_context(
-        request.scope,
-        conversation_id=prepared.conversation_id,
-        response_id=coordinator.response_id,
+def _model_not_found_error(model: str) -> PlapError:
+    return PlapError(
+        public=PublicError(
+            status_code=404,
+            type="invalid_request_error",
+            code="model_not_found",
+            message=f"Model '{model}' does not exist.",
+            param="model",
+        ),
+        private=PrivateError(
+            event="response.invalid_request",
+            reason="model_not_found",
+            message=f"response model is not configured: {model}",
+            level=ErrorLevel.WARNING,
+            context={"model": model},
+        ),
     )
-
-
-def _config(svcs: svcs.Container) -> CueBox:
-    loaded = svcs.get(CueBox)
-    return loaded.plap.config
 
 
 def _model_names(config: CueBox) -> list[str]:
@@ -165,6 +143,98 @@ def _model_names(config: CueBox) -> list[str]:
     return sorted(name for name, branch in models.items() if isinstance(name, str) and isinstance(branch, dict))
 
 
+def _require_model(config: CueBox, model: str | None) -> str:
+    if model is None:
+        raise _missing_model_error()
+    if model not in _model_names(config):
+        raise _model_not_found_error(model)
+    return model
+
+
+def _thread_codes(svcs: svcs.Container) -> dict[str, int]:
+    raw = svcs.get(CueBox).threads
+    return {str(thread): int(code) for thread, code in raw.items()}
+
+
+def _resolve_response_config(config: CueBox, request: ResponseCreateRequest) -> CueBox:
+    selection: dict[str, object] = {"model": _require_model(config, request.model)}
+    if request.reasoning is not None and request.reasoning.effort is not None:
+        selection["reasoning_effort"] = request.reasoning.effort
+    if request.service_tier is not None:
+        selection["service_tier"] = request.service_tier
+    return config.resolve(selection)
+
+
+async def _prepare_create(
+    *,
+    svcs: svcs.Container,
+    auth_context: AuthContext,
+    request: ResponseCreateRequest,
+    channels: ChannelsPlugin,
+) -> State:
+    sealing_keyring = svcs.get(SealingKeyring)
+    response_store = svcs.get(ResponseStore)
+    with tracer.start_as_current_span("response.prepare") as span:
+        config = _resolve_response_config(svcs.get(CueBox), request)
+        svcs.register_local_value(
+            CompletionBudget,
+            CompletionBudget(
+                request.max_output_tokens,
+                reasoning_to_output=float(config.reasoning_to_output),
+            ),
+        )
+        prepared = await response_store.prepare_request(auth_context, request)
+        thread_codes = _thread_codes(svcs)
+        ingested = await ingest_response_request(
+            prepared.execution_request,
+            keyring=sealing_keyring,
+            thread_codes=thread_codes,
+        )
+        response_request = prepared.response_request
+        coordinator = StreamCoordinator(
+            request=response_request,
+            channels=channels,
+            prepared=prepared,
+            response_store=response_store,
+            sealing_keyring=sealing_keyring,
+            last_reasoning_id=ingested.last_reasoning_id,
+            last_compaction_id=ingested.last_compaction_id,
+        )
+        svcs.register_local_value(StreamCoordinator, coordinator)
+        state = State.from_ingested(
+            ingested=ingested,
+            request=response_request,
+            config=config,
+            svcs=svcs,
+            thread_codes=thread_codes,
+        )
+        span.set_attribute("plap.response.id", coordinator.response_id)
+        span.set_attribute("plap.response.model", state.request.model)
+        if state.request.conversation_id is not None:
+            span.set_attribute("plap.response.conversation_id", state.request.conversation_id)
+        return state
+
+
+def _response_context(state: State):
+    coordinator = state.svcs.get(StreamCoordinator)
+    return bound_context(
+        conversation_id=state.request.conversation_id,
+        response_id=coordinator.response_id,
+    )
+
+
+def _record_request_scope_context(
+    request: Request[object, object, object],
+    state: State,
+) -> None:
+    coordinator = state.svcs.get(StreamCoordinator)
+    record_scope_context(
+        request.scope,
+        conversation_id=state.request.conversation_id,
+        response_id=coordinator.response_id,
+    )
+
+
 def _resolved_model_config(
     config: CueBox,
     *,
@@ -172,7 +242,7 @@ def _resolved_model_config(
     service_tier: ServiceTier | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> CueBox:
-    request: dict[str, object] = {"model": model}
+    request: dict[str, object] = {"model": _require_model(config, model)}
     if reasoning_effort is not None:
         request["reasoning_effort"] = reasoning_effort
     if service_tier is not None:
@@ -209,23 +279,6 @@ def _model_info_object(config: CueBox, *, model: str) -> ModelInfoObject:
     )
 
 
-def _response_state(
-    *,
-    svcs: svcs.Container,
-    prepared: PreparedRequest,
-    ingested: Ingested,
-    coordinator: StreamCoordinator,
-) -> State:
-    return State.from_ingested(
-        ingested=ingested,
-        prepared=prepared,
-        svcs=svcs,
-        coordinator=coordinator,
-        sealing_keyring=svcs.get(SealingKeyring),
-        thread_codes=_thread_codes(svcs),
-    )
-
-
 async def _watch_http_disconnect(
     request: Request[object, object, object],
     cancel_scope: anyio.CancelScope,
@@ -256,7 +309,7 @@ async def _watch_socket_disconnect(
 
 
 def _is_terminal_event(event: ResponseStreamEvent) -> bool:
-    return isinstance(event, ResponseCompletedEvent | ResponseErrorEvent)
+    return isinstance(event, ResponseCompletedEvent | ResponseFailedEvent | ResponseIncompleteEvent | ResponseErrorEvent)
 
 
 def _decode_stream_event(payload: bytes) -> ResponseStreamEvent:
@@ -275,55 +328,100 @@ async def _iter_projected_payloads(
             break
 
 
-async def _run_stream(
-    *,
-    prepared: PreparedRequest,
-    ingested: Ingested,
-    coordinator: StreamCoordinator,
-    svcs: svcs.Container,
-) -> None:
+async def _accept_response(state: State) -> None:
+    coordinator = state.svcs.get(StreamCoordinator)
+    await anyio.sleep(0)
+    with anyio.CancelScope(shield=True):
+        await coordinator.created()
+
+
+async def _execute_response(state: State) -> None:
+    coordinator = state.svcs.get(StreamCoordinator)
     try:
-        await bus.emit(
-            "response.start",
-            state=_response_state(svcs=svcs, prepared=prepared, ingested=ingested, coordinator=coordinator),
-        )
+        await coordinator.in_progress()
+        await bus.emit("response.start", state=state)
     except anyio.get_cancelled_exc_class():
-        return
+        if coordinator.current_response().status == "in_progress":
+            with anyio.CancelScope(shield=True):
+                await state.save_progress()
+                await coordinator.cancelled()
+        raise
+    except ResponseFinalizationError:
+        raise
     except Exception:
-        return
+        if coordinator.current_response().status != "in_progress":
+            logger.exception("response.execute.after_failed", response_id=coordinator.response_id)
+            return
+        logger.exception("response.execute.failed", response_id=coordinator.response_id)
+    else:
+        if coordinator.current_response().status != "in_progress":
+            return
+        logger.error("response.execute.unterminated", response_id=coordinator.response_id)
+
+    with anyio.CancelScope(shield=True):
+        await state.save_progress()
+        try:
+            await coordinator.failed()
+        except Exception as exc:
+            raise ResponseFinalizationError("response failure finalization failed") from exc
+
+
+def _unexpected_public_error() -> PublicError:
+    return PublicError(
+        status_code=500,
+        type="server_error",
+        code="internal_error",
+        message="An unexpected error occurred.",
+    )
+
+
+def _websocket_error_event(*, public: PublicError) -> ResponseErrorEvent:
+    # Preparation failed before a response coordinator existed, so this error
+    # begins its own one-event sequence.
+    return ResponseErrorEvent(
+        code=public.code,
+        message=public.message,
+        param=public.param,
+        sequence_number=1,
+        type="error",
+    )
+
+
+def _preparation_error_event(exc: Exception) -> ResponseErrorEvent:
+    if isinstance(exc, PlapError):
+        public = exc.public or _unexpected_public_error()
+        exc.log(
+            logger,
+            failure_code=public.code,
+            failure_type=public.type,
+            status_code=public.status_code,
+        )
+        return _websocket_error_event(public=public)
+
+    public = _unexpected_public_error()
+    logger.exception(
+        "response.prepare.failed",
+        failure_code=public.code,
+        failure_type=public.type,
+        status_code=public.status_code,
+    )
+    return _websocket_error_event(public=public)
 
 
 async def _sse_response_payload(
     *,
     http_request: Request[object, object, object],
-    auth_context: AuthContext,
-    request: ResponseCreateRequest,
-    svcs: svcs.Container,
+    state: State,
+    subscriber: Subscriber,
+    projection: ResponseProjection,
 ) -> AsyncIterator[str]:
     channels = http_request.app.plugins.get(ChannelsPlugin)
-    projection = ResponseProjection.from_create_request(request, transport="stream")
-    projection.validate_create_request(request)
+    coordinator = state.svcs.get(StreamCoordinator)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_watch_http_disconnect, http_request, task_group.cancel_scope)
-        prepared, ingested, coordinator = await _prepare_create(
-            svcs=svcs,
-            auth_context=auth_context,
-            request=request,
-            channels=channels,
-        )
-        _record_request_scope_context(http_request, prepared, coordinator)
-        subscriber = await channels.subscribe(coordinator.channel)
         try:
-            with _response_context(prepared, coordinator):
-                task_group.start_soon(
-                    partial(
-                        _run_stream,
-                        prepared=prepared,
-                        ingested=ingested,
-                        coordinator=coordinator,
-                        svcs=svcs,
-                    ),
-                )
+            with _response_context(state):
+                task_group.start_soon(_execute_response, state)
                 async for payload in _iter_projected_payloads(subscriber, projection=projection):
                     yield msgspec.json.encode(payload).decode()
         finally:
@@ -342,42 +440,54 @@ async def create_response(
 ) -> object:
     projection = ResponseProjection.from_create_request(data, transport="stream" if data.stream else "snapshot")
     projection.validate_create_request(data)
+    channels = request.app.plugins.get(ChannelsPlugin)
+    state = await _prepare_create(
+        svcs=svcs,
+        auth_context=auth_context,
+        request=data,
+        channels=channels,
+    )
+    coordinator = state.svcs.get(StreamCoordinator)
+    _record_request_scope_context(request, state)
     if data.stream:
+        subscriber = await channels.subscribe(coordinator.channel)
+        try:
+            with _response_context(state):
+                await _accept_response(state)
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await channels.unsubscribe(subscriber, coordinator.channel)
+            raise
         return ServerSentEvent(
             _sse_response_payload(
                 http_request=request,
-                auth_context=auth_context,
-                request=data,
-                svcs=svcs,
+                state=state,
+                subscriber=subscriber,
+                projection=projection,
             ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
-    response: object
-    channels = request.app.plugins.get(ChannelsPlugin)
+
+    with _response_context(state):
+        await _accept_response(state)
     async with anyio.create_task_group() as task_group:
         watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
-        prepared, ingested, coordinator = await _prepare_create(
-            svcs=svcs,
-            auth_context=auth_context,
-            request=data,
-            channels=channels,
-        )
-        _record_request_scope_context(request, prepared, coordinator)
-        with _response_context(prepared, coordinator):
-            await bus.emit(
-                "response.start",
-                state=_response_state(svcs=svcs, prepared=prepared, ingested=ingested, coordinator=coordinator),
-            )
-            response = projection.response(coordinator.current_response())
+        try:
+            with _response_context(state):
+                await _execute_response(state)
+        except ResponseFinalizationError:
+            if coordinator.current_response().status == "in_progress":
+                raise
+            logger.exception("response.delivery.failed", response_id=coordinator.response_id)
         watcher_scope.cancel()
-    return response
+    return projection.response(coordinator.current_response())
 
 
 @get("/v1/models")
 async def list_models(
     svcs: Any,
 ) -> ModelListObject:
-    config = _config(svcs)
+    config = svcs.get(CueBox)
     return ModelListObject(data=[_model_object(_resolved_model_config(config, model=model), model=model) for model in _model_names(config)])
 
 
@@ -388,7 +498,7 @@ async def model_info(
     service_tier: ServiceTier | None = None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> ModelInfoListObject:
-    config = _config(svcs)
+    config = svcs.get(CueBox)
     resolved = _resolved_model_config(
         config,
         model=model,
@@ -469,18 +579,6 @@ async def list_input_items(
     return projection.input_items_page(page)
 
 
-def build_error_event(*, public: PublicError) -> ResponseErrorEvent:
-    # Validation failed before a response coordinator existed, so this error
-    # begins its own one-event sequence.
-    return ResponseErrorEvent(
-        code=public.code,
-        message=public.message,
-        param=public.param,
-        sequence_number=1,
-        type="error",
-    )
-
-
 @websocket("/v1/responses", dependencies={"auth_context": Provide(provide_socket_auth_context, sync_to_thread=False)})
 async def responses_socket(
     socket: WebSocket,
@@ -488,22 +586,19 @@ async def responses_socket(
 ) -> None:
     channels = socket.app.plugins.get(ChannelsPlugin)
     registry: svcs.Registry = socket.app.state.svcs_registry
-    ws_container = svcs.Container(registry)
-
     await socket.accept()
 
     while True:
         try:
             payload = await socket.receive_json()
         except Exception:
-            await ws_container.aclose()
             return
 
         try:
             client_event = ResponseCreateClientEvent.model_validate(payload)
         except ValidationError:
             await socket.send_json(
-                build_error_event(
+                _websocket_error_event(
                     public=PublicError(
                         status_code=400,
                         type="invalid_request_error",
@@ -517,41 +612,45 @@ async def responses_socket(
             )
             continue
 
-        started_at = time.perf_counter()
-        with tracer.start_as_current_span("websocket.response.create") as span:
-            projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
-            projection.validate_create_request(client_event.response)
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
-                prepared, ingested, coordinator = await _prepare_create(
-                    svcs=ws_container,
-                    auth_context=auth_context,
-                    request=client_event.response,
-                    channels=channels,
-                )
+        response_svcs = Container(registry)
+        try:
+            started_at = time.perf_counter()
+            with tracer.start_as_current_span("websocket.response.create") as span:
+                try:
+                    projection = ResponseProjection.from_create_request(client_event.response, transport="stream")
+                    projection.validate_create_request(client_event.response)
+                    state = await _prepare_create(
+                        svcs=response_svcs,
+                        auth_context=auth_context,
+                        request=client_event.response,
+                        channels=channels,
+                    )
+                except Exception as exc:
+                    await socket.send_json(_preparation_error_event(exc).model_dump(mode="json", exclude_none=True))
+                    continue
+                coordinator = state.svcs.get(StreamCoordinator)
                 span.set_attribute("plap.response.id", coordinator.response_id)
                 subscriber = await channels.subscribe(coordinator.channel)
                 try:
-                    with _response_context(prepared, coordinator):
-                        task_group.start_soon(
-                            partial(
-                                _run_stream,
-                                prepared=prepared,
-                                ingested=ingested,
-                                coordinator=coordinator,
-                                svcs=ws_container,
-                            ),
-                        )
-                        async for payload in _iter_projected_payloads(subscriber, projection=projection):
-                            await socket.send_json(payload)
+                    with _response_context(state):
+                        await _accept_response(state)
+                    async with anyio.create_task_group() as task_group:
+                        task_group.start_soon(_watch_socket_disconnect, socket, task_group.cancel_scope)
+                        with _response_context(state):
+                            task_group.start_soon(_execute_response, state)
+                            async for payload in _iter_projected_payloads(subscriber, projection=projection):
+                                await socket.send_json(payload)
                         logger.info(
                             "websocket.response.completed",
                             duration_ms=round((time.perf_counter() - started_at) * 1000.0, 3),
                         )
+                        task_group.cancel_scope.cancel()
                 finally:
-                    task_group.cancel_scope.cancel()
                     with anyio.CancelScope(shield=True):
                         await channels.unsubscribe(subscriber, coordinator.channel)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await response_svcs.aclose()
 
 
 RESPONSE_ROUTE_HANDLERS = [

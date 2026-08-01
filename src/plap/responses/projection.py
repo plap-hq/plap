@@ -14,6 +14,8 @@ from plap.responses.contracts import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseCreateRequest,
+    ResponseFailedEvent,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseObject,
     ResponseOutputItem,
@@ -153,7 +155,10 @@ class ResponseProjection:
 
     def stream_payload(self, event: ResponseStreamEvent) -> dict[str, object]:
         payload = event.model_dump(mode="json", exclude_none=True)
-        if isinstance(event, ResponseCreatedEvent | ResponseInProgressEvent | ResponseCompletedEvent):
+        if isinstance(
+            event,
+            ResponseCreatedEvent | ResponseInProgressEvent | ResponseCompletedEvent | ResponseFailedEvent | ResponseIncompleteEvent,
+        ):
             payload["response"] = self.response(event.response).model_dump(mode="json", exclude_none=True)
         elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
             payload["item"] = self.output_item(event.item).model_dump(mode="json", exclude_none=True)

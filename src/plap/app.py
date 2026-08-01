@@ -306,7 +306,7 @@ def create_app() -> Litestar:
     api_key_manager = APIKeyManager(pepper=config.api_key_pepper)
 
     registry = svcs.Registry()
-    registry.register_value(CueBox, loaded)
+    registry.register_value(CueBox, config)
     registry.register_value(Database, database)
     registry.register_value(SealingKeyring, keyring)
     registry.register_factory(ResponseStore, lambda svcs_container: ResponseStore(svcs_container.get(Database)))
@@ -339,7 +339,7 @@ def create_app() -> Litestar:
             ),
         ],
         dependencies={
-            "svcs": Provide(provide_svcs, use_cache=True, sync_to_thread=False),
+            "svcs": Provide(provide_svcs, use_cache=False, sync_to_thread=False),
             "auth_context": Provide(provide_request_auth_context, use_cache=True, sync_to_thread=False),
         },
         exception_handlers={

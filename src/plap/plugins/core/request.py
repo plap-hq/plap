@@ -12,6 +12,7 @@ from plap.llms.completions.chat import (
     ChatStreamOptions,
     ChatTool,
     ChatToolChoiceFunction,
+    OutputEquivalence,
 )
 from plap.responses.contracts import FunctionTool, ResponseCreateRequest, ToolChoiceFunction
 from plap.responses.state import State
@@ -86,7 +87,7 @@ def apply_int_transform(
 
 
 def _response_format(state: State) -> ChatResponseFormat | None:
-    text = state.prepared.execution_request.text
+    text = state.request.text
     if text is None or text.format is None:
         return None
     format_ = text.format
@@ -102,7 +103,7 @@ def _response_format(state: State) -> ChatResponseFormat | None:
 
 
 def _tool_choice(state: State) -> str | ChatToolChoiceFunction | None:
-    tool_choice = state.prepared.execution_request.tool_choice
+    tool_choice = state.request.tool_choice
     if tool_choice is None or isinstance(tool_choice, str):
         return tool_choice
     if not isinstance(tool_choice, ToolChoiceFunction):  # pragma: no cover
@@ -110,14 +111,13 @@ def _tool_choice(state: State) -> str | ChatToolChoiceFunction | None:
     return ChatToolChoiceFunction(name=tool_choice.name)
 
 
-def build_config_request(state: State) -> dict[str, object]:
-    request = {"model": state.prepared.response_request.model}
-    reasoning = state.prepared.response_request.reasoning
-    if reasoning is not None and reasoning.effort is not None:
-        request["reasoning_effort"] = reasoning.effort
-    if state.prepared.response_request.service_tier is not None:
-        request["service_tier"] = state.prepared.response_request.service_tier
-    return request
+def build_output_equivalence(config: object) -> OutputEquivalence:
+    equivalence = config.output_equivalence
+    return OutputEquivalence(
+        uncached_input_to_output=float(equivalence.uncached_input_to_output),
+        cached_input_to_output=float(equivalence.cached_input_to_output),
+        output_to_output=float(equivalence.output_to_output),
+    )
 
 
 def build_chat_request(
@@ -140,18 +140,19 @@ def build_chat_request(
         seed=apply_int_transform(None, sampling.seed),
         reasoning_effort=config.reasoning_effort,
         service_tier=config.service_tier,
+        output_equivalence=build_output_equivalence(config),
     )
 
 
-def build_response_request(state: State, config: CueBox) -> ChatCompletionRequest:
-    request = state.prepared.execution_request
-    main = config.main
+def build_response_request(state: State) -> ChatCompletionRequest:
+    request = state.request
+    main = state.config.main
     sampling = main.sampling
     top_logprobs = apply_int_transform(request.top_logprobs, sampling.top_logprobs, minimum=0, maximum=20)
     instructions = [
         ChatMessage(
             role="developer",
-            content=DEVELOPER_PROMPT_TEMPLATE.format(model_name=config.display_name),
+            content=DEVELOPER_PROMPT_TEMPLATE.format(model_name=state.config.display_name),
         )
     ]
     if request.instructions is not None:
@@ -187,6 +188,6 @@ __all__ = [
     "apply_float_transform",
     "apply_int_transform",
     "build_chat_request",
-    "build_config_request",
+    "build_output_equivalence",
     "build_response_request",
 ]

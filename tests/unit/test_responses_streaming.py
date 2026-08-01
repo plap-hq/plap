@@ -17,7 +17,7 @@ from plap.responses.contracts import (
 from plap.responses.ingest.models import Message, ReasoningCheckpoint, ReasoningPatch
 from plap.responses.ingest.sealing import open_reasoning_payload
 from plap.responses.store import PreparedRequest
-from plap.responses.streaming import StreamCoordinator
+from plap.responses.streaming import ResponseFinalizationError, StreamCoordinator
 from plap.responses.summary import SummaryDelta, SummaryDone
 
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
@@ -63,10 +63,22 @@ class _RecordingStore:
         self.cancel_calls += 1
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
-        _ = prepared, response_id
+    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+        _ = prepared, response
         self.fail_calls += 1
         return True
+
+
+class _FailingChannels(_RecordingChannels):
+    async def wait_published(self, data: dict[str, object], channels: str | Sequence[str]) -> None:
+        _ = data, channels
+        raise RuntimeError("publication failed")
+
+
+class _FailingFinishStore(_RecordingStore):
+    async def finish_response(self, prepared: PreparedRequest, response) -> None:
+        await super().finish_response(prepared, response)
+        raise RuntimeError("persistence failed")
 
 
 def _keyring() -> SealingKeyring:
@@ -83,11 +95,7 @@ def _prepared() -> PreparedRequest:
         scope_id=uuid4(),
         response_request=request,
         execution_request=request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
 
 
@@ -340,3 +348,59 @@ async def test_emit_message_with_refusal_publishes_refusal_events() -> None:
         "response.content_part.done",
         "response.output_item.done",
     ]
+
+
+async def test_terminal_persistence_failure_leaves_response_in_progress() -> None:
+    channels = _RecordingChannels()
+    store = _FailingFinishStore()
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        prepared=_prepared(),
+        response_store=store,
+    )
+
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        await coordinator.completed()
+
+    assert coordinator.current_response().status == "in_progress"
+    assert store.finish_calls == 1
+    assert channels.published == []
+
+
+async def test_terminal_publication_failure_preserves_persisted_status() -> None:
+    channels = _FailingChannels()
+    store = _RecordingStore()
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        prepared=_prepared(),
+        response_store=store,
+    )
+
+    with pytest.raises(RuntimeError, match="publication failed"):
+        await coordinator.completed()
+
+    assert coordinator.current_response().status == "completed"
+    assert store.finish_calls == 1
+
+
+async def test_created_publication_failure_compensates_persisted_response() -> None:
+    channels = _FailingChannels()
+    store = _RecordingStore()
+    coordinator = StreamCoordinator(
+        request=_request(),
+        channels=channels,
+        prepared=_prepared(),
+        response_store=store,
+    )
+
+    with pytest.raises(ResponseFinalizationError, match="acceptance failed"):
+        await coordinator.created()
+
+    response = coordinator.current_response()
+    assert response.status == "failed"
+    assert response.error is not None
+    assert response.error.code == "server_error"
+    assert store.begin_calls == 1
+    assert store.fail_calls == 1

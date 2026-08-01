@@ -461,6 +461,13 @@ class ChatStreamOptions:
     include_usage: bool | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OutputEquivalence:
+    uncached_input_to_output: float
+    cached_input_to_output: float
+    output_to_output: float
+
+
 @dataclass(frozen=True)
 class ChatCompletionRequest:
     model: str
@@ -490,6 +497,7 @@ class ChatCompletionRequest:
     metadata: dict[str, str] | None = None
     service_tier: ServiceTier | None = None
     prediction: ChatPrediction | None = None
+    output_equivalence: OutputEquivalence | None = None
 
     def __post_init__(self) -> None:
         if self.reasoning_effort is not None:

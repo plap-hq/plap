@@ -3,6 +3,14 @@ from pydantic import ValidationError
 from plap.responses.contracts import ResponseCreateRequest
 
 
+def test_conversation_id_accepts_string_and_object_wire_forms() -> None:
+    string_request = ResponseCreateRequest.model_validate({"conversation": "conv_123", "model": "gpt-4.1"})
+    object_request = ResponseCreateRequest.model_validate({"conversation": {"id": "conv_123"}, "model": "gpt-4.1"})
+
+    assert string_request.conversation_id == "conv_123"
+    assert object_request.conversation_id == "conv_123"
+
+
 def test_rejects_unsupported_input_variant() -> None:
     try:
         ResponseCreateRequest.model_validate(

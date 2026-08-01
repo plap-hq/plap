@@ -1,9 +1,4 @@
-"""Budget every completion that contributes to one response.
-
-Each budgeted client receives the config field for the work it performs. Every
-completion starts as internal work; ``finish`` reclassifies the final main usage
-as visible response output.
-"""
+"""Apply one output-equivalent token budget across chat completions."""
 
 from __future__ import annotations
 
@@ -13,7 +8,6 @@ from math import ceil, floor
 
 import structlog
 
-from plap.config import CueBox
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -21,8 +15,8 @@ from plap.llms.completions.chat import (
     ChatFinishReason,
     ChatUsage,
     IChatCompletionClient,
+    OutputEquivalence,
 )
-from plap.responses.contracts import ResponseUsage, ResponseUsageInputTokensDetails, ResponseUsageOutputTokensDetails
 
 logger = structlog.stdlib.get_logger(__name__)
 
@@ -39,11 +33,11 @@ def _output_equivalent_tokens(usage: ChatUsage, *, reasoning_to_output: float) -
     return _visible_output_tokens(usage) + ceil((usage.reasoning_tokens or 0) * reasoning_to_output)
 
 
-def _response_output_cost(equivalence: object, usage: ChatUsage, *, reasoning_to_output: float) -> int:
+def _output_cost(equivalence: OutputEquivalence, usage: ChatUsage, *, reasoning_to_output: float) -> int:
     return ceil(equivalence.output_to_output * _output_equivalent_tokens(usage, reasoning_to_output=reasoning_to_output))
 
 
-def _internal_cost(equivalence: object, usage: ChatUsage, *, reasoning_to_output: float) -> int:
+def _internal_cost(equivalence: OutputEquivalence, usage: ChatUsage, *, reasoning_to_output: float) -> int:
     cached_input = _cached_input_tokens(usage)
     uncached_input = usage.input_tokens - cached_input
     debit = (
@@ -56,39 +50,27 @@ def _internal_cost(equivalence: object, usage: ChatUsage, *, reasoning_to_output
 
 @dataclass(frozen=True, slots=True)
 class _Charge:
-    equivalence: object
-    main: bool
+    equivalence: OutputEquivalence
     usage: ChatUsage
 
 
-class ResponseBudgetExhaustedError(Exception):
-    def __init__(self, *, last_service_tier: str | None) -> None:
-        super().__init__("response output budget exhausted")
-        self.last_service_tier = last_service_tier
+class CompletionBudgetExhaustedError(Exception):
+    pass
 
 
-class ResponseBudget:
-    def __init__(self, config: CueBox, max_output_tokens: int | None) -> None:
-        self._config = config
-        self._main = config.main
+class CompletionBudget:
+    def __init__(self, max_output_tokens: int | None, *, reasoning_to_output: float) -> None:
         self._remaining = max_output_tokens
-        self._reasoning_to_output = float(config.reasoning_to_output)
+        self._reasoning_to_output = reasoning_to_output
         self._charges: list[_Charge] = []
+        self._input: _Charge | None = None
         self._finished = False
-        self._service_tiers: dict[int, str] = {}
 
     @property
     def remaining(self) -> int | None:
         return self._remaining
 
-    def _equivalence(self, field: object) -> object:
-        equivalence = getattr(field, "output_equivalence", None)
-        if equivalence is None:
-            raise ValueError("completion config has no output equivalence")
-        return equivalence
-
-    def _completion_limit(self, field: object, configured_limit: int | None) -> int | None:
-        equivalence = self._equivalence(field)
+    def _completion_limit(self, equivalence: OutputEquivalence, configured_limit: int | None) -> int | None:
         if self._remaining is None:
             budget_cap = None
         elif self._remaining <= 0:
@@ -98,37 +80,34 @@ class ResponseBudget:
         if configured_limit is None:
             return budget_cap
         if budget_cap is None:
-            return int(configured_limit)
-        return min(budget_cap, int(configured_limit))
+            return configured_limit
+        return min(budget_cap, configured_limit)
 
-    def _record(self, field: object, usage: ChatUsage | None, *, service_tier: str | None) -> None:
-        if service_tier is not None:
-            self._service_tiers[id(field)] = service_tier
+    def _record(self, equivalence: OutputEquivalence, usage: ChatUsage | None) -> None:
         if usage is None:
             return
-        equivalence = self._equivalence(field)
-        self._charges.append(_Charge(equivalence=equivalence, main=field is self._main, usage=usage))
+        self._charges.append(_Charge(equivalence=equivalence, usage=usage))
         if self._remaining is not None:
             self._remaining -= _internal_cost(equivalence, usage, reasoning_to_output=self._reasoning_to_output)
 
-    def _last_service_tier(self, field: object) -> str | None:
-        return self._service_tiers.get(id(field))
+    def anchor(self, *, input_usage: ChatUsage | None) -> None:
+        if input_usage is None or self._input is not None:
+            return
+        charge = next((charge for charge in self._charges if charge.usage is input_usage), None)
+        if charge is None:
+            raise RuntimeError("completion budget input usage was not recorded")
+        self._input = charge
 
-    def _build_usage(self, output: _Charge | None) -> ResponseUsage | None:
+    def _build_usage(self, output: _Charge | None) -> ChatUsage | None:
         if not self._charges:
             return None
 
-        anchor_charge = next(
-            (charge for charge in self._charges if charge.main),
-            self._charges[0],
-        )
-        anchor = anchor_charge.usage
-
+        anchor = self._input or output or self._charges[0]
         visible_tokens = 0 if output is None else _visible_output_tokens(output.usage)
         normalized_output_tokens = 0
         for charge in self._charges:
             if charge is output:
-                normalized_output_tokens += _response_output_cost(
+                normalized_output_tokens += _output_cost(
                     charge.equivalence,
                     charge.usage,
                     reasoning_to_output=self._reasoning_to_output,
@@ -141,87 +120,86 @@ class ResponseBudget:
             )
 
         output_tokens = max(visible_tokens, normalized_output_tokens)
-        reasoning_tokens = output_tokens - visible_tokens
-        return ResponseUsage(
-            input_tokens=anchor.input_tokens,
-            input_tokens_details=ResponseUsageInputTokensDetails(cached_tokens=_cached_input_tokens(anchor)),
+        return ChatUsage(
+            input_tokens=anchor.usage.input_tokens,
+            cached_tokens=_cached_input_tokens(anchor.usage),
             output_tokens=output_tokens,
-            output_tokens_details=ResponseUsageOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-            total_tokens=anchor.input_tokens + output_tokens,
+            reasoning_tokens=output_tokens - visible_tokens,
+            total_tokens=anchor.usage.input_tokens + output_tokens,
         )
 
-    def finish(self, usage: ChatUsage | None = None) -> ResponseUsage | None:
+    def finish(self, *, output_usage: ChatUsage | None) -> ChatUsage | None:
         if self._finished:
-            raise RuntimeError("response budget has already been finished")
+            raise RuntimeError("completion budget has already been finished")
 
         output: _Charge | None = None
-        if usage is not None:
-            output = next((charge for charge in reversed(self._charges) if charge.usage is usage), None)
+        if output_usage is not None:
+            output = next((charge for charge in reversed(self._charges) if charge.usage is output_usage), None)
             if output is None:
-                raise RuntimeError("response output usage was not recorded")
-            if not output.main:
-                raise RuntimeError("response output usage was not produced by the main completion")
+                raise RuntimeError("completion budget output usage was not recorded")
             if self._remaining is not None:
                 internal = _internal_cost(
                     output.equivalence,
-                    usage,
+                    output_usage,
                     reasoning_to_output=self._reasoning_to_output,
                 )
-                response_cost = _response_output_cost(
+                visible = _output_cost(
                     output.equivalence,
-                    usage,
+                    output_usage,
                     reasoning_to_output=self._reasoning_to_output,
                 )
-                self._remaining += internal - response_cost
+                self._remaining += internal - visible
 
         result = self._build_usage(output)
         self._finished = True
         return result
 
 
-class _BudgetedChatCompletionClient(IChatCompletionClient):
-    def __init__(self, client: IChatCompletionClient, budget: ResponseBudget, field: object) -> None:
-        budget._equivalence(field)
+class BudgetedChatCompletionClient(IChatCompletionClient):
+    def __init__(self, client: IChatCompletionClient, budget: CompletionBudget) -> None:
         self._client = client
         self._budget = budget
-        self._field = field
 
-    def _limit_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        limit = self._budget._completion_limit(self._field, request.max_completion_tokens)
+    def _limit_request(self, request: ChatCompletionRequest) -> tuple[ChatCompletionRequest, OutputEquivalence]:
+        equivalence = request.output_equivalence
+        if equivalence is None:
+            raise ValueError("budgeted completion request requires output equivalence")
+        limit = self._budget._completion_limit(equivalence, request.max_completion_tokens)
         if limit == 0:
             logger.info(
-                "response.completion.skipped",
+                "llm.completion.skipped",
                 model=request.model,
                 reason="budget_exhausted",
                 remaining_budget=self._budget.remaining,
             )
-            raise ResponseBudgetExhaustedError(last_service_tier=self._budget._last_service_tier(self._field))
+            raise CompletionBudgetExhaustedError("completion budget exhausted")
 
         request = replace(request, max_completion_tokens=limit)
         logger.info(
-            "response.completion.started",
+            "llm.completion.started",
             max_completion_tokens=limit,
             model=request.model,
             remaining_budget=self._budget.remaining,
         )
         logger.bind(log_channel="payload").info(
-            "response.completion.request",
+            "llm.completion.request",
             model=request.model,
             request=asdict(request),
         )
-        return request
+        return request, equivalence
 
     def _record_completion(
         self,
         *,
+        equivalence: OutputEquivalence,
         finish_reason: ChatFinishReason | None,
         request: ChatCompletionRequest,
         service_tier: str | None,
         usage: ChatUsage | None,
     ) -> None:
-        self._budget._record(self._field, usage, service_tier=service_tier)
+        self._budget._record(equivalence, usage)
         logger.info(
-            "response.completion.finished",
+            "llm.completion.finished",
             finish_reason=finish_reason,
             model=request.model,
             remaining_budget=self._budget.remaining,
@@ -230,9 +208,10 @@ class _BudgetedChatCompletionClient(IChatCompletionClient):
         )
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
-        request = self._limit_request(request)
+        request, equivalence = self._limit_request(request)
         result = await self._client.complete(request)
         self._record_completion(
+            equivalence=equivalence,
             finish_reason=result.finish_reason,
             request=request,
             service_tier=result.service_tier,
@@ -242,7 +221,7 @@ class _BudgetedChatCompletionClient(IChatCompletionClient):
 
     def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionDelta]:
         async def run() -> AsyncIterator[ChatCompletionDelta]:
-            limited = self._limit_request(request)
+            limited, equivalence = self._limit_request(request)
             finish_reason: ChatFinishReason | None = None
             service_tier: str | None = None
             usage: ChatUsage | None = None
@@ -257,6 +236,7 @@ class _BudgetedChatCompletionClient(IChatCompletionClient):
                     yield delta
             finally:
                 self._record_completion(
+                    equivalence=equivalence,
                     finish_reason=finish_reason,
                     request=limited,
                     service_tier=service_tier,
@@ -266,11 +246,11 @@ class _BudgetedChatCompletionClient(IChatCompletionClient):
         return run()
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        return None
 
 
-def budgeted(client: IChatCompletionClient, budget: ResponseBudget, field: object) -> IChatCompletionClient:
-    return _BudgetedChatCompletionClient(client, budget, field)
-
-
-__all__ = ["ResponseBudget", "ResponseBudgetExhaustedError", "budgeted"]
+__all__ = [
+    "BudgetedChatCompletionClient",
+    "CompletionBudget",
+    "CompletionBudgetExhaustedError",
+]

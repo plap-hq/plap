@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 from collections.abc import Sequence
 from functools import partial
-from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
 
@@ -16,17 +15,19 @@ from pydantic import TypeAdapter
 from plap.bus import bus
 from plap.config import CueBox
 from plap.keyring import SealingKeyring
+from plap.llms.completions.budget import (
+    BudgetedChatCompletionClient,
+    CompletionBudget,
+)
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
-    ChatCompletionRequest,
     ChatFinishReason,
     ChatToolCallDelta,
     ChatUsage,
     IChatCompletionClient,
 )
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
-from plap.plugins.core.budget import ResponseBudget, ResponseBudgetExhaustedError, budgeted
-from plap.plugins.core.loop import response_request, run_response
+from plap.plugins.core.loop import response_request
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import (
@@ -42,9 +43,10 @@ from plap.responses.ingest.models import (
     ToolCall,
 )
 from plap.responses.ingest.sealing import open_call_id, open_reasoning_payload
+from plap.responses.routes import _accept_response, _execute_response
 from plap.responses.state import INTERRUPTED_TOOL_OUTPUT, State
 from plap.responses.store import PreparedRequest
-from plap.responses.streaming import StreamCoordinator
+from plap.responses.streaming import ResponseFinalizationError, StreamCoordinator
 
 _STREAM_EVENT_ADAPTER = TypeAdapter(ResponseStreamEvent)
 
@@ -55,7 +57,6 @@ def _reload_summary_handlers():
     summary_module = importlib.import_module("plap.plugins.summary")
     core_module = importlib.reload(core_module)
     importlib.reload(summary_module)
-    return core_module.run_response
 
 
 class _RecordingChannels:
@@ -98,8 +99,8 @@ class _RecordingStore:
         self.cancel_calls += 1
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
-        _ = prepared, response_id
+    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+        _ = prepared, response
         self.fail_calls += 1
         return True
 
@@ -122,11 +123,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
         scope_id=uuid4(),
         response_request=actual_request,
         execution_request=actual_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
 
 
@@ -218,22 +215,6 @@ def _config() -> _Config:
     )
 
 
-def _loaded(config: _Config | None = None) -> object:
-    return SimpleNamespace(plap=SimpleNamespace(config=config or _config()))
-
-
-def _output_equivalence(**updates: object) -> Box:
-    return Box(
-        {
-            "uncached_input_to_output": 0.25,
-            "cached_input_to_output": 0.05,
-            "output_to_output": 1.0,
-            **updates,
-        },
-        frozen_box=True,
-    )
-
-
 def _coordinator(
     store: _RecordingStore,
     channels: _RecordingChannels,
@@ -257,11 +238,14 @@ def _last_output_item(coordinator: StreamCoordinator):
     return coordinator.current_response().output[-1]
 
 
-def _svcs(*, client: object | None = None, config: _Config | None = None) -> svcs.Container:
+def _state_coordinator(state: State) -> StreamCoordinator:
+    return state.svcs.get(StreamCoordinator)
+
+
+def _svcs(*, config: _Config | None = None) -> svcs.Container:
     registry = svcs.Registry()
     registry.register_value(SealingKeyring, _keyring())
-    registry.register_value(CueBox, _loaded(config))
-    registry.register_value(IChatCompletionClient, client if client is not None else object())
+    registry.register_value(CueBox, config or _config())
     return svcs.Container(registry)
 
 
@@ -277,14 +261,30 @@ def _state(
     actual_store = store or _RecordingStore()
     actual_channels = channels or _RecordingChannels()
     actual_request = request or _request()
+    actual_config = config or _config()
+    container = _svcs(config=actual_config)
+    budget = CompletionBudget(
+        actual_request.max_output_tokens,
+        reasoning_to_output=float(actual_config.reasoning_to_output),
+    )
+    container.register_local_value(CompletionBudget, budget)
+    container.register_local_value(
+        IChatCompletionClient,
+        BudgetedChatCompletionClient(client if client is not None else object(), budget),
+    )
+    container.register_local_value(StreamCoordinator, _coordinator(actual_store, actual_channels, actual_request))
     return State.from_ingested(
         ingested=ingested or _ingested(),
-        prepared=_prepared(actual_request),
-        svcs=_svcs(client=client, config=config),
-        coordinator=_coordinator(actual_store, actual_channels, actual_request),
-        sealing_keyring=_keyring(),
+        request=actual_request,
+        config=actual_config,
+        svcs=container,
         thread_codes=_thread_codes(),
     )
+
+
+async def _run(state: State) -> None:
+    await _accept_response(state)
+    await _execute_response(state)
 
 
 def _usage(
@@ -411,7 +411,7 @@ async def test_response_request_applies_internal_sampling_config() -> None:
     config = _Config(config_data, frozen_box=True)
     state = _state(request=request, config=config)
 
-    built = await response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    built = await response_request(state=state)
 
     assert built.max_completion_tokens == 321
     assert built.min_p == 0.15
@@ -430,182 +430,6 @@ class _FakeReasoningSummarizer:
         assert mode == "concise"
         _ = prior_summary, fragment, self.kwargs
         yield "summary part"
-
-
-async def _record_usage(
-    budget: ResponseBudget,
-    field: object,
-    usage: ChatUsage,
-    *,
-    max_completion_tokens: int | None = None,
-) -> ChatCompletionRequest:
-    raw_client = _StubChatClient([_delta(finish_reason=ChatFinishReason.STOP, usage=usage)])
-    client = budgeted(raw_client, budget, field)
-    request = ChatCompletionRequest(model="test-model", messages=[], max_completion_tokens=max_completion_tokens)
-    async for _delta_item in client.stream(request):
-        pass
-    return cast(ChatCompletionRequest, raw_client.requests[0])
-
-
-def test_response_budget_returns_none_without_charges() -> None:
-    budget = ResponseBudget(_config(), None)
-
-    assert budget.finish() is None
-
-
-async def test_response_budget_caps_completion_requests() -> None:
-    config_data = _config().to_dict()
-    config_data["main"]["output_equivalence"] = _output_equivalence(output_to_output=2.0).to_dict()
-    config = _Config(config_data, frozen_box=True)
-
-    unlimited_request = await _record_usage(
-        ResponseBudget(config, 20),
-        config.main,
-        _usage(input_tokens=1, output_tokens=1),
-    )
-    limited_request = await _record_usage(
-        ResponseBudget(config, 20),
-        config.main,
-        _usage(input_tokens=1, output_tokens=1),
-        max_completion_tokens=7,
-    )
-
-    assert unlimited_request.max_completion_tokens == 10
-    assert limited_request.max_completion_tokens == 7
-
-
-async def test_response_budget_scales_single_output_usage() -> None:
-    config_data = _config().to_dict()
-    config_data["reasoning_to_output"] = 1.5
-    config = _Config(config_data, frozen_box=True)
-    budget = ResponseBudget(config, 20)
-    usage = _usage(input_tokens=10, output_tokens=12, cached_tokens=1, reasoning_tokens=5)
-
-    await _record_usage(budget, config.main, usage)
-    response_usage = budget.finish(usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 10
-    assert response_usage.input_tokens_details.cached_tokens == 1
-    assert response_usage.output_tokens == 15
-    assert response_usage.output_tokens_details.reasoning_tokens == 8
-    assert response_usage.total_tokens == 25
-    assert budget.remaining == 5
-
-
-async def test_response_budget_internal_usage_is_squashed_into_reasoning_tokens() -> None:
-    config = _config()
-    budget = ResponseBudget(config, 100)
-    hidden_usage = _usage(input_tokens=80, output_tokens=15)
-    output_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=2, reasoning_tokens=1)
-
-    await _record_usage(budget, config.main, hidden_usage)
-    await _record_usage(budget, config.main, output_usage)
-    response_usage = budget.finish(output_usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 80
-    assert response_usage.input_tokens_details.cached_tokens == 0
-    assert response_usage.output_tokens == 40
-    assert response_usage.output_tokens_details.reasoning_tokens == 36
-    assert response_usage.total_tokens == 120
-    assert budget.remaining == 60
-
-
-async def test_response_budget_uses_main_input_when_internal_summary_finishes_first() -> None:
-    config = _config()
-    budget = ResponseBudget(config, 100)
-    summary_usage = _usage(input_tokens=80, output_tokens=2)
-    main_usage = _usage(input_tokens=10, output_tokens=5, cached_tokens=3)
-
-    await _record_usage(budget, config.summary, summary_usage)
-    await _record_usage(budget, config.main, main_usage)
-    response_usage = budget.finish(main_usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 10
-    assert response_usage.input_tokens_details.cached_tokens == 3
-
-
-async def test_response_budget_accepts_a_plugin_defined_config_field() -> None:
-    config_data = _config().to_dict()
-    config_data["critic"] = config_data["main"]
-    config = _Config(config_data, frozen_box=True)
-    budget = ResponseBudget(config, 20)
-    critic_usage = _usage(input_tokens=4, output_tokens=3)
-    main_usage = _usage(input_tokens=2, output_tokens=1)
-
-    await _record_usage(budget, config.critic, critic_usage)
-    await _record_usage(budget, config.main, main_usage)
-
-    response_usage = budget.finish(main_usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 2
-    assert response_usage.output_tokens == 5
-
-
-async def test_response_budget_internal_then_output_keeps_internal_debit() -> None:
-    config = _config()
-    budget = ResponseBudget(config, 100)
-    hidden_usage = _usage(input_tokens=20, output_tokens=9, reasoning_tokens=3)
-    output_usage = _usage(input_tokens=4, output_tokens=2, cached_tokens=1)
-
-    await _record_usage(budget, config.main, hidden_usage)
-    assert budget.remaining == 86
-
-    await _record_usage(budget, config.main, output_usage)
-    response_usage = budget.finish(output_usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 20
-    assert response_usage.output_tokens == 16
-    assert response_usage.output_tokens_details.reasoning_tokens == 14
-    assert response_usage.total_tokens == 36
-    assert budget.remaining == 84
-
-
-async def test_response_budget_clamps_output_tokens_to_visible_floor_for_discounted_output() -> None:
-    config_data = _config().to_dict()
-    config_data["main"]["output_equivalence"] = _output_equivalence(output_to_output=0.5).to_dict()
-    config = _Config(config_data, frozen_box=True)
-    usage = _usage(input_tokens=10, output_tokens=20, reasoning_tokens=5)
-    budget = ResponseBudget(config, 100)
-
-    await _record_usage(budget, config.main, usage)
-    response_usage = budget.finish(usage)
-    assert response_usage is not None
-    assert response_usage.input_tokens == 10
-    assert response_usage.output_tokens == 15
-    assert response_usage.output_tokens_details.reasoning_tokens == 0
-    assert response_usage.total_tokens == 25
-    assert budget.remaining == 90
-
-
-async def test_budgeted_client_reports_last_service_tier_when_budget_is_exhausted() -> None:
-    config = _config()
-    budget = ResponseBudget(config, 1)
-    raw_client = _StubChatClient([_delta(finish_reason=ChatFinishReason.STOP, usage=_usage(input_tokens=0, output_tokens=1))])
-    request = ChatCompletionRequest(model="test-model", messages=[])
-
-    async for _delta_item in budgeted(raw_client, budget, config.main).stream(request):
-        pass
-
-    with pytest.raises(ResponseBudgetExhaustedError) as exc_info:
-        async for _delta_item in budgeted(raw_client, budget, config.main).stream(request):
-            pass
-
-    assert exc_info.value.last_service_tier == "default"
-
-
-async def test_response_budget_rejects_unrecorded_usage_and_duplicate_finish() -> None:
-    config = _config()
-    budget = ResponseBudget(config, 20)
-    usage = _usage(input_tokens=1, output_tokens=1)
-
-    with pytest.raises(RuntimeError, match="was not recorded"):
-        budget.finish(usage)
-
-    await _record_usage(budget, config.main, usage)
-    budget.finish(usage)
-
-    with pytest.raises(RuntimeError, match="already been finished"):
-        budget.finish(usage)
 
 
 async def test_run_response_completes_simple_turn_without_midstream_staging() -> None:
@@ -635,14 +459,14 @@ async def test_run_response_completes_simple_turn_without_midstream_staging() ->
         ),
     )
 
-    await run_response(state=state)
+    await _run(state)
 
     assert store.begin_calls == 1
     assert store.cancel_calls == 0
     assert store.fail_calls == 0
     assert store.replace_calls == 0
     assert store.finish_calls == 1
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "completed"
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseMessageItem)
@@ -651,25 +475,86 @@ async def test_run_response_completes_simple_turn_without_midstream_staging() ->
     assert response.usage.input_tokens == 7
 
 
+async def test_run_response_keeps_requested_service_tier_private_from_upstream() -> None:
+    state = _state(
+        _RecordingStore(),
+        _RecordingChannels(),
+        request=_request(service_tier="priority"),
+        client=_StubChatClient(
+            [
+                _delta(
+                    content_delta="hello",
+                    finish_reason=ChatFinishReason.STOP,
+                    usage=_usage(input_tokens=2, output_tokens=1),
+                )
+            ]
+        ),
+    )
+
+    await _run(state)
+
+    assert _state_coordinator(state).current_response().service_tier == "priority"
+
+
+async def test_terminal_persistence_failure_does_not_resave_committed_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingStore(_RecordingStore):
+        async def finish_response(self, prepared: PreparedRequest, response) -> None:
+            await super().finish_response(prepared, response)
+            raise RuntimeError("terminal persistence failed")
+
+    save_calls = 0
+    original_save_progress = State.save_progress
+
+    async def tracked_save_progress(self: State) -> None:
+        nonlocal save_calls
+        save_calls += 1
+        await original_save_progress(self)
+
+    monkeypatch.setattr(State, "save_progress", tracked_save_progress)
+    channels = _RecordingChannels()
+    store = FailingStore()
+    state = _state(
+        store,
+        channels,
+        client=_StubChatClient(
+            [
+                _delta(
+                    content_delta="answer",
+                    finish_reason=ChatFinishReason.STOP,
+                    usage=_usage(input_tokens=3, output_tokens=1),
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(ResponseFinalizationError, match="response finalization failed"):
+        await _run(state)
+
+    response = _state_coordinator(state).current_response()
+    assert save_calls == 0
+    assert store.finish_calls == 1
+    assert store.fail_calls == 0
+    assert response.status == "in_progress"
+    assert len(response.output) == 1
+
+
 async def test_response_hooks_follow_the_documented_execution_order() -> None:
     bus.reset()
     core = importlib.reload(importlib.import_module("plap.plugins.core.loop"))
     events: list[str] = []
 
     @bus.listen("response.request")
-    async def wrap_request(state, config, *, next):
+    async def wrap_request(state, *, next):
         events.append("request.before")
-        request = await next(state=state, config=config)
+        request = await next(state=state)
         events.append("request.after")
         return request
 
     @bus.listen("response.completion")
-    async def wrap_completion(state, config, budget, request, validators, *, next):
+    async def wrap_completion(state, request, validators, *, next):
         events.append("completion.before")
         result = await next(
             state=state,
-            config=config,
-            budget=budget,
             request=request,
             validators=validators,
         )
@@ -677,23 +562,23 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
         return result
 
     @bus.listen("response.snapshot")
-    async def wrap_snapshot(state, config, request, snapshot, *, next):
+    async def wrap_snapshot(state, request, snapshot, *, next):
         events.append("snapshot.before")
-        snapshot = await next(state=state, config=config, request=request, snapshot=snapshot)
+        snapshot = await next(state=state, request=request, snapshot=snapshot)
         events.append("snapshot.after")
         return snapshot
 
     @bus.listen("response.turn")
-    async def wrap_turn(state, config, budget, request, *, next):
+    async def wrap_turn(state, request, *, next):
         events.append("turn.before")
-        result = await next(state=state, config=config, budget=budget, request=request)
+        result = await next(state=state, request=request)
         events.append("turn.after")
         return result
 
     @bus.listen("response.loop")
-    async def wrap_loop(state, config, budget, *, next):
+    async def wrap_loop(state, *, next):
         events.append("loop.before")
-        result = await next(state=state, config=config, budget=budget)
+        result = await next(state=state)
         events.append("loop.after")
         return result
 
@@ -718,7 +603,7 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
     )
 
     try:
-        await core.run_response(state=state)
+        await _run(state)
     finally:
         bus.reset()
         importlib.reload(core)
@@ -752,7 +637,7 @@ async def test_run_response_cancellation_before_created_is_noop() -> None:
 
     with anyio.CancelScope() as cancel_scope:
         cancel_scope.cancel()
-        await run_response(state=state)
+        await _run(state)
 
     assert store.begin_calls == 0
     assert store.cancel_calls == 0
@@ -776,8 +661,8 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(
             partial(
-                run_response,
-                state=state,
+                _run,
+                state,
             ),
         )
         await body_started.wait()
@@ -786,7 +671,7 @@ async def test_run_response_cancellation_after_created_persists_cancelled(monkey
     assert store.begin_calls == 1
     assert store.cancel_calls == 1
     assert store.fail_calls == 0
-    assert state.coordinator.current_response().status == "cancelled"
+    assert _state_coordinator(state).current_response().status == "cancelled"
     assert _published_event_types(channels) == [
         "response.created",
         "response.in_progress",
@@ -799,12 +684,12 @@ async def test_run_response_completes_without_main_execution_when_main_is_inacti
     store = _RecordingStore()
     state = _state(store, channels, client=object(), ingested=_ingested(active=set()))
 
-    await run_response(state=state)
+    await _run(state)
 
     assert store.begin_calls == 1
     assert store.fail_calls == 0
     assert store.finish_calls == 1
-    assert state.coordinator.current_response().status == "completed"
+    assert _state_coordinator(state).current_response().status == "completed"
     assert _published_event_types(channels) == [
         "response.created",
         "response.in_progress",
@@ -837,13 +722,13 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
     )
     state = _state(store, channels, request=request, client=client)
 
-    await run_response(state=state)
+    await _run(state)
 
     assert len(client.requests) == 2
     assert client.requests[0].max_completion_tokens == 20
     assert client.requests[1].max_completion_tokens == 6
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "completed"
     assert response.usage is not None
     assert response.usage.input_tokens == 20
@@ -876,13 +761,13 @@ async def test_run_response_summary_saves_progress_on_summary_done(monkeypatch: 
         ]
     )
     state = _state(store, channels, request=request, client=client)
-    run_response_with_summary = _reload_summary_handlers()
+    _reload_summary_handlers()
     monkeypatch.setattr("plap.plugins.summary.ChatReasoningSummarizer", _FakeReasoningSummarizer)
 
-    await run_response_with_summary(state=state)
+    await _run(state)
 
     assert store.replace_calls == 2
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "completed"
     assert isinstance(response.output[0], ResponseReasoningItem)
     assert response.output[0].summary[0].text == "summary part"
@@ -909,9 +794,9 @@ async def test_run_response_budget_exhaustion_marks_incomplete() -> None:
     )
     state = _state(store, channels, request=request, client=client)
 
-    await run_response(state=state)
+    await _run(state)
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "incomplete"
     assert response.incomplete_details is not None
     assert response.incomplete_details.reason == "max_output_tokens"
@@ -936,7 +821,7 @@ async def test_state_save_progress_persists_stubbed_open_tail_calls() -> None:
 
     await state.save_progress()
 
-    item = _last_output_item(state.coordinator)
+    item = _last_output_item(_state_coordinator(state))
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main[0].is_assistant()
@@ -969,7 +854,7 @@ async def test_state_save_progress_appends_cross_lane_stub_without_main_patch() 
 
     await state.save_progress()
 
-    item = _last_output_item(state.coordinator)
+    item = _last_output_item(_state_coordinator(state))
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [
@@ -1002,7 +887,7 @@ async def test_state_save_progress_preserves_inactive_cross_lane_call_without_st
 
     await state.save_progress()
 
-    item = _last_output_item(state.coordinator)
+    item = _last_output_item(_state_coordinator(state))
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [completed]
@@ -1019,7 +904,7 @@ async def test_state_save_progress_preserves_explicit_empty_thread() -> None:
 
     await state.save_progress()
 
-    item = _last_output_item(state.coordinator)
+    item = _last_output_item(_state_coordinator(state))
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert isinstance(payload.state, ReasoningPatch)
@@ -1072,7 +957,7 @@ async def test_state_save_progress_accepts_replaced_current_response_suffix() ->
 
     await state.save_progress()
 
-    item = _last_output_item(state.coordinator)
+    item = _last_output_item(_state_coordinator(state))
     assert isinstance(item, ResponseReasoningItem)
     payload = open_reasoning_payload(item.encrypted_content, keyring=_keyring())
     assert payload.main == [second, first]
@@ -1095,7 +980,7 @@ async def test_state_save_progress_accepts_cleared_current_response_suffix() -> 
 
     await state.save_progress()
 
-    assert state.coordinator.current_response().output == []
+    assert _state_coordinator(state).current_response().output == []
 
 
 async def test_state_save_progress_rejects_changes_within_persisted_main_prefix() -> None:
@@ -1155,7 +1040,7 @@ async def test_state_commit_uses_message_patch_and_emits_visible_items() -> None
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning_payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert reasoning_payload.main[0] == state.threads["main"][0]
@@ -1178,7 +1063,7 @@ async def test_state_commit_uses_direct_hidden_assistant_for_new_call_only_turn(
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 2
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1205,7 +1090,7 @@ async def test_state_commit_emits_full_non_main_checkpoint_after_user() -> None:
 
     await state.commit()
 
-    reasoning_item = state.coordinator.current_response().output[0]
+    reasoning_item = _state_coordinator(state).current_response().output[0]
     assert isinstance(reasoning_item, ResponseReasoningItem)
     payload = open_reasoning_payload(reasoning_item.encrypted_content, keyring=_keyring())
     assert payload.previous_reasoning_id is None
@@ -1229,7 +1114,7 @@ async def test_state_commit_keeps_inactive_main_output_private() -> None:
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1257,9 +1142,9 @@ async def test_run_response_emits_reactivated_persisted_main_call_without_main_c
     )
     state.threads.active.add("main")
 
-    await run_response(state=state)
+    await _run(state)
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "completed"
     assert len(response.output) == 3
     assert isinstance(response.output[0], ResponseReasoningItem)
@@ -1287,7 +1172,7 @@ async def test_state_commit_materializes_parked_text_tail_after_activation() -> 
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert reasoning.main == [MessagePatch(message=assistant)]
@@ -1309,7 +1194,7 @@ async def test_state_commit_does_not_republish_active_public_tail() -> None:
 
     await state.commit()
 
-    assert state.coordinator.current_response().output == []
+    assert _state_coordinator(state).current_response().output == []
 
 
 async def test_state_commit_does_not_republish_reactivated_public_tail() -> None:
@@ -1327,7 +1212,7 @@ async def test_state_commit_does_not_republish_reactivated_public_tail() -> None
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1352,7 +1237,7 @@ async def test_state_commit_publishes_new_active_tail_after_public_history() -> 
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert reasoning.main == [current, MessagePatch(current)]
@@ -1375,7 +1260,7 @@ async def test_state_commit_does_not_publish_reactivated_compacted_tail() -> Non
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1401,7 +1286,7 @@ async def test_state_commit_repositions_persisted_call_only_tail_without_public_
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 2
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1431,7 +1316,7 @@ async def test_state_commit_materializes_partial_cross_lane_settlement() -> None
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
     assert reasoning.main == [completed, MessagePatch(message=assistant)]
@@ -1459,7 +1344,7 @@ async def test_state_commit_keeps_fully_settled_main_turn_hidden() -> None:
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     reasoning = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1480,7 +1365,7 @@ async def test_state_commit_emits_active_thread_calls_in_deterministic_order() -
 
     await state.commit()
 
-    calls = [item for item in state.coordinator.current_response().output if isinstance(item, ResponseFunctionCallItem)]
+    calls = [item for item in _state_coordinator(state).current_response().output if isinstance(item, ResponseFunctionCallItem)]
     assert [open_call_id(item.call_id, keyring=_keyring(), thread_codes=_thread_codes()).thread for item in calls] == [
         "main",
         "defender",
@@ -1500,7 +1385,7 @@ async def test_state_commit_keeps_closed_assistant_with_user_tail_hidden() -> No
 
     await state.commit()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert len(response.output) == 1
     assert isinstance(response.output[0], ResponseReasoningItem)
     payload = open_reasoning_payload(response.output[0].encrypted_content, keyring=_keyring())
@@ -1560,12 +1445,12 @@ async def test_run_response_finishes_all_public_calls_when_cancelled_during_comm
     monkeypatch.setattr(StreamCoordinator, "emit", emit_with_pause)
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(partial(run_response, state=state))
+        task_group.start_soon(_run, state)
         await first_call_emitted.wait()
         task_group.cancel_scope.cancel()
         release_commit.set()
 
-    response = state.coordinator.current_response()
+    response = _state_coordinator(state).current_response()
     assert response.status == "completed"
     assert emitted_calls == 2
     assert store.cancel_calls == 0

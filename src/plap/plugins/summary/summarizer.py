@@ -4,15 +4,17 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from plap.llms.completions.budget import CompletionBudgetExhaustedError
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatMessage,
     ChatStreamOptions,
     IChatCompletionClient,
+    OutputEquivalence,
     ReasoningEffort,
     ServiceTier,
 )
-from plap.plugins.core.budget import ResponseBudgetExhaustedError
+from plap.responses.state import State
 
 type SummaryMode = Literal["auto", "concise", "detailed"]
 
@@ -75,8 +77,8 @@ class IReasoningSummarizer(Protocol):
     ) -> AsyncIterator[str]: ...
 
 
-def _summary_mode(state) -> str | None:
-    reasoning = state.prepared.execution_request.reasoning
+def _summary_mode(state: State) -> str | None:
+    reasoning = state.request.reasoning
     if reasoning is None:
         return None
     return reasoning.summary or reasoning.generate_summary
@@ -105,6 +107,7 @@ def _summary_request(
     prompt_cache_key: str | None,
     reasoning_effort: ReasoningEffort | None,
     service_tier: ServiceTier | None,
+    output_equivalence: OutputEquivalence,
     mode: SummaryMode,
     prior_summary: str | None,
     fragment: str,
@@ -122,6 +125,7 @@ def _summary_request(
         prompt_cache_key=prompt_cache_key,
         reasoning_effort=reasoning_effort,
         service_tier=service_tier,
+        output_equivalence=output_equivalence,
         stream_options=ChatStreamOptions(include_usage=True),
         temperature=0,
     )
@@ -135,7 +139,7 @@ async def _stream_summary_text(
         async for delta in client.stream(request):
             if delta.content_delta:
                 yield delta.content_delta
-    except ResponseBudgetExhaustedError:
+    except CompletionBudgetExhaustedError:
         return
 
 
@@ -149,6 +153,7 @@ class ChatReasoningSummarizer(IReasoningSummarizer):
         prompt_cache_key: str | None,
         reasoning_effort: ReasoningEffort | None,
         service_tier: ServiceTier | None,
+        output_equivalence: OutputEquivalence,
     ) -> None:
         self._client = client
         self._model = model
@@ -156,6 +161,7 @@ class ChatReasoningSummarizer(IReasoningSummarizer):
         self._prompt_cache_key = prompt_cache_key
         self._reasoning_effort = reasoning_effort
         self._service_tier = service_tier
+        self._output_equivalence = output_equivalence
 
     def stream(
         self,
@@ -170,6 +176,7 @@ class ChatReasoningSummarizer(IReasoningSummarizer):
             prompt_cache_key=self._prompt_cache_key,
             reasoning_effort=self._reasoning_effort,
             service_tier=self._service_tier,
+            output_equivalence=self._output_equivalence,
             mode=mode,
             prior_summary=prior_summary,
             fragment=fragment,

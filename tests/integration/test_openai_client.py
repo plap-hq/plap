@@ -2,7 +2,30 @@ import anyio
 import pytest
 from openai import APIStatusError, AsyncOpenAI, AuthenticationError
 
+from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, IChatCompletionClient
+
 MODEL = "plap-ai/wisp"
+
+
+class _FailingStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise RuntimeError("private-provider-secret")
+
+
+class _FailingChatCompletionClient(IChatCompletionClient):
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResult:
+        _ = request
+        raise RuntimeError("private-provider-secret")
+
+    def stream(self, request: ChatCompletionRequest) -> _FailingStream:
+        _ = request
+        return _FailingStream()
+
+    async def aclose(self) -> None:
+        return None
 
 
 @pytest.fixture
@@ -111,6 +134,46 @@ async def test_async_openai_client_sse_stream(openai_client: AsyncOpenAI) -> Non
     assert "response.in_progress" in event_types
     assert "response.output_item.added" in event_types
     assert event_types[-1] == "response.completed"
+
+
+async def test_async_openai_client_rejects_unknown_model_before_streaming(openai_client: AsyncOpenAI) -> None:
+    with pytest.raises(APIStatusError) as unknown_model:
+        await openai_client.responses.create(model="plap-ai/missing", input="hello", stream=True)
+
+    assert unknown_model.value.status_code == 404
+
+
+async def test_async_openai_client_persists_and_streams_failed_responses(live_server_factory, seeded_auth_data) -> None:
+    with live_server_factory(chat_completion_client=_FailingChatCompletionClient()) as server:
+        client = AsyncOpenAI(
+            api_key=seeded_auth_data.api_key,
+            base_url=f"{server.base_url}/v1",
+            websocket_base_url=f"{server.websocket_base_url}/v1",
+            max_retries=0,
+        )
+        try:
+            failed = await client.responses.create(model=MODEL, input="fail once")
+            retrieved = await client.responses.retrieve(failed.id)
+            stream = await client.responses.create(model=MODEL, input="fail stream", stream=True)
+            events = [event async for event in stream]
+            continued = await client.responses.create(
+                model=MODEL,
+                input="continue failed",
+                previous_response_id=failed.id,
+            )
+        finally:
+            await client.close()
+
+    assert failed.status == "failed"
+    assert failed.error is not None
+    assert failed.error.code == "server_error"
+    assert "private-provider-secret" not in failed.model_dump_json()
+    assert retrieved.status == "failed"
+    assert retrieved.error == failed.error
+    assert events[-1].type == "response.failed"
+    assert events[-1].response.status == "failed"
+    assert continued.status == "failed"
+    assert continued.previous_response_id == failed.id
 
 
 async def test_async_openai_client_websocket(openai_client: AsyncOpenAI) -> None:

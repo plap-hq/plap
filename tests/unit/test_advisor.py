@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Sequence
-from types import SimpleNamespace
 from uuid import uuid4
 
 import msgspec
@@ -13,6 +12,7 @@ from box import Box
 from plap.bus import bus
 from plap.config import CueBox
 from plap.keyring import SealingKeyring
+from plap.llms.completions.budget import BudgetedChatCompletionClient, CompletionBudget
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -27,6 +27,7 @@ from plap.llms.completions.chat import (
 from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Threads
+from plap.responses.routes import _accept_response, _execute_response
 from plap.responses.state import State
 from plap.responses.store import PreparedRequest
 from plap.responses.streaming import StreamCoordinator
@@ -59,7 +60,7 @@ def _markdown_module():
 
 def _summary_texts(state: State) -> list[str]:
     texts: list[str] = []
-    for item in state.coordinator.current_response().output:
+    for item in state.svcs.get(StreamCoordinator).current_response().output:
         if isinstance(item, ResponseReasoningItem):
             texts.extend(part.text for part in item.summary)
     return texts
@@ -92,8 +93,8 @@ class _RecordingStore:
         _ = prepared, response
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response_id: str) -> bool:
-        _ = prepared, response_id
+    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+        _ = prepared, response
         return True
 
 
@@ -195,15 +196,10 @@ def _config() -> _Config:
     )
 
 
-def _loaded(config: _Config | None = None) -> object:
-    return SimpleNamespace(plap=SimpleNamespace(config=config or _config()))
-
-
-def _svcs(client: IChatCompletionClient, config: _Config | None = None) -> svcs.Container:
+def _svcs(config: _Config | None = None) -> svcs.Container:
     registry = svcs.Registry()
     registry.register_value(SealingKeyring, _keyring())
-    registry.register_value(CueBox, _loaded(config))
-    registry.register_value(IChatCompletionClient, client)
+    registry.register_value(CueBox, config or _config())
     return svcs.Container(registry)
 
 
@@ -233,11 +229,7 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
         scope_id=uuid4(),
         response_request=actual_request,
         execution_request=actual_request,
-        current_input_items=[],
         stored_input_items=[],
-        parent_response_id=None,
-        conversation_id=None,
-        persist_response=True,
     )
 
 
@@ -258,8 +250,17 @@ def _state(
     ingested: Ingested | None = None,
 ) -> State:
     actual_request = request or _request()
+    config = _config()
     store = _RecordingStore()
     channels = _RecordingChannels()
+    container = _svcs(config)
+    budget = CompletionBudget(
+        actual_request.max_output_tokens,
+        reasoning_to_output=float(config.reasoning_to_output),
+    )
+    container.register_local_value(CompletionBudget, budget)
+    container.register_local_value(IChatCompletionClient, BudgetedChatCompletionClient(client, budget))
+    container.register_local_value(StreamCoordinator, _coordinator(store, channels, actual_request))
     return State.from_ingested(
         ingested=ingested
         or Ingested(
@@ -268,12 +269,16 @@ def _state(
             main_tail=None,
             last_reasoning_id=None,
         ),
-        prepared=_prepared(actual_request),
-        svcs=_svcs(client),
-        coordinator=_coordinator(store, channels, actual_request),
-        sealing_keyring=_keyring(),
+        request=actual_request,
+        config=config,
+        svcs=container,
         thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
     )
+
+
+async def _run(state: State) -> None:
+    await _accept_response(state)
+    await _execute_response(state)
 
 
 def _after_tool_ingested() -> Ingested:
@@ -412,13 +417,13 @@ def test_tool_outputs_render_in_assistant_call_order_without_ids() -> None:
 
 @pytest.mark.anyio
 async def test_before_tool_noop_returns_function_call() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(main=[_tool_step()], advisor=[_advisor_step("")])
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
-    output = state.coordinator.current_response().output
+    output = state.svcs.get(StreamCoordinator).current_response().output
     assert any(isinstance(item, ResponseFunctionCallItem) for item in output)
     assert len(client.advisor_requests) == 1
     advisor_request = client.advisor_requests[0]
@@ -431,7 +436,7 @@ async def test_before_tool_noop_returns_function_call() -> None:
 
 @pytest.mark.anyio
 async def test_advisor_rebinds_advise_without_renaming_client_tool() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     advise_tool = {
         "type": "function",
         "name": _ADVISE_TOOL_NAME,
@@ -441,7 +446,7 @@ async def test_advisor_rebinds_advise_without_renaming_client_tool() -> None:
     client = _Client(main=[_tool_step()], advisor=[_advisor_step("", tool_name="advise_2")])
     state = _state(client, request=request)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert [tool.function.name for tool in client.main_requests[0].tools] == [_ADVISE_TOOL_NAME, "read_file"]
     advisor_request = client.advisor_requests[0]
@@ -451,13 +456,13 @@ async def test_advisor_rebinds_advise_without_renaming_client_tool() -> None:
 
 @pytest.mark.anyio
 async def test_advisor_retry_limit_skips_current_phase() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(main=[_tool_step()], advisor=[_bad_advisor_step(), _bad_advisor_step(), _bad_advisor_step()])
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
-    output = state.coordinator.current_response().output
+    output = state.svcs.get(StreamCoordinator).current_response().output
     assert any(isinstance(item, ResponseFunctionCallItem) for item in output)
     assert len(client.advisor_requests) == 3
     thread = state.threads.get(_ADVISOR_THREAD)
@@ -467,14 +472,14 @@ async def test_advisor_retry_limit_skips_current_phase() -> None:
 
 @pytest.mark.anyio
 async def test_advisor_retry_hidden_usage_caps_next_attempt() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     request = _request(max_output_tokens=5)
     client = _Client(main=[_tool_step()], advisor=[_expensive_bad_advisor_step()])
     state = _state(client, request=request)
 
-    await core.run_response(state=state)
+    await _run(state)
 
-    output = state.coordinator.current_response().output
+    output = state.svcs.get(StreamCoordinator).current_response().output
     assert any(isinstance(item, ResponseFunctionCallItem) for item in output)
     assert len(client.advisor_requests) == 1
     thread = state.threads.get(_ADVISOR_THREAD)
@@ -484,16 +489,16 @@ async def test_advisor_retry_hidden_usage_caps_next_attempt() -> None:
 
 @pytest.mark.anyio
 async def test_before_tool_advice_aborts_call_and_loops_to_final_answer() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(
         main=[_tool_step(), _text_step("final answer")],
         advisor=[_advisor_step("Do not read that file."), _advisor_step("")],
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
-    output = state.coordinator.current_response().output
+    output = state.svcs.get(StreamCoordinator).current_response().output
     assert not any(isinstance(item, ResponseFunctionCallItem) for item in output)
     message = next(item for item in output if isinstance(item, ResponseMessageItem))
     assert message.content[0].text == "final answer"
@@ -513,14 +518,14 @@ async def test_before_tool_advice_aborts_call_and_loops_to_final_answer() -> Non
 
 @pytest.mark.anyio
 async def test_advisor_retry_history_block_survives_rebuild() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(
         main=[_tool_step(), _text_step("final answer")],
         advisor=[_bad_advisor_step(), _advisor_step("Do not read that file."), _advisor_step("")],
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.advisor_requests) == 3
     second_phase_request = client.advisor_requests[2]
@@ -542,13 +547,13 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert len(client.advisor_requests) == 1
     memory = state.memory.get(_ADVISOR_THREAD, {})
     assert isinstance(memory, dict)
     assert memory.get("note") == "Watch whether the final answer is actually verified."
-    main_request = await core.response_request(state=state, config=state.svcs.get(CueBox).plap.config)
+    main_request = await core.response_request(state=state)
     phase_instruction = _advisor_module()._phase_instruction(state, "before_return", main_request)
     assert "# note from previous phase (may be stale)" in phase_instruction
     assert "Watch whether the final answer is actually verified." in phase_instruction
@@ -563,14 +568,14 @@ async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
 
 @pytest.mark.anyio
 async def test_after_tool_advice_reaches_next_main_request() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(main=[_text_step("final answer")], advisor=[_advisor_step("Use the tool output."), _advisor_step("")])
     state = _state(
         client,
         ingested=_after_tool_ingested(),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert "### tool_output read_file" in client.advisor_requests[0].messages[-2].content
     assert any(
@@ -581,7 +586,7 @@ async def test_after_tool_advice_reaches_next_main_request() -> None:
 
 @pytest.mark.anyio
 async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
     client = _Client(main=[_text_step("final answer")], advisor=[_advisor_step("Use the tool output."), _advisor_step("")])
     state = _state(
@@ -589,14 +594,14 @@ async def test_after_tool_advice_emits_summary_annotation_when_not_stealth(monke
         ingested=_after_tool_ingested(),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert "[advisor] advice: Use the tool output." in _summary_texts(state)
 
 
 @pytest.mark.anyio
 async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
     client = _Client(
         main=[_text_step("final answer")],
@@ -607,23 +612,23 @@ async def test_after_tool_note_emits_summary_annotation_when_not_stealth(monkeyp
         ingested=_after_tool_ingested(),
     )
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert "[advisor] note: Watch whether the tools/list call appears next." in _summary_texts(state)
 
 
 @pytest.mark.anyio
 async def test_before_return_advice_loops_and_hides_first_answer() -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     client = _Client(
         main=[_text_step("first answer"), _text_step("revised answer")],
         advisor=[_advisor_step("Revise before returning."), _advisor_step("")],
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
-    output = state.coordinator.current_response().output
+    output = state.svcs.get(StreamCoordinator).current_response().output
     message = next(item for item in output if isinstance(item, ResponseMessageItem))
     assert message.content[0].text == "revised answer"
     assert len(client.main_requests) == 2
@@ -637,7 +642,7 @@ async def test_before_return_advice_loops_and_hides_first_answer() -> None:
 
 @pytest.mark.anyio
 async def test_before_return_advice_emits_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
     client = _Client(
         main=[_text_step("first answer"), _text_step("revised answer")],
@@ -645,14 +650,14 @@ async def test_before_return_advice_emits_summary_annotation_when_not_stealth(mo
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     assert "[advisor] blocked return. advice: Revise before returning." in _summary_texts(state)
 
 
 @pytest.mark.anyio
 async def test_before_return_note_only_emits_neutral_summary_annotation_when_not_stealth(monkeypatch: pytest.MonkeyPatch) -> None:
-    core = _reload_handlers()
+    _reload_handlers()
     monkeypatch.setattr("plap.plugins.advisor.STEALTH", False)
     client = _Client(
         main=[_text_step("first answer")],
@@ -660,7 +665,7 @@ async def test_before_return_note_only_emits_neutral_summary_annotation_when_not
     )
     state = _state(client)
 
-    await core.run_response(state=state)
+    await _run(state)
 
     texts = _summary_texts(state)
     assert "[advisor] note: All good. Agent read the file and compile passed." in texts

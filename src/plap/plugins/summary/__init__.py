@@ -5,9 +5,8 @@ from collections.abc import AsyncIterator
 import anyio
 
 from plap.bus import bus
-from plap.config import CueBox
 from plap.llms.completions.chat import IChatCompletionClient
-from plap.plugins.core.budget import ResponseBudget, budgeted
+from plap.plugins.core.request import build_output_equivalence
 from plap.plugins.easy import bootstrap
 from plap.plugins.summary.summarizer import (
     ChatReasoningSummarizer,
@@ -88,29 +87,28 @@ async def _run_summarizer(
 @bus.listen("response.summary")
 async def wrap_summary(
     state: State,
-    config: CueBox,
-    budget: ResponseBudget,
     source: AsyncIterator[SummaryDelta | SummaryDone],
     *,
     next,
 ) -> None:
     mode = _summary_mode(state)
     if mode is None:
-        return await next(state=state, config=config, budget=budget, source=source)
+        return await next(state=state, source=source)
 
     summarizer = ChatReasoningSummarizer(
-        client=budgeted(await state.svcs.aget(IChatCompletionClient), budget, config.summary),
-        model=config.summary.model,
-        max_completion_tokens=config.summary.max_completion_tokens,
-        prompt_cache_key=state.prepared.execution_request.prompt_cache_key,
-        reasoning_effort=config.summary.reasoning_effort,
-        service_tier=config.summary.service_tier,
+        client=await state.svcs.aget(IChatCompletionClient),
+        model=state.config.summary.model,
+        max_completion_tokens=state.config.summary.max_completion_tokens,
+        prompt_cache_key=state.request.prompt_cache_key,
+        reasoning_effort=state.config.summary.reasoning_effort,
+        service_tier=state.config.summary.service_tier,
+        output_equivalence=build_output_equivalence(state.config.summary),
     )
 
     downstream_send, downstream_receive = anyio.create_memory_object_stream[SummaryDelta | SummaryDone](32)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_run_summarizer, mode, summarizer, source, downstream_send)
         try:
-            return await next(state=state, config=config, budget=budget, source=downstream_receive)
+            return await next(state=state, source=downstream_receive)
         finally:
             task_group.cancel_scope.cancel()

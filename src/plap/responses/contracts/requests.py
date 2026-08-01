@@ -255,6 +255,14 @@ class ResponseCreateRequest(StrictModel):
     def validate_metadata(cls, value: Metadata | None) -> Metadata | None:
         return _validate_metadata(value)
 
+    @property
+    def conversation_id(self) -> str | None:
+        if self.conversation is None:
+            return None
+        if isinstance(self.conversation, str):
+            return self.conversation
+        return self.conversation.id
+
 
 class CompactRequest(StrictModel):
     input: str | list[RequestInputItem] | None = Field(
