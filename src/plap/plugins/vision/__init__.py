@@ -12,6 +12,7 @@ import msgspec
 
 from plap.bus import bus
 from plap.config import CueBox
+from plap.llms.completions.budget import BudgetedChatCompletionClient
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -20,7 +21,6 @@ from plap.llms.completions.chat import (
     ChatContentText,
     ChatMessage,
     ChatToolCall,
-    IChatCompletionClient,
 )
 from plap.plugins.core.request import build_chat_request
 from plap.plugins.easy import ServerTool, bootstrap, server_tools
@@ -302,7 +302,7 @@ class VisionTool(ServerTool):
                 },
             )
 
-        client = await state.svcs.aget(IChatCompletionClient)
+        client = await state.svcs.aget(BudgetedChatCompletionClient)
         result = await client.complete(_vision_request(state.config, state.request, transcript, ids, prompt))
         return _tool_output_message(result, tool_call_id=call.id)
 

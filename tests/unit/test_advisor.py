@@ -259,7 +259,7 @@ def _state(
         reasoning_to_output=float(config.reasoning_to_output),
     )
     container.register_local_value(CompletionBudget, budget)
-    container.register_local_value(IChatCompletionClient, BudgetedChatCompletionClient(client, budget))
+    container.register_local_value(BudgetedChatCompletionClient, BudgetedChatCompletionClient(client, budget))
     container.register_local_value(StreamCoordinator, _coordinator(store, channels, actual_request))
     return State.from_ingested(
         ingested=ingested

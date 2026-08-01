@@ -9,11 +9,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pytest
-import svcs
 import uvicorn
 
 from plap.app import create_app
-from plap.llms.completions.budget import BudgetedChatCompletionClient, CompletionBudget
 from plap.llms.completions.chat import (
     ChatCompletionDelta,
     ChatCompletionRequest,
@@ -65,12 +63,9 @@ def _build_test_app(
         app = create_app()
     client = chat_completion_client or _StaticChatCompletionClient()
 
-    def client_factory(svcs_container: svcs.Container) -> IChatCompletionClient:
-        return BudgetedChatCompletionClient(client, svcs_container.get(CompletionBudget))
-
-    app.state.svcs_registry.register_factory(
+    app.state.svcs_registry.register_value(
         IChatCompletionClient,
-        client_factory,
+        client,
         on_registry_close=client.aclose,
     )
     return app

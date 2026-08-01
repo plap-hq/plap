@@ -24,7 +24,6 @@ from plap.llms.completions.chat import (
     ChatFinishReason,
     ChatToolCallDelta,
     ChatUsage,
-    IChatCompletionClient,
 )
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
 from plap.plugins.core.loop import response_request
@@ -269,7 +268,7 @@ def _state(
     )
     container.register_local_value(CompletionBudget, budget)
     container.register_local_value(
-        IChatCompletionClient,
+        BudgetedChatCompletionClient,
         BudgetedChatCompletionClient(client if client is not None else object(), budget),
     )
     container.register_local_value(StreamCoordinator, _coordinator(actual_store, actual_channels, actual_request))

@@ -10,7 +10,11 @@ import structlog
 
 from plap.bus import bus
 from plap.llms import RetryLimitExceededError
-from plap.llms.completions.budget import CompletionBudget, CompletionBudgetExhaustedError
+from plap.llms.completions.budget import (
+    BudgetedChatCompletionClient,
+    CompletionBudget,
+    CompletionBudgetExhaustedError,
+)
 from plap.llms.completions.chat import (
     ChatCompletionRequest,
     ChatCompletionResult,
@@ -21,7 +25,6 @@ from plap.llms.completions.chat import (
     ChatTool,
     ChatToolCall,
     ChatToolChoiceFunction,
-    IChatCompletionClient,
 )
 from plap.llms.retry import complete as retry_complete
 from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
@@ -327,7 +330,7 @@ async def _run_advisor(
         phase_instruction=phase_instruction,
     )
 
-    client = await state.svcs.aget(IChatCompletionClient)
+    client = await state.svcs.aget(BudgetedChatCompletionClient)
 
     try:
         latest_snapshot = await retry_complete(

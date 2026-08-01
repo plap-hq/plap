@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 import anyio
 
 from plap.bus import bus
-from plap.llms.completions.chat import IChatCompletionClient
+from plap.llms.completions.budget import BudgetedChatCompletionClient
 from plap.plugins.core.request import build_output_equivalence
 from plap.plugins.easy import bootstrap
 from plap.plugins.summary.summarizer import (
@@ -96,7 +96,7 @@ async def wrap_summary(
         return await next(state=state, source=source)
 
     summarizer = ChatReasoningSummarizer(
-        client=await state.svcs.aget(IChatCompletionClient),
+        client=await state.svcs.aget(BudgetedChatCompletionClient),
         model=state.config.summary.model,
         max_completion_tokens=state.config.summary.max_completion_tokens,
         prompt_cache_key=state.request.prompt_cache_key,

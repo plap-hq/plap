@@ -15,8 +15,8 @@ from opentelemetry import trace
 
 from plap.bus import bus
 from plap.llms.accumulator import Snapshot
-from plap.llms.completions.budget import CompletionBudget, CompletionBudgetExhaustedError
-from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatFinishReason, ChatUsage, IChatCompletionClient
+from plap.llms.completions.budget import BudgetedChatCompletionClient, CompletionBudget, CompletionBudgetExhaustedError
+from plap.llms.completions.chat import ChatCompletionRequest, ChatCompletionResult, ChatFinishReason, ChatUsage
 from plap.llms.retry import RetryValidator, retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
 from plap.llms.retry import stream as retry_stream
 from plap.plugins.core.request import build_response_request
@@ -60,7 +60,7 @@ async def response_completion(
     request: ChatCompletionRequest,
     validators: tuple[RetryValidator, ...],
 ) -> ChatCompletionResult:
-    client = await state.svcs.aget(IChatCompletionClient)
+    client = await state.svcs.aget(BudgetedChatCompletionClient)
     budget = state.svcs.get(CompletionBudget)
     main = state.threads["main"]
     suffix = len(main)

@@ -27,12 +27,16 @@ async def bootstrap_routes(routes: tuple[object, ...], loaded: CueBox, *, next):
 
 @bus.listen("bootstrap.services")
 async def bootstrap_services(registry: svcs.Registry, loaded: CueBox, *, next):
-    client = build_chat_completion_client(loaded.plap.config)
+    base_client = build_chat_completion_client(loaded.plap.config)
 
-    def client_factory(svcs_container: svcs.Container) -> IChatCompletionClient:
-        return BudgetedChatCompletionClient(client, svcs_container.get(CompletionBudget))
+    def budgeted_client_factory(svcs_container: svcs.Container) -> BudgetedChatCompletionClient:
+        return BudgetedChatCompletionClient(
+            svcs_container.get(IChatCompletionClient),
+            svcs_container.get(CompletionBudget),
+        )
 
-    registry.register_factory(IChatCompletionClient, client_factory, on_registry_close=client.aclose)
+    registry.register_value(IChatCompletionClient, base_client, on_registry_close=base_client.aclose)
+    registry.register_factory(BudgetedChatCompletionClient, budgeted_client_factory)
     return await next()
 
 
