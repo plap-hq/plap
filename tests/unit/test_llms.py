@@ -3449,6 +3449,47 @@ async def test_router_complete_retries_transient_errors_before_fallback(monkeypa
     assert 0.5 <= delays[1] <= 1.0
 
 
+async def test_router_complete_skips_multiple_unavailable_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    fallback = _StubChatClient(complete_result=_completion_result("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", "ok"))
+    router = RoutingChatCompletionClient([ModelRoute(prefix="gmicloud/", client=fallback)])
+
+    result = await router.complete(
+        ChatCompletionRequest(
+            model="crof/qwen3.5-9b,novita/deepseek/deepseek-v3.2,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+
+    assert result.model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [request.model for request in fallback.complete_requests] == ["XiaomiMiMo/MiMo-V2.5-Pro"]
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_router_complete_reports_when_every_route_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    unused = _StubChatClient()
+    router = RoutingChatCompletionClient([ModelRoute(prefix="gmicloud/", client=unused)])
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat completion route configured for model 'novita/model-b'"):
+        await router.complete(
+            ChatCompletionRequest(
+                model="crof/model-a,novita/model-b",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+
+    assert unused.complete_requests == []
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_exhausted",
+    ]
+
+
 async def test_router_aclose_closes_shared_child_once() -> None:
     shared = _StubChatClient()
     router = RoutingChatCompletionClient(
@@ -3572,6 +3613,57 @@ async def test_router_stream_retries_transient_errors_before_fallback(monkeypatc
     assert len(delays) == 2
     assert 0.25 <= delays[0] <= 0.5
     assert 0.5 <= delays[1] <= 1.0
+
+
+async def test_router_stream_skips_an_unavailable_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    fallback = _StubChatClient(
+        stream_result=[
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", content_delta="ok"),
+            _delta("gmicloud/XiaomiMiMo/MiMo-V2.5-Pro", finish_reason="stop"),
+        ]
+    )
+    router = RoutingChatCompletionClient([ModelRoute(prefix="gmicloud/", client=fallback)])
+
+    deltas = [
+        delta
+        async for delta in router.stream(
+            ChatCompletionRequest(
+                model="crof/qwen3.5-9b,gmicloud/XiaomiMiMo/MiMo-V2.5-Pro",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    ]
+
+    assert deltas[0].model == "gmicloud/XiaomiMiMo/MiMo-V2.5-Pro"
+    assert [request.model for request in fallback.stream_requests] == ["XiaomiMiMo/MiMo-V2.5-Pro"]
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_succeeded",
+    ]
+
+
+async def test_router_stream_reports_when_every_route_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_router_logs(monkeypatch)
+    unused = _StubChatClient()
+    router = RoutingChatCompletionClient([ModelRoute(prefix="gmicloud/", client=unused)])
+
+    with pytest.raises(ChatCompletionUnsupportedRequestError, match="No chat completion route configured for model 'novita/model-b'"):
+        [
+            delta
+            async for delta in router.stream(
+                ChatCompletionRequest(
+                    model="crof/model-a,novita/model-b",
+                    messages=[ChatMessage(role="user", content="hello")],
+                )
+            )
+        ]
+
+    assert unused.stream_requests == []
+    assert [event["event"] for event in events] == [
+        "llm.router.attempt_failed",
+        "llm.router.fallback_exhausted",
+    ]
 
 
 async def test_router_stream_does_not_fallback_after_first_delta(monkeypatch: pytest.MonkeyPatch) -> None:

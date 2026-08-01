@@ -28,6 +28,7 @@ archive/
 
 .dev/
 .env*
+!.env.example
 node_modules/
 
 jobs/

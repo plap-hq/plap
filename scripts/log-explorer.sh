@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-state_file="$repo_root/.dev/dev.env"
+state_file="$repo_root/.dev/.env"
 default_log_file="$repo_root/.dev/plap.log.jsonl"
 
 seq_image="${PLAP_SEQ_IMAGE:-datalust/seq:2025.2}"
@@ -45,8 +45,9 @@ If 5341 is already in use and you did not explicitly set PLAP_SEQ_PORT,
 the script will auto-pick a free local port.
 
 Log file resolution:
-  1. PLAP_LOG_FILE from .dev/dev.env (when available)
-  2. .dev/plap.log.jsonl fallback
+  1. Explicit PLAP_LOG_FILE
+  2. PLAP_DEV_LOG_FILE from .dev/.env
+  3. .dev/plap.log.jsonl fallback
 EOF
 }
 
@@ -67,6 +68,10 @@ load_state() {
 resolve_log_file() {
   if [[ -n "${PLAP_LOG_FILE:-}" ]]; then
     printf '%s\n' "$PLAP_LOG_FILE"
+    return
+  fi
+  if [[ -n "${PLAP_DEV_LOG_FILE:-}" ]]; then
+    printf '%s\n' "$PLAP_DEV_LOG_FILE"
     return
   fi
   printf '%s\n' "$default_log_file"

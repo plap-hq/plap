@@ -232,11 +232,11 @@ class RoutingChatCompletionClient(IChatCompletionClient):
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
-            route = self._route_for(attempt_model)
-            provider_model = _provider_model(attempt_model, route.prefix)
-            attempt_request = replace(request, model=provider_model)
             for attempt_try_index in range(1, attempt_try_count + 1):
                 try:
+                    route = self._route_for(attempt_model)
+                    provider_model = _provider_model(attempt_model, route.prefix)
+                    attempt_request = replace(request, model=provider_model)
                     result = await route.client.complete(attempt_request)
                 except (ChatCompletionProviderError, ChatCompletionUnsupportedRequestError) as exc:
                     last_error = exc
@@ -300,13 +300,13 @@ class RoutingChatCompletionClient(IChatCompletionClient):
         last_error: ChatCompletionProviderError | ChatCompletionUnsupportedRequestError | None = None
         last_attempt_model: str | None = None
         for attempt_index, attempt_model in enumerate(attempts, start=1):
-            route = self._route_for(attempt_model)
-            provider_model = _provider_model(attempt_model, route.prefix)
-            attempt_request = replace(request, model=provider_model)
             for attempt_try_index in range(1, attempt_try_count + 1):
                 yielded = False
                 iterator = None
                 try:
+                    route = self._route_for(attempt_model)
+                    provider_model = _provider_model(attempt_model, route.prefix)
+                    attempt_request = replace(request, model=provider_model)
                     iterator = route.client.stream(attempt_request).__aiter__()
                     first_delta = await _first_output_delta(
                         iterator,

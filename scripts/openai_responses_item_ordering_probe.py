@@ -13,7 +13,7 @@ from pathlib import Path
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ENV_FILE = REPO_ROOT / "tests" / ".env"
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 DEFAULT_REPORT_FILE = REPO_ROOT / ".dev" / "openai_responses_item_ordering_probe.json"
 MODEL = "gpt-5.4-mini"
 INCLUDE = ["reasoning.encrypted_content"]
@@ -72,7 +72,7 @@ def main() -> int:
     _load_env_file(args.env_file.resolve())
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise SystemExit("OPENAI_API_KEY is not set; put it in tests/.env or your shell before running this probe.")
+        raise SystemExit("OPENAI_API_KEY is not set; put it in .env or your shell before running this probe.")
     report = asyncio.run(
         _run_probe(
             api_key=api_key,

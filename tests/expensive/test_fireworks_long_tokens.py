@@ -90,7 +90,7 @@ def _skip_if_provider_account_unavailable(exc: ChatCompletionProviderError) -> N
 
 
 def _load_expensive_env() -> None:
-    env_path = Path(__file__).resolve().parents[1] / ".env"
+    env_path = Path(__file__).resolve().parents[2] / ".env"
     if not env_path.exists():
         return
 

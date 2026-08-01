@@ -16,7 +16,7 @@ from plap.llms.completions.client import ChatCompletionClient  # noqa: E402
 from plap.llms.completions.providers import build_openrouter_provider  # noqa: E402
 from plap.llms.completions.tokens import estimate_text_tokens  # noqa: E402
 
-DEFAULT_ENV_FILE = REPO_ROOT / "tests" / ".env"
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 DEFAULT_WARMUPS = 1
 DEFAULT_ROUNDS = 5
 DEFAULT_MAX_COMPLETION_TOKENS = 1024
@@ -186,7 +186,7 @@ async def _run(args: argparse.Namespace) -> int:
     _load_env_file(args.env_file.resolve())
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise SystemExit("OPENROUTER_API_KEY is not set; put it in tests/.env or your shell before running this benchmark.")
+        raise SystemExit("OPENROUTER_API_KEY is not set; put it in .env or your shell before running this benchmark.")
 
     client = ChatCompletionClient(build_openrouter_provider(api_key=api_key))
 

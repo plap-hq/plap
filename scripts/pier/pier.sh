@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
-state_file="$repo_root/.dev/dev.env"
+state_file="$repo_root/.dev/.env"
 default_agent="mini-swe-agent"
 default_model="openai/plap-ai/wisp"
 custom_environment_import_path="scripts.pier:PlapPierDockerEnvironment"
@@ -110,8 +110,8 @@ set -a
 source "$state_file"
 set +a
 
-: "${PLAP_DEV_BASE_URL:?PLAP_DEV_BASE_URL is missing from .dev/dev.env}"
-: "${PLAP_DEV_API_KEY:?PLAP_DEV_API_KEY is missing from .dev/dev.env}"
+: "${PLAP_DEV_BASE_URL:?PLAP_DEV_BASE_URL is missing from .dev/.env}"
+: "${PLAP_DEV_API_KEY:?PLAP_DEV_API_KEY is missing from .dev/.env}"
 
 normalize_agent_args "$@"
 set -- "${normalized_args[@]}"

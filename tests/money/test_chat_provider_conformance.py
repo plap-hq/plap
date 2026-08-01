@@ -666,7 +666,7 @@ def _skip_if_provider_account_unavailable(
 
 
 def _load_money_env() -> None:
-    env_path = Path(__file__).resolve().parents[1] / ".env"
+    env_path = Path(__file__).resolve().parents[2] / ".env"
     if not env_path.exists():
         return
 

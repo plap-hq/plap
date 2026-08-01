@@ -49,7 +49,7 @@ from plap.llms.retry import RetryLimitExceededError  # noqa: E402
 from plap.llms.retry import complete as retry_complete  # noqa: E402
 
 DEFAULT_DATABASE = REPO_ROOT / "archive" / "deepswe.duckdb"
-DEFAULT_ENV_FILE = REPO_ROOT / "tests" / ".env"
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 DEFAULT_RUN_DIR = REPO_ROOT / ".dev" / "mimo-gepa"
 DEFAULT_TASK_MODEL = "crof/mimo-v2.5-pro,crof/mimo-v2.5-pro"
 DEFAULT_JUDGE_MODEL = "crof/deepseek-v4-pro,crof/deepseek-v4-pro"

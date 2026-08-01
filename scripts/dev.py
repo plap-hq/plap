@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -114,7 +115,6 @@ def main() -> int:
     try:
         explicit_env = set(os.environ)
         env_file = args.env_file.resolve()
-        fallback_env_file = REPO_ROOT / "tests" / ".env"
         _remove_state_file(state_file)
 
         env_values = _parse_env_file(env_file)
@@ -122,12 +122,10 @@ def main() -> int:
             if key not in explicit_env:
                 os.environ[key] = value
 
-        if fallback_env_file != env_file:
-            fallback_env_values = _parse_env_file(fallback_env_file)
-            for key, value in fallback_env_values.items():
-                os.environ.setdefault(key, value)
-
         _populate_provider_aliases()
+        config = _load_dev_config()
+        dev_model = _resolve_dev_model(config)
+        _require_provider_keys(config, model=dev_model)
         managed_state = {
             "PLAP_DEV_USER_EMAIL": os.environ.get("PLAP_DEV_USER_EMAIL", DEFAULT_DEV_EMAIL),
             "PLAP_DEV_ORG_SLUG": os.environ.get("PLAP_DEV_ORG_SLUG", DEFAULT_DEV_ORG_SLUG),
@@ -143,7 +141,6 @@ def main() -> int:
         _normalize_sealing_keys_env()
         _reset_log_file(Path(os.environ["PLAP_DEV_LOG_FILE"]))
         _ensure_managed_collector(managed_state, resources)
-        _require_provider_keys()
 
         managed_state.update(
             {
@@ -165,8 +162,6 @@ def main() -> int:
         if not args.skip_db_upgrade:
             _run_migrations(os.environ["PLAP_DATABASE_URL"])
 
-        config = _load_dev_config()
-        dev_model = _resolve_dev_model(config)
         api_key = asyncio.run(
             _ensure_dev_api_key(
                 database_url=os.environ["PLAP_DATABASE_URL"],
@@ -205,7 +200,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--postgres-container", default=DEFAULT_POSTGRES_CONTAINER)
     parser.add_argument("--postgres-image", default=DEFAULT_POSTGRES_IMAGE)
     parser.add_argument("--env-file", default=REPO_ROOT / ".env", type=Path)
-    parser.add_argument("--state-file", default=REPO_ROOT / ".dev" / "dev.env", type=Path)
+    parser.add_argument("--state-file", default=REPO_ROOT / ".dev" / ".env", type=Path)
     parser.add_argument("--no-server", action="store_true")
     parser.add_argument("--no-reload", action="store_true")
     parser.add_argument("--skip-db-upgrade", action="store_true")
@@ -263,44 +258,66 @@ def _populate_provider_aliases() -> None:
             os.environ[source] = os.environ[target]
 
 
-def _require_provider_keys() -> None:
-    missing = [name for name in _required_provider_env_vars(_load_dev_config()) if not os.environ.get(name)]
-    if missing:
-        missing_list = ", ".join(missing)
-        raise SystemExit(
-            "Missing required provider env vars for the configured runtime models: "
-            f"{missing_list}. Put them in your shell or repo .env before running this script."
-        )
+def _route_model_attempts(model: str) -> list[str]:
+    attempts = [part.strip() for part in model.split(",")]
+    if not attempts or any(not attempt for attempt in attempts):
+        raise SystemExit(f"Invalid routed model fallback chain in dev settings: {model!r}")
+    return attempts
 
 
-def _required_provider_env_vars(config: CueBox) -> list[str]:
-    models = _configured_models(config)
-    required: set[str] = set()
-    for model in models:
-        for attempt in _route_model_attempts(model):
-            for prefix, env_var in ROUTE_ENV_VARS.items():
-                if attempt.startswith(prefix):
-                    required.add(PROVIDER_ENV_ALIASES[env_var])
-                    break
-    return sorted(required)
-
-
-def _configured_models(config: CueBox) -> set[str]:
-    models: set[str] = set()
-    branches = config.overlays.get("model", {})
-    if not isinstance(branches, dict):
-        return models
-    for branch in branches.values():
-        if not isinstance(branch, dict):
+def _completion_fields(resolved: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    fields: dict[str, Mapping[str, object]] = {}
+    for name, value in resolved.items():
+        if not isinstance(value, Mapping):
             continue
-        for field in ("main", "summary", "vision"):
-            config_field = branch.get(field)
-            if not isinstance(config_field, dict):
-                continue
-            model = config_field.get("model")
-            if isinstance(model, str) and model:
-                models.add(model)
-    return models
+        if not isinstance(value.get("model"), str):
+            continue
+        if not isinstance(value.get("sampling"), Mapping):
+            continue
+        if not isinstance(value.get("output_equivalence"), Mapping):
+            continue
+        fields[name] = value
+    return fields
+
+
+def _provider_env_vars(model: str) -> tuple[str, ...]:
+    env_vars: list[str] = []
+    for attempt in _route_model_attempts(model):
+        provider, separator, _ = attempt.partition("/")
+        env_var = ROUTE_ENV_VARS.get(f"{provider}/") if separator else None
+        if env_var is None:
+            continue
+        alias = PROVIDER_ENV_ALIASES[env_var]
+        if alias not in env_vars:
+            env_vars.append(alias)
+    return tuple(env_vars)
+
+
+def _missing_provider_fields(fields: Mapping[str, Mapping[str, object]]) -> dict[str, tuple[str, ...]]:
+    missing: dict[str, tuple[str, ...]] = {}
+    for name, field in fields.items():
+        env_vars = _provider_env_vars(str(field["model"]))
+        if not env_vars or not any(os.environ.get(env_var) for env_var in env_vars):
+            missing[name] = env_vars
+    return missing
+
+
+def _require_provider_keys(config: CueBox, *, model: str) -> None:
+    fields = _completion_fields(config.resolve({"model": model}))
+    if not fields:
+        raise SystemExit(f"Development model {model!r} has no completion fields.")
+
+    missing = _missing_provider_fields(fields)
+    if not missing:
+        return
+
+    details = "\n".join(
+        f"  {name}: {', '.join(env_vars) if env_vars else 'no recognized provider prefixes'}" for name, env_vars in sorted(missing.items())
+    )
+    raise SystemExit(
+        f"Missing provider credentials for development model {model!r}:\n{details}\n"
+        "Put at least one provider key for each field in your shell or repo .env."
+    )
 
 
 def _load_dev_config() -> CueBox:
@@ -323,13 +340,6 @@ def _load_dev_config() -> CueBox:
     if "plap" not in loaded:
         raise SystemExit("config load did not produce package 'plap'")
     return loaded.plap.config
-
-
-def _route_model_attempts(model: str) -> list[str]:
-    attempts = [part.strip() for part in model.split(",")]
-    if not attempts or any(not attempt for attempt in attempts):
-        raise SystemExit(f"Invalid routed model fallback chain in dev settings: {model!r}")
-    return attempts
 
 
 def _docker_client() -> docker.DockerClient:
@@ -681,7 +691,7 @@ def _print_summary(*, state_file: Path, log_file: Path, host: str, port: int, ap
     print(f"WebSocket URL: ws://{host}:{port}/v1")
     print(f"Model: {model}")
     print(f"API key: {api_key}")
-    print("Source this from another shell while the server is running: source .dev/dev.env")
+    print("Source this from another shell while the server is running: source .dev/.env")
     print(f"Explore logs: lnav {shlex.quote(str(log_file))}")
     print(f"Smoke test: curl http://{host}:{port}/v1/models -H 'Authorization: Bearer {api_key}'")
 

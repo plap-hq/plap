@@ -1,0 +1,26 @@
+# Documentation
+
+Plugins extend the Responses server. `plap.llms` provides the lower-level chat-completion library used by the server.
+
+## Add server functionality
+
+- [Write your first plugin](first-plugin.md) adds a `server_time` tool and calls it through the Responses API.
+- [Server tools](easy/server-tools.md) covers arguments, results, saved history, collisions, and failures.
+
+## Modify execution
+
+- [Event bus](bus.md) defines how plugin handlers compose.
+- [Hooks](hooks.md) covers the response and bootstrap events that plugins can modify.
+- [Reasoning summaries](summary.md) stream progress while the main answer remains private.
+- [Response state](state.md) covers request data, configuration, memory, model context, and services.
+- [Threads](threads.md) covers isolated model histories, active client-tool work, and parking.
+
+## Add application components
+
+- [Bootstrap helpers](easy/bootstrap.md) add config, routes, services, and shutdown hooks without writing bus listeners.
+
+## Use the LLM library
+
+- [Make your first completion](llms/getting-started.md) calls OpenRouter directly without starting the Responses server.
+- The [`plap.llms` reference](llms/README.md) covers messages, providers, routing, streaming, retries, model JSON, completion
+  budgets, and token measurement.
