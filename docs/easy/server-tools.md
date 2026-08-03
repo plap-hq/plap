@@ -40,6 +40,7 @@ class Lookup(ServerTool):
     name: str = "lookup"
     description: str = "Look up a record by ID."
     parameters: dict[str, Any] = field(
+        # ServerTool subclasses are dataclasses; mutable field defaults need a factory.
         default_factory=lambda: {
             "type": "object",
             "properties": {"id": {"type": "string"}},
@@ -113,4 +114,4 @@ Use a client tool when the API caller implements the function. plap returns a fu
 request supplies its output.
 
 Server tools add a capability without changing the surrounding response behavior. A [response hook](../hooks.md#response-hooks)
-can modify an existing stage.
+can change or wrap behavior that is part of the normal response cycle.

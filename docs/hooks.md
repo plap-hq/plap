@@ -3,7 +3,7 @@
 Server tools extend what the model can do. Hooks change how plap itself behaves.
 
 A hook can change a model request before it is sent, inspect a turn before the loop continues, or alter how the application
-starts. Underneath, hooks are ordered [event-bus listeners](bus.md) that wrap existing stages.
+starts. Underneath, the [event bus](bus.md) implements each hook as a core handler with an ordered listener chain.
 
 ## Response hooks
 
@@ -21,8 +21,8 @@ response.start
 └── response.commit
 ```
 
-`response.turn` contains one `response.completion` stage. Completion can make several attempts, and each attempt can produce
-many snapshots.
+`response.turn` calls `response.completion` once. A completion can make several attempts, and each attempt can produce many
+snapshots.
 
 | Hook | Receives | Returns | What it can change |
 | --- | --- | --- | --- |

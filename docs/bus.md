@@ -80,4 +80,4 @@ Plugins can listen to either family directly. [`plap.plugins.easy`](easy/README.
 | `easy.server_tools` | `response.request`, `response.snapshot`, `response.completion` |
 
 Use the easy API when it already expresses the contribution. Use `bus.listen` when the plugin needs to inspect existing
-values, change ordering, wrap work before and after a stage, or stop a stage entirely.
+values, run work before or after `next`, change the result, or stop the listener chain entirely.

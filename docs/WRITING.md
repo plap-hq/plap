@@ -154,8 +154,8 @@ Avoid phrases such as:
 - "The objects have one job each."
 - "Behavior belongs at this boundary."
 
-A link should be attached to a concrete fact. For example: "A response hook can modify an existing stage" is useful;
-"continue with hooks" is not.
+A link should be attached to a concrete fact. For example: "A response hook can change how plap builds the next model
+request" is useful; "continue with hooks" is not.
 
 Navigation must name a concrete reason to follow the link. Avoid vague promises such as "the complete contract" unless the
 target is specifically a formal input/output contract.
@@ -169,7 +169,7 @@ Do not substitute an inventory for an explanation. Tables and lists are useful r
 their entries is clear; they are not connective prose.
 
 Keep each transition at one level of abstraction. If the reader is choosing an extension model, explain the difference
-between the models. Do not jump down into unrelated method names, lifecycle stages, and edge cases to justify a link.
+between the models. Do not jump down into unrelated method names, lifecycle details, and edge cases to justify a link.
 
 Synthesize related facts before listing details. More facts make the writing better only when they help answer the current
 question.

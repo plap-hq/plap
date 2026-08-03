@@ -23,6 +23,7 @@ class ServerTime(ServerTool):
     name: str = "server_time"
     description: str = "Return the current UTC time."
     parameters: dict[str, Any] = field(
+        # ServerTool subclasses are dataclasses; mutable field defaults need a factory.
         default_factory=lambda: {
             "type": "object",
             "properties": {},
@@ -123,5 +124,4 @@ Congrats! You now have an additive plugin: it gives the model a new capability.
 If your next plugin adds another server-owned capability, continue with [Server tools](easy/server-tools.md). It starts from
 the `ServerTool` used here and develops it beyond the no-argument `server_time` example.
 
-If your plugin needs to change the process around the model instead of adding another capability, continue with
-[Hooks](hooks.md). A hook wraps the relevant response stage, allowing you to modify the corresponding behavior.
+If your plugin needs to change or wrap behavior that is part of the normal response cycle, continue with [Hooks](hooks.md).
