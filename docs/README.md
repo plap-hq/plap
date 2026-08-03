@@ -22,5 +22,5 @@ Plugins extend the Responses server. `plap.llms` provides the lower-level chat-c
 ## Use the LLM library
 
 - [Make your first completion](llms/getting-started.md) calls OpenRouter directly without starting the Responses server.
-- The [`plap.llms` reference](llms/README.md) covers messages, providers, routing, streaming, retries, model JSON, completion
-  budgets, and token measurement.
+- The [`plap.llms` reference](llms/README.md) covers messages, providers, model whitelists, routing, streaming, retries, model
+  JSON, completion budgets, and token measurement.

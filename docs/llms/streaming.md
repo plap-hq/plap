@@ -1,12 +1,15 @@
 # Streaming
 
-Streaming exposes text, reasoning, and tool calls while the model is generating them. A live UI can render those updates
-immediately. Application logic can use `Accumulator` to build a complete `ChatMessage` or `ChatCompletionResult` from the
-deltas.
+A provider stream contains partial updates rather than complete messages. Text may be split across many events, tool arguments
+may arrive one fragment at a time, and usage may arrive after the finish reason.
+
+`ChatCompletionClient` converts provider events into `ChatCompletionDelta`. Code that only needs live updates can read those
+deltas directly. `Accumulator` joins text, refusal, reasoning, tool-call, metadata, and usage fragments into snapshots and a
+final result.
 
 ## Read deltas directly
 
-Each delta contains the fields changed by one stream event:
+Each delta contains only the fields changed by one stream event:
 
 ```python
 from plap.llms.completions import ChatCompletionRequest, IChatCompletionClient
@@ -32,12 +35,12 @@ The main incremental fields are:
 | `finish_reason` | The terminal reason for the completion |
 | `usage` | Token usage when the provider reports it |
 
-A tool call may arrive across several deltas. Do not decode its argument fragments separately.
+A tool call may span several deltas. Decode its arguments only after accumulation has joined the fragments.
 
 ## Assemble a result
 
-Create one `Accumulator` per completion stream. Pass the request tools so completed tool arguments can be recovered and
-normalized with their schemas:
+Create one `Accumulator` for each completion stream. Pass the request tools so completed tool arguments can be recovered and
+normalized against their schemas:
 
 ```python
 from plap.llms import Accumulator
@@ -65,20 +68,19 @@ async def collect_stream(
     return final
 ```
 
-Before the terminal delta, `snapshot.messages` contains the current partial assistant message and `snapshot.result` is
-`None`. When a delta contains `finish_reason`, the snapshot contains a `ChatCompletionResult` and exposes it through
-`snapshot.result`.
+Before the terminal delta, `snapshot.messages` contains the current partial assistant message and `snapshot.result` is `None`.
+A delta with `finish_reason` produces a `ChatCompletionResult` in `snapshot.result`.
 
-`Accumulator` repairs JSON syntax and performs conservative schema-guided normalization for tool arguments. It does not
-guarantee that the final arguments satisfy the tool schema. Use a [retry validator](retries.md) when invalid arguments should
-cause another model attempt.
+`Accumulator` repairs JSON syntax and performs conservative schema-guided normalization for tool arguments. It does not prove
+that the final arguments satisfy the tool schema. Use a [retry validator](retries.md) when invalid arguments should cause
+another model attempt.
 
-## Stream normalization
+## Provider stream normalization
 
-`ChatCompletionClient` normalizes provider streams before yielding deltas. It combines provider-specific terminal signals,
-ensures tool-call streams finish as `tool_calls`, and raises a provider error when a stream ends without a usable terminal
-state.
+Providers disagree about terminal events and trailing usage. `ChatCompletionClient` normalizes those differences before it
+yields deltas. It ensures tool-call streams finish with `tool_calls` and raises a provider error when a stream ends without a
+usable terminal state.
 
-Provider transports close their active stream after normal completion, failure, or cancellation. A caller that abandons an
-iterator early should close it explicitly. Code that owns the completion client must also call `client.aclose()` when the
-client itself is no longer needed.
+Provider transports close their active stream after completion, failure, or cancellation. A caller that abandons an iterator
+early should close that iterator. Code that owns the completion client must also call `client.aclose()` when the client is no
+longer needed.

@@ -1,7 +1,10 @@
 # Messages and Requests
 
-Provider SDKs use different Python objects for the same chat concepts. `plap.llms` defines one set of messages, tools,
-requests, results, and stream deltas that every completion client accepts.
+A conversation may be retried or routed through another provider. If its history uses objects from one provider SDK, the next
+call must translate that history before it can reuse it.
+
+`plap.llms` keeps messages, tools, requests, results, and stream deltas in provider-neutral dataclasses. Provider clients
+translate those values at the network boundary, so the conversation history remains unchanged when the client changes.
 
 ## Build a message history
 
@@ -19,16 +22,15 @@ request = ChatCompletionRequest(
 )
 ```
 
-Roles are `system`, `developer`, `user`, `assistant`, and `tool`. Message content can be a string, `None`, or a list of
-structured content parts for text, images, files, and input audio. The content-part classes live in
-`plap.llms.completions.chat`.
+Roles are `system`, `developer`, `user`, `assistant`, and `tool`. Content may be a string, `None`, or a list of structured text,
+image, file, or input-audio parts. The content-part classes live in `plap.llms.completions.chat`.
 
-`ChatMessage.memory` stores application metadata beside a message. It is preserved by plap serialization but omitted from
-provider requests.
+`ChatMessage.memory` stores application metadata beside one message. plap serialization preserves it, but provider requests
+omit it.
 
 ## Add a function tool
 
-A function definition is wrapped in `ChatTool` before it is added to a request:
+A function definition becomes a request tool when wrapped in `ChatTool`:
 
 ```python
 from plap.llms.completions import ChatFunctionTool, ChatTool
@@ -48,7 +50,7 @@ lookup = ChatTool(
 )
 ```
 
-Add the tool and a tool-selection rule with `dataclasses.replace`:
+`ChatCompletionRequest` is frozen. Use `dataclasses.replace` to add the tool and choose how the model may call it:
 
 ```python
 from dataclasses import replace
@@ -60,8 +62,10 @@ request = replace(
 )
 ```
 
-When the model calls it, `result.message.tool_calls` contains `ChatToolCall` values. `arguments` remains JSON text. After
-executing the function, append the assistant message and a matching tool result before the next completion:
+When the model calls `lookup`, the accepted assistant message contains a `ChatToolCall`. Its `arguments` field remains JSON
+text until the application decodes and validates it.
+
+After executing the function, append both the assistant message and a tool result with the matching call ID:
 
 ```python
 from plap.llms.completions import ChatMessage
@@ -81,7 +85,7 @@ next_request = replace(
 )
 ```
 
-The tool message must use the call's ID so the model can match the result to its request.
+The call ID ties the result to the model's request. Omitting it leaves an unresolved tool call in the conversation.
 
 ## Request options
 
@@ -89,17 +93,19 @@ The tool message must use the call's ID so the model can match the result to its
 
 | Group | Fields |
 | --- | --- |
-| Output size | `max_completion_tokens` |
-| Sampling | `temperature`, `top_p`, `min_p`, `top_k`, penalties, `seed`, `stop` |
+| Output size | `max_completion_tokens`, `n` |
+| Sampling | `temperature`, `top_p`, `min_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop` |
+| Token probabilities | `logprobs`, `top_logprobs` |
 | Tools | `tools`, `tool_choice`, `parallel_tool_calls` |
 | Structured output | `response_format` |
 | Reasoning | `reasoning_effort` |
 | Streaming | `stream_options` |
+| Predicted output | `prediction` |
 | Provider metadata | `user`, `prompt_cache_key`, `metadata`, `service_tier` |
 | Budgeting | `output_equivalence` |
 
-Providers reject or adapt unsupported fields through their configured quirks. `output_equivalence` is required only by a
-[budgeted client](budgeting.md).
+The provider and model [normalization rules](whitelist.md) decide whether an option is passed through, translated, removed, or
+rejected. `output_equivalence` is required only by a [budgeted client](budgeting.md).
 
 ## Read a result
 
@@ -112,8 +118,8 @@ finish_reason = result.finish_reason
 usage = result.usage
 ```
 
-`finish_reason` explains why generation stopped, such as `stop`, `length`, `tool_calls`, or `content_filter`. `usage` may
-include input, output, cached, and reasoning token counts when the provider reports them.
+`finish_reason` records why generation stopped, such as `stop`, `length`, `tool_calls`, or `content_filter`. When the provider
+reports usage, `usage` may include input, output, cached, and reasoning token counts.
 
-For streaming, the same information arrives incrementally as `ChatCompletionDelta` values. [Streaming](streaming.md)
-explains how to consume those deltas and assemble a result.
+The streaming interface returns the same information incrementally as `ChatCompletionDelta` values. [Streaming](streaming.md)
+shows how to consume the deltas and assemble a final result.

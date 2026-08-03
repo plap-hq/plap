@@ -229,6 +229,8 @@ class Accumulator:
         self._created_at: float | None = None
         self._content: list[str] = []
         self._has_content = False
+        self._refusal: list[str] = []
+        self._has_refusal = False
         self._reasoning: list[str] = []
         self._calls: dict[int, _ToolCall] = {}
         self._finish: ChatFinishReason | None = None
@@ -256,6 +258,9 @@ class Accumulator:
         if delta.content_delta is not None:
             self._has_content = True
             self._content.append(delta.content_delta)
+        if delta.refusal_delta is not None:
+            self._has_refusal = True
+            self._refusal.append(delta.refusal_delta)
         if delta.reasoning_delta is not None:
             self._reasoning.append(delta.reasoning_delta)
         if delta.tool_call_delta is not None:
@@ -272,11 +277,13 @@ class Accumulator:
 
     def _message(self, *, partial: bool) -> ChatMessage:
         content = "".join(self._content) if self._has_content else None
+        refusal = "".join(self._refusal) if self._has_refusal else None
         reasoning_content = "".join(self._reasoning) or None
         tool_calls = [self._calls[index].tool_call() for index in sorted(self._calls)]
         message = ChatMessage(
             role="assistant",
             content=content,
+            refusal=refusal,
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
         )

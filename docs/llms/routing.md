@@ -1,7 +1,11 @@
 # Routing
 
-A direct `ChatCompletionClient` sends every request to one provider. `RoutingChatCompletionClient` selects a provider from
-the model name and can try another model after a provider failure.
+A direct `ChatCompletionClient` always calls the provider it was constructed with. That is enough when one model has one
+provider. A configured plap model can instead list several provider/model combinations in fallback order.
+
+`RoutingChatCompletionClient` reads that order from the request's model string. Provider prefixes select child clients, and
+commas separate fallback attempts. The caller can send one `ChatCompletionRequest`; the router rebuilds it with the model name
+expected by each child.
 
 ## Route by model prefix
 
@@ -18,14 +22,14 @@ client = RoutingChatCompletionClient(
 )
 ```
 
-The router removes the matching prefix before calling the child. If several routes match, the longest prefix wins.
+For `groq/openai/gpt-oss-20b`, the router selects `groq_client` and sends it `openai/gpt-oss-20b`. If several prefixes match,
+the longest wins.
 
-A route prefix is part of the application's model name, not the provider's model name. The result and streamed deltas use
-the prefixed name again when they return through the router.
+The prefixed name remains the application's model name. Results and stream deltas restore that name after the child call.
 
 ## Add a fallback chain
 
-Separate model attempts with commas, in priority order:
+Separate attempts with commas, in the order they should run:
 
 ```python
 from dataclasses import replace
@@ -39,34 +43,32 @@ fallback_request = replace(
 )
 ```
 
-An attempt can fall back when its route is missing, its child does not support the model, or the child raises a completion
-provider error. Missing routes are skipped; every provider in the model string does not need to be configured in the
-current environment.
+The router moves to the next attempt when a route is missing, the child provider's [whitelist](whitelist.md) rejects the model
+or request, or the child raises a provider error. The process stops as soon as one attempt succeeds.
+
+A fallback chain may name a provider that is not configured in the current process. The missing route is skipped, which lets
+one model configuration work in environments with different provider credentials.
 
 ## Transport retries
 
-Before moving to the next model, the router retries a timeout or plain `ChatCompletionProviderError` twice with exponential
-jitter. Authentication, rate-limit, invalid-request, context-length, and unsupported-request errors move to the next model
-immediately.
+A timeout or plain `ChatCompletionProviderError` may describe a temporary transport failure. The router retries that attempt
+twice with exponential jitter before moving to the next model.
 
-Router retries repeat a failed provider call. [Completion retries](retries.md) reject a completed call whose model answer
-cannot be used.
+Authentication, rate-limit, invalid-request, context-length, and unsupported-request errors move to the next model immediately.
+Repeating the same call cannot correct those conditions.
+
+These transport retries are separate from [completion retries](retries.md), which ask a model to replace a completed but
+unusable answer.
 
 ## Streaming fallback
 
-The router can change providers only before the caller receives model output:
+The router may change providers only before the caller receives model output. After yielding content, reasoning, refusal, or a
+tool-call fragment, switching providers would combine two model responses in one stream, so the router raises the error.
 
-If a provider fails before yielding content, reasoning, refusal, or tool-call output, the router can retry or fall back. If
-the provider fails after yielding any of that output, the router raises the error instead of mixing output from another
-model into the stream.
-
-Empty metadata deltas do not lock the route. Content, reasoning, refusal, or tool-call deltas do. The router also applies a
-first-output timeout and an idle timeout between later deltas.
-
-Set `stream_first_delta_timeout_seconds=None` to disable the first-output timeout for a routing client. The idle timeout is a
-library constant rather than a constructor option.
+Metadata-only deltas do not lock the route. The router also applies a first-output timeout and an idle timeout between later
+deltas. Set `stream_first_delta_timeout_seconds=None` to disable the first-output timeout; the idle timeout is a library
+constant.
 
 ## Close routed clients
 
-Calling `client.aclose()` closes all distinct child clients. If two prefixes refer to the same child object, it is closed
-once.
+`client.aclose()` closes every distinct child client once. A child shared by several prefixes is still closed once.

@@ -1,6 +1,7 @@
 # Make Your First Completion
 
-This tutorial calls OpenRouter through `plap.llms` directly. It does not start the plap Responses server.
+Use this tutorial to call OpenRouter through `plap.llms` without starting the Responses server. It shows the provider client,
+common request type, and streaming interface in isolation.
 
 ## 1. Set the API key
 
@@ -76,7 +77,7 @@ finally:
 ```
 
 A delta contains only the fields updated by that stream event. Use an [Accumulator](streaming.md#assemble-a-result) when code
-needs the current complete message or a final result while streaming.
+needs the current assembled message or a final result while streaming.
 
 ## Continue learning
 

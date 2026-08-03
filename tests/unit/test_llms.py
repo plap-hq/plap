@@ -581,6 +581,18 @@ def test_accumulator_apply_returns_snapshot_and_terminal_result() -> None:
     assert second.result is second.results[0]
 
 
+def test_accumulator_assembles_streamed_refusal_in_partial_and_terminal_messages() -> None:
+    accumulator = Accumulator()
+
+    partial = accumulator.apply(_delta("model-a", refusal_delta="cannot "))
+    terminal = accumulator.apply(_delta("model-a", refusal_delta="help", finish_reason="stop"))
+
+    assert partial.messages[0].refusal == "cannot "
+    assert partial.result is None
+    assert terminal.result is not None
+    assert terminal.result.message.refusal == "cannot help"
+
+
 def test_accumulator_repairs_tool_call_json_syntax_with_safe_scalar_normalization() -> None:
     tool = ChatTool(
         function=ChatFunctionTool(

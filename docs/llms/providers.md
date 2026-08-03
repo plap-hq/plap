@@ -1,8 +1,11 @@
 # Providers
 
-A completion provider translates the common `ChatCompletionRequest` into one model API's wire format. It also converts the
-provider response and exceptions back into common plap types. Application code can therefore change providers without
-adopting another SDK interface.
+Provider SDKs disagree on request fields, response objects, stream events, and exceptions. If those SDK types reach the
+calling code, changing providers requires changes throughout the application.
+
+A `Provider` owns the transport for one model API. `ChatCompletionClient` applies the provider and model quirks before the
+call, then converts the raw response into `ChatCompletionResult` or `ChatCompletionDelta`. Callers only work with the common
+completion types.
 
 ## Use a built-in provider
 
@@ -25,13 +28,13 @@ Provider builders are available from `plap.llms.completions.providers`:
 Each builder accepts an API key and returns a `Provider`. Wrap it in `ChatCompletionClient` before sending requests, as shown
 in [Make your first completion](getting-started.md).
 
-Built-in providers have explicit model tables. Requesting a model absent from that provider's table raises
-`ChatCompletionUnsupportedRequestError` before the network call.
+Built-in providers use a [model whitelist](whitelist.md). A model absent from the provider's table raises
+`ChatCompletionUnsupportedRequestError` before a network call.
 
 ## Use another OpenAI-compatible endpoint
 
-`OpenAIProvider` can connect to an endpoint that implements OpenAI Chat Completions. Its model table declares the names the
-client may send:
+`OpenAIProvider` supplies the transport for an endpoint that implements OpenAI Chat Completions. The `models` table is
+required because sharing the OpenAI wire format does not guarantee that every model handles the same request fields.
 
 ```python
 import os
@@ -49,15 +52,16 @@ provider = OpenAIProvider(
 client = ChatCompletionClient(provider)
 ```
 
-The empty tuple means that `my-model` needs no model-specific quirks. Provider-wide and model-specific quirks can reject,
-remove, rename, or add wire fields when an endpoint differs from the common request format.
+The empty tuple admits `my-model` with no model-specific quirks. Provider-wide and model-specific quirks can move, remove,
+set, or reject fields when the endpoint differs from the common completion shape. [Model whitelist](whitelist.md) explains
+how those rules are assigned.
 
-For a non-OpenAI transport, subclass `Provider` and implement `complete`, `stream`, and `aclose`. The completion methods
-return raw OpenAI-shaped dictionaries; `ChatCompletionClient` converts them into the common result and delta types.
+For a non-OpenAI transport, subclass `Provider` and implement `complete`, `stream`, and `aclose`. The completion methods return
+raw OpenAI-shaped dictionaries; `ChatCompletionClient` converts them into the common result and delta types.
 
 ## Handle errors
 
-Provider implementations convert SDK exceptions into the completion error hierarchy:
+Providers convert SDK exceptions into the completion error hierarchy:
 
 | Error | Meaning |
 | --- | --- |
@@ -67,14 +71,14 @@ Provider implementations convert SDK exceptions into the completion error hierar
 | `ChatCompletionInvalidRequestError` | The provider rejected another request field |
 | `ChatCompletionTimeoutError` | A provider or transport timeout occurred |
 | `ChatCompletionProviderError` | Another provider or transport failure occurred |
-| `ChatCompletionUnsupportedRequestError` | No configured model or feature can handle the request |
+| `ChatCompletionUnsupportedRequestError` | The provider does not accept the model or one of its request options |
 
-Catch these errors instead of provider SDK exceptions. The router uses their types to decide whether to retry the same
-provider or move to a fallback model.
+Catch these errors instead of SDK exceptions. A [routing client](routing.md) uses the error type to decide whether to retry the
+same provider or move to the next model.
 
 ## Close the client
 
-`ChatCompletionClient.aclose()` closes the provider transport. Call it once when the application no longer needs the client:
+`ChatCompletionClient.aclose()` closes its provider transport:
 
 ```python
 try:
@@ -83,4 +87,5 @@ finally:
     await client.aclose()
 ```
 
-A [routing client](routing.md) closes each distinct child client once, including a child shared by several prefixes.
+The code that creates the client owns its lifetime. A routing client closes each distinct child once, including a child shared
+by several route prefixes.

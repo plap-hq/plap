@@ -1,9 +1,10 @@
 # Token Measurement
 
-Token measurement estimates whether a prompt fits a model before sending it. It is useful for choosing when to compact
-history, reserving output space, or rejecting an oversized request without paying for a provider call.
+Provider usage arrives after a model call, too late to decide whether the prompt should be compacted or rejected before
+generation. Token measurement estimates the prompt size before the request is sent.
 
-The result is an estimate of the model-visible prompt surface. Provider billing remains authoritative.
+The estimate covers the model-visible request. It is suitable for preflight decisions, but provider billing remains the
+authoritative usage record.
 
 ## Configure the tokenizer
 
@@ -22,16 +23,14 @@ class TokenizerConfig(ITokenizerConfig):
     tokenizer_trust_remote_code: bool = False
 ```
 
-Set `tokenizer_hf_repo` to a Hugging Face tokenizer repository when the model has a compatible chat template. Pin
-`tokenizer_revision` when reproducible counts matter. Enable `tokenizer_trust_remote_code` only for a repository whose code
-you trust.
+Set `tokenizer_hf_repo` when the model has a compatible Hugging Face tokenizer and chat template. Pin
+`tokenizer_revision` for reproducible counts. Enable `tokenizer_trust_remote_code` only for a repository whose code you trust.
 
-With no Hugging Face repository, measurement uses the library's fallback tokenizer and a deterministic rendering of the
-request.
+Without a Hugging Face repository, measurement uses the fallback tokenizer and a deterministic rendering of the request.
 
 ## Measure a request
 
-`measure_request_tokens` includes messages, tool definitions, and response format. Tokenizer-specific encodings can also use
+`measure_request_tokens` includes messages, tool definitions, and response format. Tokenizer-specific encodings may also use
 the request's reasoning mode:
 
 ```python
@@ -55,11 +54,11 @@ tokens = measure_request_tokens(
 ```
 
 Message memory is excluded because providers do not receive it. Tool-call arguments, reasoning content, structured content,
-tool schemas, and structured-output schemas are included in the measured surface.
+tool schemas, and structured-output schemas are included.
 
 ## Measure prompt parts
 
-Use `measure_prompt_tokens` when the code has prompt components but has not built a full request:
+Use `measure_prompt_tokens` before a full request has been built:
 
 ```python
 from plap.llms.completions import measure_prompt_tokens
@@ -73,7 +72,7 @@ tokens = measure_prompt_tokens(
 )
 ```
 
-Use `estimate_text_tokens(text)` for a standalone string. It uses the fallback text encoding and returns at least one token,
+Use `estimate_text_tokens(text)` for one standalone string. It uses the fallback text encoding and returns at least one token,
 including for empty or `None` input.
 
 | Function | Measures |

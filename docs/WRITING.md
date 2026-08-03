@@ -82,8 +82,8 @@ Remove only the part that carries no information. In "it gives the model a new c
 response loop," the first clause is useful and the second clause is redundant. Keep the first clause instead of rewriting
 the whole sentence into dry exposition.
 
-Use active verbs and reader-visible consequences. Let the prose communicate why a feature is powerful, not only how its
-objects are wired together.
+Use active verbs and reader-visible consequences. Name the behavior and its effect instead of praising a feature as
+powerful.
 
 Avoid vague idioms such as "ready to stand behind." Name the actual condition: an answer may still fail validation, call a
 tool, receive review feedback, or be replaced.
@@ -122,6 +122,54 @@ Keep distinct concepts separate. Examples include:
 - `state.memory` carries response-level plugin data; `ChatMessage.memory` belongs to one message.
 - Routing retries provider failures; completion retries reject unusable model results.
 - Server tools add model-callable functions; response hooks modify existing execution.
+
+## Explain why the design exists
+
+When plap differs from a common design, explain the choice from the outside in:
+
+1. Describe what most comparable systems do.
+2. Explain why that design is reasonable for their purpose.
+3. Name the requirement it does not satisfy here.
+4. Show how plap's design follows from that requirement.
+5. State the cost of the choice when the reader needs it.
+
+Do not begin with the implementation. "`Provider.lookup()` reads a model table" explains how a whitelist works; it does not
+explain why arbitrary model pass-through would violate the provider abstraction.
+
+Keep these kinds of statement distinct:
+
+| Kind | Question it answers |
+| --- | --- |
+| Motivation | Why did this design become necessary? |
+| Mechanism | How is the design implemented? |
+| Consequence | What happens because of the design? |
+| Property | How can the design be described? |
+
+Only motivation answers why. A mechanism, a list of consequences, or a property such as "explicit" cannot stand in for the
+requirement that caused the design.
+
+Compare alternatives against the same requirement. Explain which part of the system must handle the difference in each
+design. Describe the common design accurately and explain why people use it; do not turn another framework into a foil for
+praising plap.
+
+Use one representative failure to establish the requirement. If a proxy must normalize provider behavior, show how an ignored
+`reasoning_effort` or an unmapped reasoning field breaks the common completion shape. Listing every subsystem affected by the
+failure adds volume without explaining the cause.
+
+For example, this is weak:
+
+> plap uses a narrower, explicit model whitelist for stable behavior.
+
+It labels the design without explaining it. A useful explanation establishes the normal design, the unmet requirement, and
+the resulting choice:
+
+> Most LLM proxies begin with a provider and model name, then use a provider adapter to send the request. Model-specific
+> differences are handled when the call is made. This works for gateways whose callers can account for those differences.
+>
+> plap requires the provider layer to remove those differences. Everything above `plap.llms` uses the same request, result,
+> and delta types regardless of which provider handles the call.
+>
+> Provider and model quirks perform that conversion. The whitelist names the provider/model pairs with the required rules.
 
 ## Include the reason and the consequence
 
@@ -174,6 +222,9 @@ between the models. Do not jump down into unrelated method names, lifecycle deta
 Synthesize related facts before listing details. More facts make the writing better only when they help answer the current
 question.
 
+A list of consequences is not a causal explanation. Choose the consequence that reveals why the design is necessary, then
+leave unrelated effects for the sections that own them.
+
 Implementation research is a filter for accuracy, not a source of material to copy into the page. After tracing the code,
 keep only the facts needed to explain the reader-visible behavior or a decision the reader must make.
 
@@ -208,6 +259,9 @@ decisions, causes, and effects.
 
 Name the concrete request, message, call, result, or state change. Avoid vague substitutes such as "line of work,"
 "materialize," "owns the boundary," or "the machinery."
+
+Words such as "explicit," "flexible," "robust," "broad," "narrow," "powerful," and "stable" do not explain behavior by
+themselves. Use them only when the same sentence names the concrete condition they describe.
 
 Keep sentences grammatically simple. More detail is welcome when each sentence adds a fact, reason, constraint, or
 consequence.
@@ -258,3 +312,9 @@ Before accepting a page, verify:
 16. Tables and lists support an explanation rather than replace it.
 17. Examples that cross requests or lifecycle phases label those boundaries explicitly.
 18. Every technical claim matches the current implementation and tests.
+19. A design that rejects a common approach explains what that approach does and why it is normally reasonable.
+20. The motivation is a requirement, not an implementation property or a list of consequences.
+21. The chosen design follows directly from the failure established in the normal design.
+22. Comparisons judge both designs against the same requirement instead of framing one as capable and the other as deficient.
+23. One representative failure carries the explanation instead of a list of loosely related facts.
+24. Descriptive labels such as "explicit," "broad," or "stable" do not substitute for concrete behavior.

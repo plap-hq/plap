@@ -1,12 +1,14 @@
 # Completion Budgeting
 
-One response can make several model calls: a main completion, a private review, a summary, and correction attempts. Limiting
-each call separately does not limit their combined cost. `CompletionBudget` accounts for all calls in one output-equivalent
-token budget.
+`max_completion_tokens` limits one model call. A response can make several model calls before producing its final answer, so
+separate per-call limits do not cap the total work performed for that response.
+
+`CompletionBudget` gives those calls one shared limit. It measures them in output-equivalent tokens, allowing input, cached
+input, output, and reasoning tokens to consume the same budget at configured rates.
 
 ## Wrap a completion client
 
-`BudgetedChatCompletionClient` implements the normal completion-client interface and delegates calls to another client:
+`BudgetedChatCompletionClient` applies a `CompletionBudget` to every call delegated to its base client:
 
 ```python
 from plap.llms.completions import (
@@ -21,10 +23,10 @@ budget = CompletionBudget(
 client = BudgetedChatCompletionClient(base_client, budget)
 ```
 
-The wrapper does not close `base_client`; its `aclose()` method is a no-op. The code that created the base client remains
-responsible for closing it.
+The wrapper does not own `base_client`; `client.aclose()` is a no-op. The code that created the base client must close it.
 
-Inside a response plugin, plap has already created this wrapper. Get it from state instead of constructing another budget:
+The Responses server registers a budget for each response and makes a budgeted client available to its plugins. Use that client
+rather than creating a separate budget:
 
 ```python
 client = await state.svcs.aget(BudgetedChatCompletionClient)
@@ -32,8 +34,8 @@ client = await state.svcs.aget(BudgetedChatCompletionClient)
 
 ## Define the cost of a call
 
-Different model calls may assign different relative costs to input, cached input, and output tokens. Every request sent
-through the budgeted client must include `OutputEquivalence`:
+Each request sent through the wrapper must include `OutputEquivalence`. Its rates convert the call's reported tokens into the
+budget's output-token unit:
 
 ```python
 from dataclasses import replace
@@ -50,15 +52,13 @@ budgeted_request = replace(
 )
 ```
 
-`OutputEquivalence` converts provider token usage into the shared output-token unit. It belongs to the call's policy, not to
-the provider model globally; two workflows can account for the same model differently.
-
-`reasoning_to_output` performs a second conversion for reasoning tokens reported inside output usage.
+The conversion belongs to the call, because two workflows may account for the same provider model differently.
+`reasoning_to_output` supplies the separate conversion for reasoning tokens reported inside output usage.
 
 ## Limit and charge calls
 
-Before each call, the wrapper converts the remaining budget into that request's output-token scale. The resulting
-`max_completion_tokens` is the smaller of:
+Before a call, the wrapper converts the remaining budget into that request's output-token scale. It sets
+`max_completion_tokens` to the smaller of:
 
 - The converted remaining budget.
 - The request's existing `max_completion_tokens`, when set.
@@ -66,23 +66,23 @@ Before each call, the wrapper converts the remaining budget into that request's 
 If no tokens remain, the wrapper raises `CompletionBudgetExhaustedError` without contacting the provider.
 
 After the call, reported usage charges uncached input, cached input, visible output, and reasoning output at their configured
-rates. Streaming records the latest usage even when iteration is cancelled or fails after a usage delta was received.
+rates. Streaming records the latest reported usage even when iteration is cancelled or fails later.
 
 ## Build aggregate usage
 
-`finish()` converts recorded calls into one `ChatUsage` value. The final public completion can be identified so its visible
-output remains visible while other charges are represented as reasoning output:
+The public response should report the final main completion as visible output while accounting for internal calls as reasoning
+work. `anchor()` and `finish()` build that aggregate `ChatUsage`:
 
 ```python
 budget.anchor(input_usage=first_main_usage)
 aggregate = budget.finish(output_usage=final_main_usage)
 ```
 
-`anchor()` selects the input usage reported for the aggregate. The first successful anchor is kept. `finish()` may be called
-once and requires `output_usage` to be the same `ChatUsage` object recorded by the wrapper.
+`anchor()` selects the aggregate input usage; the first successful anchor is kept. `finish()` may be called once, and its
+`output_usage` must be the same `ChatUsage` object previously recorded by the wrapper.
 
-If there is no explicit input anchor, `finish()` uses the final output call, then the first recorded call. If no call
-reported usage, it returns `None`.
+If `anchor()` has not selected an input call, `finish()` uses the final output call and then the first recorded call. It returns
+`None` when no call reported usage.
 
-The response loop performs the anchor and finish steps for plugins. Standalone library users need them only when they want
-the aggregate `ChatUsage`; the wrapper enforces its remaining budget while calls are running.
+The response loop performs these final steps for plugins. Standalone callers need them only when they want aggregate usage;
+the wrapper enforces the budget while calls are running either way.

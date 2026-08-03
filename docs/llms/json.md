@@ -1,12 +1,19 @@
 # Model JSON
 
-Models often produce JSON-like text rather than strict JSON. A tool call may contain single quotes, comments, a missing
-closing brace, or a string where the schema expects a number. `plap.llms.json` separates four operations so application code
-can decide how much repair to allow.
+Model-generated JSON can fail in two different ways: the text may not be valid JSON, or the decoded value may not satisfy the
+schema. Treating both failures as one repair step makes it difficult to tell what the application accepted or changed.
+
+`plap.llms.json` keeps four operations separate:
+
+| Operation | Purpose |
+| --- | --- |
+| Decode | Accept strict JSON or report a syntax error |
+| Recover | Repair supported model syntax and truncated values |
+| Normalize | Apply conservative, schema-guided value conversions |
+| Validate | Check the final value against the schema |
 
 Recovery and normalization do not replace validation. Recovery does not remove unknown keys or coerce types. Normalization
-changes a value only when a schema provides an unambiguous valid replacement, but the complete result may still violate
-another schema rule.
+changes a value only when the schema identifies one unambiguous replacement.
 
 ## Decode strict JSON
 
@@ -23,7 +30,7 @@ Use the decode helpers when malformed JSON must fail:
 
 ## Recover model output
 
-`recover` accepts common model syntax errors and reports whether the value is complete:
+`recover` accepts supported model syntax errors and reports whether the recovered value is complete:
 
 ```python
 from plap.llms.json import Outcome, recover
@@ -44,8 +51,6 @@ if result.outcome == Outcome.REJECTED:
 value = result.value
 ```
 
-The outcomes are:
-
 | Outcome | Meaning |
 | --- | --- |
 | `COMPLETE` | Recovery found a complete value |
@@ -56,7 +61,7 @@ Set `partial=True` while arguments are still streaming. The returned value may t
 
 ## Normalize and validate
 
-Recovery can feed normalization and validation directly:
+Normalization uses the schema to make conservative conversions before validation:
 
 ```python
 from plap.llms.json import (
@@ -88,17 +93,17 @@ except ValidationError as exc:
     raise ValueError(validation_error_message(exc)) from exc
 ```
 
-`normalize` can convert exact numeric, boolean, null, `const`, and `enum` strings when the schema confirms one result. It can
-also wrap one value in an array when that produces a valid array. It does not extract values from arbitrary prose or remove
+`normalize` converts exact numeric, boolean, null, `const`, and `enum` strings only when the schema confirms the replacement.
+It can also wrap one value in an array when that produces a valid array. It does not extract values from prose or remove
 additional properties.
 
-`compile_validator` caches validators by schema content. `validation_error_message` adds the failing data path to the
-underlying validation message when one is available.
+`compile_validator` caches validators by schema content. `validation_error_message` adds the failing data path when one is
+available.
 
 ## JSON in completion streams
 
-`Accumulator` uses recovery and normalization while assembling streamed tool calls. Partial snapshots expose the recovered
-arguments available so far; the terminal snapshot performs final normalization.
+`Accumulator` uses recovery and normalization while assembling streamed tool calls. Partial snapshots expose the arguments
+recovered so far; the terminal snapshot performs final normalization.
 
-The built-in `retry_on_unusable_tool_calls` validator then checks that final arguments are an object and satisfy the tool's
-schema. [Completion retries](retries.md) can ask the model to replace arguments that remain invalid.
+The built-in `retry_on_unusable_tool_calls` validator checks that the final arguments are an object and satisfy the tool schema.
+[Completion retries](retries.md) can then ask the model to replace arguments that remain invalid.
