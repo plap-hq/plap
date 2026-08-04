@@ -113,6 +113,12 @@ def _rebind_history(messages: Sequence[ChatMessage], wire_names: Mapping[str, st
     return rebound
 
 
+def prepare(request: ChatCompletionRequest) -> ChatCompletionRequest:
+    """Add registered server tools and bind canonical history to request-local names."""
+    tools, wire_names = _bind_tools(request.tools)
+    return replace(request, messages=_rebind_history(request.messages, wire_names), tools=tools)
+
+
 def _registered_by_wire(request: ChatCompletionRequest) -> dict[str, ServerTool]:
     bound = [tool.function for tool in request.tools if isinstance(tool.function, ServerTool)]
     if len(bound) != len(_registered):
@@ -204,11 +210,34 @@ def _record_server_tool_call(tool: ServerTool, call: ChatToolCall, message: Chat
     )
 
 
+async def execute_calls(
+    state: State,
+    request: ChatCompletionRequest,
+    message: ChatMessage,
+) -> list[ChatMessage]:
+    """Execute canonical server calls and return their tool outputs in declaration order."""
+    tools = {tool.name: tool for tool in _registered_by_wire(request).values()}
+    server_call_ids = _server_call_ids(message)
+    outputs: list[ChatMessage] = []
+    for call in message.tool_calls:
+        if call.id not in server_call_ids:
+            continue
+        tool = tools.get(call.name)
+        if tool is None:  # pragma: no cover - snapshot canonicalization uses the same finalized request
+            raise RuntimeError(f"canonical server tool is not registered: {call.name}")
+        try:
+            output = await tool(state, call)
+        except CompletionBudgetExhaustedError:
+            output = _budget_exhausted_message(tool, call)
+        else:
+            output = _record_server_tool_call(tool, call, output)
+        outputs.append(output)
+    return outputs
+
+
 @bus.listen("response.request")
 async def _inject_server_tools(state: State, *, next) -> ChatCompletionRequest:
-    request = await next(state=state)
-    tools, wire_names = _bind_tools(request.tools)
-    return replace(request, messages=_rebind_history(request.messages, wire_names), tools=tools)
+    return prepare(await next(state=state))
 
 
 @bus.listen("response.snapshot")
@@ -231,22 +260,8 @@ async def _execute_server_tools(
     next,
 ) -> ChatCompletionResult:
     result = await next(state=state, request=request)
-    tools = {tool.name: tool for tool in _registered_by_wire(request).values()}
-    server_call_ids = _server_call_ids(result.message)
-    for call in result.message.tool_calls:
-        if call.id not in server_call_ids:
-            continue
-        tool = tools.get(call.name)
-        if tool is None:  # pragma: no cover - snapshot canonicalization uses the same finalized request
-            raise RuntimeError(f"canonical server tool is not registered: {call.name}")
-        try:
-            message = await tool(state, call)
-        except CompletionBudgetExhaustedError:
-            message = _budget_exhausted_message(tool, call)
-        else:
-            message = _record_server_tool_call(tool, call, message)
-        state.threads["main"].append(message)
+    state.threads["main"].extend(await execute_calls(state, request, result.message))
     return result
 
 
-__all__ = ["BUDGET_TOOL_OUTPUT", "ServerTool", "register", "rename_to_avoid_collisions"]
+__all__ = ["BUDGET_TOOL_OUTPUT", "ServerTool", "execute_calls", "prepare", "register", "rename_to_avoid_collisions"]

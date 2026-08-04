@@ -1,10 +1,9 @@
-# TODO: should probably add a sticky rules system, complementary to notes
-
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
 
+import blake3
 import msgspec
 import structlog
 
@@ -24,15 +23,17 @@ from plap.llms.completions.chat import (
     ChatStreamOptions,
     ChatTool,
     ChatToolCall,
-    ChatToolChoiceFunction,
+    ChatToolChoiceMode,
 )
-from plap.llms.retry import complete as retry_complete
-from plap.llms.retry import retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls
-from plap.plugins.advisor.markdown import (
-    note_instruction,
-    render_main_messages,
-    requirements_instruction,
+from plap.llms.retry import (
+    RetryValidator,
+    complete,
+    retry_message,
+    retry_on_tool_choice_mismatch,
+    retry_on_unusable_tool_calls,
 )
+from plap.plugins.advisor.markdown import render_main_update, requirements_instruction
+from plap.plugins.core.loop import response_request, response_snapshot
 from plap.plugins.core.request import build_chat_request
 from plap.plugins.easy import bootstrap, server_tools
 from plap.responses.state import State
@@ -48,242 +49,224 @@ ADVISE_TOOL_NAME = "advise"
 ADVISOR_TOOL_OUTPUT = "0"
 ABORTED_TOOL_OUTPUT = "Tool call cancelled by advisor."
 STEALTH = False
+
+_PHASES = frozenset({"before_tool_call", "after_tool_call", "before_return"})
+
 ADVISOR_PROMPT = """You are a peer reviewer / watchdog for the main agent.
 You receive the agent transcript incrementally, including thoughts.
+Investigate suspicions directly with the available tools.
+You may take as many exploration rounds as needed and call independent tools in parallel.
+The # requirements block describes constraints the main agent must satisfy.
+When you are finished, call advise exactly once and by itself.
 """
+
 BEFORE_TOOL_CALL_PHASE = """phase: before_tool_call
 
-Call advise exactly once.
-Use {"advice":"",  "note": ...} when no guidance is needed.
-IMPORTANT: A non-empty advice will abort the pending tool calls.
-DO NOT provide advice at this time UNLESS you (intentionally) want to BLOCK those tool calls.
-For example, if those tool calls directly go against what the user said or are dangerous.
-If you want to note something to yourself, put it in note, NOT advice.
+The main agent has pending tool calls.
 
-ALSO IMPORTANT: You will enter phase: after_tool_call after the tool execution.
-For efficiency reasons, prefer using a note to that phase INSTEAD of advice (which is blocking)
-when a large tool call would take less effort to fix with a follow-up patch.
+Empty advice allows every pending call to proceed. Non-empty advice cancels every pending call and sends
+your guidance to the main agent.
 
-As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
-you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
+IMPORTANT: Block only when you intentionally want to stop those calls.
+
+Block calls that conflict with the user's request, are unsafe or irreversible, are entirely useless,
+or must be corrected before execution.
+
+If the calls are reversible and likely to provide useful evidence, prefer allowing them to run. You
+will review their outputs in phase: after_tool_call. If a concern can wait until then, put it in note
+instead of blocking.
 """
+
 AFTER_TOOL_CALL_PHASE = """phase: after_tool_call
 
-Call advise exactly once.
-Use {"advice":"",  "note": ...} when no guidance is needed.
-IMPORTANT: If you have nothing of substance to add, prefer staying silent.
-If you want to note something to yourself, put it in note, NOT advice.
-
-As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
-you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
+The main agent's tool outputs are available. Inspect them and verify any unresolved concerns.
 """
+
 BEFORE_RETURN_PHASE = """phase: before_return
 
-Call advise exactly once.
-Use {"advice":"",  "note": ...} when no guidance is needed.
-IMPORTANT: This is the last point to intercept before the agent returns a response.
-I repeat, it is VERY IMPORTANT for you to verify your suspicions at this time, or else you will not be able to later.
+The main agent is about to return its answer to the user. This is the final opportunity to verify unresolved concerns.
 
-ALSO IMPORTANT: A non-empty advice will abort the pending return and cause the model to loop.
-DO NOT provide advice at this time UNLESS you (intentionally) want to LOOP the main agent.
-For example, if the main agent has not sufficiently completed or verified its completion of a task and instead returned early.
-If you want to note something to yourself, put it in note, NOT advice.
+Empty advice allows the answer to return. Non-empty advice blocks the return and sends your guidance to
+the main agent.
 
-As an advisor, you may only call the advise tool. If you believe the main agent has not read or verified enough,
-you should advise it to do so (call the tools you want, in order to confirm suspicions) rather than calling the tools yourself.
+IMPORTANT: Block when the work is incomplete, conflicts with the user's request, or is returning prematurely.
+
+Do not use note to defer a concern that must be resolved before the answer is returned.
 """
+
 ADVISE_FUNCTION = ChatFunctionTool(
     name=ADVISE_TOOL_NAME,
-    description="Provide guidance for the main agent.",
+    description="Finish the current review phase and optionally guide the main agent.",
     parameters={
         "type": "object",
         "properties": {
             "advice": {
                 "type": "string",
-                "description": "Guidance for the main agent.",
+                "description": "Guidance for the main agent. Use an empty string when no guidance is needed.",
             },
             "note": {
                 "type": "string",
-                "description": ("Note passed to the next advice phase. This is non-blocking; writing one does NOT cause aborts or loops."),
+                "description": "Non-blocking observation retained in advisor history for later review phases.",
             },
         },
+        "required": ["advice"],
         "additionalProperties": False,
     },
     strict=True,
 )
 
 
-def _advisor_memory(state: State) -> dict[str, object]:
-    raw = state.memory.get(ADVISOR_THREAD)
+def _advisor_message_memory(message: ChatMessage) -> dict[str, object]:
+    raw = message.memory.get(ADVISOR_THREAD)
     if isinstance(raw, Mapping):
         return dict(raw)
     return {}
 
 
-def _advisor_note(state: State) -> str | None:
-    value = _advisor_memory(state).get("note")
-    if not isinstance(value, str) or not value:
+def _is_main_artifact(message: ChatMessage) -> bool:
+    return _advisor_message_memory(message).get("artifact") is True
+
+
+def _transcript_anchor(message: ChatMessage) -> str | None:
+    value = _advisor_message_memory(message).get("transcript_anchor")
+    if value is None:
         return None
+    if not isinstance(value, str) or not value:
+        raise ValueError("advisor transcript anchor must be a non-empty string")
     return value
 
 
-def _set_advisor_note(state: State, note: str | None) -> None:
-    memory = _advisor_memory(state)
-    if note is None:
-        memory.pop("note", None)
-    else:
-        memory["note"] = note
-    state.memory[ADVISOR_THREAD] = memory
+def _active_phase(messages: list[ChatMessage]) -> tuple[int, str] | None:
+    markers: list[tuple[int, str]] = []
+    for index, message in enumerate(messages):
+        value = _advisor_message_memory(message).get("phase")
+        if value is None:
+            continue
+        if not isinstance(value, str) or value not in _PHASES:
+            raise ValueError("advisor phase marker is invalid")
+        markers.append((index, value))
+    if len(markers) > 1:
+        raise RuntimeError("advisor thread contains multiple active phase markers")
+    return markers[0] if markers else None
 
 
-def _advisor_message_memory(msg: ChatMessage) -> dict[str, object]:
-    raw = msg.memory.get(ADVISOR_THREAD)
-    if isinstance(raw, Mapping):
-        return dict(raw)
-    return {}
+def _projected_main(state: State) -> list[ChatMessage]:
+    return [message for message in state.threads["main"] if not _is_main_artifact(message)]
 
 
-def _is_advisor_artifact(msg: ChatMessage) -> bool:
-    return isinstance(_advisor_message_memory(msg).get("call_id"), str)
-
-
-def _advisor_call_id(msg: ChatMessage) -> str:
-    call_id = _advisor_message_memory(msg).get("call_id")
-    if not isinstance(call_id, str):
-        raise TypeError("advisor artifact is missing its call id")
-    return call_id
-
-
-def _is_advisor_transcript_message(msg: ChatMessage) -> bool:
-    return msg.role == "user" and _advisor_message_memory(msg).get("transcript") is True
-
-
-def _strip_note_from_messages(messages: tuple[ChatMessage, ...], *, advise_tool_name: str) -> list[ChatMessage]:
-    stripped: list[ChatMessage] = []
+def _prefix_anchors(messages: list[ChatMessage]) -> list[str]:
+    hasher = blake3.blake3()
+    anchors: list[str] = []
     for message in messages:
-        if not message.is_assistant() or not message.tool_calls:
-            stripped.append(message)
-            continue
-        changed = False
-        tool_calls: list[ChatToolCall] = []
-        for call in message.tool_calls:
-            if call.name != advise_tool_name:
-                tool_calls.append(call)
-                continue
-            arguments = msgspec.json.decode(call.arguments)
-            if isinstance(arguments, dict) and "note" in arguments:
-                changed = True
-                arguments = dict(arguments)
-                arguments.pop("note", None)
-                tool_calls.append(ChatToolCall(id=call.id, name=call.name, arguments=msgspec.json.encode(arguments).decode()))
-                continue
-            tool_calls.append(call)
-        stripped.append(message if not changed else replace(message, tool_calls=tool_calls))
-    return stripped
+        hasher.update(bytes.fromhex(message.content_hash()))
+        anchors.append(hasher.hexdigest())
+    return anchors
 
 
-def _final_block_call_id(block: list[ChatMessage]) -> str | None:
-    for msg in reversed(block):
-        if msg.role == "tool" and msg.content == ADVISOR_TOOL_OUTPUT and msg.tool_call_id is not None:
-            return msg.tool_call_id
-    return None
+def _latest_main_turn(messages: list[ChatMessage]) -> list[ChatMessage]:
+    if not messages:
+        return []
+    if not messages[-1].is_tool():
+        return [messages[-1]]
+    start = len(messages) - 1
+    while start > 0 and messages[start - 1].is_tool():
+        start -= 1
+    if start > 0 and messages[start - 1].is_assistant():
+        start -= 1
+    return messages[start:]
 
 
-def _rebuild_advisor_thread(state: State) -> None:
-    existing_blocks: dict[str, list[ChatMessage]] = {}
-    current_block: list[ChatMessage] = []
-    for entry in state.threads.get(ADVISOR_THREAD, []):
-        if _is_advisor_transcript_message(entry):
-            if current_block:
-                call_id = _final_block_call_id(current_block)
-                if call_id is not None:
-                    existing_blocks[call_id] = list(current_block)
-                current_block = []
-            continue
-        if entry.role == "user" and not current_block:
-            continue
-        current_block.append(entry)
-    if current_block:
-        call_id = _final_block_call_id(current_block)
-        if call_id is not None:
-            existing_blocks[call_id] = list(current_block)
+def _append_main_update(state: State) -> None:
+    advisor = state.threads.setdefault(ADVISOR_THREAD)
+    projected = _projected_main(state)
+    if not projected:
+        return
 
-    history = state.threads["main"]
-    new_thread: list[ChatMessage] = []
-    current_msgs: list[ChatMessage] = []
-    buffered_msgs: list[ChatMessage] = []
+    anchors = _prefix_anchors(projected)
+    previous = next(
+        (anchor for message in reversed(advisor) if (anchor := _transcript_anchor(message)) is not None),
+        None,
+    )
+    if previous is None:
+        start = 0
+    else:
+        try:
+            previous_index = anchors.index(previous)
+        except ValueError:
+            latest = _latest_main_turn(projected)
+            start = len(projected) - len(latest)
+            logger.info("response.advisor.reanchored", main_messages=len(projected), update_messages=len(latest))
+        else:
+            start = previous_index + 1
 
-    def flush_user():
-        if current_msgs:
-            rendered = "\n".join(render_main_messages(current_msgs))
-            new_thread.append(ChatMessage(role="user", content=rendered, memory={ADVISOR_THREAD: {"transcript": True}}))
-            current_msgs.clear()
-
-    for msg in history:
-        if _is_advisor_artifact(msg):
-            call_id = _advisor_call_id(msg)
-            if msg.role == "tool":
-                buffered_msgs.append(msg)
-                continue
-            if msg.role == "developer":
-                flush_user()
-                block = existing_blocks.get(call_id)
-                if block is not None:
-                    new_thread.extend(block)
-                current_msgs.clear()
-                current_msgs.extend(buffered_msgs)
-                buffered_msgs.clear()
-                continue
-        current_msgs.append(msg)
-
-    flush_user()
-    if buffered_msgs:
-        rendered = "\n".join(render_main_messages(buffered_msgs))
-        new_thread.append(ChatMessage(role="user", content=rendered, memory={ADVISOR_THREAD: {"transcript": True}}))
-    state.threads[ADVISOR_THREAD] = new_thread
+    if start >= len(projected):
+        return
+    advisor.append(
+        ChatMessage(
+            role="user",
+            content="\n".join(render_main_update(projected, start)),
+            memory={ADVISOR_THREAD: {"transcript_anchor": anchors[-1]}},
+        )
+    )
 
 
-def _phase_instruction(state: State, phase: str, main_request: ChatCompletionRequest) -> str:
-    req = requirements_instruction(main_request)
-    base = {
+def _phase_instruction(phase: str, main_request: ChatCompletionRequest) -> str:
+    requirements = requirements_instruction(main_request)
+    phase_text = {
         "before_tool_call": BEFORE_TOOL_CALL_PHASE,
         "after_tool_call": AFTER_TOOL_CALL_PHASE,
         "before_return": BEFORE_RETURN_PHASE,
     }[phase]
-    parts: list[str] = []
-    if req:
-        parts.append(req)
-    note = _advisor_note(state)
-    if note is not None:
-        parts.append(note_instruction(note))
-    parts.append(base)
-    return "\n".join(parts)
+    return "\n\n".join(part for part in (requirements, phase_text) if part)
 
 
-def _advisor_request(
-    *,
-    state: State,
-    main_request: ChatCompletionRequest,
-    phase_instruction: str,
-) -> ChatCompletionRequest:
-    advisor = state.config.advisor
-    advise_function = server_tools.rename_to_avoid_collisions(ADVISE_FUNCTION, main_request.tools)
-    return replace(
+def _phase_message(phase: str, main_request: ChatCompletionRequest) -> ChatMessage:
+    return ChatMessage(
+        role="user",
+        content=_phase_instruction(phase, main_request),
+        memory={ADVISOR_THREAD: {"phase": phase}},
+    )
+
+
+def _client_tools(main_request: ChatCompletionRequest) -> list[ChatTool]:
+    return [tool for tool in main_request.tools if not isinstance(tool.function, server_tools.ServerTool)]
+
+
+def _advisor_request(state: State, main_request: ChatCompletionRequest) -> tuple[ChatCompletionRequest, str]:
+    client_tools = _client_tools(main_request)
+    advise_function = server_tools.rename_to_avoid_collisions(ADVISE_FUNCTION, client_tools)
+    request = replace(
         build_chat_request(
-            advisor,
+            state.config.advisor,
             state.request,
             messages=[
                 ChatMessage(role="developer", content=ADVISOR_PROMPT),
-                *state.threads.get(ADVISOR_THREAD, []),
-                ChatMessage(role="user", content=phase_instruction),
+                *state.threads[ADVISOR_THREAD],
             ],
         ),
-        tools=[ChatTool(function=advise_function), *main_request.tools],
-        tool_choice=ChatToolChoiceFunction(name=advise_function.name),
-        parallel_tool_calls=False,
+        tools=[ChatTool(function=advise_function), *client_tools],
+        tool_choice=ChatToolChoiceMode.REQUIRED,
+        parallel_tool_calls=True,
         stream_options=ChatStreamOptions(include_usage=True),
         prompt_cache_key=state.request.prompt_cache_key,
     )
+    return server_tools.prepare(request), advise_function.name
+
+
+def _advise_validator(advise_tool_name: str) -> RetryValidator:
+    async def validate(result: ChatCompletionResult, request: ChatCompletionRequest) -> str | None:
+        _ = request
+        advise_calls = [call for call in result.message.tool_calls if call.name == advise_tool_name]
+        if not advise_calls:
+            return None
+        if len(advise_calls) == 1 and len(result.message.tool_calls) == 1:
+            return None
+        return retry_message(
+            problems=("The final `advise` call was mixed with other tool calls.",),
+            rules=("Use exploration tools without `advise`, or call `advise` by itself when the review phase is complete.",),
+        )
+
+    return validate
 
 
 def _advice_fields(call: ChatToolCall) -> tuple[str | None, str | None]:
@@ -300,8 +283,7 @@ def _annotation_text(prefix: str, advice: str | None, note: str | None) -> str |
         return None
     if advice is None:
         return f"[advisor] note: {note}"
-    parts = [prefix]
-    parts.append(f"advice: {advice}")
+    parts = [prefix, f"advice: {advice}"]
     if note is not None:
         parts.append(f"note: {note}")
     return " ".join(parts)
@@ -316,149 +298,178 @@ async def _emit_annotation(state: State, text: str) -> None:
     await coordinator.summary_done(SummaryDone())
 
 
-async def _run_advisor(
-    *,
+def _start_phase(state: State, phase: str, main_request: ChatCompletionRequest) -> None:
+    advisor = state.threads.setdefault(ADVISOR_THREAD)
+    if _active_phase(advisor) is not None:
+        raise RuntimeError("cannot start an advisor phase while another phase is active")
+    _append_main_update(state)
+    advisor.append(_phase_message(phase, main_request))
+    state.threads.active.discard("main")
+    state.threads.active.add(ADVISOR_THREAD)
+
+
+def _remove_phase_message(state: State) -> str:
+    advisor = state.threads[ADVISOR_THREAD]
+    marker = _active_phase(advisor)
+    if marker is None:
+        raise RuntimeError("active advisor thread is missing its phase marker")
+    index, phase = marker
+    advisor.pop(index)
+    return phase
+
+
+async def _complete_advisor(
     state: State,
     main_request: ChatCompletionRequest,
-    phase_instruction: str,
-    phase: str,
-) -> tuple[str | None, str]:
-    _rebuild_advisor_thread(state)
-    request = _advisor_request(
-        state=state,
-        main_request=main_request,
-        phase_instruction=phase_instruction,
-    )
-
+) -> tuple[ChatCompletionResult, str]:
+    request, advise_tool_name = _advisor_request(state, main_request)
     client = await state.svcs.aget(BudgetedChatCompletionClient)
-
-    try:
-        latest_snapshot = await retry_complete(
-            client,
-            request,
-            validators=(retry_on_tool_choice_mismatch, retry_on_unusable_tool_calls),
-        )
-    except CompletionBudgetExhaustedError:
-        budget = state.svcs.get(CompletionBudget)
-        logger.info("response.advisor.skipped", phase=phase, reason="budget_exhausted", remaining=budget.remaining)
-        return None, ""
-    except RetryLimitExceededError:
-        logger.warning("response.advisor.skipped", phase=phase, reason="retry_limit_exceeded")
-        return None, ""
-
-    result = latest_snapshot.result
+    snapshot = await complete(
+        client,
+        request,
+        validators=(
+            retry_on_tool_choice_mismatch,
+            retry_on_unusable_tool_calls,
+            _advise_validator(advise_tool_name),
+        ),
+    )
+    snapshot = await response_snapshot(state=state, request=request, snapshot=snapshot)
+    result = snapshot.result
     if result is None:  # pragma: no cover - retry_complete returns an accepted terminal snapshot
         raise RuntimeError("advisor completion ended without an accepted result")
-    call = result.message.tool_calls[0]
-    advice, note = _advice_fields(call)
-    logger.info(
-        "response.advisor.result",
-        advice_chars=len(advice) if advice else 0,
-        applied=advice is not None,
-        has_note=note is not None,
-        phase=phase,
+    state.threads[ADVISOR_THREAD].extend(snapshot.messages)
+    state.threads[ADVISOR_THREAD].extend(await server_tools.execute_calls(state, request, result.message))
+    return result, advise_tool_name
+
+
+def _main_artifact(content: str) -> ChatMessage:
+    return ChatMessage(role="developer", content=content, memory={ADVISOR_THREAD: {"artifact": True}})
+
+
+def _aborted_main_output(call: ChatToolCall) -> ChatMessage:
+    return ChatMessage(
+        role="tool",
+        tool_call_id=call.id,
+        content=ABORTED_TOOL_OUTPUT,
+        memory={ADVISOR_THREAD: {"artifact": True}},
     )
 
-    state.threads[ADVISOR_THREAD].extend(
-        _strip_note_from_messages(latest_snapshot.messages, advise_tool_name=request.tools[0].function.name)
-    )
-    state.threads[ADVISOR_THREAD].append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
 
-    _set_advisor_note(state, note)
-
-    return advice, call.id
-
-
-async def _maybe_advise_after_tool_call(
-    *,
+async def _finalize_phase(
     state: State,
-    main_request: ChatCompletionRequest,
-) -> ChatMessage | None:
-    history = state.threads["main"]
-    if not history or not history[-1].is_tool():
-        return None
-    phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
-    logger.info("response.advisor.phase", phase="after_tool_call", main_model=main_request.model, main_messages=len(history))
-    advice, call_id = await _run_advisor(
-        state=state,
-        main_request=main_request,
-        phase_instruction=phase_instruction,
-        phase="after_tool_call",
-    )
-    note = _advisor_note(state)
-    text = _annotation_text("[advisor]", advice, note)
+    *,
+    advice: str | None,
+    note: str | None,
+) -> None:
+    phase = _remove_phase_message(state)
+    state.threads.active.discard(ADVISOR_THREAD)
+    state.threads.active.add("main")
+
+    prefix = "[advisor]"
+    if phase == "before_tool_call" and advice is not None:
+        open_calls = state.open_calls("main")
+        state.threads["main"].extend(_aborted_main_output(call) for call in open_calls)
+        names = ", ".join(call.name for call in open_calls)
+        prefix = f"[advisor] blocked tool call(s): {names}."
+        state.threads["main"].append(_main_artifact(advice))
+    elif phase == "before_return" and advice is not None:
+        prefix = "[advisor] blocked return."
+        state.threads["main"].append(_main_artifact(advice))
+    elif phase == "after_tool_call" and advice is not None:
+        state.threads["main"].append(_main_artifact(advice))
+
+    text = _annotation_text(prefix, advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    if advice is not None:
-        message = ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}})
-        state.threads["main"].append(message)
-        return message
-    return None
 
 
-async def _maybe_advise_before_tool_call(
-    *,
-    state: State,
-    main_request: ChatCompletionRequest,
-    result: ChatCompletionResult,
-) -> None:
-    if result.finish_reason != ChatFinishReason.TOOL_CALLS:
-        return
-    open_calls = state.open_calls("main")
-    if not open_calls:
-        return
-    phase_instruction = _phase_instruction(state, "before_tool_call", main_request)
-    call_names = [c.name for c in open_calls]
-    logger.info("response.advisor.phase", phase="before_tool_call", main_model=main_request.model, pending_calls=call_names)
-    advice, call_id = await _run_advisor(
-        state=state,
-        main_request=main_request,
-        phase_instruction=phase_instruction,
-        phase="before_tool_call",
-    )
-    if advice is None:
-        return
-    state.threads["main"].extend(
-        ChatMessage(
-            role="tool",
-            tool_call_id=call.id,
-            content=ABORTED_TOOL_OUTPUT,
-            memory={ADVISOR_THREAD: {"call_id": call_id, "tool_name": call.name}},
+async def _continue_phase(state: State, main_request: ChatCompletionRequest) -> bool:
+    marker = _active_phase(state.threads[ADVISOR_THREAD])
+    if marker is None:
+        raise RuntimeError("active advisor thread is missing its phase marker")
+    phase = marker[1]
+
+    while True:
+        try:
+            result, advise_tool_name = await _complete_advisor(state, main_request)
+        except CompletionBudgetExhaustedError:
+            budget = state.svcs.get(CompletionBudget)
+            logger.info("response.advisor.skipped", phase=phase, reason="budget_exhausted", remaining=budget.remaining)
+            await _finalize_phase(state, advice=None, note=None)
+            return True
+        except RetryLimitExceededError:
+            logger.warning("response.advisor.skipped", phase=phase, reason="retry_limit_exceeded")
+            await _finalize_phase(state, advice=None, note=None)
+            return True
+
+        advise_call = next((call for call in result.message.tool_calls if call.name == advise_tool_name), None)
+        if advise_call is not None:
+            advice, note = _advice_fields(advise_call)
+            state.threads[ADVISOR_THREAD].append(ChatMessage(role="tool", tool_call_id=advise_call.id, content=ADVISOR_TOOL_OUTPUT))
+            logger.info(
+                "response.advisor.result",
+                advice_chars=len(advice) if advice else 0,
+                applied=advice is not None,
+                has_note=note is not None,
+                phase=phase,
+            )
+            await _finalize_phase(state, advice=advice, note=note)
+            return True
+
+        open_calls = state.open_calls(ADVISOR_THREAD)
+        logger.info(
+            "response.advisor.exploration",
+            phase=phase,
+            tool_names=[call.name for call in result.message.tool_calls],
+            awaiting_client=bool(open_calls),
         )
-        for call in open_calls
-    )
-    joined = ", ".join(call.name for call in open_calls)
-    note = _advisor_note(state)
-    text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
-    if text is not None:
-        await _emit_annotation(state, text)
-    state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
+        if open_calls:
+            return False
 
 
-async def _maybe_advise_before_return(
-    *,
+async def _start_and_continue_phase(
     state: State,
     main_request: ChatCompletionRequest,
-    result: ChatCompletionResult,
-) -> None:
-    if result.finish_reason != ChatFinishReason.STOP or result.message.tool_calls:
-        return
-    if state.open_calls("main"):
-        return
-    phase_instruction = _phase_instruction(state, "before_return", main_request)
-    logger.info("response.advisor.phase", phase="before_return", main_model=main_request.model)
-    advice, call_id = await _run_advisor(
-        state=state,
-        main_request=main_request,
-        phase_instruction=phase_instruction,
-        phase="before_return",
-    )
-    note = _advisor_note(state)
-    text = _annotation_text("[advisor] blocked return.", advice, note)
-    if text is not None:
-        await _emit_annotation(state, text)
-    if advice is not None:
-        state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
+    phase: str,
+) -> bool:
+    _start_phase(state, phase, main_request)
+    logger.info("response.advisor.phase", phase=phase, main_model=main_request.model)
+    return await _continue_phase(state, main_request)
+
+
+def _main_can_run(state: State) -> bool:
+    if "main" not in state.threads.active or state.open_calls("main"):
+        return False
+    main = state.threads["main"]
+    return not main or not main[-1].is_assistant()
+
+
+def _after_tool_phase_pending(state: State) -> bool:
+    if "main" not in state.threads.active or state.open_calls("main"):
+        return False
+    main = state.threads["main"]
+    return bool(main) and main[-1].is_tool()
+
+
+@bus.listen("response.loop")
+async def resume_advisor(state: State, *, next) -> ChatCompletionResult | None:
+    handled_phase = False
+    if ADVISOR_THREAD in state.threads.active:
+        if state.open_calls(ADVISOR_THREAD):
+            return None
+        main_request = await response_request(state=state)
+        handled_phase = True
+        if not await _continue_phase(state, main_request):
+            return None
+    elif _after_tool_phase_pending(state):
+        main_request = await response_request(state=state)
+        handled_phase = True
+        if not await _start_and_continue_phase(state, main_request, "after_tool_call"):
+            return None
+
+    if handled_phase and not _main_can_run(state):
+        return None
+    return await next(state=state)
 
 
 @bus.listen("response.turn")
@@ -468,15 +479,14 @@ async def advise_turn(
     *,
     next,
 ) -> ChatCompletionResult:
-    advice = await _maybe_advise_after_tool_call(
-        state=state,
-        main_request=request,
-    )
-    if advice is not None:
-        request = replace(request, messages=[*request.messages, advice])
     result = await next(state=state, request=request)
-    await _maybe_advise_before_tool_call(state=state, main_request=request, result=result)
-    await _maybe_advise_before_return(state=state, main_request=request, result=result)
+    if result.finish_reason == ChatFinishReason.TOOL_CALLS:
+        if state.open_calls("main"):
+            await _start_and_continue_phase(state, request, "before_tool_call")
+        elif state.threads["main"] and state.threads["main"][-1].is_tool():
+            await _start_and_continue_phase(state, request, "after_tool_call")
+    elif result.finish_reason == ChatFinishReason.STOP and not result.message.tool_calls and not state.open_calls("main"):
+        await _start_and_continue_phase(state, request, "before_return")
     return result
 
 

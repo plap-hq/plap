@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Sequence
+from copy import deepcopy
+from dataclasses import field
 from uuid import uuid4
 
 import msgspec
@@ -21,11 +23,20 @@ from plap.llms.completions.chat import (
     ChatMessage,
     ChatToolCall,
     ChatToolCallDelta,
+    ChatToolChoiceMode,
     ChatUsage,
     IChatCompletionClient,
 )
 from plap.responses.contracts import ResponseCreateRequest
-from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
+from plap.responses.contracts.items import (
+    RequestFunctionCallItem,
+    RequestFunctionCallOutputItem,
+    RequestReasoningItem,
+    ResponseFunctionCallItem,
+    ResponseMessageItem,
+    ResponseReasoningItem,
+)
+from plap.responses.ingest.ingest import ingest_response_request
 from plap.responses.ingest.models import HiddenMainTail, Ingested, Message, Threads
 from plap.responses.routes import _accept_response, _execute_response
 from plap.responses.state import State
@@ -139,8 +150,10 @@ class _Client:
 def _reload_handlers():
     bus.reset()
     core_module = importlib.import_module("plap.plugins.core.loop")
+    server_tools_module = importlib.import_module("plap.plugins.easy.server_tools")
     advisor_module = importlib.import_module("plap.plugins.advisor")
     core_module = importlib.reload(core_module)
+    importlib.reload(server_tools_module)
     importlib.reload(advisor_module)
     return core_module
 
@@ -220,7 +233,8 @@ def _tool() -> dict[str, object]:
 
 def _request(**updates: object) -> ResponseCreateRequest:
     tools = updates.pop("tools", [_tool()])
-    return ResponseCreateRequest(model="plap-ai/test", input="hello", tools=tools, **updates)
+    input_ = updates.pop("input", "hello")
+    return ResponseCreateRequest(model="plap-ai/test", input=input_, tools=tools, **updates)
 
 
 def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
@@ -339,29 +353,72 @@ def _tool_step(call_id: str = "call_read") -> list[ChatCompletionDelta]:
     ]
 
 
+def _advisor_calls_step(
+    *calls: tuple[str, str, dict[str, object]],
+    reasoning: str | None = None,
+) -> list[ChatCompletionDelta]:
+    deltas = [] if reasoning is None else [_delta(model="advisor-model", reasoning_delta=reasoning)]
+    deltas.extend(
+        [
+            _delta(
+                model="advisor-model",
+                tool_call_delta=ChatToolCallDelta(
+                    index=index,
+                    id=call_id,
+                    name=name,
+                    arguments_delta=msgspec.json.encode(arguments).decode(),
+                ),
+            )
+            for index, (call_id, name, arguments) in enumerate(calls)
+        ]
+    )
+    deltas.append(_delta(model="advisor-model", finish_reason=ChatFinishReason.TOOL_CALLS, usage=_usage()))
+    return deltas
+
+
 def _advisor_step(
     advice: str | None = "",
     *,
     note: str | None = None,
     tool_name: str = _ADVISE_TOOL_NAME,
 ) -> list[ChatCompletionDelta]:
-    arguments: dict[str, str] = {}
-    if advice is not None:
-        arguments["advice"] = advice
+    arguments: dict[str, str] = {"advice": advice or ""}
     if note is not None:
         arguments["note"] = note
-    return [
-        _delta(
-            model="advisor-model",
-            tool_call_delta=ChatToolCallDelta(
-                index=0,
-                id="call_advise",
-                name=tool_name,
-                arguments_delta=msgspec.json.encode(arguments).decode(),
-            ),
-        ),
-        _delta(model="advisor-model", finish_reason=ChatFinishReason.TOOL_CALLS, usage=_usage()),
-    ]
+    return _advisor_calls_step(("call_advise", tool_name, arguments))
+
+
+def _main_output_ingested(state: State, output: ChatMessage) -> Ingested:
+    threads = deepcopy(state.threads)
+    threads["main"].append(output)
+    main_source = next(message for message in reversed(threads["main"]) if message.is_assistant())
+    return Ingested(
+        memory=deepcopy(state.memory),
+        threads=threads,
+        main_tail=HiddenMainTail(source=main_source),
+        last_reasoning_id=None,
+    )
+
+
+def _register_inspect_tool() -> None:
+    easy_server_tools = importlib.import_module("plap.plugins.easy.server_tools")
+
+    @easy_server_tools.register
+    class InspectTool(easy_server_tools.ServerTool):
+        name: str = "inspect"
+        parameters: dict[str, object] = field(
+            default_factory=lambda: {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        )
+        strict: bool = True
+
+        async def __call__(self, state: State, call: ChatToolCall) -> ChatMessage:
+            _ = state
+            return ChatMessage(role="tool", tool_call_id=call.id, content=f"inspected:{call.arguments}")
 
 
 def _bad_advisor_step() -> list[ChatCompletionDelta]:
@@ -415,6 +472,62 @@ def test_tool_outputs_render_in_assistant_call_order_without_ids() -> None:
     assert rendered.index("### tool_output read_file\n```text\nA\n```") < rendered.index("### tool_output read_file\n```text\nB\n```")
 
 
+def test_advisor_main_updates_are_incremental_and_reanchor_to_latest_turn() -> None:
+    _reload_handlers()
+    state = _state(_Client(main=[], advisor=[]))
+    advisor = _advisor_module()
+
+    advisor._append_main_update(state)
+    state.threads["main"].extend(
+        [
+            ChatMessage(
+                role="developer",
+                content="old advisor guidance",
+                memory={_ADVISOR_THREAD: {"artifact": True}},
+            ),
+            ChatMessage(role="assistant", content="new answer"),
+        ]
+    )
+    advisor._append_main_update(state)
+
+    updates = [message for message in state.threads[_ADVISOR_THREAD] if "transcript_anchor" in message.memory.get(_ADVISOR_THREAD, {})]
+    assert len(updates) == 2
+    assert "new answer" in updates[-1].content
+    assert "old advisor guidance" not in updates[-1].content
+
+    state.threads["main"] = [
+        ChatMessage(role="user", content="replacement context"),
+        ChatMessage(role="assistant", content="latest answer"),
+    ]
+    advisor._append_main_update(state)
+
+    updates = [message for message in state.threads[_ADVISOR_THREAD] if "transcript_anchor" in message.memory.get(_ADVISOR_THREAD, {})]
+    assert len(updates) == 3
+    assert "latest answer" in updates[-1].content
+    assert "replacement context" not in updates[-1].content
+
+
+def test_incremental_main_tool_output_keeps_its_tool_name_without_repeating_call() -> None:
+    _reload_handlers()
+    state = _state(_Client(main=[], advisor=[]))
+    state.threads["main"].append(
+        ChatMessage(
+            role="assistant",
+            tool_calls=[ChatToolCall(id="call_read", name="read_file", arguments='{"path":"src/app.py"}')],
+        )
+    )
+    advisor = _advisor_module()
+    advisor._append_main_update(state)
+    state.threads["main"].append(ChatMessage(role="tool", tool_call_id="call_read", content="file contents"))
+
+    advisor._append_main_update(state)
+
+    update = state.threads[_ADVISOR_THREAD][-1]
+    assert "### tool_output read_file" in update.content
+    assert "file contents" in update.content
+    assert "### tool_call read_file" not in update.content
+
+
 @pytest.mark.anyio
 async def test_before_tool_noop_returns_function_call() -> None:
     _reload_handlers()
@@ -428,7 +541,8 @@ async def test_before_tool_noop_returns_function_call() -> None:
     assert len(client.advisor_requests) == 1
     advisor_request = client.advisor_requests[0]
     assert [tool.function.name for tool in advisor_request.tools] == [_ADVISE_TOOL_NAME, "read_file"]
-    assert advisor_request.tool_choice.name == _ADVISE_TOOL_NAME
+    assert advisor_request.tool_choice == ChatToolChoiceMode.REQUIRED
+    assert advisor_request.parallel_tool_calls is True
     assert "### tool_call read_file" in advisor_request.messages[-2].content
     assert state.threads[_ADVISOR_THREAD][-1].role == "tool"
     assert state.threads[_ADVISOR_THREAD][-1].tool_call_id == "call_advise"
@@ -451,7 +565,214 @@ async def test_advisor_rebinds_advise_without_renaming_client_tool() -> None:
     assert [tool.function.name for tool in client.main_requests[0].tools] == [_ADVISE_TOOL_NAME, "read_file"]
     advisor_request = client.advisor_requests[0]
     assert [tool.function.name for tool in advisor_request.tools] == ["advise_2", _ADVISE_TOOL_NAME, "read_file"]
-    assert advisor_request.tool_choice.name == "advise_2"
+    assert advisor_request.tool_choice == ChatToolChoiceMode.REQUIRED
+
+
+@pytest.mark.anyio
+async def test_advisor_executes_parallel_server_tools_before_advise() -> None:
+    _reload_handlers()
+    _register_inspect_tool()
+    client = _Client(
+        main=[_tool_step()],
+        advisor=[
+            _advisor_calls_step(
+                ("call_inspect_a", "inspect", {"value": "a"}),
+                ("call_inspect_b", "inspect", {"value": "b"}),
+                reasoning="Inspect both independent questions.",
+            ),
+            _advisor_step(""),
+        ],
+    )
+    state = _state(client)
+
+    await _run(state)
+
+    assert len(client.advisor_requests) == 2
+    assert client.advisor_requests[0].parallel_tool_calls is True
+    second_request = client.advisor_requests[1]
+    assert sum("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in second_request.messages) == 1
+    outputs = [message for message in second_request.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in outputs[-2:]] == ["call_inspect_a", "call_inspect_b"]
+    assert all(message.memory["server_tools"]["tool"] == "inspect" for message in outputs[-2:])
+    assert any(message.reasoning_content == "Inspect both independent questions." for message in second_request.messages)
+    assert _ADVISOR_THREAD not in state.threads.active
+    assert "main" in state.threads.active
+    assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in state.threads[_ADVISOR_THREAD])
+
+
+@pytest.mark.anyio
+async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise() -> None:
+    _reload_handlers()
+    _register_inspect_tool()
+    first_client = _Client(
+        main=[_tool_step()],
+        advisor=[
+            _advisor_calls_step(
+                ("call_inspect", "inspect", {"value": "server"}),
+                ("call_probe", "read_file", {"path": "src/app.py"}),
+            )
+        ],
+    )
+    first_state = _state(first_client)
+
+    await _run(first_state)
+
+    first_output = first_state.svcs.get(StreamCoordinator).current_response().output
+    visible_calls = [item for item in first_output if isinstance(item, ResponseFunctionCallItem)]
+    assert [item.name for item in visible_calls] == ["read_file"]
+    assert first_state.threads.active == {_ADVISOR_THREAD}
+    phase_messages = [message for message in first_state.threads[_ADVISOR_THREAD] if "phase" in message.memory.get(_ADVISOR_THREAD, {})]
+    assert len(phase_messages) == 1
+    assert first_client.main_requests and len(first_client.main_requests) == 1
+
+    reasoning = next(item for item in first_output if isinstance(item, ResponseReasoningItem))
+    continuation_request = _request(
+        input=[
+            RequestReasoningItem.model_validate(reasoning.model_dump()),
+            RequestFunctionCallItem.model_validate(visible_calls[0].model_dump()),
+            RequestFunctionCallOutputItem(
+                call_id=visible_calls[0].call_id,
+                output="client inspection",
+                type="function_call_output",
+            ),
+        ]
+    )
+    ingested = await ingest_response_request(
+        continuation_request,
+        keyring=_keyring(),
+        thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
+    )
+    second_client = _Client(main=[], advisor=[_advisor_step("")])
+    second_state = _state(
+        second_client,
+        request=continuation_request,
+        ingested=ingested,
+    )
+
+    await _run(second_state)
+
+    assert second_client.main_requests == []
+    assert len(second_client.advisor_requests) == 1
+    assert any(message.tool_call_id == "call_probe" for message in second_client.advisor_requests[0].messages)
+    assert any(
+        message.tool_call_id == "call_probe" and message.content == "client inspection" for message in second_state.threads[_ADVISOR_THREAD]
+    )
+    assert any(message.tool_call_id == "call_inspect" for message in second_state.threads[_ADVISOR_THREAD])
+    assert second_state.threads.active == {"main"}
+    assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in second_state.threads[_ADVISOR_THREAD])
+    second_output = second_state.svcs.get(StreamCoordinator).current_response().output
+    assert [item.name for item in second_output if isinstance(item, ResponseFunctionCallItem)] == ["read_file"]
+
+
+@pytest.mark.anyio
+async def test_advisor_parallel_client_tool_outputs_resume_exploration() -> None:
+    _reload_handlers()
+    first_client = _Client(
+        main=[_tool_step()],
+        advisor=[
+            _advisor_calls_step(
+                ("call_probe_a", "read_file", {"path": "src/a.py"}),
+                ("call_probe_b", "read_file", {"path": "src/b.py"}),
+            )
+        ],
+    )
+    first_state = _state(first_client)
+
+    await _run(first_state)
+
+    first_output = first_state.svcs.get(StreamCoordinator).current_response().output
+    reasoning = next(item for item in first_output if isinstance(item, ResponseReasoningItem))
+    visible_calls = [item for item in first_output if isinstance(item, ResponseFunctionCallItem)]
+    assert [item.name for item in visible_calls] == ["read_file", "read_file"]
+    continuation_request = _request(
+        input=[
+            RequestReasoningItem.model_validate(reasoning.model_dump()),
+            *[RequestFunctionCallItem.model_validate(item.model_dump()) for item in visible_calls],
+            *[
+                RequestFunctionCallOutputItem(
+                    call_id=item.call_id,
+                    output=f"client inspection {index}",
+                    type="function_call_output",
+                )
+                for index, item in enumerate(visible_calls)
+            ],
+        ]
+    )
+    ingested = await ingest_response_request(
+        continuation_request,
+        keyring=_keyring(),
+        thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
+    )
+    second_client = _Client(main=[], advisor=[_advisor_step("")])
+    second_state = _state(
+        second_client,
+        request=continuation_request,
+        ingested=ingested,
+    )
+
+    await _run(second_state)
+
+    advisor_outputs = [message for message in second_state.threads[_ADVISOR_THREAD] if message.role == "tool"]
+    assert any(message.tool_call_id == "call_probe_a" and message.content == "client inspection 0" for message in advisor_outputs)
+    assert any(message.tool_call_id == "call_probe_b" and message.content == "client inspection 1" for message in advisor_outputs)
+    assert len(second_client.advisor_requests) == 1
+    assert second_state.threads.active == {"main"}
+
+
+@pytest.mark.anyio
+async def test_main_client_output_starts_after_tool_phase_with_named_incremental_output() -> None:
+    _reload_handlers()
+    first_client = _Client(main=[_tool_step()], advisor=[_advisor_step("")])
+    first_state = _state(first_client)
+    await _run(first_state)
+
+    second_client = _Client(
+        main=[_text_step("final answer")],
+        advisor=[_advisor_step(""), _advisor_step("")],
+    )
+    second_state = _state(
+        second_client,
+        ingested=_main_output_ingested(
+            first_state,
+            ChatMessage(role="tool", tool_call_id="call_read", content="file contents"),
+        ),
+    )
+
+    await _run(second_state)
+
+    after_tool_request = second_client.advisor_requests[0]
+    transcript = next(
+        message for message in reversed(after_tool_request.messages) if "transcript_anchor" in message.memory.get(_ADVISOR_THREAD, {})
+    )
+    assert "### tool_output read_file" in transcript.content
+    assert "file contents" in transcript.content
+    assert "### tool_call read_file" not in transcript.content
+
+
+@pytest.mark.anyio
+async def test_advisor_retries_advise_mixed_with_exploration_calls() -> None:
+    _reload_handlers()
+    client = _Client(
+        main=[_tool_step()],
+        advisor=[
+            _advisor_calls_step(
+                ("call_bad_advise", _ADVISE_TOOL_NAME, {"advice": ""}),
+                ("call_probe", "read_file", {"path": "src/app.py"}),
+            ),
+            _advisor_step(""),
+        ],
+    )
+    state = _state(client)
+
+    await _run(state)
+
+    assert len(client.advisor_requests) == 2
+    assert any(
+        message.role == "user" and isinstance(message.content, str) and "final `advise` call was mixed" in message.content
+        for message in state.threads[_ADVISOR_THREAD]
+    )
+    output = state.svcs.get(StreamCoordinator).current_response().output
+    assert [item.name for item in output if isinstance(item, ResponseFunctionCallItem)] == ["read_file"]
 
 
 @pytest.mark.anyio
@@ -468,6 +789,8 @@ async def test_advisor_retry_limit_skips_current_phase() -> None:
     thread = state.threads.get(_ADVISOR_THREAD)
     assert thread is not None
     assert all(msg.role == "user" for msg in thread)
+    assert state.threads.active == {"main"}
+    assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in thread)
 
 
 @pytest.mark.anyio
@@ -485,6 +808,8 @@ async def test_advisor_retry_hidden_usage_caps_next_attempt() -> None:
     thread = state.threads.get(_ADVISOR_THREAD)
     assert thread is not None
     assert all(msg.role == "user" for msg in thread)
+    assert state.threads.active == {"main"}
+    assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in thread)
 
 
 @pytest.mark.anyio
@@ -506,18 +831,18 @@ async def test_before_tool_advice_aborts_call_and_loops_to_final_answer() -> Non
     second_main = client.main_requests[1]
     aborted = next(message for message in second_main.messages if message.role == "tool" and message.content == _ABORTED_TOOL_OUTPUT)
     assert aborted.name is None
-    assert aborted.memory == {_ADVISOR_THREAD: {"call_id": "call_advise", "tool_name": "read_file"}}
+    assert aborted.memory == {_ADVISOR_THREAD: {"artifact": True}}
     assert any(
         message.role == "developer" and message.content == "Do not read that file." and _has_advisor_marker(message)
         for message in second_main.messages
     )
     second_advisor = client.advisor_requests[1]
-    assert "### tool_output read_file" in second_advisor.messages[-2].content
+    assert "### tool_output read_file" not in second_advisor.messages[-2].content
     assert '{"advisor":"call_advise"}' not in second_advisor.messages[-2].content
 
 
 @pytest.mark.anyio
-async def test_advisor_retry_history_block_survives_rebuild() -> None:
+async def test_advisor_retry_history_persists_across_phases() -> None:
     _reload_handlers()
     client = _Client(
         main=[_tool_step(), _text_step("final answer")],
@@ -539,31 +864,22 @@ async def test_advisor_retry_history_block_survives_rebuild() -> None:
 
 
 @pytest.mark.anyio
-async def test_advisor_note_is_sent_to_next_turn_scrubbed_and_cleared() -> None:
-    core = _reload_handlers()
+async def test_advisor_note_is_retained_in_advisor_history_without_global_memory() -> None:
+    _reload_handlers()
     client = _Client(
-        main=[_tool_step(), _text_step("final answer")],
-        advisor=[_advisor_step(None, note="Watch whether the final answer is actually verified."), _advisor_step("")],
+        main=[_tool_step()],
+        advisor=[_advisor_step("", note="Watch whether the final answer is actually verified.")],
     )
     state = _state(client)
 
     await _run(state)
 
     assert len(client.advisor_requests) == 1
-    memory = state.memory.get(_ADVISOR_THREAD, {})
-    assert isinstance(memory, dict)
-    assert memory.get("note") == "Watch whether the final answer is actually verified."
-    main_request = await core.response_request(state=state)
-    phase_instruction = _advisor_module()._phase_instruction(state, "before_return", main_request)
-    assert "# note from previous phase (may be stale)" in phase_instruction
-    assert "Watch whether the final answer is actually verified." in phase_instruction
-    assert not any(
-        message.role == "assistant" and message.tool_calls and "note" in message.tool_calls[0].arguments
-        for message in state.threads[_ADVISOR_THREAD]
-    )
-    _advisor_module()._set_advisor_note(state, None)
-    memory = state.memory.get(_ADVISOR_THREAD, {})
-    assert not isinstance(memory, dict) or "note" not in memory
+    assert _ADVISOR_THREAD not in state.memory
+    advise_call = next(call for message in state.threads[_ADVISOR_THREAD] for call in message.tool_calls if call.name == _ADVISE_TOOL_NAME)
+    arguments = msgspec.json.decode(advise_call.arguments)
+    assert arguments == {"advice": "", "note": "Watch whether the final answer is actually verified."}
+    assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in state.threads[_ADVISOR_THREAD])
 
 
 @pytest.mark.anyio
@@ -705,15 +1021,15 @@ def test_render_main_messages_does_not_emit_message_memory() -> None:
             name="read_file",
             tool_call_id="call_1",
             content="output",
-            memory={"advisor": {"call_id": "call_x"}},
+            memory={"advisor": {"artifact": True}},
         ),
-        ChatMessage(role="developer", content="note", memory={"advisor": {"transcript": True}}),
+        ChatMessage(role="developer", content="note", memory={"advisor": {"transcript_anchor": "hash"}}),
     ]
 
     rendered = "\n".join(_markdown_module().render_main_messages(messages))
 
-    assert "call_x" not in rendered
-    assert "transcript" not in rendered
+    assert "artifact" not in rendered
+    assert "transcript_anchor" not in rendered
 
 
 def test_requirements_instruction_renders_effective_defaults() -> None:

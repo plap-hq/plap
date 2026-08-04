@@ -153,10 +153,6 @@ def requirements_instruction(request: ChatCompletionRequest) -> str:
     return "\n".join(["# requirements", *lines])
 
 
-def note_instruction(note: str) -> str:
-    return "\n".join(["# note from previous phase (may be stale)", *_text_fence(note)])
-
-
 def latest_closed_tool_output_turn(history: list[ChatMessage]) -> ToolOutputTurn | None:
     if not history or not history[-1].is_tool():
         return None
@@ -243,13 +239,46 @@ def render_main_messages(messages: list[ChatMessage]) -> list[str]:
     return lines
 
 
+def render_main_update(messages: list[ChatMessage], start: int) -> list[str]:
+    if start >= len(messages):
+        return []
+
+    lines: list[str] = []
+    index = start
+    if messages[index].is_tool():
+        anchor_index = index - 1
+        while anchor_index >= 0 and messages[anchor_index].is_tool():
+            anchor_index -= 1
+        anchor = messages[anchor_index] if anchor_index >= 0 else None
+        outputs: dict[str, ChatMessage] = {}
+        while index < len(messages) and messages[index].is_tool():
+            output = messages[index]
+            if output.tool_call_id is not None:
+                outputs[output.tool_call_id] = output
+            index += 1
+        if anchor is not None and anchor.is_assistant():
+            tool_lines = ["## tool"]
+            for call in anchor.tool_calls:
+                output = outputs.get(call.id)
+                if output is not None:
+                    _append_tool_output(tool_lines, call, output)
+            if len(tool_lines) > 1:
+                lines.extend(tool_lines)
+        else:
+            lines.extend(render_main_messages(messages[start:index]))
+
+    lines.extend(render_main_messages(messages[index:]))
+    return lines
+
+
 __all__ = [
     "ToolOutputTurn",
     "assistant_markdown",
     "canonical_json",
     "latest_closed_tool_output_turn",
-    "note_instruction",
     "render_main_messages",
+    "render_main_update",
+    "requirements_instruction",
     "requirements_markdown",
     "requirements_value",
     "tool_outputs_markdown",
