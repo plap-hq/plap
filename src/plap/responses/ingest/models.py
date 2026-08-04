@@ -345,7 +345,7 @@ class Thread:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Thread):
-            return self.name == other.name and self.messages == other.messages
+            return self.name == other.name and self.threads is other.threads
         if isinstance(other, list):
             return self.messages == other
         return NotImplemented
