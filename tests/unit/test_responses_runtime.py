@@ -26,7 +26,7 @@ from plap.llms.completions.chat import (
     ChatUsage,
 )
 from plap.llms.retry import RETRY_TOOL_PLACEHOLDER
-from plap.plugins.core.loop import response_request
+from plap.plugins.core.loop import response_loop, response_request
 from plap.responses.contracts import ResponseCreateRequest, ResponseStreamEvent
 from plap.responses.contracts.items import ResponseFunctionCallItem, ResponseMessageItem, ResponseReasoningItem
 from plap.responses.ingest.models import (
@@ -695,6 +695,54 @@ async def test_run_response_completes_without_main_execution_when_main_is_inacti
         "response.in_progress",
         "response.completed",
     ]
+
+
+async def test_response_loop_runs_main_only_after_all_blocking_threads_unblock() -> None:
+    client = _StubChatClient(
+        [
+            _delta(
+                content_delta="unblocked",
+                finish_reason=ChatFinishReason.STOP,
+                usage=_usage(input_tokens=7, output_tokens=2),
+            )
+        ]
+    )
+    state = _state(client=client)
+    reviewer = state.threads.setdefault("reviewer")
+    defender = state.threads.setdefault("defender")
+
+    reviewer.block()
+    defender.block()
+
+    assert not state.threads["main"].active
+
+    result = await response_loop(state=state)
+
+    assert result is None
+    assert client.requests == []
+    assert not state.threads["main"].active
+
+    reviewer.unblock()
+
+    assert not state.threads["main"].active
+
+    result = await response_loop(state=state)
+
+    assert result is None
+    assert client.requests == []
+    assert not state.threads["main"].active
+
+    defender.unblock()
+
+    assert state.threads["main"].active
+
+    result = await response_loop(state=state)
+
+    assert result is not None
+    assert len(client.requests) == 1
+    assert state.threads["main"].active
+    assert state.threads["main"][-1].role == "assistant"
+    assert state.threads["main"][-1].content == "unblocked"
 
 
 async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_first_attempt() -> None:
