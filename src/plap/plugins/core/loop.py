@@ -201,7 +201,7 @@ async def default_summary(
             if not open_part:
                 await state.ensure_progress()
                 open_part = True
-                await coordinator.summary_delta(SummaryDelta(text=item.text))
+            await coordinator.summary_delta(SummaryDelta(text=item.text))
             accumulated += len(item.text)
             if accumulated >= SUMMARY_HARD_FLUSH_CHARS:
                 await coordinator.summary_done(SummaryDone())

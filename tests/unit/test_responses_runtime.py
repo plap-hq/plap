@@ -428,7 +428,8 @@ class _FakeReasoningSummarizer:
     async def stream(self, *, mode: str, prior_summary: str | None, fragment: str):
         assert mode == "concise"
         _ = prior_summary, fragment, self.kwargs
-        yield "summary part"
+        yield "summary "
+        yield "part"
 
 
 async def test_run_response_completes_simple_turn_without_midstream_staging() -> None:
@@ -744,7 +745,9 @@ async def test_run_response_retry_persists_hidden_history_and_anchors_usage_to_f
     assert response.output[1].content[0].text == "fixed"
 
 
-async def test_run_response_summary_saves_progress_on_summary_done(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_response_summary_streams_all_deltas_and_saves_progress_on_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     channels = _RecordingChannels()
     store = _RecordingStore()
     request = _request(reasoning={"summary": "concise"})
