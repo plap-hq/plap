@@ -1686,6 +1686,49 @@ async def test_stale_non_main_pair_is_discarded() -> None:
     assert result.threads.get("reviewer") is None
 
 
+@pytest.mark.parametrize("output_order", [("review_0", "review_1"), ("review_1", "review_0")])
+async def test_parallel_non_main_call_outputs_preserve_observed_chronology(output_order: tuple[str, str]) -> None:
+    reviewer = Message(
+        role="assistant",
+        tool_calls=[_tool_call("review_0", name="first"), _tool_call("review_1", name="second")],
+    )
+    root = _patch(
+        "rs_root",
+        active={"main", "reviewer"},
+        threads={"reviewer": [{"op": "add", "path": "/0", "value": reviewer.to_primitive()}]},
+    )
+    call_ids = {call_id: _sealed_call_id("reviewer", call_id) for call_id in output_order}
+    advanced = _patch(
+        "rs_advanced",
+        previous_reasoning_id=root.id,
+        threads={
+            "reviewer": [
+                {
+                    "op": "add",
+                    "path": "/3",
+                    "value": Message(role="developer", content="continue").to_primitive(),
+                }
+            ]
+        },
+    )
+
+    result = await _ingest(
+        [
+            _sealed_reasoning(root),
+            _function_call(call_ids["review_0"], name="first"),
+            _function_call(call_ids["review_1"], name="second"),
+            *[_function_output(call_ids[call_id], f"{call_id} result") for call_id in output_order],
+            _sealed_reasoning(advanced),
+        ]
+    )
+
+    assert result.threads["reviewer"] == [
+        reviewer,
+        *[Message(role="tool", tool_call_id=call_id, content=f"{call_id} result") for call_id in output_order],
+        Message(role="developer", content="continue"),
+    ]
+
+
 async def test_main_timewarp_does_not_rehome_interleaved_non_main_pair() -> None:
     source = Message(role="assistant", reasoning_content="private")
     reviewer = Message(role="assistant", tool_calls=[_tool_call("review_0")])

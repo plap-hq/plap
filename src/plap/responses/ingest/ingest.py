@@ -472,7 +472,6 @@ class _Replay:
                 content=content.tool_output(item),
             )
         )
-        self._rebuild_non_main_calls(call_id.thread)
 
     def _activate_main_for_message(self, message: Message) -> None:
         if message.role not in {"user", "assistant"}:
