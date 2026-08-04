@@ -62,7 +62,7 @@ async def response_completion(
 ) -> ChatCompletionResult:
     client = await state.svcs.aget(BudgetedChatCompletionClient)
     budget = state.svcs.get(CompletionBudget)
-    main = state.threads["main"]
+    main = state.threads["main"].messages
     suffix = len(main)
     result: ChatCompletionResult | None = None
     first_main_attempt_usage: ChatUsage | None = None
@@ -124,14 +124,14 @@ async def response_turn(
 
 @bus.emit("response.loop")
 async def response_loop(state: State) -> ChatCompletionResult | None:
-    if "main" not in state.threads.active or state.open_calls("main"):
+    if not state.threads["main"].active or state.open_calls("main"):
         return None
 
     while True:
         request = await response_request(state=state)
         result = await response_turn(state=state, request=request)
-        main = state.threads["main"]
-        if "main" not in state.threads.active or state.open_calls("main") or not main or main[-1].is_assistant():
+        main = state.threads["main"].messages
+        if not state.threads["main"].active or state.open_calls("main") or not main or main[-1].is_assistant():
             return result
 
 

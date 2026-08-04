@@ -287,7 +287,7 @@ class VisionTool(ServerTool):
         call: ChatToolCall,
     ) -> ChatMessage:
         ids, prompt = _tool_args(call.arguments)
-        transcript, known_image_ids = _vision_context(state.threads["main"])
+        transcript, known_image_ids = _vision_context(state.threads["main"].messages)
         missing = [image_id for image_id in ids if image_id not in known_image_ids]
         if missing:
             return ChatMessage(

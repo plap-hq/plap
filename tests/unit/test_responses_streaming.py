@@ -108,7 +108,7 @@ def _reasoning_args(label: str) -> dict[str, object]:
 
 def _checkpoint_args(label: str) -> dict[str, object]:
     return {
-        "state": ReasoningCheckpoint(memory={"checkpoint": True}, active={"main"}, threads={}),
+        "state": ReasoningCheckpoint(memory={"checkpoint": True}, active={"main"}, blocking=set(), threads={}),
         "main": [Message(role="assistant", content=label)],
     }
 

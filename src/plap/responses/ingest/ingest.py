@@ -331,10 +331,13 @@ class _Replay:
     def _sync_main(self) -> None:
         messages = self.main.current_messages()
         if messages or "main" in self.threads.messages:
-            self.threads["main"] = messages
+            self.threads.setdefault("main").messages = messages
 
     def _rebuild_non_main_calls(self, thread: str) -> None:
-        self.calls_by_thread[thread] = _ThreadCalls.rebuild(self.threads.get(thread, []) or [])
+        current = self.threads.get(thread)
+        self.calls_by_thread[thread] = _ThreadCalls.rebuild(
+            [] if current is None or thread not in self.threads.messages else current.messages
+        )
 
     def _rebuild_all_non_main_calls(self) -> None:
         self.calls_by_thread = {}
@@ -343,7 +346,7 @@ class _Replay:
                 self._rebuild_non_main_calls(thread)
 
     def _validate_threads(self) -> None:
-        unknown = (self.threads.active | set(self.threads.messages)) - self.allowed_threads
+        unknown = (self.threads.active | self.threads.blocking | set(self.threads.messages)) - self.allowed_threads
         if unknown:
             names = ", ".join(sorted(unknown))
             raise _reasoning_replay_error(
@@ -354,13 +357,13 @@ class _Replay:
     def _validate_call_boundary(self, *, allow_deferred_main: bool) -> None:
         self.main.assert_no_pending_patch()
         main_calls = self._main_calls()
-        if main_calls.has_open() or ("main" in self.threads.active and main_calls.has_declared() and not allow_deferred_main):
+        if main_calls.has_open() or (self.threads["main"].active and main_calls.has_declared() and not allow_deferred_main):
             raise _tool_replay_error(
                 reason="pending_tool_outputs_block_message",
                 private_message="reasoning cannot appear before active main function calls are closed",
             )
         for thread, thread_calls in self.calls_by_thread.items():
-            if thread_calls.has_open() or (thread in self.threads.active and thread_calls.has_declared()):
+            if thread_calls.has_open() or (self.threads[thread].active and thread_calls.has_declared()):
                 raise _tool_replay_error(
                     reason="pending_tool_outputs_block_message",
                     private_message="reasoning cannot appear before active function calls are closed",
@@ -401,7 +404,7 @@ class _Replay:
         self.memory = dict(payload.memory)
         self.threads = Threads.from_primitive(payload.threads.to_primitive())
         self._validate_threads()
-        self.main.load_snapshot(self.threads.get("main") or [])
+        self.main.load_snapshot(self.threads.messages.get("main", []))
         self._rebuild_all_non_main_calls()
         calls = [self._main_calls(), *self.calls_by_thread.values()]
         if any(thread_calls.has_unfinished() for thread_calls in calls):
@@ -422,17 +425,26 @@ class _Replay:
         if main_present or main_messages:
             messages["main"] = main_messages
         self.memory = dict(state.memory)
-        self.threads = Threads(active=set(state.active), messages=messages)
+        self.threads = Threads(active=set(state.active), blocking=set(state.blocking), messages=messages)
         self._rebuild_all_non_main_calls()
 
     def _apply_patch(self, state: ReasoningPatch) -> None:
         self.memory = _apply_memory_patch(self.memory, state.memory)
         for thread, patch in state.threads.items():
-            current = self.threads.get(thread, []) or []
-            self.threads[thread] = list(current) if not patch else _apply_thread_patch(current, patch, thread=thread)
+            current = self.threads.get(thread)
+            current_messages = [] if current is None or thread not in self.threads.messages else current.messages
+            self.threads.setdefault(thread).messages = (
+                list(current_messages) if not patch else _apply_thread_patch(current_messages, patch, thread=thread)
+            )
             self._rebuild_non_main_calls(thread)
         if state.active is not None:
             self.threads.active = set(state.active)
+        if state.blocking is not None:
+            self.threads.blocking = set(state.blocking)
+        if self.threads.blocking:
+            self.threads.active.discard("main")
+        else:
+            self.threads.active.add("main")
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
         self._validate_reasoning(payload)
@@ -453,7 +465,7 @@ class _Replay:
         thread_calls = self.calls_by_thread.get(call_id.thread)
         if thread_calls is None or thread_calls.phase(call_id.upstream_tool_call_id) is None:
             return
-        if call_id.thread not in self.threads.active:
+        if not self.threads[call_id.thread].active:
             raise _tool_replay_error(
                 reason="inactive_thread_function_call",
                 private_message="public function_call belongs to an inactive thread",
@@ -465,7 +477,7 @@ class _Replay:
         if thread_calls is None or thread_calls.phase(call_id.upstream_tool_call_id) is None:
             return
         thread_calls.close(call_id.upstream_tool_call_id)
-        self.threads.setdefault(call_id.thread).append(
+        self.threads.setdefault(call_id.thread).messages.append(
             Message(
                 role="tool",
                 tool_call_id=call_id.upstream_tool_call_id,
@@ -477,12 +489,13 @@ class _Replay:
     def _activate_main_for_message(self, message: Message) -> None:
         if message.role not in {"user", "assistant"}:
             return
-        if "main" not in self.threads.active:
+        main = self.threads["main"]
+        if not main.active:
             if message.role == "user" and self._main_calls().has_declared():
                 self.deferred_main_interrupt = True
             else:
                 self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
-        self.threads.active.add("main")
+        main.active = True
         if message.role == "user":
             self.checkpoint_required = True
 
@@ -492,7 +505,7 @@ class _Replay:
             self.main.append_message(item.message)
         elif isinstance(item, _DecodedSealedFunctionCall):
             phase = self.main.phases().get(item.call_id.upstream_tool_call_id)
-            if "main" not in self.threads.active and phase == CallPhase.DECLARED:
+            if not self.threads["main"].active and phase == CallPhase.DECLARED:
                 raise _tool_replay_error(
                     reason="inactive_thread_function_call",
                     private_message="public function_call belongs to an inactive thread",
@@ -513,9 +526,9 @@ class _Replay:
             self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
             self.deferred_main_interrupt = False
         self.main.assert_no_pending_patch()
-        self._main_calls().validate_completion(active="main" in self.threads.active)
+        self._main_calls().validate_completion(active=self.threads["main"].active)
         for thread, thread_calls in self.calls_by_thread.items():
-            thread_calls.validate_completion(active=thread in self.threads.active)
+            thread_calls.validate_completion(active=self.threads[thread].active)
 
     def finish(self) -> Ingested:
         self._validate_finish()

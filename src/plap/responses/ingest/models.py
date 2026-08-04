@@ -83,6 +83,17 @@ def _required_thread_name_set(value: object, *, label: str) -> set[str]:
     return threads
 
 
+def _required_thread_name_mapping(value: object, *, label: str) -> dict[str, int]:
+    item = _required_mapping(value, label=label)
+    normalized: dict[str, int] = {}
+    for raw_thread, raw_count in item.items():
+        thread = _required_thread_name(raw_thread, label=f"{label} key")
+        if not isinstance(raw_count, int) or raw_count < 0:
+            raise ValueError(f"{label}.{thread} must be a non-negative integer")
+        normalized[thread] = raw_count
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class MessagePatch:
     message: Message
@@ -186,31 +197,93 @@ def split_tail(items: list[Message]) -> tuple[list[Message], Message | None, lis
 @dataclass(slots=True)
 class Threads:
     active: set[str] = field(default_factory=lambda: {"main"})
+    blocking: set[str] = field(default_factory=set)
     messages: dict[str, list[Message]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.active = {_required_thread_name(thread, label="active thread") for thread in self.active}
+        self.blocking = {_required_thread_name(thread, label="blocking thread") for thread in self.blocking}
+        if self.blocking:
+            self.active.discard("main")
+        else:
+            self.active.add("main")
         normalized: dict[str, list[Message]] = {}
         for raw_thread, messages in self.messages.items():
             thread = _required_thread_name(raw_thread, label="threads key")
             normalized[thread] = list(messages)
         self.messages = normalized
 
-    def get(self, thread: str, default: list[Message] | None = None) -> list[Message] | None:
-        return self.messages.get(_required_thread_name(thread, label="thread"), default)
+    def _thread_key(self, thread: str) -> str:
+        return _required_thread_name(thread, label="thread")
 
-    def __getitem__(self, thread: str) -> list[Message]:
-        return self.messages[_required_thread_name(thread, label="thread")]
+    def _thread_active(self, thread: str) -> bool:
+        if thread == "main":
+            return not self.blocking
+        return thread in self.active
 
-    def __setitem__(self, thread: str, messages: list[Message]) -> None:
-        key = _required_thread_name(thread, label="thread")
-        self.messages[key] = list(messages)
+    def _set_thread_active(self, thread: str, value: bool) -> None:
+        if thread == "main":
+            if value:
+                self.blocking.discard("main")
+                if not self.blocking:
+                    self.active.add("main")
+                return
+            self.blocking.add("main")
+            self.active.discard("main")
+            return
+        if value:
+            self.active.add(thread)
+            return
+        self.active.discard(thread)
 
-    def setdefault(self, thread: str, default: list[Message] | None = None) -> list[Message]:
-        key = _required_thread_name(thread, label="thread")
+    def _thread_blocking(self, thread: str) -> bool:
+        return thread in self.blocking
+
+    def _set_thread_blocking(self, thread: str, value: bool) -> None:
+        if value:
+            self.blocking.add(thread)
+            self.active.discard("main")
+            return
+        self.blocking.discard(thread)
+        if not self.blocking:
+            self.active.add("main")
+
+    def _thread_messages(self, thread: str) -> list[Message]:
+        return self.messages[thread]
+
+    def _set_thread_messages(self, thread: str, messages: list[Message]) -> None:
+        self.messages[thread] = list(messages)
+
+    def get(self, thread: str, default: Thread | list[Message] | None = None) -> Thread | list[Message] | None:
+        key = self._thread_key(thread)
+        if key not in self.messages and key not in self.active and key not in self.blocking:
+            return default
+        return Thread(name=key, threads=self)
+
+    def __getitem__(self, thread: str) -> Thread:
+        key = self._thread_key(thread)
+        return Thread(name=key, threads=self)
+
+    def __setitem__(self, thread: str, value: Thread | list[Message]) -> None:
+        key = self._thread_key(thread)
+        if isinstance(value, Thread):
+            if value.name != key:
+                raise ValueError("thread wrapper name does not match assigned key")
+            self.messages[key] = list(value.messages)
+            if key == "main":
+                self._set_thread_active(key, value.active)
+                self._set_thread_blocking(key, value.blocking)
+                return
+            self._set_thread_active(key, value.active)
+            self._set_thread_blocking(key, value.blocking)
+            return
+        self.messages[key] = list(value)
+
+    def setdefault(self, thread: str, default: list[Message] | None = None) -> Thread:
+        key = self._thread_key(thread)
         if key not in self.messages:
             self.messages[key] = [] if default is None else list(default)
-        return self.messages[key]
+        return Thread(name=key, threads=self)
 
     def items(self):
         return self.messages.items()
@@ -218,13 +291,14 @@ class Threads:
     def to_primitive(self) -> dict[str, object]:
         return {
             "active": sorted(self.active),
+            "blocking": sorted(self.blocking),
             "messages": {thread: [message.to_primitive() for message in self.messages[thread]] for thread in sorted(self.messages)},
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> Threads:
         item = _required_mapping(value, label="threads")
-        allowed = {"active", "messages"}
+        allowed = {"active", "blocking", "messages"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
@@ -236,11 +310,81 @@ class Threads:
         messages_value = _required_mapping(item["messages"], label="threads messages")
         return cls(
             active=_required_thread_name_set(item["active"], label="threads active"),
+            blocking=_required_thread_name_set(item["blocking"], label="threads blocking"),
             messages={
                 _required_thread_name(thread, label="threads key"): _required_message_list(messages, label=f"threads.{thread}")
                 for thread, messages in messages_value.items()
             },
         )
+
+
+@dataclass(slots=True, eq=False)
+class Thread:
+    name: str
+    threads: Threads
+
+    __hash__ = object.__hash__
+
+    def _message_items(self) -> list[Message]:
+        return self.messages
+
+    def __bool__(self) -> bool:
+        return bool(self._message_items())
+
+    def __iter__(self):
+        return iter(self._message_items())
+
+    def __len__(self) -> int:
+        return len(self._message_items())
+
+    def __getitem__(self, index: int | slice) -> Message | list[Message]:
+        return self._message_items()[index]
+
+    def __setitem__(self, index: int | slice, value: Message | list[Message]) -> None:
+        self._message_items()[index] = value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Thread):
+            return self.name == other.name and self.messages == other.messages
+        if isinstance(other, list):
+            return self.messages == other
+        return NotImplemented
+
+    @property
+    def active(self) -> bool:
+        return self.threads._thread_active(self.name)
+
+    @active.setter
+    def active(self, value: bool) -> None:
+        self.threads._set_thread_active(self.name, value)
+
+    @property
+    def blocking(self) -> bool:
+        return self.threads._thread_blocking(self.name)
+
+    @blocking.setter
+    def blocking(self, value: bool) -> None:
+        self.threads._set_thread_blocking(self.name, value)
+
+    @property
+    def messages(self) -> list[Message]:
+        return self.threads._thread_messages(self.name)
+
+    @messages.setter
+    def messages(self, value: list[Message]) -> None:
+        self.threads._set_thread_messages(self.name, value)
+
+    def append(self, message: Message) -> None:
+        self.messages.append(message)
+
+    def extend(self, messages: list[Message]) -> None:
+        self.messages.extend(messages)
+
+    def block(self) -> None:
+        self.blocking = True
+
+    def unblock(self) -> None:
+        self.blocking = False
 
 
 def split_main_updates(
@@ -294,6 +438,7 @@ def split_main_updates(
 class ReasoningCheckpoint:
     memory: dict[str, JSONValue]
     active: set[str]
+    blocking: set[str]
     threads: dict[str, list[Message]]
 
     def __post_init__(self) -> None:
@@ -302,6 +447,11 @@ class ReasoningCheckpoint:
             self,
             "active",
             {_required_thread_name(thread, label="active thread") for thread in self.active},
+        )
+        object.__setattr__(
+            self,
+            "blocking",
+            {_required_thread_name(thread, label="blocking thread") for thread in self.blocking},
         )
         normalized: dict[str, list[Message]] = {}
         for raw_thread, messages in self.threads.items():
@@ -316,13 +466,14 @@ class ReasoningCheckpoint:
             "type": "checkpoint",
             "memory": dict(self.memory),
             "active": sorted(self.active),
+            "blocking": sorted(self.blocking),
             "threads": {thread: [message.to_primitive() for message in self.threads[thread]] for thread in sorted(self.threads)},
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> ReasoningCheckpoint:
         item = _required_mapping(value, label="reasoning checkpoint")
-        allowed = {"type", "memory", "active", "threads"}
+        allowed = {"type", "memory", "active", "blocking", "threads"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
@@ -334,6 +485,7 @@ class ReasoningCheckpoint:
         return cls(
             memory=dict(memory),
             active=_required_thread_name_set(item.get("active"), label="reasoning checkpoint active"),
+            blocking=_required_thread_name_set(item.get("blocking"), label="reasoning checkpoint blocking"),
             threads={
                 _required_thread_name(thread, label="reasoning checkpoint threads key"): _required_message_list(
                     messages,
@@ -348,6 +500,7 @@ class ReasoningCheckpoint:
 class ReasoningPatch:
     memory: JSONPatch
     active: set[str] | None = None
+    blocking: set[str] | None = None
     threads: dict[str, JSONPatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -357,6 +510,12 @@ class ReasoningPatch:
                 self,
                 "active",
                 {_required_thread_name(thread, label="active thread") for thread in self.active},
+            )
+        if self.blocking is not None:
+            object.__setattr__(
+                self,
+                "blocking",
+                {_required_thread_name(thread, label="blocking thread") for thread in self.blocking},
             )
         normalized: dict[str, JSONPatch] = {}
         for raw_thread, patch in self.threads.items():
@@ -371,13 +530,14 @@ class ReasoningPatch:
             "type": "patch",
             "memory": list(self.memory),
             "active": None if self.active is None else sorted(self.active),
+            "blocking": None if self.blocking is None else sorted(self.blocking),
             "threads": {thread: list(patch) for thread, patch in sorted(self.threads.items())},
         }
 
     @classmethod
     def from_primitive(cls, value: object) -> ReasoningPatch:
         item = _required_mapping(value, label="reasoning patch")
-        allowed = {"type", "memory", "active", "threads"}
+        allowed = {"type", "memory", "active", "blocking", "threads"}
         unknown = set(item) - allowed
         if unknown:
             names = ", ".join(sorted(unknown))
@@ -386,9 +546,11 @@ class ReasoningPatch:
             raise ValueError("reasoning patch type must be 'patch'")
         threads = _required_mapping(item.get("threads"), label="reasoning patch threads")
         active = item.get("active")
+        blocking = item.get("blocking")
         return cls(
             memory=_required_patch(item.get("memory"), label="reasoning memory patch"),
             active=None if active is None else _required_thread_name_set(active, label="reasoning patch active"),
+            blocking=None if blocking is None else _required_thread_name_set(blocking, label="reasoning patch blocking"),
             threads={
                 _required_thread_name(thread, label="reasoning patch threads key"): _required_patch(
                     patch,

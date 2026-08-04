@@ -192,7 +192,8 @@ def _final_block_call_id(block: list[ChatMessage]) -> str | None:
 def _rebuild_advisor_thread(state: State) -> None:
     existing_blocks: dict[str, list[ChatMessage]] = {}
     current_block: list[ChatMessage] = []
-    for entry in state.threads.get(ADVISOR_THREAD, []):
+    advisor_thread = state.threads.get(ADVISOR_THREAD)
+    for entry in ([] if advisor_thread is None else advisor_thread.messages):
         if _is_advisor_transcript_message(entry):
             if current_block:
                 call_id = _final_block_call_id(current_block)
@@ -208,7 +209,7 @@ def _rebuild_advisor_thread(state: State) -> None:
         if call_id is not None:
             existing_blocks[call_id] = list(current_block)
 
-    history = state.threads["main"]
+    history = state.threads["main"].messages
     new_thread: list[ChatMessage] = []
     current_msgs: list[ChatMessage] = []
     buffered_msgs: list[ChatMessage] = []
@@ -268,13 +269,14 @@ def _advisor_request(
 ) -> ChatCompletionRequest:
     advisor = state.config.advisor
     advise_function = server_tools.rename_to_avoid_collisions(ADVISE_FUNCTION, main_request.tools)
+    advisor_thread = state.threads.get(ADVISOR_THREAD)
     return replace(
         build_chat_request(
             advisor,
             state.request,
             messages=[
                 ChatMessage(role="developer", content=ADVISOR_PROMPT),
-                *state.threads.get(ADVISOR_THREAD, []),
+                *( [] if advisor_thread is None else advisor_thread.messages),
                 ChatMessage(role="user", content=phase_instruction),
             ],
         ),
@@ -359,10 +361,10 @@ async def _run_advisor(
         phase=phase,
     )
 
-    state.threads[ADVISOR_THREAD].extend(
+    state.threads[ADVISOR_THREAD].messages.extend(
         _strip_note_from_messages(latest_snapshot.messages, advise_tool_name=request.tools[0].function.name)
     )
-    state.threads[ADVISOR_THREAD].append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
+    state.threads[ADVISOR_THREAD].messages.append(ChatMessage(role="tool", tool_call_id=call.id, content=ADVISOR_TOOL_OUTPUT))
 
     _set_advisor_note(state, note)
 
@@ -374,7 +376,7 @@ async def _maybe_advise_after_tool_call(
     state: State,
     main_request: ChatCompletionRequest,
 ) -> ChatMessage | None:
-    history = state.threads["main"]
+    history = state.threads["main"].messages
     if not history or not history[-1].is_tool():
         return None
     phase_instruction = _phase_instruction(state, "after_tool_call", main_request)
@@ -391,7 +393,7 @@ async def _maybe_advise_after_tool_call(
         await _emit_annotation(state, text)
     if advice is not None:
         message = ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}})
-        state.threads["main"].append(message)
+        state.threads["main"].messages.append(message)
         return message
     return None
 
@@ -418,7 +420,7 @@ async def _maybe_advise_before_tool_call(
     )
     if advice is None:
         return
-    state.threads["main"].extend(
+    state.threads["main"].messages.extend(
         ChatMessage(
             role="tool",
             tool_call_id=call.id,
@@ -432,7 +434,9 @@ async def _maybe_advise_before_tool_call(
     text = _annotation_text(f"[advisor] blocked tool call(s): {joined}.", advice, note)
     if text is not None:
         await _emit_annotation(state, text)
-    state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
+    state.threads["main"].messages.append(
+        ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}})
+    )
 
 
 async def _maybe_advise_before_return(
@@ -458,7 +462,9 @@ async def _maybe_advise_before_return(
     if text is not None:
         await _emit_annotation(state, text)
     if advice is not None:
-        state.threads["main"].append(ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}}))
+        state.threads["main"].messages.append(
+            ChatMessage(role="developer", content=advice, memory={ADVISOR_THREAD: {"call_id": call_id}})
+        )
 
 
 @bus.listen("response.turn")

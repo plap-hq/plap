@@ -312,13 +312,15 @@ def _checkpoint(
     previous_reasoning_id: str | None = None,
     previous_compaction_id: str | None = None,
 ) -> ReasoningPayload:
+    requested_active = {"main"} if active is None else set(active)
     return ReasoningPayload(
         id=payload_id,
         previous_reasoning_id=previous_reasoning_id,
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             memory={} if memory is None else memory,
-            active={"main"} if active is None else active,
+            active=requested_active - {"main"},
+            blocking=set() if "main" in requested_active else {"main"},
             threads={} if threads is None else threads,
         ),
         main=[] if main is None else main,
@@ -335,13 +337,20 @@ def _patch(
     threads: dict[str, list[dict[str, object]]] | None = None,
     main: list[Message | MessagePatch] | None = None,
 ) -> ReasoningPayload:
+    blocking = None
+    normalized_active = None
+    if active is not None:
+        requested_active = set(active)
+        normalized_active = requested_active - {"main"}
+        blocking = set() if "main" in requested_active else {"main"}
     return ReasoningPayload(
         id=payload_id,
         previous_reasoning_id=previous_reasoning_id,
         previous_compaction_id=previous_compaction_id,
         state=ReasoningPatch(
             memory=[] if memory is None else memory,
-            active=active,
+            active=normalized_active,
+            blocking=blocking,
             threads={} if threads is None else threads,
         ),
         main=[] if main is None else main,
@@ -619,9 +628,9 @@ async def test_user_message_inside_reasoning_main_does_not_require_checkpoint() 
     assert result.last_reasoning_id == continuation.id
 
 
-def test_reasoning_state_variants_reject_main_thread_state() -> None:
-    with pytest.raises(ValueError, match="may not contain main"):
-        ReasoningCheckpoint(memory={}, active={"main"}, threads={"main": []})
+    def test_reasoning_state_variants_reject_main_thread_state() -> None:
+        with pytest.raises(ValueError, match="may not contain main"):
+            ReasoningCheckpoint(memory={}, active={"main"}, blocking=set(), threads={"main": []})
     with pytest.raises(ValueError, match="may not target main"):
         ReasoningPatch(memory=[], threads={"main": []})
 

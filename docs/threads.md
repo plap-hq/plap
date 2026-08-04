@@ -36,19 +36,19 @@ A client-owned tool crosses the other boundary. plap returns a function-call ite
 Responses request. After executing the tool, the API client sends a new Responses request containing the function-call
 output. This page calls that second API call a **Responses continuation**.
 
-plap saves thread histories and `threads.active` with the first response. The Responses continuation restores both. A
+plap saves thread histories, thread activation, and `threads.blocking` with the first response. The Responses continuation restores all of it. A
 plugin can therefore leave `main` parked while a reviewer takes one or more client-tool turns across several Responses
 requests.
 
 ## Add a separate history
 
-`setdefault` creates a thread the first time it is used and returns the existing history in later Responses continuations:
+`setdefault` creates a thread the first time it is used and returns a thread wrapper in later Responses continuations:
 
 ```python
 from plap.llms.completions import ChatMessage
 
 reviewer = state.threads.setdefault("reviewer")
-reviewer.append(
+reviewer.messages.append(
     ChatMessage(
         role="user",
         content="Review the proposed answer.",
@@ -59,10 +59,16 @@ reviewer.append(
 The new message exists only in `reviewer`. A review completion can use that history without changing the next main-model
 request. Custom thread names must be [registered](#register-a-thread-name) before response state is saved.
 
+Each thread wrapper exposes three routed attributes:
+
+- `thread.messages`: that thread's message history
+- `thread.active`: whether that thread is active
+- `thread.blocking`: whether that thread is currently blocking `main`
+
 ## Choose active threads
 
-Thread histories control model context. `state.threads.active` controls which threads can exchange client-tool calls in the
-current response.
+Thread histories control model context. Each thread wrapper controls whether that thread can exchange client-tool calls in
+the current response.
 
 An active non-main thread can publish a pending function call. When the API client sends the matching function-call output
 in a Responses continuation, plap appends the result to that thread. The thread's messages stay private; plap does not return
@@ -73,16 +79,17 @@ non-main messages as response messages. Activating a thread does not call a mode
 - The main-model loop runs only while `main` is active and has no open client call.
 - The latest main assistant message can be published only while `main` is active.
 
-Removing `main` from the active set parks its unpublished assistant message and function calls:
+Setting any thread's `blocking` flag parks `main` while that blocker is present. A blocking thread often activates itself at
+the same time:
 
 ```python
-state.threads.active.discard("main")
-state.threads.active.add("reviewer")
+reviewer = state.threads.setdefault("reviewer")
+reviewer.block()
+reviewer.active = True
 ```
 
-If the current response returns a reviewer function call, leave the active set in this state. Do not switch back to `main`
-before the response ends. The reviewer must still be active when the API client's Responses continuation supplies that
-call's output.
+If the current response returns a reviewer function call, leave the thread in this state. Do not unblock `main` before the
+response ends. The reviewer must still be active when the API client's Responses continuation supplies that call's output.
 
 ## What does a cross-request review look like?
 
@@ -90,7 +97,7 @@ Suppose the main model has produced an answer that must be reviewed before the A
 
 During the first Responses request:
 
-1. A response hook removes `main` from `threads.active`.
+1. A response hook blocks `main` from the reviewer thread.
 2. The plugin builds a review request from the reviewer thread and calls the review model.
 3. If the reviewer asks the API client to run a tool, the plugin leaves `reviewer` active and `main` inactive.
 4. `commit()` saves both histories and the active set, then returns the reviewer function call. The main answer remains private.
@@ -99,17 +106,18 @@ During the API client's Responses continuation:
 
 1. plap reads the call ID and appends the tool result to the reviewer thread.
 2. The plugin continues the review from that history.
-3. Another reviewer function call ends the response again with the same active set.
+3. Another reviewer function call ends the response again with the same reviewer state.
 4. Once the review is complete, the plugin can reactivate `main`:
 
 ```python
-state.threads.active.discard("reviewer")
-state.threads.active.add("main")
+reviewer = state.threads["reviewer"]
+reviewer.active = False
+reviewer.unblock()
 ```
 
 If the reviewer needs no client-owned tool, the entire review can finish during the first Responses request and `main` can
-be reactivated before that request commits. The important condition is that review has finished, not that activation and
-reactivation happen as an immediate pair.
+be unblocked before that request commits. The important condition is that review has finished, not that blocking and
+unblocking happen as an immediate pair.
 
 Reactivating `main` changes state; it does not itself call the main model. The hook that performs reactivation determines
 what follows:

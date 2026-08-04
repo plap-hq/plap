@@ -245,7 +245,7 @@ async def _execute_server_tools(
             message = _budget_exhausted_message(tool, call)
         else:
             message = _record_server_tool_call(tool, call, message)
-        state.threads["main"].append(message)
+        state.threads["main"].messages.append(message)
     return result
 
 

@@ -129,6 +129,11 @@ class _Update:
     patches: dict[str, list[dict[str, object]]]
 
 
+def _split_requested_active(active: set[str] | None) -> tuple[set[str], set[str]]:
+    requested_active = {"main"} if active is None else set(active)
+    return requested_active - {"main"}, set() if "main" in requested_active else {"main"}
+
+
 def _next_reasoning_payload_id() -> str:
     return f"rs_payload_{next(_REASONING_PAYLOAD_COUNTER)}"
 
@@ -158,11 +163,17 @@ def _reasoning_payload(
     state = (
         ReasoningCheckpoint(
             memory={},
-            active={"main"} if threads.active is None else threads.active,
+            active=_split_requested_active(threads.active)[0],
+            blocking=_split_requested_active(threads.active)[1],
             threads={},
         )
         if checkpoint
-        else ReasoningPatch(memory=memory, active=threads.active, threads=threads.patches)
+        else ReasoningPatch(
+            memory=memory,
+            active=None if threads.active is None else _split_requested_active(threads.active)[0],
+            blocking=None if threads.active is None else _split_requested_active(threads.active)[1],
+            threads=threads.patches,
+        )
     )
     return ReasoningPayload(
         id=payload_id or _next_reasoning_payload_id(),
@@ -187,7 +198,8 @@ def _checkpoint_payload(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             memory=memory,
-            active={"main"} if threads.active is None else threads.active,
+            active=_split_requested_active(threads.active)[0],
+            blocking=_split_requested_active(threads.active)[1],
             threads={} if snapshots is None else snapshots,
         ),
         main=threads.main,
@@ -202,7 +214,13 @@ def _threads_update(
 ) -> _Update:
     update = _Update(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
     split_main_updates(update.main)
-    ReasoningPatch(memory=[], active=active, threads=update.patches)
+    normalized_active, normalized_blocking = _split_requested_active(active)
+    ReasoningPatch(
+        memory=[],
+        active=None if active is None else normalized_active,
+        blocking=None if active is None else normalized_blocking,
+        threads=update.patches,
+    )
     return update
 
 

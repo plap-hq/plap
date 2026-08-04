@@ -170,7 +170,7 @@ def build_response_request(state: State) -> ChatCompletionRequest:
         if isinstance(tool, FunctionTool)
     ]
     return replace(
-        build_chat_request(main, request, [*instructions, *state.threads["main"]]),
+        build_chat_request(main, request, [*instructions, *state.threads["main"].messages]),
         tools=tools,
         tool_choice=_tool_choice(state),
         parallel_tool_calls=request.parallel_tool_calls,

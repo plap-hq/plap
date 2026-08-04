@@ -149,8 +149,8 @@ class State:
         return items
 
     def _main_suffix(self, threads: Threads) -> list[Message]:
-        base = self._base_threads["main"]
-        current = threads["main"]
+        base = self._base_threads["main"].messages
+        current = threads["main"].messages
         if len(current) < len(base) or current[: len(base)] != base:
             raise RuntimeError("persisted main history is immutable; replace only the current response suffix")
         return current[len(base) :]
@@ -167,6 +167,7 @@ class State:
             return ReasoningCheckpoint(
                 memory=deepcopy(memory),
                 active=set(threads.active),
+                blocking=set(threads.blocking),
                 threads={thread: deepcopy(messages) for thread, messages in threads.items() if thread != "main"},
             )
 
@@ -177,19 +178,27 @@ class State:
                 continue
             base_present = thread in self._base_threads.messages
             current_present = thread in threads.messages
-            base_messages = self._base_threads.get(thread)
-            current_messages = threads.get(thread)
-            if base_present == current_present and base_messages == current_messages:
+            base_messages = None if not base_present else self._base_threads[thread]
+            current_messages = None if not current_present else threads[thread]
+            if (
+                base_present == current_present
+                and base_messages is not None
+                and current_messages is not None
+                and base_messages.messages == current_messages.messages
+            ):
+                continue
+            if base_present == current_present and base_messages is None and current_messages is None:
                 continue
             patches[thread] = diff(
-                [] if base_messages is None else [message.to_primitive() for message in base_messages],
-                [] if current_messages is None else [message.to_primitive() for message in current_messages],
+                [] if base_messages is None else [message.to_primitive() for message in base_messages.messages],
+                [] if current_messages is None else [message.to_primitive() for message in current_messages.messages],
             )
         active = None if self._base_threads.active == threads.active else set(threads.active)
-        return ReasoningPatch(memory=memory_patch, active=active, threads=patches)
+        blocking = None if self._base_threads.blocking == threads.blocking else set(threads.blocking)
+        return ReasoningPatch(memory=memory_patch, active=active, blocking=blocking, threads=patches)
 
     def _validate_threads(self) -> None:
-        unknown = (self.threads.active | set(self.threads.messages)) - set(self._thread_codes)
+        unknown = (self.threads.active | self.threads.blocking | set(self.threads.messages)) - set(self._thread_codes)
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"state contains unconfigured threads: {names}")
@@ -197,11 +206,11 @@ class State:
     def _validate_main(self) -> None:
         self._validate_threads()
         self._main_suffix(self.threads)
-        self._split_tail(self.threads["main"], label="main history")
+        self._split_tail(self.threads["main"].messages, label="main history")
 
     def _logical_main(self, *, threads: Threads | None = None) -> Message | None:
         current_threads = self.threads if threads is None else threads
-        _, anchor, suffix, after, open_calls = self._split_tail(current_threads["main"], label="main history")
+        _, anchor, suffix, after, open_calls = self._split_tail(current_threads["main"].messages, label="main history")
         if anchor is None or after:
             return None
         if suffix and not open_calls:
@@ -214,7 +223,7 @@ class State:
         threads: Threads,
         main: list[Message],
     ) -> tuple[Message | None, Message | None]:
-        if "main" not in threads.active:
+        if not threads["main"].active:
             return None, None
         visible = self._logical_main(threads=threads)
         if visible is None:
@@ -252,18 +261,19 @@ class State:
     def _update_empty(self, state: ReasoningState, main: list[Message | MessagePatch]) -> bool:
         if main or isinstance(state, ReasoningCheckpoint):
             return False
-        return not state.memory and state.active is None and not state.threads
+        return not state.memory and state.active is None and state.blocking is None and not state.threads
 
     def _progress_snapshot(self) -> tuple[dict[str, JSONValue], Threads, list[Message]]:
         self._validate_main()
         shadow_memory = deepcopy(self.memory)
         shadow_threads = deepcopy(self.threads)
         for thread in list(shadow_threads.messages):
-            if thread != "main" and thread in shadow_threads.active:
-                shadow_threads[thread] = self._stubbed(shadow_threads[thread], label=f"{thread} thread")
-        if "main" in shadow_threads.active:
-            open_calls = self._split_tail(shadow_threads["main"], label="main history")[4]
-            shadow_threads["main"].extend(
+            current = shadow_threads[thread]
+            if thread != "main" and current.active:
+                current.messages = self._stubbed(current.messages, label=f"{thread} thread")
+        if shadow_threads["main"].active:
+            open_calls = self._split_tail(shadow_threads["main"].messages, label="main history")[4]
+            shadow_threads["main"].messages.extend(
                 Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls
             )
         return shadow_memory, shadow_threads, self._main_suffix(shadow_threads)
@@ -278,7 +288,11 @@ class State:
         return deepcopy(self.memory), threads, self._main_suffix(threads)
 
     def open_calls(self, thread: str) -> list[ChatToolCall]:
-        return self._split_tail(self.threads.get(thread, []) or [], label=f"{thread} history")[4]
+        current = self.threads.get(thread)
+        return self._split_tail(
+            [] if current is None or thread not in self.threads.messages else current.messages,
+            label=f"{thread} history",
+        )[4]
 
     async def save_progress(self) -> None:
         coordinator = self.svcs.get(StreamCoordinator)
@@ -304,7 +318,7 @@ class State:
         visible_calls: list[ResponseFunctionCallItem] = []
         main_open_calls: list[ChatToolCall] = []
         if visible_main is not None:
-            main_open_calls = self._split_tail(threads["main"], label="main history")[4]
+            main_open_calls = self._split_tail(threads["main"].messages, label="main history")[4]
             visible_calls.extend(self._function_items("main", main_open_calls))
         main_update = self._main_update(
             main,
@@ -317,10 +331,10 @@ class State:
         state = self._build_update(memory=memory, threads=threads)
 
         for thread in sorted(threads.messages):
-            if thread == "main" or thread not in threads.active:
+            current = threads[thread]
+            if thread == "main" or not current.active:
                 continue
-            messages = threads[thread]
-            visible_calls.extend(self._function_items(thread, self._split_tail(messages, label=f"{thread} thread")[4]))
+            visible_calls.extend(self._function_items(thread, self._split_tail(current.messages, label=f"{thread} thread")[4]))
 
         if self._reasoning_id is None and not self._update_empty(state, main_update):
             self._reasoning_id = await coordinator.begin_reasoning(state=state, main=main_update)
