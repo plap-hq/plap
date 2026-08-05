@@ -106,7 +106,7 @@ ADVISE_FUNCTION = ChatFunctionTool(
             },
             "note": {
                 "type": "string",
-                "description": "Non-blocking observation retained in advisor history for later review phases.",
+                "description": "Non-blocking observation to yourself for later review phases. The main agent does not see this.",
             },
         },
         "required": ["advice"],

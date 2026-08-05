@@ -86,8 +86,8 @@ def test_summary_chunker_waits_on_rule_lists_without_paragraph_breaks() -> None:
 
 
 def test_summary_chunker_prefers_paragraph_boundary_near_end() -> None:
-    paragraph_1 = "I am checking the request constraints and comparing them with the current plan. " * 4
-    paragraph_2 = "I am reviewing the main failure modes and narrowing the likely cause before changing code. " * 4
+    paragraph_1 = "I am checking the request constraints and comparing them with the current plan. " * 7
+    paragraph_2 = "I am reviewing the main failure modes and narrowing the likely cause before changing code. " * 7
     paragraph_3 = "z" * 320
     buffer = f"{paragraph_1}\n\n{paragraph_2}\n\n{paragraph_3}"
 
@@ -98,7 +98,7 @@ def test_summary_chunker_prefers_paragraph_boundary_near_end() -> None:
 
 
 def test_summary_chunker_hard_flushes_large_boundary_free_text() -> None:
-    buffer = "x" * 900
+    buffer = "x" * 2400
 
     chunker = _SummaryChunker()
 
