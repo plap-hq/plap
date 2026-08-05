@@ -98,10 +98,9 @@ class _RecordingStore:
         self.cancel_calls += 1
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+    async def fail_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
         self.fail_calls += 1
-        return True
 
 
 def _keyring() -> SealingKeyring:

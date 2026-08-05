@@ -410,15 +410,13 @@ def _preparation_error_event(exc: Exception) -> ResponseErrorEvent:
 
 async def _sse_response_payload(
     *,
-    http_request: Request[object, object, object],
+    channels: ChannelsPlugin,
     state: State,
     subscriber: Subscriber,
     projection: ResponseProjection,
 ) -> AsyncIterator[str]:
-    channels = http_request.app.plugins.get(ChannelsPlugin)
     coordinator = state.svcs.get(StreamCoordinator)
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(_watch_http_disconnect, http_request, task_group.cancel_scope)
         try:
             with _response_context(state):
                 task_group.start_soon(_execute_response, state)
@@ -460,7 +458,7 @@ async def create_response(
             raise
         return ServerSentEvent(
             _sse_response_payload(
-                http_request=request,
+                channels=channels,
                 state=state,
                 subscriber=subscriber,
                 projection=projection,

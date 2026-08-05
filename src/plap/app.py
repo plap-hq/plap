@@ -19,6 +19,7 @@ from litestar.channels.backends.memory import MemoryChannelsBackend
 from litestar.datastructures import State
 from litestar.di import Provide
 from litestar.exceptions import HTTPException, NotAuthorizedException, ValidationException
+from litestar.types import ASGIApp, Receive, Scope, Send
 
 from plap.auth import APIKeyManager
 from plap.auth.dependencies import auth_middleware, provide_request_auth_context
@@ -217,23 +218,27 @@ def provide_svcs(request: Request[Any, Any, Any]) -> svcs.Container:
     return container
 
 
-async def cleanup_svcs(message: Any, scope: dict[str, Any]) -> None:
-    scope_type = scope.get("type")
-    if scope_type == "http":
-        if message.get("type") != "http.response.body" or bool(message.get("more_body", False)):
-            return
-    elif scope_type == "websocket":
-        if message.get("type") != "websocket.close":
-            return
-    else:
-        return
-
+async def _close_scope_svcs(scope: Scope) -> None:
     state = scope.get("state")
     if not isinstance(state, dict):
         return
-    container = state.get("svcs_container")
+    container = state.pop("svcs_container", None)
     if isinstance(container, svcs.Container):
-        await container.aclose()
+        with anyio.CancelScope(shield=True):
+            try:
+                await container.aclose()
+            except Exception:
+                logger.exception("request.services.close_failed", transport=scope.get("type"))
+
+
+def svcs_lifecycle_middleware(app: ASGIApp) -> ASGIApp:
+    async def middleware(scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await app(scope, receive, send)
+        finally:
+            await _close_scope_svcs(scope)
+
+    return middleware
 
 
 async def _shutdown_database(app: Litestar) -> None:
@@ -327,9 +332,9 @@ def create_app() -> Litestar:
 
     return Litestar(
         route_handlers=routes,
-        before_send=[emit_access_log, cleanup_svcs],
+        before_send=[emit_access_log],
         logging_config=None,
-        middleware=[request_context_middleware, auth_middleware],
+        middleware=[request_context_middleware, auth_middleware, svcs_lifecycle_middleware],
         plugins=[
             telemetry.plugin,
             ChannelsPlugin(

@@ -207,9 +207,7 @@ class StreamCoordinator:
     async def _persist_failed(self) -> ResponseObject:
         response = self._terminal_response("failed", error=_GENERIC_RESPONSE_ERROR)
         if self._response_store is not None and self._prepared is not None:
-            updated = await self._response_store.fail_response(self._prepared, response)
-            if not updated:
-                raise RuntimeError("response could not transition to failed")
+            await self._response_store.fail_response(self._prepared, response)
         self._response = response
         return response
 
@@ -466,7 +464,7 @@ class StreamCoordinator:
         response = self.current_response()
         persisted = False
         try:
-            if self._response_store is not None and self._prepared is not None:
+            if self._response_store is not None and self._prepared is not None and self._prepared.response_request.store is not False:
                 await self._response_store.begin_response(self._prepared, response)
                 persisted = True
             await self._publish(ResponseCreatedEvent(response=response, sequence_number=0, type="response.created"))

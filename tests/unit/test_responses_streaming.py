@@ -44,29 +44,40 @@ class _RecordingStore:
 
     async def begin_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
+        if prepared.response_request.store is False:
+            return
         self.begin_calls += 1
 
     async def append_output_item(self, prepared: PreparedRequest, response_id: str, output_index: int, item: object) -> None:
         _ = prepared, response_id, output_index, item
+        if prepared.response_request.store is False:
+            return
         self.append_calls += 1
 
     async def replace_output_item(self, prepared: PreparedRequest, response_id: str, output_index: int, item: object) -> None:
         _ = prepared, response_id, output_index, item
+        if prepared.response_request.store is False:
+            return
         self.replace_calls += 1
 
     async def finish_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
+        if prepared.response_request.store is False:
+            return
         self.finish_calls += 1
 
     async def cancel_response(self, prepared: PreparedRequest, response) -> bool:
         _ = prepared, response
+        if prepared.response_request.store is False:
+            return False
         self.cancel_calls += 1
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+    async def fail_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
+        if prepared.response_request.store is False:
+            return
         self.fail_calls += 1
-        return True
 
 
 class _FailingChannels(_RecordingChannels):
@@ -85,16 +96,16 @@ def _keyring() -> SealingKeyring:
     return SealingKeyring(roots=(b"i" * 32,))
 
 
-def _request() -> ResponseCreateRequest:
-    return ResponseCreateRequest(model="plap/test", input="hello")
+def _request(*, store: bool | None = None) -> ResponseCreateRequest:
+    return ResponseCreateRequest(model="plap/test", input="hello", store=store)
 
 
-def _prepared() -> PreparedRequest:
-    request = _request()
+def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
+    actual_request = request or _request()
     return PreparedRequest(
         scope_id=uuid4(),
-        response_request=request,
-        execution_request=request,
+        response_request=actual_request,
+        execution_request=actual_request,
         stored_input_items=[],
     )
 
@@ -383,6 +394,47 @@ async def test_terminal_publication_failure_preserves_persisted_status() -> None
 
     assert coordinator.current_response().status == "completed"
     assert store.finish_calls == 1
+
+
+async def test_store_disabled_failure_publishes_terminal_without_persistence() -> None:
+    request = _request(store=False)
+    channels = _RecordingChannels()
+    store = _RecordingStore()
+    coordinator = StreamCoordinator(
+        request=request,
+        channels=channels,
+        prepared=_prepared(request),
+        response_store=store,
+    )
+
+    await coordinator.created()
+    await coordinator.failed()
+
+    assert coordinator.current_response().status == "failed"
+    assert store.begin_calls == 0
+    assert store.fail_calls == 0
+    assert _published_event_types(channels) == ["response.created", "response.failed"]
+
+
+async def test_store_disabled_created_publication_failure_does_not_compensate() -> None:
+    request = _request(store=False)
+    channels = _FailingChannels()
+    store = _RecordingStore()
+    coordinator = StreamCoordinator(
+        request=request,
+        channels=channels,
+        prepared=_prepared(request),
+        response_store=store,
+    )
+
+    with pytest.raises(ResponseFinalizationError, match="response acceptance failed") as exc_info:
+        await coordinator.created()
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "publication failed"
+    assert coordinator.current_response().status == "in_progress"
+    assert store.begin_calls == 0
+    assert store.fail_calls == 0
 
 
 async def test_created_publication_failure_compensates_persisted_response() -> None:

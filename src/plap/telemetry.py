@@ -4,10 +4,11 @@ import logging as stdlib_logging
 import os
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 import structlog
 from litestar.contrib.opentelemetry import OpenTelemetryConfig, OpenTelemetryPlugin
-from litestar.types import ASGIApp, Message, Receive, Scope, Send
+from litestar.types import ASGIApp, Message, Receive, ReceiveMessage, Scope, Send
 from opentelemetry import trace
 from opentelemetry._logs import get_logger_provider, set_logger_provider
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -43,6 +44,7 @@ class _RequestLog:
     started_at: float
     accepted: bool = False
     conversation_id: str | None = None
+    disconnected: bool = False
     logged: bool = False
     response_id: str | None = None
     status_code: int | None = None
@@ -193,21 +195,31 @@ def record_scope_context(scope: Scope, **context: object) -> None:
         request_state.conversation_id = conversation_id
 
 
-def _log_http_completion(request_state: _RequestLog) -> None:
+def _log_http_completion(
+    request_state: _RequestLog,
+    *,
+    outcome: Literal["aborted", "completed", "disconnected"],
+) -> None:
     _ACCESS_LOGGER.info(
         "http.request.completed",
         conversation_id=request_state.conversation_id,
         duration_ms=_duration_ms(request_state.started_at),
+        outcome=outcome,
         response_id=request_state.response_id,
         status_code=request_state.status_code,
     )
 
 
-def _log_websocket_completion(request_state: _RequestLog) -> None:
+def _log_websocket_completion(
+    request_state: _RequestLog,
+    *,
+    outcome: Literal["aborted", "completed", "disconnected"],
+) -> None:
     _ACCESS_LOGGER.info(
         "websocket.connection.completed",
         accepted=request_state.accepted,
         duration_ms=_duration_ms(request_state.started_at),
+        outcome=outcome,
     )
 
 
@@ -228,7 +240,7 @@ def emit_access_log(message: Message, scope: Scope) -> None:
                 request_state.status_code = status_code
             return
         if message_type == "http.response.body" and not bool(message.get("more_body", False)):
-            _log_http_completion(request_state)
+            _log_http_completion(request_state, outcome="completed")
             request_state.logged = True
         return
 
@@ -237,8 +249,15 @@ def emit_access_log(message: Message, scope: Scope) -> None:
         request_state.accepted = True
         return
     if message_type == "websocket.close":
-        _log_websocket_completion(request_state)
+        _log_websocket_completion(request_state, outcome="completed")
         request_state.logged = True
+
+
+async def _receive_with_disconnect_tracking(receive: Receive, request_state: _RequestLog) -> ReceiveMessage:
+    message = await receive()
+    if message.get("type") in {"http.disconnect", "websocket.disconnect"}:
+        request_state.disconnected = True
+    return message
 
 
 def request_context_middleware(app: ASGIApp) -> ASGIApp:
@@ -254,11 +273,34 @@ def request_context_middleware(app: ASGIApp) -> ASGIApp:
             return
         request_state.accepted = False
         request_state.conversation_id = None
+        request_state.disconnected = False
         request_state.logged = False
         request_state.response_id = None
         request_state.started_at = time.perf_counter()
         request_state.status_code = None
+
+        async def tracked_receive() -> ReceiveMessage:
+            return await _receive_with_disconnect_tracking(receive, request_state)
+
+        def log_unfinished_request() -> None:
+            outcome: Literal["aborted", "disconnected"] = "disconnected" if request_state.disconnected else "aborted"
+            if scope.get("type") == "http":
+                _log_http_completion(request_state, outcome=outcome)
+            else:
+                _log_websocket_completion(request_state, outcome=outcome)
+            request_state.logged = True
+
         with bound_context(**_scope_context(scope)):
-            await app(scope, receive, send)
+            try:
+                await app(scope, tracked_receive, send)
+            except BaseException:
+                # Pre-response exceptions may still be converted to a complete
+                # response by outer exception middleware.
+                if request_state.status_code is not None and not request_state.logged:
+                    log_unfinished_request()
+                raise
+            else:
+                if not request_state.logged:
+                    log_unfinished_request()
 
     return middleware

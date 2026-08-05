@@ -485,9 +485,9 @@ class ResponseStore:
                 move_head_result.scalar_one_or_none()
                 move_head_result.close()
 
-    async def fail_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
+    async def fail_response(self, prepared: PreparedRequest, response: ResponseObject) -> None:
         if prepared.response_request.store is False:
-            return False
+            return
         logger.warning(
             "response.store.fail",
             response_id=response.id,
@@ -522,7 +522,6 @@ class ResponseStore:
             update_result.close()
             if failed_response_id is None:
                 raise RuntimeError("response could not transition to failed")
-            return True
 
     async def cancel_response(self, prepared: PreparedRequest, response: ResponseObject) -> bool:
         if prepared.response_request.store is False:

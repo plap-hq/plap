@@ -72,9 +72,8 @@ class _RecordingStore:
         _ = prepared, response
         return True
 
-    async def fail_response(self, prepared: PreparedRequest, response) -> bool:
+    async def fail_response(self, prepared: PreparedRequest, response) -> None:
         _ = prepared, response
-        return True
 
 
 class _Client:
