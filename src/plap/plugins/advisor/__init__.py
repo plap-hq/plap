@@ -308,6 +308,18 @@ def _start_phase(state: State, phase: str, main_request: ChatCompletionRequest) 
     state.threads.active.add(ADVISOR_THREAD)
 
 
+def _refresh_phase_instruction(state: State, main_request: ChatCompletionRequest) -> None:
+    advisor = state.threads[ADVISOR_THREAD]
+    marker = _active_phase(advisor)
+    if marker is None:
+        raise RuntimeError("active advisor thread is missing its phase marker")
+    index, phase = marker
+
+    instruction = _phase_instruction(phase, main_request)
+    if advisor[index].content != instruction:
+        advisor[index] = replace(advisor[index], content=instruction)
+
+
 def _remove_phase_message(state: State) -> str:
     advisor = state.threads[ADVISOR_THREAD]
     marker = _active_phase(advisor)
@@ -322,6 +334,7 @@ async def _complete_advisor(
     state: State,
     main_request: ChatCompletionRequest,
 ) -> tuple[ChatCompletionResult, str]:
+    _refresh_phase_instruction(state, main_request)
     request, advise_tool_name = _advisor_request(state, main_request)
     client = await state.svcs.aget(BudgetedChatCompletionClient)
     snapshot = await complete(
@@ -449,6 +462,18 @@ def _after_tool_phase_pending(state: State) -> bool:
         return False
     main = state.threads["main"]
     return bool(main) and main[-1].is_tool()
+
+
+@bus.listen("response.user_turn")
+async def interrupt_advisor(state: State, *, next) -> None:
+    if ADVISOR_THREAD in state.threads.active:
+        marker = _active_phase(state.threads[ADVISOR_THREAD])
+        if marker is None:
+            raise RuntimeError("active advisor thread is missing its phase marker")
+        _append_main_update(state)
+        logger.info("response.advisor.interrupted", phase=marker[1], reason="user_turn")
+        await _finalize_phase(state, advice=None, note=None)
+    await next(state=state)
 
 
 @bus.listen("response.loop")

@@ -1828,7 +1828,7 @@ async def test_ingest_response_request_accepts_reversed_outputs_for_all_active_t
     )
 
 
-async def test_ingest_response_request_user_interrupts_only_parked_main_calls() -> None:
+async def test_ingest_response_request_user_interrupts_parked_main_without_changing_active_threads() -> None:
     assistant = Message(
         role="assistant",
         content="hidden",
@@ -1844,7 +1844,7 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
         keyring=_keyring(),
     )
 
-    assert result.threads.active == {"main", "reviewer"}
+    assert result.threads.active == {"reviewer"}
     assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),
@@ -1852,7 +1852,7 @@ async def test_ingest_response_request_user_interrupts_only_parked_main_calls() 
     ]
 
 
-async def test_ingest_response_request_fabricated_assistant_interrupts_parked_main_calls() -> None:
+async def test_ingest_response_request_fabricated_assistant_interrupts_parked_main_without_reactivating_it() -> None:
     assistant = Message(
         role="assistant",
         content="hidden",
@@ -1874,7 +1874,7 @@ async def test_ingest_response_request_fabricated_assistant_interrupts_parked_ma
         keyring=_keyring(),
     )
 
-    assert result.threads.active == {"main"}
+    assert result.threads.active == set()
     assert result.threads["main"] == [
         assistant,
         Message(role="tool", tool_call_id="up_main_0", content="Tool call aborted by user."),

@@ -46,7 +46,7 @@ class State:
     _base_threads: Threads
     _base_main_tail: MainTail | None
     _reasoning_id: str | None
-    _checkpoint_required: bool
+    checkpoint_required: bool
 
     @classmethod
     def from_ingested(
@@ -70,7 +70,7 @@ class State:
             _base_threads=base_threads,
             _base_main_tail=deepcopy(ingested.main_tail),
             _reasoning_id=None,
-            _checkpoint_required=ingested.checkpoint_required,
+            checkpoint_required=ingested.checkpoint_required,
             memory=deepcopy(base_memory),
             threads=deepcopy(base_threads),
         )
@@ -163,7 +163,7 @@ class State:
     ) -> ReasoningState:
         self._main_suffix(threads)
 
-        if self._checkpoint_required:
+        if self.checkpoint_required:
             return ReasoningCheckpoint(
                 memory=deepcopy(memory),
                 active=set(threads.active),
@@ -327,7 +327,7 @@ class State:
         if self._reasoning_id is not None:
             await coordinator.finish_reasoning(state=state, main=main_update)
             self._reasoning_id = None
-            self._checkpoint_required = False
+            self.checkpoint_required = False
         if visible_message is not None:
             await coordinator.emit(visible_message)
         for item in visible_calls:

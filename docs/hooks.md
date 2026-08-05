@@ -11,6 +11,7 @@ The response hooks follow the nested structure of one response:
 
 ```text
 response.start
+├── response.user_turn?
 ├── response.loop
 │   └── repeat:
 │       ├── response.request
@@ -21,16 +22,20 @@ response.start
 └── response.commit
 ```
 
-`response.turn` calls `response.completion` once. A completion can make several attempts, and each attempt can produce many
-snapshots.
+`response.user_turn` appears only when a request introduces a new user message.
+
+`response.turn` calls `response.completion` once, but a completion can make several attempts. A retry validator checks a
+finished attempt and either accepts it or tells the model what to correct. [Completion retries and
+validators](llms/retries.md) explains that process. Each attempt can produce many snapshots.
 
 | Hook | Receives | Returns | What it can change |
 | --- | --- | --- | --- |
 | `response.start` | `state` | `None` | The complete response, including final status |
+| `response.user_turn` | `state` | `None` | Stop or reset work from the previous user turn |
 | `response.loop` | `state` | A result or `None` | Whether and how main-model turns repeat |
 | `response.request` | `state` | `ChatCompletionRequest` | Messages, tools, and options for the next main-model call |
 | `response.turn` | `state`, `request` | `ChatCompletionResult` | Work before or after one accepted main-model turn |
-| `response.completion` | `state`, `request`, `validators` | `ChatCompletionResult` | Streaming and retry behavior for one turn |
+| `response.completion` | `state`, `request`, `validators` | `ChatCompletionResult` | Streaming and [retry validation](llms/retries.md) for one turn |
 | `response.snapshot` | `state`, `request`, `snapshot` | `Snapshot` | Each accumulated update from a completion attempt |
 | `response.summary` | `state`, `source` | `None` | How [reasoning summaries](summary.md) stream during completion |
 | `response.commit` | `state` | `None` | State finalization and published response output |
@@ -71,8 +76,8 @@ the replacement. `ChatCompletionRequest` is a frozen dataclass, so `dataclasses.
 
 #### Run work around a turn
 
-A model turn may need several completion attempts before one passes validation. If a plugin records one duration for that
-whole process, `response.turn` provides the correct start and end points:
+The model may need another attempt when it returns invalid tool arguments. If a plugin records one duration for the complete
+turn, `response.turn` provides the correct start and end points:
 
 ```python
 import time
@@ -99,8 +104,8 @@ async def time_turn(
     return result
 ```
 
-The timer starts before the first completion attempt and stops after one attempt passes the validators. Rejected attempts
-remain inside the same measurement.
+The timer starts before the first attempt and stops after plap has a result it can use. Any retries remain inside the same
+measurement.
 
 Every response hook has access to the current [State](state.md). A plugin that calls another model can keep its messages out
 of the main request with a separate [thread](threads.md).

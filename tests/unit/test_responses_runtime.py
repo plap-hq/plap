@@ -125,12 +125,13 @@ def _prepared(request: ResponseCreateRequest | None = None) -> PreparedRequest:
     )
 
 
-def _ingested(*, active: set[str] | None = None) -> Ingested:
+def _ingested(*, active: set[str] | None = None, checkpoint_required: bool = False) -> Ingested:
     return Ingested(
         memory={},
         threads=Threads(active={"main"} if active is None else active),
         main_tail=None,
         last_reasoning_id=None,
+        checkpoint_required=checkpoint_required,
     )
 
 
@@ -542,6 +543,12 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
     core = importlib.reload(importlib.import_module("plap.plugins.core.loop"))
     events: list[str] = []
 
+    @bus.listen("response.user_turn")
+    async def wrap_user_turn(state, *, next):
+        events.append("user_turn.before")
+        await next(state=state)
+        events.append("user_turn.after")
+
     @bus.listen("response.request")
     async def wrap_request(state, *, next):
         events.append("request.before")
@@ -590,6 +597,7 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
     state = _state(
         _RecordingStore(),
         _RecordingChannels(),
+        ingested=_ingested(checkpoint_required=True),
         client=_StubChatClient(
             [
                 _delta(
@@ -608,6 +616,8 @@ async def test_response_hooks_follow_the_documented_execution_order() -> None:
         importlib.reload(core)
 
     assert events == [
+        "user_turn.before",
+        "user_turn.after",
         "loop.before",
         "request.before",
         "request.after",

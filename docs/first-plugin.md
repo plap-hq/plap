@@ -124,4 +124,7 @@ Congrats! You now have an additive plugin: it gives the model a new capability.
 If your next plugin adds another server-owned capability, continue with [Server tools](easy/server-tools.md). It starts from
 the `ServerTool` used here and develops it beyond the no-argument `server_time` example.
 
+If your plugin needs configuration, HTTP routes, shared services, or shutdown work, continue with [Bootstrap
+helpers](easy/bootstrap.md).
+
 If your plugin needs to change or wrap behavior that is part of the normal response cycle, continue with [Hooks](hooks.md).

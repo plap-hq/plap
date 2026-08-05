@@ -36,7 +36,7 @@ Callers choose a client without changing how they build requests or consume resu
 | Understand which provider and model combinations may run | [Model whitelist](whitelist.md) |
 | Select providers and configure fallback | [Routing](routing.md) |
 | Consume deltas and assemble results | [Streaming](streaming.md) |
-| Ask the model to correct an unusable result | [Retries](retries.md) |
+| Validate a result and ask the model to correct it | [Retries](retries.md) |
 | Decode, recover, normalize, and validate model JSON | [JSON](json.md) |
 | Share one limit across several model calls | [Budgeting](budgeting.md) |
 | Estimate prompt size before a call | [Token measurement](tokens.md) |

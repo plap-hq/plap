@@ -122,6 +122,11 @@ async def response_turn(
     )
 
 
+@bus.emit("response.user_turn")
+async def response_user_turn(state: State) -> None:
+    _ = state
+
+
 @bus.emit("response.loop")
 async def response_loop(state: State) -> ChatCompletionResult | None:
     if "main" not in state.threads.active or state.open_calls("main"):
@@ -164,6 +169,8 @@ async def run_response(state: State) -> None:
         result: ChatCompletionResult | None = None
         budget_exhausted = False
         try:
+            if state.checkpoint_required:
+                await response_user_turn(state=state)
             result = await response_loop(state=state)
         except CompletionBudgetExhaustedError:
             budget_exhausted = True

@@ -31,6 +31,7 @@ from plap.responses.contracts import ResponseCreateRequest
 from plap.responses.contracts.items import (
     RequestFunctionCallItem,
     RequestFunctionCallOutputItem,
+    RequestMessageItem,
     RequestReasoningItem,
     ResponseFunctionCallItem,
     ResponseMessageItem,
@@ -634,7 +635,8 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
                 output="client inspection",
                 type="function_call_output",
             ),
-        ]
+        ],
+        parallel_tool_calls=False,
     )
     ingested = await ingest_response_request(
         continuation_request,
@@ -652,7 +654,10 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
 
     assert second_client.main_requests == []
     assert len(second_client.advisor_requests) == 1
-    assert any(message.tool_call_id == "call_probe" for message in second_client.advisor_requests[0].messages)
+    advisor_request = second_client.advisor_requests[0]
+    assert any(message.tool_call_id == "call_probe" for message in advisor_request.messages)
+    phase = next(message for message in advisor_request.messages if "phase" in message.memory.get(_ADVISOR_THREAD, {}))
+    assert '"parallel_tool_calls":false' in phase.content
     assert any(
         message.tool_call_id == "call_probe" and message.content == "client inspection" for message in second_state.threads[_ADVISOR_THREAD]
     )
@@ -661,6 +666,68 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
     assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in second_state.threads[_ADVISOR_THREAD])
     second_output = second_state.svcs.get(StreamCoordinator).current_response().output
     assert [item.name for item in second_output if isinstance(item, ResponseFunctionCallItem)] == ["read_file"]
+
+
+@pytest.mark.anyio
+async def test_interrupted_advisor_exploration_sees_new_main_update_before_main_resumes() -> None:
+    _reload_handlers()
+    first_client = _Client(
+        main=[_tool_step()],
+        advisor=[_advisor_calls_step(("call_probe", "read_file", {"path": "src/app.py"}))],
+    )
+    first_state = _state(first_client)
+
+    await _run(first_state)
+
+    first_output = first_state.svcs.get(StreamCoordinator).current_response().output
+    reasoning = next(item for item in first_output if isinstance(item, ResponseReasoningItem))
+    visible_call = next(item for item in first_output if isinstance(item, ResponseFunctionCallItem))
+    continuation_request = _request(
+        input=[
+            RequestReasoningItem.model_validate(reasoning.model_dump()),
+            RequestFunctionCallItem.model_validate(visible_call.model_dump()),
+            RequestFunctionCallOutputItem(
+                call_id=visible_call.call_id,
+                output="Advisor exploration interrupted by user.",
+                type="function_call_output",
+            ),
+            RequestMessageItem(content="Use the new direction instead.", role="user", type="message"),
+        ],
+        parallel_tool_calls=False,
+    )
+    ingested = await ingest_response_request(
+        continuation_request,
+        keyring=_keyring(),
+        thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
+    )
+    assert ingested.threads.active == {_ADVISOR_THREAD}
+
+    second_client = _Client(
+        main=[_text_step("new answer")],
+        advisor=[_advisor_step("")],
+    )
+    second_state = _state(
+        second_client,
+        request=continuation_request,
+        ingested=ingested,
+    )
+
+    await _run(second_state)
+
+    assert len(second_client.advisor_requests) == 1
+    before_return_request = second_client.advisor_requests[0]
+    assert any(
+        message.tool_call_id == "call_probe" and message.content == "Advisor exploration interrupted by user."
+        for message in before_return_request.messages
+    )
+    updates = [message for message in before_return_request.messages if "transcript_anchor" in message.memory.get(_ADVISOR_THREAD, {})]
+    assert any("Use the new direction instead." in message.content for message in updates)
+    assert any("new answer" in message.content for message in updates)
+    phase = next(message for message in before_return_request.messages if "phase" in message.memory.get(_ADVISOR_THREAD, {}))
+    assert "phase: before_return" in phase.content
+    assert '"parallel_tool_calls":false' in phase.content
+    assert len(second_client.main_requests) == 1
+    assert second_state.threads.active == {"main"}
 
 
 @pytest.mark.anyio

@@ -84,6 +84,11 @@ If the current response returns a reviewer function call, leave the active set i
 before the response ends. The reviewer must still be active when the API client's Responses continuation supplies that
 call's output.
 
+NOTE: When the user interrupts, they expect the new message to take effect immediately. If a plugin continues work from the
+previous turn, the assistant appears stuck or looks as though it ignored the interruption. A plugin that parks `main` must
+handle `response.user_turn` by stopping obsolete work and returning control to `main` before making another private model
+call.
+
 ## What does a cross-request review look like?
 
 Suppose the main model has produced an answer that must be reviewed before the API client sees it.

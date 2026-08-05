@@ -6,6 +6,9 @@ unknown, its arguments may fail the schema, or the model may ignore a required t
 Transport retries repeat a call that failed to complete. Completion retries handle the different case: they preserve the
 rejected answer, add a correction message, and ask the model to try the task again.
 
+A retry validator inspects a completed attempt. It returns nothing when the result can be used, or a correction when the
+model should try again.
+
 ## Use the built-in validators
 
 `retry_on_tool_choice_mismatch` checks `tool_choice` and `parallel_tool_calls`.

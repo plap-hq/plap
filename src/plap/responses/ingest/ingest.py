@@ -473,21 +473,20 @@ class _Replay:
             )
         )
 
-    def _activate_main_for_message(self, message: Message) -> None:
+    def _handle_main_message_boundary(self, message: Message) -> None:
         if message.role not in {"user", "assistant"}:
             return
-        if "main" not in self.threads.active:
+        if "main" not in self.threads.active and not self.deferred_main_interrupt:
             if message.role == "user" and self._main_calls().has_declared():
                 self.deferred_main_interrupt = True
             else:
                 self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
-        self.threads.active.add("main")
         if message.role == "user":
             self.checkpoint_required = True
 
     def _step_main_item(self, item: _DecodedInput) -> None:
         if isinstance(item, _DecodedMessage):
-            self._activate_main_for_message(item.message)
+            self._handle_main_message_boundary(item.message)
             self.main.append_message(item.message)
         elif isinstance(item, _DecodedSealedFunctionCall):
             phase = self.main.phases().get(item.call_id.upstream_tool_call_id)
