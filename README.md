@@ -2,8 +2,12 @@
 
 plap is an OpenAI Responses-compatible server for building plugin-driven model workflows.
 
-It accepts normal Responses API requests, runs them through a configurable model loop, and lets Python plugins add new
-capabilities or modify response execution through hooks.
+It accepts normal Responses API requests, runs them through a highly configurable model loop, and lets Python plugins add new
+capabilities or modify response execution through [hooks](docs/hooks.md).
+
+Harness engineering has never been done on the server side before. Want to build a company brain, context compression,
+or an advisor model plugin? plap makes it possible with features such as [a threading system](docs/threads.md): letting multiple models
+work on the same response with isolated contexts and access to the client's tools.
 
 ## Start plap
 
@@ -61,12 +65,6 @@ PY
 ```
 
 You now have a working local plap server.
-
-## What happens to a request?
-
-1. plap reads the Responses request into response state.
-2. The model loop runs completions, plugins, and server tools.
-3. Commit saves the final state and publishes Responses output.
 
 ## Add something
 

@@ -9,6 +9,7 @@ Plugins extend the Responses server. `plap.llms` provides the lower-level chat-c
 
 ## Modify execution
 
+- [Built-in plugins](examples.md) covers the example plugins that ship with plap.
 - [Event bus](bus.md) defines how plugin handlers compose.
 - [Hooks](hooks.md) covers the response and bootstrap events that plugins can modify.
 - [Reasoning summaries](summary.md) stream progress while the main answer remains private.
