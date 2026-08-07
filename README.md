@@ -83,3 +83,7 @@ pixi run ruff format --check src tests scripts
 ```
 
 Tests marked `money` or `expensive` may call live providers and use credentials from root `.env`.
+
+## License
+
+plap is licensed under the [Apache License 2.0](LICENSE).
