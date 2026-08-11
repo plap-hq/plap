@@ -66,11 +66,11 @@ packages = ["src/plap"]
 
 [project.entry-points."plap.plugin"]
 core = "plap.plugins.core"
-easy = "plap.plugins.easy"
-vision = "plap.plugins.vision"
-summary = "plap.plugins.summary"
-advisor = "plap.plugins.advisor"
 chat_completions = "plap.plugins.chat_completions"
+easy = "plap.plugins.easy"
+summary = "plap.plugins.summary"
+vision = "plap.plugins.vision"
+advisor = "plap.plugins.advisor"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
