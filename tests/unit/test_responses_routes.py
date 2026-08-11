@@ -268,7 +268,7 @@ async def test_prepare_create_preserves_stored_user_boundary_and_resets_lineage(
         channels=_RecordingChannels(),
     )
     coordinator = state.svcs.get(StreamCoordinator)
-    checkpoint = ReasoningCheckpoint(memory={"turn": 2}, active={"main"}, threads={})
+    checkpoint = ReasoningCheckpoint(memory={"turn": 2}, enabled={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
     patch = ReasoningPatch(memory=[{"op": "add", "path": "/tool", "value": True}])
@@ -324,7 +324,7 @@ async def test_prepare_create_echoes_inbound_compaction_anchor_into_reasoning() 
         channels=_RecordingChannels(),
     )
     coordinator = state.svcs.get(StreamCoordinator)
-    checkpoint = ReasoningCheckpoint(memory={"generation": 2}, active={"main"}, threads={})
+    checkpoint = ReasoningCheckpoint(memory={"generation": 2}, enabled={"main"}, threads={})
     checkpoint_id = await coordinator.begin_reasoning(state=checkpoint, main=[])
     await coordinator.finish_reasoning(state=checkpoint, main=[])
     patch = ReasoningPatch(memory=[{"op": "add", "path": "/tool", "value": True}])

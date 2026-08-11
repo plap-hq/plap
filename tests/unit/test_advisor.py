@@ -621,6 +621,8 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
     visible_calls = [item for item in first_output if isinstance(item, ResponseFunctionCallItem)]
     assert [item.name for item in visible_calls] == ["read_file"]
     assert first_state.threads.active == {_ADVISOR_THREAD}
+    assert first_state.threads.enabled == {"main", _ADVISOR_THREAD}
+    assert first_state.threads.blocked_by == {"main": {_ADVISOR_THREAD}}
     phase_messages = [message for message in first_state.threads[_ADVISOR_THREAD] if "phase" in message.memory.get(_ADVISOR_THREAD, {})]
     assert len(phase_messages) == 1
     assert first_client.main_requests and len(first_client.main_requests) == 1
@@ -643,6 +645,8 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
         keyring=_keyring(),
         thread_codes={"main": 0, _ADVISOR_THREAD: 1024},
     )
+    assert ingested.threads.enabled == {"main", _ADVISOR_THREAD}
+    assert ingested.threads.blocked_by == {"main": {_ADVISOR_THREAD}}
     second_client = _Client(main=[], advisor=[_advisor_step("")])
     second_state = _state(
         second_client,
@@ -663,6 +667,8 @@ async def test_advisor_client_tool_continuation_keeps_main_frozen_until_advise()
     )
     assert any(message.tool_call_id == "call_inspect" for message in second_state.threads[_ADVISOR_THREAD])
     assert second_state.threads.active == {"main"}
+    assert second_state.threads.enabled == {"main"}
+    assert second_state.threads.blocked_by == {}
     assert not any("phase" in message.memory.get(_ADVISOR_THREAD, {}) for message in second_state.threads[_ADVISOR_THREAD])
     second_output = second_state.svcs.get(StreamCoordinator).current_response().output
     assert [item.name for item in second_output if isinstance(item, ResponseFunctionCallItem)] == ["read_file"]

@@ -158,11 +158,11 @@ def _reasoning_payload(
     state = (
         ReasoningCheckpoint(
             memory={},
-            active={"main"} if threads.active is None else threads.active,
+            enabled={"main"} if threads.active is None else threads.active,
             threads={},
         )
         if checkpoint
-        else ReasoningPatch(memory=memory, active=threads.active, threads=threads.patches)
+        else ReasoningPatch(memory=memory, enabled=threads.active, threads=threads.patches)
     )
     return ReasoningPayload(
         id=payload_id or _next_reasoning_payload_id(),
@@ -187,7 +187,7 @@ def _checkpoint_payload(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             memory=memory,
-            active={"main"} if threads.active is None else threads.active,
+            enabled={"main"} if threads.active is None else threads.active,
             threads={} if snapshots is None else snapshots,
         ),
         main=threads.main,
@@ -202,7 +202,7 @@ def _threads_update(
 ) -> _Update:
     update = _Update(active=active, main=[] if main is None else list(main), patches={} if patches is None else patches)
     split_main_updates(update.main)
-    ReasoningPatch(memory=[], active=active, threads=update.patches)
+    ReasoningPatch(memory=[], enabled=active, threads=update.patches)
     return update
 
 
@@ -639,6 +639,60 @@ def test_threads_assignment_is_replaceable_and_copies_assigned_lists() -> None:
     assert threads["main"] == [first, second]
 
 
+def test_threads_keep_target_blocked_until_every_blocker_releases() -> None:
+    threads = Threads(enabled={"main", "reviewer"})
+    threads.block("main", by="advisor")
+    threads.block("main", by="critic")
+
+    assert threads.active == {"reviewer"}
+
+    threads.unblock("main", by="advisor")
+
+    assert threads.active == {"reviewer"}
+    assert threads.blocked_by == {"main": {"critic"}}
+
+    threads.unblock("main", by="critic")
+
+    assert threads.active == {"main", "reviewer"}
+    assert threads.blocked_by == {}
+
+
+def test_threads_preserve_owner_state_while_target_is_blocked() -> None:
+    threads = Threads(enabled=set())
+    threads.block("main", by="advisor")
+    threads.enable("main")
+
+    assert "main" not in threads.active
+
+    threads.disable("main")
+    threads.unblock("main", by="advisor")
+
+    assert "main" not in threads.active
+
+
+def test_threads_reject_duplicate_and_unmatched_block_transitions() -> None:
+    threads = Threads()
+    threads.block("main", by="advisor")
+
+    with pytest.raises(RuntimeError, match="already blocks"):
+        threads.block("main", by="advisor")
+    with pytest.raises(RuntimeError, match="does not block"):
+        threads.unblock("main", by="critic")
+
+
+def test_threads_activity_round_trips_with_block_attribution() -> None:
+    threads = Threads(
+        enabled={"main", "reviewer"},
+        blocked_by={"main": {"advisor", "critic"}},
+        messages={"reviewer": [Message(role="assistant", content="review")]},
+    )
+
+    restored = Threads.from_primitive(threads.to_primitive())
+
+    assert restored == threads
+    assert restored.active == {"reviewer"}
+
+
 def test_threads_update_main_accepts_terminal_patch_after_hidden_tool_messages() -> None:
     assistant = Message(
         role="assistant",
@@ -906,7 +960,7 @@ async def test_ingest_response_request_rejects_unresolved_call_inside_compaction
     payload = _compaction_payload(
         memory={},
         threads=Threads(
-            active=set(),
+            enabled=set(),
             messages={
                 "reviewer": [
                     Message(

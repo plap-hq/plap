@@ -118,7 +118,8 @@ stated problem.
 
 Keep distinct concepts separate. Examples include:
 
-- A thread stores an isolated message history; `threads.active` controls client-tool participation and main publication.
+- A thread stores an isolated message history; attributed blockers prevent one plugin from reactivating a thread another
+  plugin still blocks.
 - `state.memory` carries response-level plugin data; `ChatMessage.memory` belongs to one message.
 - Routing retries provider failures; completion retries reject unusable model results.
 - Server tools add model-callable functions; response hooks modify existing execution.
@@ -173,7 +174,7 @@ the resulting choice:
 
 ## Include the reason and the consequence
 
-Do not state a mechanism without its effect. If code removes `main` from `threads.active`, explain that the main loop stops
+Do not state a mechanism without its effect. If code blocks `main`, explain that the main loop stops
 and unpublished main output remains private.
 
 Do not claim ownership that the API does not enforce. If plugins can call `save_progress()`, do not say core decides when

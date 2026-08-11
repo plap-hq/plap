@@ -166,7 +166,8 @@ class State:
         if self.checkpoint_required:
             return ReasoningCheckpoint(
                 memory=deepcopy(memory),
-                active=set(threads.active),
+                enabled=set(threads.enabled),
+                blocked_by={thread: set(blockers) for thread, blockers in threads.blocked_by.items()},
                 threads={thread: deepcopy(messages) for thread, messages in threads.items() if thread != "main"},
             )
 
@@ -185,11 +186,16 @@ class State:
                 [] if base_messages is None else [message.to_primitive() for message in base_messages],
                 [] if current_messages is None else [message.to_primitive() for message in current_messages],
             )
-        active = None if self._base_threads.active == threads.active else set(threads.active)
-        return ReasoningPatch(memory=memory_patch, active=active, threads=patches)
+        enabled = None if self._base_threads.enabled == threads.enabled else set(threads.enabled)
+        blocked_by = (
+            None
+            if self._base_threads.blocked_by == threads.blocked_by
+            else {thread: set(blockers) for thread, blockers in threads.blocked_by.items()}
+        )
+        return ReasoningPatch(memory=memory_patch, enabled=enabled, blocked_by=blocked_by, threads=patches)
 
     def _validate_threads(self) -> None:
-        unknown = (self.threads.active | set(self.threads.messages)) - set(self._thread_codes)
+        unknown = (self.threads.enabled | set(self.threads.blocked_by) | set(self.threads.messages)) - set(self._thread_codes)
         if unknown:
             names = ", ".join(sorted(unknown))
             raise ValueError(f"state contains unconfigured threads: {names}")
@@ -252,16 +258,17 @@ class State:
     def _update_empty(self, state: ReasoningState, main: list[Message | MessagePatch]) -> bool:
         if main or isinstance(state, ReasoningCheckpoint):
             return False
-        return not state.memory and state.active is None and not state.threads
+        return not state.memory and state.enabled is None and state.blocked_by is None and not state.threads
 
     def _progress_snapshot(self) -> tuple[dict[str, JSONValue], Threads, list[Message]]:
         self._validate_main()
         shadow_memory = deepcopy(self.memory)
         shadow_threads = deepcopy(self.threads)
+        active = shadow_threads.active
         for thread in list(shadow_threads.messages):
-            if thread != "main" and thread in shadow_threads.active:
+            if thread != "main" and thread in active:
                 shadow_threads[thread] = self._stubbed(shadow_threads[thread], label=f"{thread} thread")
-        if "main" in shadow_threads.active:
+        if "main" in active:
             open_calls = self._split_tail(shadow_threads["main"], label="main history")[4]
             shadow_threads["main"].extend(
                 Message(role="tool", tool_call_id=tool_call.id, content=INTERRUPTED_TOOL_OUTPUT) for tool_call in open_calls
@@ -316,8 +323,9 @@ class State:
 
         state = self._build_update(memory=memory, threads=threads)
 
+        active = threads.active
         for thread in sorted(threads.messages):
-            if thread == "main" or thread not in threads.active:
+            if thread == "main" or thread not in active:
                 continue
             messages = threads[thread]
             visible_calls.extend(self._function_items(thread, self._split_tail(messages, label=f"{thread} thread")[4]))

@@ -368,7 +368,7 @@ async def test_encrypted_reasoning_restores_hidden_state_and_private_assistant()
         id="rs_test",
         previous_reasoning_id=None,
         previous_compaction_id=None,
-        state=ReasoningCheckpoint(memory={"private": True}, active={"main"}, threads={}),
+        state=ReasoningCheckpoint(memory={"private": True}, enabled={"main"}, threads={}),
         main=[MessagePatch(message=private)],
     )
     encrypted = seal_reasoning_payload(payload, keyring=keyring)

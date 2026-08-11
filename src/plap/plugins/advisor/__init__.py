@@ -304,8 +304,8 @@ def _start_phase(state: State, phase: str, main_request: ChatCompletionRequest) 
         raise RuntimeError("cannot start an advisor phase while another phase is active")
     _append_main_update(state)
     advisor.append(_phase_message(phase, main_request))
-    state.threads.active.discard("main")
-    state.threads.active.add(ADVISOR_THREAD)
+    state.threads.enable(ADVISOR_THREAD)
+    state.threads.block("main", by=ADVISOR_THREAD)
 
 
 def _refresh_phase_instruction(state: State, main_request: ChatCompletionRequest) -> None:
@@ -375,8 +375,8 @@ async def _finalize_phase(
     note: str | None,
 ) -> None:
     phase = _remove_phase_message(state)
-    state.threads.active.discard(ADVISOR_THREAD)
-    state.threads.active.add("main")
+    state.threads.disable(ADVISOR_THREAD)
+    state.threads.unblock("main", by=ADVISOR_THREAD)
 
     prefix = "[advisor]"
     if phase == "before_tool_call" and advice is not None:
@@ -466,10 +466,9 @@ def _after_tool_phase_pending(state: State) -> bool:
 
 @bus.listen("response.user_turn")
 async def interrupt_advisor(state: State, *, next) -> None:
-    if ADVISOR_THREAD in state.threads.active:
-        marker = _active_phase(state.threads[ADVISOR_THREAD])
-        if marker is None:
-            raise RuntimeError("active advisor thread is missing its phase marker")
+    advisor = state.threads.get(ADVISOR_THREAD)
+    marker = None if advisor is None else _active_phase(advisor)
+    if marker is not None:
         _append_main_update(state)
         logger.info("response.advisor.interrupted", phase=marker[1], reason="user_turn")
         await _finalize_phase(state, advice=None, note=None)

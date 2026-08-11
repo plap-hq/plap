@@ -343,7 +343,7 @@ class _Replay:
                 self._rebuild_non_main_calls(thread)
 
     def _validate_threads(self) -> None:
-        unknown = (self.threads.active | set(self.threads.messages)) - self.allowed_threads
+        unknown = (self.threads.enabled | set(self.threads.blocked_by) | set(self.threads.messages)) - self.allowed_threads
         if unknown:
             names = ", ".join(sorted(unknown))
             raise _reasoning_replay_error(
@@ -353,14 +353,15 @@ class _Replay:
 
     def _validate_call_boundary(self, *, allow_deferred_main: bool) -> None:
         self.main.assert_no_pending_patch()
+        active = self.threads.active
         main_calls = self._main_calls()
-        if main_calls.has_open() or ("main" in self.threads.active and main_calls.has_declared() and not allow_deferred_main):
+        if main_calls.has_open() or ("main" in active and main_calls.has_declared() and not allow_deferred_main):
             raise _tool_replay_error(
                 reason="pending_tool_outputs_block_message",
                 private_message="reasoning cannot appear before active main function calls are closed",
             )
         for thread, thread_calls in self.calls_by_thread.items():
-            if thread_calls.has_open() or (thread in self.threads.active and thread_calls.has_declared()):
+            if thread_calls.has_open() or (thread in active and thread_calls.has_declared()):
                 raise _tool_replay_error(
                     reason="pending_tool_outputs_block_message",
                     private_message="reasoning cannot appear before active function calls are closed",
@@ -422,7 +423,11 @@ class _Replay:
         if main_present or main_messages:
             messages["main"] = main_messages
         self.memory = dict(state.memory)
-        self.threads = Threads(active=set(state.active), messages=messages)
+        self.threads = Threads(
+            enabled=set(state.enabled),
+            blocked_by={thread: set(blockers) for thread, blockers in state.blocked_by.items()},
+            messages=messages,
+        )
         self._rebuild_all_non_main_calls()
 
     def _apply_patch(self, state: ReasoningPatch) -> None:
@@ -431,8 +436,10 @@ class _Replay:
             current = self.threads.get(thread, []) or []
             self.threads[thread] = list(current) if not patch else _apply_thread_patch(current, patch, thread=thread)
             self._rebuild_non_main_calls(thread)
-        if state.active is not None:
-            self.threads.active = set(state.active)
+        if state.enabled is not None:
+            self.threads.enabled = set(state.enabled)
+        if state.blocked_by is not None:
+            self.threads.blocked_by = {thread: set(blockers) for thread, blockers in state.blocked_by.items()}
 
     def _step_reasoning(self, payload: ReasoningPayload) -> None:
         self._validate_reasoning(payload)
@@ -511,9 +518,10 @@ class _Replay:
             self.main.interrupt_declared(output=INTERRUPTED_TOOL_OUTPUT)
             self.deferred_main_interrupt = False
         self.main.assert_no_pending_patch()
-        self._main_calls().validate_completion(active="main" in self.threads.active)
+        active = self.threads.active
+        self._main_calls().validate_completion(active="main" in active)
         for thread, thread_calls in self.calls_by_thread.items():
-            thread_calls.validate_completion(active=thread in self.threads.active)
+            thread_calls.validate_completion(active=thread in active)
 
     def finish(self) -> Ingested:
         self._validate_finish()

@@ -318,7 +318,7 @@ def _checkpoint(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningCheckpoint(
             memory={} if memory is None else memory,
-            active={"main"} if active is None else active,
+            enabled={"main"} if active is None else active,
             threads={} if threads is None else threads,
         ),
         main=[] if main is None else main,
@@ -341,7 +341,7 @@ def _patch(
         previous_compaction_id=previous_compaction_id,
         state=ReasoningPatch(
             memory=[] if memory is None else memory,
-            active=active,
+            enabled=active,
             threads={} if threads is None else threads,
         ),
         main=[] if main is None else main,
@@ -621,7 +621,7 @@ async def test_user_message_inside_reasoning_main_does_not_require_checkpoint() 
 
 def test_reasoning_state_variants_reject_main_thread_state() -> None:
     with pytest.raises(ValueError, match="may not contain main"):
-        ReasoningCheckpoint(memory={}, active={"main"}, threads={"main": []})
+        ReasoningCheckpoint(memory={}, enabled={"main"}, threads={"main": []})
     with pytest.raises(ValueError, match="may not target main"):
         ReasoningPatch(memory=[], threads={"main": []})
 

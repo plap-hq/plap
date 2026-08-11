@@ -22,7 +22,7 @@ Reasoning and compaction payloads
 - Reasoning envelope:
 
     {
-        "version": 8,
+        "version": 9,
         "type": "reasoning",
         "id": <string>,
         "previous_reasoning_id": <string|null>,
@@ -30,14 +30,20 @@ Reasoning and compaction payloads
         "state": {
             "type": "checkpoint",
             "memory": <object>,
-            "active": [<thread>, ...],
+            "enabled": [<thread>, ...],
+            "blocked_by": {
+                <thread>: [<blocker>, ...],
+            },
             "threads": {
                 <non-main-thread>: [<message>, ...],
             },
         } | {
             "type": "patch",
             "memory": <JSONPatch>,
-            "active": [<thread>, ...] | null,
+            "enabled": [<thread>, ...] | null,
+            "blocked_by": {
+                <thread>: [<blocker>, ...],
+            } | null,
             "threads": {
                 <non-main-thread>: <JSONPatch>,
             },
@@ -48,7 +54,7 @@ Reasoning and compaction payloads
 - Compaction envelope:
 
     {
-        "version": 6,
+        "version": 7,
         "type": "compaction",
         "id": <string>,
         "memory": <object>,
@@ -58,14 +64,17 @@ Reasoning and compaction payloads
 - Thread snapshot:
 
     {
-        "active": [<thread>, ...],
+        "enabled": [<thread>, ...],
+        "blocked_by": {
+            <thread>: [<blocker>, ...],
+        },
         "messages": {
             <thread>: [<message>, ...],
         },
     }
 
-- Reasoning checkpoints replace memory, active membership, and every non-main
-  thread. Reasoning patches apply deltas to those fields. Main always uses the
+- Reasoning checkpoints replace memory, enabled membership, blockers, and every
+  non-main thread. Reasoning patches apply deltas to those fields. Main always uses the
   common append-only `main` lane and is never checkpointed by reasoning.
 - `previous_compaction_id` is null before any compaction and otherwise equals
   the latest replayed compaction ID for every checkpoint and patch.
@@ -175,8 +184,8 @@ COMPACTION_PURPOSE = "responses.ingest.compaction"
 REASONING_PURPOSE = "responses.ingest.reasoning"
 CALL_ID_PURPOSE = "responses.ingest.call_id"
 CALL_ID_PREFIX = "call_"
-COMPACTION_PAYLOAD_FORMAT_VERSION = 6
-REASONING_PAYLOAD_FORMAT_VERSION = 8
+COMPACTION_PAYLOAD_FORMAT_VERSION = 7
+REASONING_PAYLOAD_FORMAT_VERSION = 9
 COMPACTION_PAYLOAD_TYPE = "compaction"
 REASONING_PAYLOAD_TYPE = "reasoning"
 CALL_ID_FORMAT_VERSION = 2
