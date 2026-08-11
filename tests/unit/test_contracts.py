@@ -227,7 +227,7 @@ def test_rejects_invalid_reasoning_effort() -> None:
 
 
 def test_accepts_full_reasoning_effort_vocabulary() -> None:
-    for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         request = ResponseCreateRequest.model_validate({"model": "gpt-4.1", "reasoning": {"effort": effort}})
 
         assert request.reasoning is not None

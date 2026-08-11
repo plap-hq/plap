@@ -223,18 +223,6 @@ def _response_context(state: State):
     )
 
 
-def _record_request_scope_context(
-    request: Request[object, object, object],
-    state: State,
-) -> None:
-    coordinator = state.svcs.get(StreamCoordinator)
-    record_scope_context(
-        request.scope,
-        conversation_id=state.request.conversation_id,
-        response_id=coordinator.response_id,
-    )
-
-
 def _resolved_model_config(
     config: CueBox,
     *,
@@ -366,6 +354,95 @@ async def _execute_response(state: State) -> None:
             raise ResponseFinalizationError("response failure finalization failed") from exc
 
 
+async def _response_event_stream(
+    state: State,
+    subscriber: Subscriber,
+    channels: ChannelsPlugin,
+) -> AsyncIterator[ResponseStreamEvent]:
+    coordinator = state.svcs.get(StreamCoordinator)
+    try:
+        async with anyio.create_task_group() as task_group:
+            try:
+                with _response_context(state):
+                    task_group.start_soon(_execute_response, state)
+                    async for payload in subscriber.iter_events():
+                        event = _decode_stream_event(payload)
+                        yield event
+                        if _is_terminal_event(event):
+                            break
+            except GeneratorExit:
+                return
+            finally:
+                task_group.cancel_scope.cancel()
+    finally:
+        with anyio.CancelScope(shield=True):
+            await channels.unsubscribe(subscriber, coordinator.channel)
+
+
+async def create(
+    data: ResponseCreateRequest,
+    *,
+    svcs: Container,
+    auth_context: AuthContext,
+    channels: ChannelsPlugin,
+    scope: dict[str, Any] | None = None,
+) -> ResponseObject:
+    state = await _prepare_create(
+        svcs=svcs,
+        auth_context=auth_context,
+        request=data,
+        channels=channels,
+    )
+    coordinator = state.svcs.get(StreamCoordinator)
+    if scope is not None:
+        record_scope_context(
+            scope,
+            conversation_id=state.request.conversation_id,
+            response_id=coordinator.response_id,
+        )
+    with _response_context(state):
+        await _accept_response(state)
+        try:
+            await _execute_response(state)
+        except ResponseFinalizationError:
+            if coordinator.current_response().status == "in_progress":
+                raise
+            logger.exception("response.delivery.failed", response_id=coordinator.response_id)
+    return coordinator.current_response()
+
+
+async def stream(
+    data: ResponseCreateRequest,
+    *,
+    svcs: Container,
+    auth_context: AuthContext,
+    channels: ChannelsPlugin,
+    scope: dict[str, Any] | None = None,
+) -> AsyncIterator[ResponseStreamEvent]:
+    state = await _prepare_create(
+        svcs=svcs,
+        auth_context=auth_context,
+        request=data,
+        channels=channels,
+    )
+    coordinator = state.svcs.get(StreamCoordinator)
+    if scope is not None:
+        record_scope_context(
+            scope,
+            conversation_id=state.request.conversation_id,
+            response_id=coordinator.response_id,
+        )
+    subscriber = await channels.subscribe(coordinator.channel)
+    try:
+        with _response_context(state):
+            await _accept_response(state)
+    except BaseException:
+        with anyio.CancelScope(shield=True):
+            await channels.unsubscribe(subscriber, coordinator.channel)
+        raise
+    return _response_event_stream(state, subscriber, channels)
+
+
 def _unexpected_public_error() -> PublicError:
     return PublicError(
         status_code=500,
@@ -408,24 +485,20 @@ def _preparation_error_event(exc: Exception) -> ResponseErrorEvent:
     return _websocket_error_event(public=public)
 
 
+def _single_group_exception(exc: BaseExceptionGroup) -> BaseException:
+    current: BaseException = exc
+    while isinstance(current, BaseExceptionGroup) and len(current.exceptions) == 1:
+        current = current.exceptions[0]
+    return current
+
+
 async def _sse_response_payload(
     *,
-    channels: ChannelsPlugin,
-    state: State,
-    subscriber: Subscriber,
+    events: AsyncIterator[ResponseStreamEvent],
     projection: ResponseProjection,
 ) -> AsyncIterator[str]:
-    coordinator = state.svcs.get(StreamCoordinator)
-    async with anyio.create_task_group() as task_group:
-        try:
-            with _response_context(state):
-                task_group.start_soon(_execute_response, state)
-                async for payload in _iter_projected_payloads(subscriber, projection=projection):
-                    yield msgspec.json.encode(payload).decode()
-        finally:
-            task_group.cancel_scope.cancel()
-            with anyio.CancelScope(shield=True):
-                await channels.unsubscribe(subscriber, coordinator.channel)
+    async for event in events:
+        yield msgspec.json.encode(projection.stream_payload(event)).decode()
     yield "[DONE]"
 
 
@@ -439,46 +512,41 @@ async def create_response(
     projection = ResponseProjection.from_create_request(data, transport="stream" if data.stream else "snapshot")
     projection.validate_create_request(data)
     channels = request.app.plugins.get(ChannelsPlugin)
-    state = await _prepare_create(
-        svcs=svcs,
-        auth_context=auth_context,
-        request=data,
-        channels=channels,
-    )
-    coordinator = state.svcs.get(StreamCoordinator)
-    _record_request_scope_context(request, state)
     if data.stream:
-        subscriber = await channels.subscribe(coordinator.channel)
-        try:
-            with _response_context(state):
-                await _accept_response(state)
-        except BaseException:
-            with anyio.CancelScope(shield=True):
-                await channels.unsubscribe(subscriber, coordinator.channel)
-            raise
+        events = await stream(
+            data,
+            svcs=svcs,
+            auth_context=auth_context,
+            channels=channels,
+            scope=request.scope,
+        )
         return ServerSentEvent(
             _sse_response_payload(
-                channels=channels,
-                state=state,
-                subscriber=subscriber,
+                events=events,
                 projection=projection,
             ),
             headers={"content-type": "text/event-stream; charset=utf-8"},
         )
 
-    with _response_context(state):
-        await _accept_response(state)
-    async with anyio.create_task_group() as task_group:
-        watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
-        try:
-            with _response_context(state):
-                await _execute_response(state)
-        except ResponseFinalizationError:
-            if coordinator.current_response().status == "in_progress":
-                raise
-            logger.exception("response.delivery.failed", response_id=coordinator.response_id)
-        watcher_scope.cancel()
-    return projection.response(coordinator.current_response())
+    try:
+        async with anyio.create_task_group() as task_group:
+            watcher_scope = await task_group.start(_watch_http_disconnect, request, task_group.cancel_scope)
+            try:
+                response = await create(
+                    data,
+                    svcs=svcs,
+                    auth_context=auth_context,
+                    channels=channels,
+                    scope=request.scope,
+                )
+            finally:
+                watcher_scope.cancel()
+    except BaseExceptionGroup as exc:
+        unwrapped = _single_group_exception(exc)
+        if unwrapped is exc:
+            raise
+        raise unwrapped from None
+    return projection.response(response)
 
 
 @get("/v1/models")

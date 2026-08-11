@@ -1,6 +1,6 @@
 # plap
 
-plap is an OpenAI Responses-compatible server for building plugin-driven model workflows.
+plap is a highly extensible OpenAI Responses-compatible server built around plugins.
 
 It accepts normal Responses API requests, runs them through a highly configurable model loop, and lets Python plugins add new
 capabilities or modify response execution through [hooks](docs/hooks.md).
@@ -8,6 +8,8 @@ capabilities or modify response execution through [hooks](docs/hooks.md).
 Harness engineering has never been done on the server side before. Want to build a company brain, context compression,
 or an advisor model plugin? plap makes it possible with features such as [a threading system](docs/threads.md): letting multiple models
 work on the same response with isolated contexts and access to the client's tools.
+
+For chat clients, the built-in [Chat Completions plugin](docs/chat-completions.md) lets existing OpenAI Chat clients call plap.
 
 ## Start plap
 
@@ -70,8 +72,8 @@ You now have a working local plap server.
 
 [Write your first plugin](docs/first-plugin.md) to add a `server_time` tool that the model can call.
 
-The [documentation index](docs/README.md) covers the event bus, server tools, hooks, reasoning summaries, state, separate
-model contexts, and the lower-level LLM library.
+The [documentation index](docs/README.md) covers the event bus, server tools, hooks, reasoning
+summaries, state, separate model contexts, and the lower-level LLM library.
 
 ## Development commands
 

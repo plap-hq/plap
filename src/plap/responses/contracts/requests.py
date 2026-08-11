@@ -58,6 +58,7 @@ type ReasoningEffort = Literal[
     "medium",
     "high",
     "xhigh",
+    "max",
 ]
 
 type ReasoningSummary = Literal["auto", "concise", "detailed"]

@@ -70,6 +70,7 @@ easy = "plap.plugins.easy"
 vision = "plap.plugins.vision"
 summary = "plap.plugins.summary"
 advisor = "plap.plugins.advisor"
+chat_completions = "plap.plugins.chat_completions"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

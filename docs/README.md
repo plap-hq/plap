@@ -1,6 +1,11 @@
 # Documentation
 
-Plugins extend the Responses server. `plap.llms` provides the lower-level chat-completion library used by the server.
+Plugins extend the Responses server.
+
+## Use the server
+
+- [Use the Responses API](../README.md#send-a-response) sends a response with the OpenAI client.
+- [Use Chat Completions](chat-completions.md) calls plap from an existing Chat client and preserves conversations across turns.
 
 ## Add server functionality
 
