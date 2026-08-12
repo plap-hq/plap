@@ -7,7 +7,7 @@ provider, so SDK request types, response objects, stream events, and exceptions 
 `ChatCompletionDelta`. Provider clients perform the wire translation. Routers, retries, and completion budgets use the same
 types, so they can be composed without introducing provider-specific branches.
 
-Use the library directly for chat completions outside the Responses server. Inside a response plugin, get
+Use the library directly for chat completions without calling plap's HTTP server. Inside a response plugin, get
 `BudgetedChatCompletionClient` from `state.svcs`; that client charges the additional call to the response budget.
 
 ## Client contract

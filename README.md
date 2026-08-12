@@ -1,15 +1,13 @@
 # plap
 
-plap is a highly extensible OpenAI Responses-compatible server built around plugins.
+plap is a highly extensible OpenAI-compatible server for the Responses and Chat Completions APIs, built around plugins.
 
-It accepts normal Responses API requests, runs them through a highly configurable model loop, and lets Python plugins add new
-capabilities or modify response execution through [hooks](docs/hooks.md).
+It accepts normal requests from either API, runs them through a highly configurable model loop, and lets Python plugins add
+new capabilities or modify response execution through [hooks](docs/hooks.md).
 
 Harness engineering has never been done on the server side before. Want to build a company brain, context compression,
 or an advisor model plugin? plap makes it possible with features such as [a threading system](docs/threads.md): letting multiple models
 work on the same response with isolated contexts and access to the client's tools.
-
-For chat clients, the built-in [Chat Completions plugin](docs/chat-completions.md) lets existing OpenAI Chat clients call plap.
 
 ## Start plap
 
@@ -46,6 +44,8 @@ source .dev/.env
 
 The OpenAI Python client is already installed in the Pixi environment:
 
+### Responses
+
 ```sh
 pixi run python - <<'PY'
 import os
@@ -66,7 +66,30 @@ print(response.output_text)
 PY
 ```
 
-You now have a working local plap server.
+### Chat Completions
+
+```sh
+pixi run python - <<'PY'
+import os
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=os.environ["PLAP_DEV_BASE_URL"],
+    api_key=os.environ["PLAP_DEV_API_KEY"],
+)
+
+completion = client.chat.completions.create(
+    model=os.environ["PLAP_DEV_MODEL"],
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+
+print(completion.choices[0].message.content)
+PY
+```
+
+You now have a working local plap server. To carry model and plugin state into later requests, continue with
+[Continue a Conversation](docs/conversations.md).
 
 ## Add something
 

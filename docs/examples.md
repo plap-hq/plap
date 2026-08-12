@@ -26,11 +26,11 @@ client to run a tool, inspect the result, and continue investigating. plap's adv
 
 The advisor uses plap's [thread system](threads.md) to keep its own conversation separate from the main model. This split
 context keeps its investigation out of the main conversation. It can call tools supplied by the client, receive their
-results in later Responses requests, and continue where it left off. These client turns can repeat until the review is
+results in later API requests, and continue where it left off. These client turns can repeat until the review is
 complete.
 
-This gives plap the same kind of advisor as [OMP's advisor](https://omp.sh/), but behind the Responses API. It can stop a
-tool call before it runs or send advice back to the main model before the user sees it.
+This gives plap the same kind of advisor as [OMP's advisor](https://omp.sh/) through either public API. It can stop a tool call
+before it runs or send advice back to the main model before the user sees it.
 
 ## Summary: summarized model progress
 

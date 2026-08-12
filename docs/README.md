@@ -1,11 +1,11 @@
 # Documentation
 
-Plugins extend the Responses server.
+Plugins extend the model loop used by both public APIs.
 
 ## Use the server
 
-- [Use the Responses API](../README.md#send-a-response) sends a response with the OpenAI client.
-- [Use Chat Completions](chat-completions.md) calls plap from an existing Chat client and preserves conversations across turns.
+- [Send a response](../README.md#send-a-response) calls plap through the Responses or Chat Completions API.
+- [Continue a conversation](conversations.md) carries visible history and private model or plugin state into later requests.
 
 ## Add server functionality
 
@@ -27,7 +27,7 @@ Plugins extend the Responses server.
 
 ## Use the LLM library
 
-- [Make your first completion](llms/getting-started.md) calls OpenRouter directly without starting the Responses server.
+- [Make your first completion](llms/getting-started.md) calls OpenRouter directly without starting plap's API server.
 - [Completion retries and validators](llms/retries.md) explains how to reject an unusable model result and ask the model to
   correct it.
 - The [`plap.llms` reference](llms/README.md) covers messages, providers, model whitelists, routing, streaming, retries, model

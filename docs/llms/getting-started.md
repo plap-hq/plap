@@ -1,6 +1,6 @@
 # Make Your First Completion
 
-Use this tutorial to call OpenRouter through `plap.llms` without starting the Responses server. It shows the provider client,
+Use this tutorial to call OpenRouter through `plap.llms` without starting plap's API server. It shows the provider client,
 common request type, and streaming interface in isolation.
 
 ## 1. Set the API key

@@ -25,8 +25,8 @@ client = BudgetedChatCompletionClient(base_client, budget)
 
 The wrapper does not own `base_client`; `client.aclose()` is a no-op. The code that created the base client must close it.
 
-The Responses server registers a budget for each response and makes a budgeted client available to its plugins. Use that client
-rather than creating a separate budget:
+plap registers a budget for each public response and makes a budgeted client available to its plugins. Use that client rather
+than creating a separate budget:
 
 ```python
 client = await state.svcs.aget(BudgetedChatCompletionClient)

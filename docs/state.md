@@ -16,8 +16,8 @@ cache_key = state.request.prompt_cache_key
 requested_tools = state.request.tools
 ```
 
-These values come from the Responses API request. They are separate from the provider-facing `ChatCompletionRequest` built
-by `response.request`.
+These values use the Responses request contract. Chat Completions requests are translated into that contract before response
+execution. They are separate from the provider-facing `ChatCompletionRequest` built by `response.request`.
 
 ## Read the selected configuration
 
